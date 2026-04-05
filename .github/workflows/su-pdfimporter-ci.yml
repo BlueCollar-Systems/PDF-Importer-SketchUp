@@ -10,6 +10,56 @@ on:
   workflow_dispatch:
 
 jobs:
+  context-hash-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify repo_context_builder_core.py hash
+        run: |
+          EXPECTED_SHA="8fe18c896c63372b5c2d7c17c383b548e9573c9b7592019cd72159f2b08505de"
+          test -f repo_context_builder_core.py || { echo "ERROR: repo_context_builder_core.py missing"; exit 1; }
+          ACTUAL_SHA=$(sha256sum repo_context_builder_core.py | awk '{print $1}')
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: repo_context_builder_core.py hash mismatch"
+            echo "expected=$EXPECTED_SHA"
+            echo "actual=$ACTUAL_SHA"
+            exit 1
+          fi
+
+  syntax-check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ruby: ['2.2', '2.7', '3.2']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - name: Syntax check all .rb files
+        run: |
+          find extracted/sketchup_ext -name '*.rb' | while read f; do
+            ruby -c "$f" || exit 1
+          done
+
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version consistency check
+        run: |
+          META_VER=$(grep -oP "VERSION = '\\K[^']+" extracted/sketchup_ext/bc_pdf_vector_importer/metadata.rb | head -n1)
+          LOADER_VER=$(grep -oP "PLUGIN_VERSION\\s*=\\s*'\\K[^']+" extracted/sketchup_ext/bc_pdf_vector_importer.rb | head -n1)
+          README_VER=$(grep -oP 'Version-\K[0-9.]+' README.md | head -n1)
+          if [ -z "$META_VER" ] || [ -z "$LOADER_VER" ] || [ -z "$README_VER" ]; then
+            echo "ERROR: Could not read version(s): metadata=$META_VER loader=$LOADER_VER readme=$README_VER"
+            exit 1
+          fi
+          if [ "$META_VER" != "$README_VER" ] || [ "$LOADER_VER" != "$README_VER" ]; then
+            echo "ERROR: Version mismatch metadata=$META_VER loader=$LOADER_VER readme=$README_VER"
+            exit 1
+          fi
+
   smoke:
     runs-on: ubuntu-latest
     strategy:
@@ -35,6 +85,8 @@ jobs:
             set -e
             find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
             ruby test/smoke_test.rb
+            ruby test/arc_fitter_test.rb
+            ruby test/unit_parser_test.rb
           '
 
       - name: Ruby syntax check
@@ -45,4 +97,7 @@ jobs:
 
       - name: Run smoke test
         if: matrix.ruby-version != '2.2'
-        run: ruby test/smoke_test.rb
+        run: |
+          ruby test/smoke_test.rb
+          ruby test/arc_fitter_test.rb
+          ruby test/unit_parser_test.rb

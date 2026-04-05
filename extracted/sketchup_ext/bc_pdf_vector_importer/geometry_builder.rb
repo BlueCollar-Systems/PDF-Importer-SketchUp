@@ -43,6 +43,11 @@ module BlueCollarSystems
         @text_count = 0
       end
 
+      # Threshold above which we use timer-based batching to keep
+      # SketchUp's UI responsive during import.
+      LARGE_IMPORT_THRESHOLD = 500
+      BATCH_SIZE = 100
+
       def build
         base_layer = get_or_create_layer(@layer_name)
         entities = @target_entities || @model.active_entities
@@ -69,72 +74,54 @@ module BlueCollarSystems
         page_height_pts = (@media_box[3] - @media_box[1]).abs
         page_area_pts = page_width * page_height_pts
 
-        # ── Vector geometry ──
-        @paths.each do |path|
-          next unless path.subpaths && !path.subpaths.empty?
+        # Store shared state for use by process_single_path / async path
+        @_base_layer = base_layer
+        @_target = target
+        @_page_origin_x = page_origin_x
+        @_page_origin_y = page_origin_y
+        @_page_area_pts = page_area_pts
 
-          should_stroke = path.stroke
-          should_fill = path.fill && @import_fills
-          next unless should_stroke || should_fill
+        total_primitives = @paths.length + (@text_items ? @text_items.length : 0)
 
-          # ── Skip paths whose bounding box exceeds the page ──
-          # These are typically decorative backgrounds, clip-fill regions, or
-          # graphic elements that extend far beyond the visible page area.
-          # They produce huge arcs/circles that clutter the import.
-          path_bbox = compute_path_bbox(path)
-          if path_bbox
-            pw = (path_bbox[2] - path_bbox[0]).abs
-            ph = (path_bbox[3] - path_bbox[1]).abs
-            if pw * ph > page_area_pts * 0.95
-              next
-            end
-          end
+        if total_primitives > LARGE_IMPORT_THRESHOLD
+          import_with_progress(target, base_layer, page_height,
+                               page_origin_x, page_origin_y)
+          # Return nil — results delivered asynchronously via status bar
+          nil
+        else
+          # ── Synchronous import for small files ──
+          build_paths_sync
+          build_text_sync(target, base_layer, page_height,
+                          page_origin_x, page_origin_y)
 
-          # Determine target group based on color
-          color_rgb = path.stroke_color || [0, 0, 0]
-          dest = get_color_group(target, color_rgb)
+          {
+            edges: @edge_count,
+            faces: @face_count,
+            arcs: @arc_count,
+            text_objects: @text_count
+          }
+        end
+      end
 
-          # Determine the layer for this path — OCG layer takes priority
-          path_layer = base_layer
-          if path.layer_name && !path.layer_name.empty?
-            ocg_layer_name = "PDF::Layer::#{path.layer_name}"
-            path_layer = get_or_create_layer(ocg_layer_name)
-          end
-
-          # Determine dash rendering info
-          dash_spec = nil
-          dash_layer = nil
-          if @map_dashes && path.dash_pattern
-            dash_spec = normalize_dash_pattern(path.dash_pattern, path.ctm)
-            dash_layer = classify_dash(path.dash_pattern)
-          end
-
-          path.subpaths.each do |subpath|
-            points_list = subpath_to_points(subpath)
-            next if points_list.empty?
-
-            # Convert PDF → SketchUp coordinates
-            su_points = points_list.map do |pt|
-              pdf_to_su(pt[0], pt[1], page_origin_x, page_origin_y)
-            end
-
-            su_points = remove_consecutive_duplicates(su_points)
-            next if su_points.length < 2
-
-            # Arc reconstruction on the polyline
-            if @detect_arcs && dash_spec.nil? && su_points.length >= 5
-              draw_with_arc_detection(dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color)
-            else
-              draw_edges(dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed)
-              if should_fill && subpath.closed && su_points.length >= 3
-                draw_face(dest, su_points, path_layer, path.fill_color)
-              end
-            end
-          end
+      # ---------------------------------------------------------------
+      # Timer-based batched import for large files (> LARGE_IMPORT_THRESHOLD)
+      # Yields control back to SketchUp's event loop every BATCH_SIZE
+      # primitives so the UI stays responsive.
+      # ---------------------------------------------------------------
+      def import_with_progress(target, base_layer, page_height,
+                               page_origin_x, page_origin_y)
+        all_items = @paths.map { |p| [:path, p] }
+        if @import_text && @text_items && !@text_items.empty?
+          @text_items.each { |t| all_items << [:text, t] }
         end
 
-        # ── Text objects ──
-        if @import_text && !@text_items.empty?
+        index = 0
+        total = all_items.length
+
+        # Prepare text target once (used by text items in the batch)
+        text_layer = nil
+        text_target = nil
+        if @import_text && @text_items && !@text_items.empty?
           text_layer = get_or_create_layer("#{@layer_name}:Text")
           text_group = nil
           if @page_group
@@ -143,21 +130,136 @@ module BlueCollarSystems
             set_layer(text_group, text_layer)
           end
           text_target = text_group ? text_group.entities : target
-
-          @text_items.each do |item|
-            place_text(text_target, item, page_origin_x, page_origin_y, page_height, text_layer)
-          end
         end
 
-        {
-          edges: @edge_count,
-          faces: @face_count,
-          arcs: @arc_count,
-          text_objects: @text_count
+        @model.start_operation('PDF Import', true)
+
+        timer_proc = proc {
+          begin
+            batch_end = [index + BATCH_SIZE, total].min
+            (index...batch_end).each do |i|
+              kind, item = all_items[i]
+              if kind == :path
+                process_single_path(item)
+              elsif kind == :text && text_target && text_layer
+                place_text(text_target, item,
+                           page_origin_x, page_origin_y,
+                           page_height, text_layer)
+              end
+            end
+            index = batch_end
+            pct = total > 0 ? (index * 100 / total) : 100
+            Sketchup.status_text = "Importing... #{pct}%"
+
+            if index < total
+              UI.start_timer(0.01, false, &timer_proc)
+            else
+              @model.commit_operation
+              Sketchup.status_text = "Import complete. " \
+                "#{@edge_count} edges, #{@face_count} faces, " \
+                "#{@arc_count} arcs, #{@text_count} text objects."
+            end
+          rescue StandardError => ex
+            Logger.error("GeometryBuilder",
+                         "import_with_progress batch failed", ex)
+            begin
+              @model.abort_operation
+            rescue StandardError
+              # already aborted
+            end
+            Sketchup.status_text = "Import failed: #{ex.message}"
+          end
         }
+
+        UI.start_timer(0.01, false, &timer_proc)
       end
 
       private
+
+      # ---------------------------------------------------------------
+      # Process a single VectorPath (extracted for use by both sync
+      # and async code paths).
+      # ---------------------------------------------------------------
+      def process_single_path(path)
+        return unless path.subpaths && !path.subpaths.empty?
+
+        should_stroke = path.stroke
+        should_fill = path.fill && @import_fills
+        return unless should_stroke || should_fill
+
+        path_bbox = compute_path_bbox(path)
+        if path_bbox
+          pw = (path_bbox[2] - path_bbox[0]).abs
+          ph = (path_bbox[3] - path_bbox[1]).abs
+          return if pw * ph > @_page_area_pts * 0.95
+        end
+
+        color_rgb = path.stroke_color || [0, 0, 0]
+        dest = get_color_group(@_target, color_rgb)
+
+        path_layer = @_base_layer
+        if path.layer_name && !path.layer_name.empty?
+          ocg_layer_name = "PDF::Layer::#{path.layer_name}"
+          path_layer = get_or_create_layer(ocg_layer_name)
+        end
+
+        dash_spec = nil
+        dash_layer = nil
+        if @map_dashes && path.dash_pattern
+          dash_spec = normalize_dash_pattern(path.dash_pattern, path.ctm)
+          dash_layer = classify_dash(path.dash_pattern)
+        end
+
+        path.subpaths.each do |subpath|
+          points_list = subpath_to_points(subpath)
+          next if points_list.empty?
+
+          su_points = points_list.map do |pt|
+            pdf_to_su(pt[0], pt[1], @_page_origin_x, @_page_origin_y)
+          end
+
+          su_points = remove_consecutive_duplicates(su_points)
+          next if su_points.length < 2
+
+          if @detect_arcs && dash_spec.nil? && su_points.length >= 5
+            draw_with_arc_detection(dest, su_points, path_layer,
+                                    dash_layer, dash_spec, subpath.closed,
+                                    should_fill, path.fill_color)
+          else
+            draw_edges(dest, su_points, path_layer, dash_layer,
+                       dash_spec, subpath.closed)
+            if should_fill && subpath.closed && su_points.length >= 3
+              draw_face(dest, su_points, path_layer, path.fill_color)
+            end
+          end
+        end
+      end
+
+      # ---------------------------------------------------------------
+      # Synchronous path for small imports (< LARGE_IMPORT_THRESHOLD)
+      # ---------------------------------------------------------------
+      def build_paths_sync
+        @paths.each { |path| process_single_path(path) }
+      end
+
+      def build_text_sync(target, base_layer, page_height,
+                          page_origin_x, page_origin_y)
+        return unless @import_text && @text_items && !@text_items.empty?
+
+        text_layer = get_or_create_layer("#{@layer_name}:Text")
+        text_group = nil
+        if @page_group
+          text_group = @page_group.entities.add_group
+          text_group.name = "Text"
+          set_layer(text_group, text_layer)
+        end
+        text_target = text_group ? text_group.entities : target
+
+        @text_items.each do |item|
+          place_text(text_target, item, page_origin_x, page_origin_y,
+                     page_height, text_layer)
+        end
+      end
 
       # ---------------------------------------------------------------
       # Coordinate conversion

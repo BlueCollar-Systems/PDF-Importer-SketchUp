@@ -64,25 +64,60 @@ module BlueCollarSystems
 
         private
 
+        PDFTOTEXT_PREF_SECTION = 'BlueCollar_PDF_Import'.freeze
+        PDFTOTEXT_PREF_KEY    = 'pdftotext_path'.freeze
+
         def pdftotext_executable
-          # 1) Explicit override
+          # 1) User-configured path via SketchUp preferences
+          #    (set through Extension > PDF Vector Importer > Set pdftotext Path,
+          #     or via Ruby console:
+          #       Sketchup.write_default("BlueCollar_PDF_Import", "pdftotext_path", "C:/path/to/pdftotext.exe")
+          #    )
+          if defined?(Sketchup) && Sketchup.respond_to?(:read_default)
+            begin
+              saved = Sketchup.read_default(PDFTOTEXT_PREF_SECTION, PDFTOTEXT_PREF_KEY, '')
+              if saved.is_a?(String) && !saved.empty? && File.exist?(saved)
+                return saved
+              end
+            rescue StandardError => e
+              Logger.warn('ExternalTextExtractor', "read_default failed: #{e.message}")
+            end
+          end
+
+          # 2) Explicit environment variable override
           env = ENV['BC_PDFTOTEXT_PATH']
           return env if env && !env.empty? && File.exist?(env)
 
-          # 2) Common Windows install path (MiKTeX)
+          # 3) Common Windows install paths (Poppler, MiKTeX, Chocolatey)
           candidates = []
+          # Poppler standalone installs
           candidates << 'C:\\Program Files\\poppler\\Library\\bin\\pdftotext.exe'
           candidates << 'C:\\Program Files\\poppler\\bin\\pdftotext.exe'
+          # Chocolatey installs poppler utilities here
+          candidates << 'C:\\ProgramData\\chocolatey\\bin\\pdftotext.exe'
+          if ENV['ChocolateyInstall'] && !ENV['ChocolateyInstall'].empty?
+            candidates << File.join(ENV['ChocolateyInstall'], 'bin', 'pdftotext.exe')
+          end
+          # MiKTeX local user install
           if ENV['LOCALAPPDATA'] && !ENV['LOCALAPPDATA'].empty?
             candidates << File.join(
               ENV['LOCALAPPDATA'],
               'Programs', 'MiKTeX', 'miktex', 'bin', 'x64', 'pdftotext.exe'
             )
           end
+          # MiKTeX system install
           candidates << 'C:\\Program Files\\MiKTeX\\miktex\\bin\\x64\\pdftotext.exe'
+          # Default Poppler Windows installer path (poppler-utils)
+          candidates << 'C:\\Program Files (x86)\\poppler\\bin\\pdftotext.exe'
           candidates.each { |p| return p if File.exist?(p) }
 
-          # 3) PATH
+          # 4) macOS / Linux common paths
+          ['/usr/bin/pdftotext', '/usr/local/bin/pdftotext',
+           '/opt/homebrew/bin/pdftotext'].each do |p|
+            return p if File.exist?(p)
+          end
+
+          # 5) PATH lookup
           begin
             probe = CommandRunner.run(['pdftotext', '-v'],
               timeout_s: 10,
@@ -93,6 +128,43 @@ module BlueCollarSystems
           end
 
           nil
+        end
+
+        # -----------------------------------------------------------------
+        # Save a user-supplied pdftotext path into SketchUp preferences.
+        # Returns true on success.
+        # -----------------------------------------------------------------
+        def save_pdftotext_path(path)
+          return false unless path.is_a?(String) && !path.empty?
+          unless File.exist?(path)
+            Logger.warn('ExternalTextExtractor',
+              "Cannot save pdftotext path — file does not exist: #{path}")
+            return false
+          end
+          if defined?(Sketchup) && Sketchup.respond_to?(:write_default)
+            begin
+              Sketchup.write_default(PDFTOTEXT_PREF_SECTION, PDFTOTEXT_PREF_KEY, path)
+              return true
+            rescue StandardError => e
+              Logger.warn('ExternalTextExtractor', "write_default failed: #{e.message}")
+            end
+          end
+          false
+        end
+
+        # -----------------------------------------------------------------
+        # Clear the saved pdftotext path from SketchUp preferences.
+        # -----------------------------------------------------------------
+        def clear_pdftotext_path
+          if defined?(Sketchup) && Sketchup.respond_to?(:write_default)
+            begin
+              Sketchup.write_default(PDFTOTEXT_PREF_SECTION, PDFTOTEXT_PREF_KEY, '')
+              return true
+            rescue StandardError => e
+              Logger.warn('ExternalTextExtractor', "write_default failed: #{e.message}")
+            end
+          end
+          false
         end
 
         def parse_bbox_html(html, opts = {})

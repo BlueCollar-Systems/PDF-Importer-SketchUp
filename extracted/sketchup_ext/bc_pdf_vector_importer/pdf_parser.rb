@@ -45,11 +45,12 @@ module BlueCollarSystems
         find_xref
         parse_xref
 
-        # Check for encrypted PDFs — these produce garbage geometry instead
-        # of a useful error message if we proceed.
-        if @trailer && @trailer['/Encrypt']
-          raise "This PDF is encrypted and cannot be imported. " \
-                "Please remove the encryption (e.g., print to a new PDF) and try again."
+        # Detect encrypted PDFs early and give a clear message
+        if @trailer && @trailer.key?('/Encrypt')
+          raise "This PDF is encrypted (password-protected). " \
+                "Please remove the password protection before importing. " \
+                "You can do this with Adobe Acrobat, Preview (macOS), " \
+                "or a free tool like qpdf."
         end
 
         build_page_list
@@ -244,12 +245,22 @@ module BlueCollarSystems
                 decoded = nil
               end
             when '/RunLengthDecode'
+              Logger.warn("PdfParser",
+                "RunLengthDecode filter is not fully supported — " \
+                "stream content may be incomplete. Re-save the PDF " \
+                "with a modern tool to use FlateDecode instead.")
               decoded = run_length_decode(decoded)
             when '/LZWDecode'
-              Logger.warn("PdfParser", "LZWDecode is not supported for content streams — skipping stream")
+              Logger.warn("PdfParser",
+                "LZWDecode compression is not supported — skipping stream. " \
+                "Re-save the PDF with a modern tool (e.g., Adobe Acrobat, " \
+                "qpdf, Ghostscript) to convert to FlateDecode.")
               decoded = nil
             else
-              Logger.warn("PdfParser", "Unsupported stream filter #{filter} — skipping stream")
+              Logger.warn("PdfParser",
+                "Unsupported stream filter '#{filter}' — skipping stream. " \
+                "Supported filters: FlateDecode, ASCII85Decode, " \
+                "ASCIIHexDecode, RunLengthDecode.")
               decoded = nil
             end
             break unless decoded
@@ -717,28 +728,43 @@ module BlueCollarSystems
       def get_raw_object(obj_num)
         info = @objects[obj_num]
         return nil unless info
+        return info[:raw] if info[:raw]
 
         # Object in object stream
         if info[:in_object_stream]
-          return get_object_from_object_stream(obj_num, info[:in_object_stream], info[:index_in_stream])
+          raw = get_object_from_object_stream(obj_num, info[:in_object_stream], info[:index_in_stream])
+          info[:raw] = raw
+          return raw
         end
 
         return nil unless info[:offset]
         offset = info[:offset]
-        # Read a chunk starting at offset
+        return nil if offset >= @data.length
+
+        # Fast path for small objects.
         chunk_size = [32768, @data.length - offset].min
-        chunk = @data[offset, chunk_size]
+        chunk = @data[offset, chunk_size] || ''
 
         # Find endobj
         endobj_pos = chunk.index('endobj')
         if endobj_pos
-          return chunk[0..endobj_pos + 5]
+          raw = chunk[0..endobj_pos + 5]
+          info[:raw] = raw
+          return raw
         end
 
-        # If not found in chunk, extend
-        extended = @data[offset, [131072, @data.length - offset].min]
-        endobj_pos = extended.index('endobj')
-        return endobj_pos ? extended[0..endobj_pos + 5] : extended
+        # Large stream objects can be much bigger than 128 KB. Find endobj
+        # from the full buffer to avoid truncating content streams.
+        marker = /(?:\r\n|\n|\r)endobj\b/.match(@data, offset)
+        if marker
+          raw = @data.byteslice(offset, marker.begin(0) - offset + marker[0].length)
+          info[:raw] = raw
+          return raw
+        end
+
+        raw = @data.byteslice(offset, @data.length - offset)
+        info[:raw] = raw
+        raw
       end
 
       def get_object_from_object_stream(obj_num, stream_obj_num, index)
@@ -790,9 +816,17 @@ module BlueCollarSystems
       end
 
       def resolve_parsed_object(obj_num)
+        info = @objects[obj_num]
+        if info && info.key?(:parsed)
+          return info[:parsed]
+        end
+
         raw = get_raw_object(obj_num)
         return nil unless raw
-        parse_object_value(raw, obj_num)
+
+        parsed = parse_object_value(raw, obj_num)
+        info[:parsed] = parsed if info
+        parsed
       end
 
       # ---------------------------------------------------------------

@@ -345,6 +345,31 @@ module BlueCollarSystems
         cs = ContentStreamParser.new(streams, parser, ocg_map)
         paths = cs.parse
 
+        xobj = XObjectParser.new(parser)
+        xobj.scan_page(page_num)
+        xobj.count_references(streams)
+        xobj_paths = []
+        if paths.empty? && !xobj.form_xobjects.empty?
+          stream_bytes = streams.inject(0) { |sum, s| sum + s.to_s.bytesize }
+          if stream_bytes <= 8 * 1024 * 1024
+            xobj_paths = xobj.expanded_paths(streams)
+            if xobj_paths && !xobj_paths.empty?
+              paths.concat(xobj_paths)
+              Logger.info(
+                "Pipeline",
+                "Page #{page_num}: expanded #{xobj_paths.length} paths from " \
+                "#{xobj.form_xobjects.length} Form XObjects"
+              )
+            end
+          else
+            Logger.warn(
+              "Pipeline",
+              "Page #{page_num}: skipping XObject expansion for large stream payload " \
+              "(#{(stream_bytes / (1024.0 * 1024.0)).round(1)} MB)"
+            )
+          end
+        end
+
         # Smart auto-raster override for fill-art flood pages.
         flood_hit, flood_stats = looks_like_fill_art_flood?(paths, media_box)
         if flood_hit
@@ -373,10 +398,6 @@ module BlueCollarSystems
             Logger.warn("Pipeline", "Page #{page_num}: fill-art flood detected but raster fallback is disabled.")
           end
         end
-
-        xobj = XObjectParser.new(parser)
-        xobj.scan_page(page_num)
-        xobj.count_references(streams)
 
         text_items = []
         if opts[:import_text]

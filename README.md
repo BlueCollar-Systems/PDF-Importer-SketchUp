@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.6.4-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.6.7-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -44,7 +44,7 @@ The importer profiles each PDF document to identify its origin (fabrication draw
 
 ## Installation
 
-1. Download `bc_pdf_vector_importer_v3.6.4.rbz`
+1. Download `bc_pdf_vector_importer_v3.6.7.rbz`
 2. In SketchUp: **Window > Extension Manager > Install Extension**
 3. Select the `.rbz` file
 4. Restart SketchUp if prompted
@@ -176,14 +176,36 @@ bc_pdf_vector_importer/
 
 ---
 
+## Known Limitations
+
+| Limitation | Details |
+|-----------|---------|
+| **Encrypted PDFs** | Password-protected PDFs cannot be imported. Remove encryption first using Adobe Acrobat, Preview (macOS), or qpdf. |
+| **Compression filters** | FlateDecode is supported. LZWDecode, ASCII85Decode, ASCIIHexDecode, and RunLengthDecode streams are not fully supported and may be skipped. |
+| **Embedded fonts** | Text rendered with embedded subset fonts may not extract correctly. The importer can fall back to external pdftotext for higher-fidelity text extraction. |
+| **Clipped/XObject-heavy PDFs** | Deeply nested form XObjects and aggressive clipping can lead to partial geometry recovery. |
+| **Raster-only scans** | Pure image/scanned PDFs with no vector operators will not produce SketchUp edges. |
+| **Very large PDFs** | Files over 500 MB are rejected. Dense drawings with over 1 million path operators per stream are truncated. Split large documents before importing. |
+
+---
+
 ## Compatibility
 
 | SketchUp Version | Ruby Version | Status |
-|------------------|-------------|--------|
-| 2017–2019 | 2.2–2.5 | Supported (including Make; Ruby 2.2 smoke CI-tested) |
-| 2020 | 2.5 | May work, not CI-tested |
-| 2021–2023 | 2.7 | CI-tested |
-| 2024+ | 3.2+ | CI-tested |
+|-----------------|-------------|--------|
+| Make 2017 | 2.2.4 | ⚠️ Expected (CI syntax-checked, not host-verified) |
+| Pro 2017 | 2.2.4 | ⚠️ Expected |
+| 2018–2019 | 2.5.x | ⚠️ Expected |
+| 2020–2023 | 2.7.x | ⚠️ Expected |
+| 2024 | 3.2.2 | ⚠️ Expected |
+| 2025 | 3.2.x+ | ⚠️ Expected |
+| Current Pro release | verify actual Ruby | ⚠️ Expected until host-tested |
+| 2014–2016 | 2.0.x | ⚠️ Expected only after dedicated host verification |
+
+Evidence levels:
+- `✅ Verified`: host-run validation evidence captured.
+- `⚠️ Expected`: syntax/runtime compatible but no host-run evidence yet.
+- `❌ Not supported`: outside maintained/tested compatibility scope.
 
 ---
 

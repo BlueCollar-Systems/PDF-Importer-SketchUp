@@ -188,6 +188,38 @@ module BlueCollarSystems
       end
 
       # ---------------------------------------------------------------
+      # Expand referenced Form XObjects into transformed VectorPath objects.
+      # This lets downstream extraction/import work on PDFs where most
+      # geometry is emitted via Do operators.
+      # ---------------------------------------------------------------
+      def expanded_paths(streams)
+        return [] if @form_xobjects.empty?
+
+        track_placements(streams)
+
+        expanded = []
+        @form_xobjects.each_value do |form|
+          placements = (form.instance_xforms || []).dup
+          if placements.empty? && form.usage_count.to_i > 0
+            placements = [identity_matrix]
+          end
+          next if placements.empty?
+
+          base_paths = parse_xobject_paths(form.name)
+          next if base_paths.nil? || base_paths.empty?
+
+          form_matrix = normalize_matrix(form.matrix)
+
+          placements.each do |placement|
+            combined = multiply_matrices(form_matrix, normalize_matrix(placement))
+            expanded.concat(transform_paths(base_paths, combined))
+          end
+        end
+
+        expanded
+      end
+
+      # ---------------------------------------------------------------
       # Get XObjects that are worth making into Components
       # (referenced more than once)
       # ---------------------------------------------------------------
@@ -236,6 +268,53 @@ module BlueCollarSystems
           end
         else
           []
+        end
+      end
+
+      def identity_matrix
+        [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+      end
+
+      def normalize_matrix(m)
+        return identity_matrix unless m.is_a?(Array) && m.length >= 6
+        [
+          m[0].to_f, m[1].to_f, m[2].to_f,
+          m[3].to_f, m[4].to_f, m[5].to_f
+        ]
+      end
+
+      def transform_point(pt, matrix)
+        x = pt[0].to_f
+        y = pt[1].to_f
+        [
+          matrix[0] * x + matrix[2] * y + matrix[4],
+          matrix[1] * x + matrix[3] * y + matrix[5]
+        ]
+      end
+
+      def transform_paths(paths, matrix)
+        paths.map do |path|
+          new_subpaths = path.subpaths.map do |sp|
+            new_segments = sp.segments.map do |seg|
+              points = seg.points.map { |pt| transform_point(pt, matrix) }
+              ContentStreamParser::Segment.new(seg.type, points)
+            end
+            ContentStreamParser::SubPath.new(new_segments, sp.closed)
+          end
+
+          ContentStreamParser::VectorPath.new(
+            new_subpaths,
+            path.stroke,
+            path.fill,
+            path.stroke_color ? path.stroke_color.dup : nil,
+            path.fill_color ? path.fill_color.dup : nil,
+            path.line_width,
+            path.line_cap,
+            path.line_join,
+            path.dash_pattern ? path.dash_pattern.dup : nil,
+            matrix.dup,
+            path.layer_name
+          )
         end
       end
 
