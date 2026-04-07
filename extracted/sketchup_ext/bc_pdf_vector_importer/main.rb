@@ -203,6 +203,69 @@ module BlueCollarSystems
       end
     end
 
+    def self.bb_corners(bb)
+      mn = bb.min
+      mx = bb.max
+      [
+        Geom::Point3d.new(mn.x, mn.y, mn.z),
+        Geom::Point3d.new(mx.x, mn.y, mn.z),
+        Geom::Point3d.new(mn.x, mx.y, mn.z),
+        Geom::Point3d.new(mx.x, mx.y, mn.z),
+        Geom::Point3d.new(mn.x, mn.y, mx.z),
+        Geom::Point3d.new(mx.x, mn.y, mx.z),
+        Geom::Point3d.new(mn.x, mx.y, mx.z),
+        Geom::Point3d.new(mx.x, mx.y, mx.z)
+      ]
+    end
+
+    def self.add_bounds_with_transform(target_bb, source_bb, transform = nil)
+      return unless fit_usable_bounds?(source_bb)
+      if transform
+        bb_corners(source_bb).each { |pt| target_bb.add(pt.transform(transform)) }
+      else
+        target_bb.add(source_bb)
+      end
+    rescue StandardError
+      nil
+    end
+
+    # Collect bounds recursively while ignoring text/dimension annotations.
+    # This prevents a single outlier label from blowing up fit extents.
+    def self.collect_fit_bounds(entity, out_bb, parent_transform = nil, depth = 0)
+      return if entity.nil? || !entity.valid?
+      return if fit_ignored_entity?(entity)
+      return if depth > 12
+
+      if defined?(Sketchup::Group) && entity.is_a?(Sketchup::Group)
+        world_t = parent_transform ? (parent_transform * entity.transformation) : entity.transformation
+        nested = Geom::BoundingBox.new
+        entity.entities.each { |child| collect_fit_bounds(child, nested, world_t, depth + 1) }
+        if fit_usable_bounds?(nested)
+          out_bb.add(nested)
+        else
+          # Fallback: group bounds in model space.
+          add_bounds_with_transform(out_bb, entity.bounds, nil)
+        end
+        return
+      end
+
+      if defined?(Sketchup::ComponentInstance) && entity.is_a?(Sketchup::ComponentInstance)
+        world_t = parent_transform ? (parent_transform * entity.transformation) : entity.transformation
+        nested = Geom::BoundingBox.new
+        entity.definition.entities.each { |child| collect_fit_bounds(child, nested, world_t, depth + 1) }
+        if fit_usable_bounds?(nested)
+          out_bb.add(nested)
+        else
+          add_bounds_with_transform(out_bb, entity.bounds, nil)
+        end
+        return
+      end
+
+      add_bounds_with_transform(out_bb, entity.bounds, parent_transform)
+    rescue StandardError
+      nil
+    end
+
     def self.run_pipeline(model, path, opts)
       Logger.reset
       config = RecognitionConfig.default
@@ -662,7 +725,7 @@ module BlueCollarSystems
           end
 
           bb = Geom::BoundingBox.new
-          fit_targets.each { |e| bb.add(e.bounds) }
+          fit_targets.each { |e| collect_fit_bounds(e, bb) }
 
           if fit_usable_bounds?(bb)
             center = bb.center
@@ -671,7 +734,7 @@ module BlueCollarSystems
             up = Geom::Vector3d.new(0, 1, 0)
             view.camera = Sketchup::Camera.new(eye, target, up)
             view.camera.perspective = false
-            view.zoom(fit_targets)
+            view.zoom(bb)
           else
             view.zoom_extents
           end

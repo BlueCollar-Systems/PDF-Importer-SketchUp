@@ -92,7 +92,11 @@ module BlueCollarSystems
           end
 
           # Determine target group based on color
-          color_rgb = path.stroke_color || [0, 0, 0]
+          color_rgb = if should_fill && !should_stroke && path.fill_color.is_a?(Array)
+                        path.fill_color
+                      else
+                        path.stroke_color || path.fill_color || [0, 0, 0]
+                      end
           dest = get_color_group(target, color_rgb)
 
           # Determine the layer for this path — OCG layer takes priority
@@ -408,9 +412,13 @@ module BlueCollarSystems
         begin
           face = entities.add_face(points)
           if face
+            # Keep imported sheet faces consistently front-facing in top view.
+            face.reverse! if face.normal.z < 0
             set_layer(face, layer)
             if fill_rgb && fill_rgb.is_a?(Array) && fill_rgb.length >= 3
-              face.material = get_or_create_material(fill_rgb)
+              mat = get_or_create_material(fill_rgb)
+              face.material = mat
+              face.back_material = mat
             end
             @face_count += 1
           end
@@ -485,13 +493,14 @@ module BlueCollarSystems
               if success
                 new_ents = entities.to_a[count_before..-1] || []
                 if new_ents.any?
-                  # Build transform: move to position, optionally rotate
-                  xform = Geom::Transformation.new(pt)
+                  # Keep transform order deterministic:
+                  # rotate text at origin first, then translate to insertion.
                   if item_angle.abs > 0.1
                     rot = Geom::Transformation.rotation(ORIGIN, Z_AXIS, item_angle.degrees)
-                    xform = xform * rot
+                    entities.transform_entities(rot, *new_ents)
                   end
-                  entities.transform_entities(xform, *new_ents)
+                  move = Geom::Transformation.new(pt)
+                  entities.transform_entities(move, *new_ents)
                   new_ents.each do |entity|
                     begin
                       set_layer(entity, layer)
