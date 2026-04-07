@@ -203,6 +203,41 @@ module BlueCollarSystems
       end
     end
 
+    # Add a deterministic page-sized fit box in SketchUp model space.
+    # This makes "fit all" resilient even when imported entities contain
+    # sparse labels, nested groups, or occasional outlier bounds.
+    def self.add_page_fit_bounds(target_bb, media_box, render_box, scale, y_offset)
+      return unless target_bb
+      return unless media_box.is_a?(Array) && media_box.length >= 4
+      return unless render_box.is_a?(Array) && render_box.length >= 4
+
+      s = scale.to_f
+      s = 1.0 if s <= 0.0
+      oy = y_offset.to_f
+
+      mx0 = media_box[0].to_f
+      my0 = media_box[1].to_f
+
+      rx0 = render_box[0].to_f
+      ry0 = render_box[1].to_f
+      rx1 = render_box[2].to_f
+      ry1 = render_box[3].to_f
+
+      x0 = (rx0 - mx0) * (1.0 / 72.0) * s
+      y0 = (ry0 - my0) * (1.0 / 72.0) * s + oy
+      x1 = (rx1 - mx0) * (1.0 / 72.0) * s
+      y1 = (ry1 - my0) * (1.0 / 72.0) * s + oy
+
+      bb = Geom::BoundingBox.new
+      bb.add(Geom::Point3d.new(x0, y0, 0.0))
+      bb.add(Geom::Point3d.new(x1, y1, 0.0))
+      return unless fit_usable_bounds?(bb)
+
+      target_bb.add(bb)
+    rescue StandardError => e
+      Logger.warn("Pipeline", "add_page_fit_bounds failed: #{e.message}")
+    end
+
     def self.bb_corners(bb)
       mn = bb.min
       mx = bb.max
@@ -381,6 +416,7 @@ module BlueCollarSystems
                 text: 0, components: 0, layers: ocg.layer_list, cleanup: {},
                 generic: nil, mode_used: nil, xobjects: 0,
                 text_mode: requested_text_mode }
+      page_fit_bounds = Geom::BoundingBox.new
 
       import_start = Time.now
       stack_spacing = 1.2
@@ -419,6 +455,7 @@ module BlueCollarSystems
             if raster_ok
               stats[:pages] += 1
               stats[:raster_fallback_used] = true
+              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
               running_y_offset += curr_page_height_in * stack_spacing
             end
           end
@@ -450,6 +487,7 @@ module BlueCollarSystems
             if raster_ok
               stats[:pages] += 1
               stats[:raster_fallback_used] = true
+              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
               running_y_offset += curr_page_height_in * stack_spacing
               next
             end
@@ -473,13 +511,14 @@ module BlueCollarSystems
         if opts[:import_text]
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Extracting text... [#{(Time.now - import_start).round(1)}s]"
           strict_text_fidelity = !!opts[:strict_text_fidelity]
-          # Keep strict per-span behavior for labels/geometry paths only.
-          strict_text_processing = strict_text_fidelity && (requested_text_mode != :text3d)
-          # Prefer external bbox-layout text first for 3D text.
-          # Internal stream text can fragment glyph runs on OCR/CAD sheets,
-          # which causes the overlapping/concatenated 3D labels users reported.
-          # Strict fidelity for label/geometry modes still prefers internal spans.
-          prefer_internal_text = strict_text_processing
+          text3d_mode = (requested_text_mode == :text3d)
+          # Strict mode is opt-in only. For text3d we still prefer internal
+          # placement, but do not force strict token mode (it can regress
+          # reconstructed dimensions like 15/16 and 3'-10 1/2).
+          strict_text_processing = strict_text_fidelity
+          # For text3d, baseline/matrix placement from stream parsing is usually
+          # the most stable for rotated/angled dimensions and callouts.
+          prefer_internal_text = text3d_mode || strict_text_processing
           if prefer_internal_text
             font_maps = parser.page_font_maps(page_num)
             parser_opts = { strict_text_fidelity: strict_text_processing }
@@ -523,6 +562,7 @@ module BlueCollarSystems
           if raster_ok
             stats[:pages] += 1
             stats[:raster_fallback_used] = true
+            add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
             running_y_offset += curr_page_height_in * stack_spacing
             next
           end
@@ -538,6 +578,7 @@ module BlueCollarSystems
             if raster_ok
               stats[:pages] += 1
               stats[:edges] += 0
+              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
               running_y_offset += curr_page_height_in * stack_spacing
             else
               Logger.warn("Pipeline",
@@ -679,6 +720,8 @@ module BlueCollarSystems
           cl.each { |k, v| stats[:cleanup][k] = (stats[:cleanup][k] || 0) + v }
         end
 
+        add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
+
         # Advance the running page stack only after a successful import.
         running_y_offset += curr_page_height_in * stack_spacing
 
@@ -711,21 +754,24 @@ module BlueCollarSystems
         view = model.active_view
         if view
           # Switch to top-down orthographic view for 2D drawing
-          imported_entities = model.active_entities.to_a - pre_import_entities
-          fit_targets = imported_entities.select do |e|
-            next false if fit_ignored_entity?(e)
-            next false unless e.respond_to?(:bounds) && e.valid?
-            fit_usable_bounds?(e.bounds)
-          end
-          # If a page only produced label entities, still fit to what was imported.
-          if fit_targets.empty?
-            fit_targets = imported_entities.select do |e|
-              e && e.valid? && e.respond_to?(:bounds) && fit_usable_bounds?(e.bounds)
-            end
-          end
-
           bb = Geom::BoundingBox.new
-          fit_targets.each { |e| collect_fit_bounds(e, bb) }
+          if fit_usable_bounds?(page_fit_bounds)
+            bb.add(page_fit_bounds)
+          else
+            imported_entities = model.active_entities.to_a - pre_import_entities
+            fit_targets = imported_entities.select do |e|
+              next false if fit_ignored_entity?(e)
+              next false unless e.respond_to?(:bounds) && e.valid?
+              fit_usable_bounds?(e.bounds)
+            end
+            # If a page only produced label entities, still fit to what was imported.
+            if fit_targets.empty?
+              fit_targets = imported_entities.select do |e|
+                e && e.valid? && e.respond_to?(:bounds) && fit_usable_bounds?(e.bounds)
+              end
+            end
+            fit_targets.each { |e| collect_fit_bounds(e, bb) }
+          end
 
           if fit_usable_bounds?(bb)
             center = bb.center
