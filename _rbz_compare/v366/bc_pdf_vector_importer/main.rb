@@ -184,25 +184,6 @@ module BlueCollarSystems
       [false, stats]
     end
 
-    def self.fit_ignored_entity?(entity)
-      return true unless entity
-      return true if defined?(Sketchup::Text) && entity.is_a?(Sketchup::Text)
-      return true if defined?(Sketchup::Dimension) && entity.is_a?(Sketchup::Dimension)
-      false
-    end
-
-    def self.fit_usable_bounds?(bb)
-      return false unless bb && bb.valid?
-      begin
-        dx = (bb.max.x.to_f - bb.min.x.to_f).abs
-        dy = (bb.max.y.to_f - bb.min.y.to_f).abs
-        dz = (bb.max.z.to_f - bb.min.z.to_f).abs
-        (dx + dy + dz) > 1.0e-9
-      rescue StandardError
-        false
-      end
-    end
-
     def self.run_pipeline(model, path, opts)
       Logger.reset
       config = RecognitionConfig.default
@@ -297,9 +278,6 @@ module BlueCollarSystems
       pages = pages.select { |p| p >= 1 && p <= parser.page_count }
       return nil if pages.empty?
 
-      # Track new entities in the currently active editing context.
-      # Using model.entities misses imports done while editing groups/components.
-      pre_import_entities = model.active_entities.to_a
       model.start_operation("Import PDF Vectors", true)
 
       # Reset ID counter once at the start of a multi-page import
@@ -410,20 +388,19 @@ module BlueCollarSystems
         if opts[:import_text]
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Extracting text... [#{(Time.now - import_start).round(1)}s]"
           strict_text_fidelity = !!opts[:strict_text_fidelity]
+          # 3D text placement relies on merged text runs for readability.
           # Keep strict per-span behavior for labels/geometry paths only.
           strict_text_processing = strict_text_fidelity && (requested_text_mode != :text3d)
-          # Prefer external bbox-layout text first for 3D text.
-          # Internal stream text can fragment glyph runs on OCR/CAD sheets,
-          # which causes the overlapping/concatenated 3D labels users reported.
-          # Strict fidelity for label/geometry modes still prefers internal spans.
-          prefer_internal_text = strict_text_processing
+          # 3D text alignment is most stable when we use baseline-aware
+          # coordinates from content streams first, then fall back to bbox text.
+          prefer_internal_text = (requested_text_mode == :text3d)
           if prefer_internal_text
             font_maps = parser.page_font_maps(page_num)
-            parser_opts = { strict_text_fidelity: strict_text_processing }
-            # For 3D text, preserving native spans avoids accidental
-            # concatenation/offset caused by run-merge heuristics.
-            parser_opts[:merge_text_runs] = false if requested_text_mode == :text3d
-            text_items = TextParser.new(streams, font_maps, parser_opts).parse
+            text_items = TextParser.new(
+              streams,
+              font_maps,
+              strict_text_fidelity: strict_text_processing
+            ).parse
             text_source = :internal
             if text_items.nil? || text_items.empty?
               text_items = ExternalTextExtractor.extract(path, page_num,
@@ -438,9 +415,11 @@ module BlueCollarSystems
             text_source = :external
             if text_items.nil? || text_items.empty?
               font_maps = parser.page_font_maps(page_num)
-              parser_opts = { strict_text_fidelity: strict_text_processing }
-              parser_opts[:merge_text_runs] = false if requested_text_mode == :text3d
-              text_items = TextParser.new(streams, font_maps, parser_opts).parse
+              text_items = TextParser.new(
+                streams,
+                font_maps,
+                strict_text_fidelity: strict_text_processing
+              ).parse
               text_source = :internal
             end
           end
@@ -643,38 +622,43 @@ module BlueCollarSystems
 
       stats[:elapsed_seconds] = elapsed
 
-      # ── Auto fit view to newly imported geometry (not model-wide extents) ──
+      # ── Auto fit view to geometry (not text) ──
       begin
         view = model.active_view
         if view
+          # Temporarily hide text tag so zoom_extents fits geometry only
+          text_tag_name = "#{opts[:layer_name] || 'PDF Import'}:Text"
+          text_tag = model.layers[text_tag_name]
+          was_visible = text_tag ? text_tag.visible? : nil
+
+          text_tag.visible = false if text_tag && was_visible
+
           # Switch to top-down orthographic view for 2D drawing
-          imported_entities = model.active_entities.to_a - pre_import_entities
-          fit_targets = imported_entities.select do |e|
-            next false if fit_ignored_entity?(e)
-            next false unless e.respond_to?(:bounds) && e.valid?
-            fit_usable_bounds?(e.bounds)
-          end
-          # If a page only produced label entities, still fit to what was imported.
-          if fit_targets.empty?
-            fit_targets = imported_entities.select do |e|
-              e && e.valid? && e.respond_to?(:bounds) && fit_usable_bounds?(e.bounds)
+          cam = view.camera
+          # Find bounding box center of imported geometry
+          bb = nil
+          model.entities.each do |e|
+            next unless e.respond_to?(:bounds) && e.valid?
+            if bb
+              bb.add(e.bounds)
+            else
+              bb = e.bounds
             end
           end
 
-          bb = Geom::BoundingBox.new
-          fit_targets.each { |e| bb.add(e.bounds) }
-
-          if fit_usable_bounds?(bb)
+          if bb && bb.valid?
             center = bb.center
             eye = Geom::Point3d.new(center.x, center.y, center.z + 1000)
             target = center
             up = Geom::Vector3d.new(0, 1, 0)
             view.camera = Sketchup::Camera.new(eye, target, up)
             view.camera.perspective = false
-            view.zoom(fit_targets)
-          else
-            view.zoom_extents
           end
+
+          view.zoom_extents
+
+          # Restore text tag visibility
+          text_tag.visible = true if text_tag && was_visible
         end
       rescue StandardError => e
         Logger.warn("Pipeline", "Auto-fit view failed: #{e.message}")
@@ -689,46 +673,11 @@ module BlueCollarSystems
     # ================================================================
     # RASTER FALLBACK — render scanned page as positioned image
     # ================================================================
-    def self.compute_effective_raster_dpi(opts, page_w_pts, page_h_pts)
-      requested = (opts[:raster_dpi] || 300).to_i
-      requested = 300 if requested <= 0
-      requested = [[requested, 150].max, 1200].min
-
-      # Safe sharpening default:
-      # if user kept the legacy 300 DPI default, raise target modestly.
-      desired = requested
-      desired = 400 if requested <= 300
-
-      page_w_in = page_w_pts.to_f / 72.0
-      page_h_in = page_h_pts.to_f / 72.0
-      page_area_in2 = page_w_in * page_h_in
-      page_area_in2 = 1.0 if page_area_in2 <= 0.0 || !page_area_in2.finite?
-
-      # Guardrail against giant raster allocations.
-      pixel_budget = (opts[:raster_pixel_budget] || 120_000_000).to_i
-      pixel_budget = [[pixel_budget, 25_000_000].max, 240_000_000].min
-      cap_from_budget = Math.sqrt(pixel_budget.to_f / page_area_in2).floor
-      cap_from_budget = [[cap_from_budget, 150].max, 1200].min
-
-      effective = [desired, cap_from_budget].min
-      effective = [[effective, 150].max, 1200].min
-
-      {
-        requested: requested,
-        desired: desired,
-        effective: effective,
-        cap: cap_from_budget,
-        pixel_budget: pixel_budget
-      }
-    rescue StandardError => e
-      Logger.warn("Raster", "DPI planner failed: #{e.message}")
-      { requested: 300, desired: 300, effective: 300, cap: 300, pixel_budget: 120_000_000 }
-    end
-
     def self.import_page_as_raster(model, pdf_path, page_num, media_box, opts, import_start, y_offset = 0.0, render_box = nil)
       exe = safe_find_pdftocairo
       return false unless exe
 
+      dpi = opts[:raster_dpi] || 300
       # Render/placement box (usually CropBox when available, else MediaBox).
       render_box = media_box unless render_box.is_a?(Array) && render_box.length >= 4
       media_min_x = media_box[0].to_f
@@ -739,8 +688,6 @@ module BlueCollarSystems
       page_h_pts = (render_box[3] - render_box[1]).abs
       page_w_pts = 612.0 if page_w_pts < 1
       page_h_pts = 792.0 if page_h_pts < 1
-      dpi_plan = compute_effective_raster_dpi(opts, page_w_pts, page_h_pts)
-      dpi = dpi_plan[:effective]
 
       use_cropbox = false
       begin
@@ -783,11 +730,11 @@ module BlueCollarSystems
 
       return false unless run[:ok] && actual_png && File.exist?(actual_png)
 
-        begin
-          scale = opts[:scale] || 1.0
-          # Image size in inches = page pts / 72
-          img_w = page_w_pts / 72.0 * scale
-          img_h = page_h_pts / 72.0 * scale
+      begin
+        scale = opts[:scale] || 1.0
+        # Image size in inches = page pts / 72
+        img_w = page_w_pts / 72.0 * scale
+        img_h = page_h_pts / 72.0 * scale
         box_offset_x = (render_min_x - media_min_x) / 72.0 * scale
         box_offset_y = (render_min_y - media_min_y) / 72.0 * scale
 
@@ -804,16 +751,8 @@ module BlueCollarSystems
               Logger.warn("Raster", "Image layer assignment failed: #{e.message}")
             end
             box_msg = use_cropbox ? "cropbox" : "mediabox"
-            req = dpi_plan[:requested]
-            cap = dpi_plan[:cap]
-            sharpened = dpi > req
-            status_suffix = sharpened ? " (enhanced)" : ""
-            Sketchup.status_text = "PDF Import — Page #{page_num} — Raster image placed at #{dpi} DPI#{status_suffix} [#{(Time.now - import_start).round(1)}s]"
-            Logger.info(
-              "Raster",
-              "Page #{page_num}: placed #{box_msg} raster #{img_w.round(3)}x#{img_h.round(3)} in at " \
-              "(#{pt.x.round(3)},#{pt.y.round(3)}), dpi req=#{req}, eff=#{dpi}, cap=#{cap}, budget=#{dpi_plan[:pixel_budget]}"
-            )
+            Sketchup.status_text = "PDF Import — Page #{page_num} — Raster image placed at #{dpi} DPI [#{(Time.now - import_start).round(1)}s]"
+            Logger.info("Raster", "Page #{page_num}: placed #{box_msg} raster #{img_w.round(3)}x#{img_h.round(3)} in at (#{pt.x.round(3)},#{pt.y.round(3)})")
             return true
           end
         rescue StandardError => e

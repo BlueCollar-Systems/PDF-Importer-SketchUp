@@ -50,3 +50,10 @@ Desktop.ini
 
 # Logs
 *.log
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Dev artifacts
+dev_logs/

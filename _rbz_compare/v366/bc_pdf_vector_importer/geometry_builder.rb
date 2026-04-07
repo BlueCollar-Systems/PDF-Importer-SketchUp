@@ -536,17 +536,7 @@ module BlueCollarSystems
 
       # Use geometry text only for non-horizontal labels when strict fidelity is enabled.
       # This avoids needlessly converting horizontal labels that annotation text handles well.
-      # Threshold is tunable via BC_SU_ROTATED_LABEL_DEG for troubleshooting.
       def angle_needs_geometry_text?(angle_deg, tol_deg = 12.0)
-        env = ENV['BC_SU_ROTATED_LABEL_DEG']
-        if env && !env.to_s.strip.empty?
-          begin
-            parsed = env.to_f
-            tol_deg = parsed if parsed >= 0.0 && parsed <= 89.0
-          rescue StandardError
-            # keep default tolerance
-          end
-        end
         a = angle_deg.to_f % 180.0
         a += 180.0 if a < 0.0
         a = 180.0 - a if a > 90.0

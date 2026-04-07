@@ -29,9 +29,6 @@ module BlueCollarSystems
         # Strict mode keeps raw text spans as close to source as possible.
         # Default remains false to preserve legacy behavior.
         @strict_text_fidelity = !!opts[:strict_text_fidelity]
-        # Optional: disable run-merge heuristics (useful for text3d placement
-        # where keeping native spans avoids accidental cross-label concatenation).
-        @merge_text_runs = opts.key?(:merge_text_runs) ? !!opts[:merge_text_runs] : true
 
         (font_maps || {}).each do |k, v|
           key = k.to_s
@@ -55,10 +52,8 @@ module BlueCollarSystems
         else
           # Reconstruct stacked fractions before run-merge so slash forms survive.
           @text_items = reconstruct_fractions(@text_items)
-          if @merge_text_runs
-            @text_items = merge_text_runs(@text_items)
-            @text_items = fix_merged_fractions(@text_items)
-          end
+          @text_items = merge_text_runs(@text_items)
+          @text_items = fix_merged_fractions(@text_items)
           @text_items = dedupe_text_items(@text_items)
           @text_items = quality_filter(@text_items)
           @text_items = suppress_overlaps(@text_items)
