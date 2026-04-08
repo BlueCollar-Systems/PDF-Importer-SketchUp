@@ -17,7 +17,7 @@ module BlueCollarSystems
 
     PLUGIN_ID       = 'bc_pdf_vector_importer'.freeze
     PLUGIN_NAME     = 'PDF Vector Importer'.freeze
-    PLUGIN_VERSION  = '3.6.7'.freeze
+    PLUGIN_VERSION  = '3.6.8'.freeze
     PLUGIN_DIR      = File.join(File.dirname(__FILE__), PLUGIN_ID).freeze
 
     extension = SketchupExtension.new(PLUGIN_NAME, File.join(PLUGIN_ID, 'main'))
