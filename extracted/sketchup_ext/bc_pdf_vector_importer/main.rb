@@ -337,7 +337,7 @@ module BlueCollarSystems
           begin
             view = model.active_view
             view.zoom_extents if view
-          rescue => _e
+          rescue StandardError
           end
           return { pages: 1, primitives: 0, edges: 0, faces: 0, arcs: 0,
                    text: 0, components: 0, layers: [], cleanup: {},
@@ -383,7 +383,7 @@ module BlueCollarSystems
             begin
               view = model.active_view
               view.zoom_extents if view
-            rescue => _e
+            rescue StandardError
             end
             return { pages: 1, primitives: 0, edges: 0, faces: 0, arcs: 0,
                      text: 0, components: 0, layers: [], cleanup: {},

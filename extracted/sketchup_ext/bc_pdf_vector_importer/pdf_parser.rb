@@ -5,6 +5,8 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
+require 'zlib'
+
 module BlueCollarSystems
   module PDFVectorImporter
     class PDFParser
