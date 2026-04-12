@@ -627,7 +627,16 @@ module BlueCollarSystems
           end
         end
 
-        Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Building #{paths.length} paths... [#{(Time.now - import_start).round(1)}s]"
+        # ── Complexity warning for very large pages ──
+        total_subpaths = paths.inject(0) { |sum, p| sum + p.subpaths.length }
+        if paths.length > 5000 || total_subpaths > 10000
+          Logger.warn("Pipeline",
+            "Page #{page_num}: heavy page (#{paths.length} paths, " \
+            "#{total_subpaths} subpaths). Import may take several minutes.")
+          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Heavy page: #{paths.length} paths (this may take a while)... [#{(Time.now - import_start).round(1)}s]"
+        else
+          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Building #{paths.length} paths... [#{(Time.now - import_start).round(1)}s]"
+        end
 
         # ── Hatch detection ──
         hatch_mode = opts[:hatch_mode] || :import
