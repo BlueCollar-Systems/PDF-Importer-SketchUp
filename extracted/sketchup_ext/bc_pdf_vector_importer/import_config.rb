@@ -68,7 +68,8 @@ module BlueCollarSystems
           merge_tolerance: '0.005', units: 'Inches',
           force_raster: 'No', raster_dpi: '300',
           arc_mode: 'Auto', cleanup_level: 'Balanced',
-          lineweight_mode: 'Ignore', grouping_mode: 'Group per page'
+          lineweight_mode: 'Ignore', grouping_mode: 'Group per page',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Balanced' => {
           scale: '1.0', bezier_segments: '16', import_as: 'Edges and Faces',
@@ -78,7 +79,8 @@ module BlueCollarSystems
           merge_tolerance: '0.002', units: 'Inches',
           force_raster: 'No', raster_dpi: '300',
           arc_mode: 'Auto', cleanup_level: 'Conservative',
-          lineweight_mode: 'Ignore', grouping_mode: 'Group per page'
+          lineweight_mode: 'Ignore', grouping_mode: 'Group per page',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Full' => {
           scale: '1.0', bezier_segments: '24', import_as: 'Edges and Faces',
@@ -88,7 +90,8 @@ module BlueCollarSystems
           merge_tolerance: '0.001', units: 'Inches',
           force_raster: 'No', raster_dpi: '300',
           arc_mode: 'Auto', cleanup_level: 'Balanced',
-          lineweight_mode: 'Ignore', grouping_mode: 'Group per page'
+          lineweight_mode: 'Ignore', grouping_mode: 'Group per page',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Max Fidelity' => {
           scale: '1.0', bezier_segments: '32', import_as: 'Edges and Faces',
@@ -98,7 +101,8 @@ module BlueCollarSystems
           merge_tolerance: '0.0005', units: 'Inches',
           force_raster: 'No', raster_dpi: '300',
           arc_mode: 'Rebuild arcs', cleanup_level: 'Aggressive',
-          lineweight_mode: 'Preserve visually', grouping_mode: 'Nested: page > layer'
+          lineweight_mode: 'Preserve visually', grouping_mode: 'Nested: page > layer',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Raster Image' => {
           scale: '1.0', bezier_segments: '8', import_as: 'Edges Only',
@@ -108,7 +112,8 @@ module BlueCollarSystems
           merge_tolerance: '0.005', units: 'Inches',
           force_raster: 'Yes', raster_dpi: '300',
           arc_mode: 'Auto', cleanup_level: 'Balanced',
-          lineweight_mode: 'Ignore', grouping_mode: 'Single group'
+          lineweight_mode: 'Ignore', grouping_mode: 'Single group',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Custom...' => nil
       }.freeze
@@ -122,7 +127,8 @@ module BlueCollarSystems
                     :raster_dpi, :cleanup_geometry, :recognition_mode,
                     :text_mode, :units,
                     # Phase 2 additions
-                    :arc_mode, :cleanup_level, :lineweight_mode, :grouping_mode
+                    :arc_mode, :cleanup_level, :lineweight_mode, :grouping_mode,
+                    :page_arrangement, :page_gap_ratio
 
       def initialize(attrs = {})
         # Existing defaults
@@ -152,6 +158,8 @@ module BlueCollarSystems
         @cleanup_level    = attrs[:cleanup_level]    || 'Balanced'
         @lineweight_mode  = attrs[:lineweight_mode]  || 'Ignore'
         @grouping_mode    = attrs[:grouping_mode]    || 'Group per page'
+        @page_arrangement = attrs[:page_arrangement] || 'Spread (20% gap)'
+        @page_gap_ratio   = attrs[:page_gap_ratio]   || '0.20'
       end
 
       # Build from a named preset
@@ -181,7 +189,8 @@ module BlueCollarSystems
           raster_dpi: @raster_dpi, cleanup_geometry: @cleanup_geometry,
           recognition_mode: @recognition_mode, units: @units,
           arc_mode: @arc_mode, cleanup_level: @cleanup_level,
-          lineweight_mode: @lineweight_mode, grouping_mode: @grouping_mode
+          lineweight_mode: @lineweight_mode, grouping_mode: @grouping_mode,
+          page_arrangement: @page_arrangement, page_gap_ratio: @page_gap_ratio
         }
       end
 

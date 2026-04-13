@@ -19,7 +19,8 @@ module BlueCollarSystems
           merge_tolerance: '0.005', units: 'Inches',
           force_raster: 'No', raster_dpi: '300',
           arc_mode: 'Auto', cleanup_level: 'Balanced',
-          lineweight_mode: 'Ignore', grouping_mode: 'Group per page'
+          lineweight_mode: 'Ignore', grouping_mode: 'Group per page',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Balanced' => {
           scale: '1.0', bezier_segments: '16', import_as: 'Edges and Faces',
@@ -29,7 +30,8 @@ module BlueCollarSystems
           merge_tolerance: '0.002', units: 'Inches',
           force_raster: 'No', raster_dpi: '300',
           arc_mode: 'Auto', cleanup_level: 'Conservative',
-          lineweight_mode: 'Ignore', grouping_mode: 'Group per page'
+          lineweight_mode: 'Ignore', grouping_mode: 'Group per page',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Full' => {
           scale: '1.0', bezier_segments: '24', import_as: 'Edges and Faces',
@@ -39,7 +41,8 @@ module BlueCollarSystems
           merge_tolerance: '0.001', units: 'Inches',
           force_raster: 'No', raster_dpi: '300',
           arc_mode: 'Auto', cleanup_level: 'Balanced',
-          lineweight_mode: 'Ignore', grouping_mode: 'Group per page'
+          lineweight_mode: 'Ignore', grouping_mode: 'Group per page',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Max Fidelity' => {
           scale: '1.0', bezier_segments: '32', import_as: 'Edges and Faces',
@@ -49,7 +52,8 @@ module BlueCollarSystems
           merge_tolerance: '0.0005', units: 'Inches',
           force_raster: 'No', raster_dpi: '300',
           arc_mode: 'Rebuild arcs', cleanup_level: 'Aggressive',
-          lineweight_mode: 'Preserve visually', grouping_mode: 'Nested: page > layer'
+          lineweight_mode: 'Preserve visually', grouping_mode: 'Nested: page > layer',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Raster Image' => {
           scale: '1.0', bezier_segments: '8', import_as: 'Edges Only',
@@ -59,7 +63,8 @@ module BlueCollarSystems
           merge_tolerance: '0.005', units: 'Inches',
           force_raster: 'Yes', raster_dpi: '300',
           arc_mode: 'Auto', cleanup_level: 'Balanced',
-          lineweight_mode: 'Ignore', grouping_mode: 'Single group'
+          lineweight_mode: 'Ignore', grouping_mode: 'Single group',
+          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
         },
         'Custom...' => nil
       }.freeze
@@ -74,6 +79,7 @@ module BlueCollarSystems
       CLEANUP_LEVEL_CHOICES  = 'Conservative|Balanced|Aggressive'
       LINEWEIGHT_CHOICES     = 'Ignore|Preserve visually|Group by lineweight|Map to tags'
       GROUPING_CHOICES       = 'Single group|Group per page|Group per layer|Group per color|Nested: page > layer|Nested: page > lineweight'
+      PAGE_ARRANGEMENT_CHOICES = 'Spread (20% gap)|Compact gap|Touching pages|Overlay pages'
 
       def self.show(filepath)
         filename = File.basename(filepath)
@@ -159,7 +165,9 @@ module BlueCollarSystems
           arc_mode:         saved[:arc_mode]                           || 'Auto',
           cleanup_level:    saved[:cleanup_level]                      || 'Balanced',
           lineweight_mode:  saved[:lineweight_mode]                    || 'Ignore',
-          grouping_mode:    saved[:grouping_mode]                      || 'Group per page'
+          grouping_mode:    saved[:grouping_mode]                      || 'Group per page',
+          page_arrangement: saved[:page_arrangement]                   || 'Spread (20% gap)',
+          page_gap_ratio:   saved[:page_gap_ratio]                     || '0.20'
         }
 
         dlg.set_html(advanced_html(filename, d))
@@ -175,6 +183,7 @@ module BlueCollarSystems
             force_raster: p['force_raster'], raster_dpi: p['raster_dpi'],
             arc_mode: p['arc_mode'], cleanup_level: p['cleanup_level'],
             lineweight_mode: p['lineweight_mode'], grouping_mode: p['grouping_mode'],
+            page_arrangement: p['page_arrangement'], page_gap_ratio: p['page_gap_ratio'],
             last_preset: 'Custom...'
           )
           import_as = p['import_fills'] == 'Yes' ? 'Edges and Faces' : 'Edges Only'
@@ -190,7 +199,8 @@ module BlueCollarSystems
             force_raster: p['force_raster'], raster_dpi: p['raster_dpi'],
             recognition_mode: 'None', merge_tolerance: '0.001', units: 'Inches',
             arc_mode: p['arc_mode'], cleanup_level: p['cleanup_level'],
-            lineweight_mode: p['lineweight_mode'], grouping_mode: p['grouping_mode']
+            lineweight_mode: p['lineweight_mode'], grouping_mode: p['grouping_mode'],
+            page_arrangement: p['page_arrangement'], page_gap_ratio: p['page_gap_ratio']
           )
           dlg.close
         end
@@ -314,6 +324,11 @@ module BlueCollarSystems
           "<option value=\"#{esc(v)}\"#{sel}>#{esc(v)}</option>"
         }.join
 
+        page_arrangement_opts = PAGE_ARRANGEMENT_CHOICES.split('|').map{|v|
+          sel = d[:page_arrangement] == v ? ' selected' : ''
+          "<option value=\"#{esc(v)}\"#{sel}>#{esc(v)}</option>"
+        }.join
+
         <<-HTML
           <!DOCTYPE html><html><head><meta charset="utf-8">
           <style>#{DIALOG_CSS}body{overflow-y:auto}</style></head><body>
@@ -364,6 +379,14 @@ module BlueCollarSystems
             <div><label>Grouping Mode</label>
               <select id="grouping_mode">#{grouping_opts}</select></div>
           </div>
+          <div class="section">Multi-Page Layout</div>
+          <div class="row2">
+            <div><label>Page Arrangement</label>
+              <select id="page_arrangement">#{page_arrangement_opts}</select></div>
+            <div><label>Compact Gap Ratio</label>
+              <input type="text" id="page_gap_ratio" value="#{esc(d[:page_gap_ratio])}" placeholder="0.20">
+              <p class="hint">Used only for Compact gap mode.</p></div>
+          </div>
           <div class="section">Raster Fallback</div>
           <div class="row2">
             <div><label>Force Raster</label>
@@ -391,7 +414,9 @@ module BlueCollarSystems
             arc_mode:document.getElementById('arc_mode').value,
             cleanup_level:document.getElementById('cleanup_level').value,
             lineweight_mode:document.getElementById('lineweight_mode').value,
-            grouping_mode:document.getElementById('grouping_mode').value});}
+            grouping_mode:document.getElementById('grouping_mode').value,
+            page_arrangement:document.getElementById('page_arrangement').value,
+            page_gap_ratio:document.getElementById('page_gap_ratio').value.trim()||'0.20'});}
           function cancel(){sketchup.on_cancel({});}
           document.addEventListener('keydown',function(e){if(e.key==='Escape')cancel();});
           </script></body></html>
@@ -425,7 +450,8 @@ module BlueCollarSystems
           "Import Text:","Hatchings:","Rebuild Arcs from Curves:",
           "Map Dashed/Hidden Lines:","Import Filled Regions:",
           "Auto-Clean Geometry:","Force Raster Image (skip vectors):","Raster DPI (200-600):",
-          "Arc Mode:","Cleanup Level:","Lineweight Handling:","Grouping Mode:"
+          "Arc Mode:","Cleanup Level:","Lineweight Handling:","Grouping Mode:",
+          "Page Arrangement:","Compact Gap Ratio (0.00-1.00):"
         ]
         defaults = [
           pages_str||saved[:pages]||'All', scale_str||saved[:scale]||'1.0',
@@ -436,22 +462,27 @@ module BlueCollarSystems
           saved[:cleanup_geometry]||'Yes', saved[:force_raster]||'No',
           saved[:raster_dpi]||'300',
           saved[:arc_mode]||'Auto', saved[:cleanup_level]||'Balanced',
-          saved[:lineweight_mode]||'Ignore', saved[:grouping_mode]||'Group per page'
+          saved[:lineweight_mode]||'Ignore', saved[:grouping_mode]||'Group per page',
+          saved[:page_arrangement]||'Spread (20% gap)', saved[:page_gap_ratio]||'0.20'
         ]
         dropdowns = ['','','',TEXT_MODES,HATCH_MODES,YES_NO,YES_NO,YES_NO,YES_NO,YES_NO,'',
-                     ARC_MODE_CHOICES,CLEANUP_LEVEL_CHOICES,LINEWEIGHT_CHOICES,GROUPING_CHOICES]
+                     ARC_MODE_CHOICES,CLEANUP_LEVEL_CHOICES,LINEWEIGHT_CHOICES,GROUPING_CHOICES,
+                     PAGE_ARRANGEMENT_CHOICES,'']
         result = UI.inputbox(prompts, defaults, dropdowns, "Custom Import \u2014 #{filename}")
         return nil unless result
         p_pages,p_scale,p_bezier,p_text_mode,p_hatch,
         p_arcs,p_dashes,p_fills,p_cleanup,p_force_raster,p_raster_dpi,
-        p_arc_mode,p_cleanup_level,p_lineweight_mode,p_grouping_mode = result
+        p_arc_mode,p_cleanup_level,p_lineweight_mode,p_grouping_mode,
+        p_page_arrangement,p_page_gap_ratio = result
         save_prefs(pages:p_pages,scale:p_scale,bezier_segments:p_bezier,
                    text_mode:p_text_mode,hatch_mode:p_hatch,
                    detect_arcs:p_arcs,map_dashes:p_dashes,import_fills:p_fills,
                    cleanup_geometry:p_cleanup,force_raster:p_force_raster,
                    raster_dpi:p_raster_dpi,arc_mode:p_arc_mode,
                    cleanup_level:p_cleanup_level,lineweight_mode:p_lineweight_mode,
-                   grouping_mode:p_grouping_mode,last_preset:'Custom...')
+                   grouping_mode:p_grouping_mode,
+                   page_arrangement:p_page_arrangement,page_gap_ratio:p_page_gap_ratio,
+                   last_preset:'Custom...')
         import_as = p_fills == 'Yes' ? 'Edges and Faces' : 'Edges Only'
         build_opts(pages:p_pages,scale:p_scale,bezier_segments:p_bezier,
                    import_as:import_as,layer_name:'PDF Import',
@@ -462,7 +493,8 @@ module BlueCollarSystems
                    force_raster:p_force_raster,raster_dpi:p_raster_dpi,
                    recognition_mode:'None',merge_tolerance:'0.001',units:'Inches',
                    arc_mode:p_arc_mode,cleanup_level:p_cleanup_level,
-                   lineweight_mode:p_lineweight_mode,grouping_mode:p_grouping_mode)
+                   lineweight_mode:p_lineweight_mode,grouping_mode:p_grouping_mode,
+                   page_arrangement:p_page_arrangement,page_gap_ratio:p_page_gap_ratio)
       end
 
       private
@@ -545,6 +577,8 @@ module BlueCollarSystems
           raster_fallback:  (raw[:raster_fallback] || 'Yes') == 'Yes',
           force_raster:     (raw[:force_raster] || 'No') == 'Yes',
           raster_dpi:       [[((raw[:raster_dpi] || '300').to_i), 200].max, 600].min,
+          page_arrangement: (raw[:page_arrangement] || 'Spread (20% gap)').to_s,
+          page_gap_ratio:   [[(raw[:page_gap_ratio] || '0.20').to_f, 0.0].max, 1.0].min,
           cleanup_geometry: (raw[:cleanup_geometry] || 'Yes') == 'Yes',
           recognition_mode: recog,
           arc_mode:         (raw[:arc_mode] || 'Auto').to_s,
@@ -564,6 +598,7 @@ module BlueCollarSystems
              map_dashes text_mode hatch_mode raster_fallback force_raster
              raster_dpi cleanup_geometry recognition_mode merge_tolerance units
              arc_mode cleanup_level lineweight_mode grouping_mode
+             page_arrangement page_gap_ratio
           ].each do |key|
             val = Sketchup.read_default(PREF_KEY, key, nil)
             prefs[key.to_sym] = val if val
