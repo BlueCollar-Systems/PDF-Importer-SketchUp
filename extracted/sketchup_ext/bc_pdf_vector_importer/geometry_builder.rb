@@ -460,12 +460,24 @@ module BlueCollarSystems
               # ExternalTextExtractor: bbox height → add_3d_text letter height.
               # add_3d_text height = cap height directly.
               # bbox includes ascenders, descenders, leading.
-              # Cap height ≈ 30% of pdftotext bbox for this font/page combo.
+              # Typical font metrics (as fraction of bbox height):
+              #   cap height ≈ 0.55-0.65, ascender ≈ 0.70-0.80, descender ≈ 0.20-0.25
+              # 0.55 is conservative — keeps text from being undersized.
               bbox_h = fs
-              fs = fs * 0.30
-              # Shift origin up: bbox bottom includes descender space
-              # Keep this conservative to avoid drift on rotated/angled blueprint text.
-              baseline_ratio = (item_angle.abs > 10.0) ? 0.0 : 0.05
+              fs = fs * 0.55
+              # Shift origin up: pdftotext bbox anchors at box bottom (descender line).
+              # add_3d_text places baseline at Y origin. Shift = descender depth.
+              # descender ≈ 7% of bbox height for most CAD fonts.
+              baseline_ratio = (item_angle.abs > 10.0) ? 0.05 : 0.07
+              env_ratio = ENV['BC_SU_TEXT_BASELINE_RATIO']
+              if env_ratio && !env_ratio.to_s.strip.empty?
+                begin
+                  parsed_ratio = env_ratio.to_f
+                  baseline_ratio = parsed_ratio if parsed_ratio >= 0.0 && parsed_ratio <= 0.50
+                rescue StandardError
+                  # keep computed baseline ratio
+                end
+              end
               baseline_shift = bbox_h * baseline_ratio * PDF_POINT_TO_INCH * @scale
               pt = Geom::Point3d.new(pt.x, pt.y + baseline_shift, pt.z)
             end

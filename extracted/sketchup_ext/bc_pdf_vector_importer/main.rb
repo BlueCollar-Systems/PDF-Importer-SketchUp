@@ -166,8 +166,13 @@ module BlueCollarSystems
       total_items = stats[:total_item_count]
       max_rect_ratio = stats[:max_rect_ratio]
 
+      # Average items per drawing — glyph/fill-art floods have 1-3 items,
+      # real drawings (garden plans, floor plans) have many more
+      avg_items = n > 0 ? total_items.to_f / n : 0.0
+
       pure_fill = fill_ratio >= AUTO_FILL_PURE_RATIO &&
-                  stroke_ratio <= AUTO_FILL_PURE_STROKE_MAX
+                  stroke_ratio <= AUTO_FILL_PURE_STROKE_MAX &&
+                  avg_items <= 5.0
       if pure_fill && n >= AUTO_FILL_PURE_MIN_GROUPS
         if total_items >= AUTO_FILL_PURE_MIN_ITEMS ||
            max_rect_ratio >= AUTO_FILL_PURE_LARGE_RECT_RATIO
@@ -177,7 +182,8 @@ module BlueCollarSystems
 
       if n >= AUTO_FILL_DRAWING_THRESHOLD &&
          fill_ratio >= AUTO_FILL_HEAVY_RATIO &&
-         stroke_ratio <= AUTO_FILL_STROKE_MAX
+         stroke_ratio <= AUTO_FILL_STROKE_MAX &&
+         avg_items <= 5.0
         return [true, stats]
       end
 
@@ -310,9 +316,6 @@ module BlueCollarSystems
         entity.entities.each { |child| collect_fit_bounds(child, nested, world_t, depth + 1) }
         if fit_usable_bounds?(nested)
           out_bb.add(nested)
-        else
-          # Fallback: group bounds in model space.
-          add_bounds_with_transform(out_bb, entity.bounds, nil)
         end
         return
       end
@@ -323,8 +326,6 @@ module BlueCollarSystems
         entity.definition.entities.each { |child| collect_fit_bounds(child, nested, world_t, depth + 1) }
         if fit_usable_bounds?(nested)
           out_bb.add(nested)
-        else
-          add_bounds_with_transform(out_bb, entity.bounds, nil)
         end
         return
       end
@@ -367,6 +368,7 @@ module BlueCollarSystems
         fit_targets.each { |e| collect_fit_bounds(e, bb) }
       end
 
+      fit_applied = false
       if fit_usable_bounds?(bb)
         begin
           center = bb.center
@@ -376,15 +378,12 @@ module BlueCollarSystems
           view.camera = Sketchup::Camera.new(eye, target, up)
           view.camera.perspective = false
           view.zoom(bb)
+          fit_applied = true
         rescue StandardError
           # Fallback if zoom(bb) fails on older SketchUp versions
-          view.zoom_extents
+          fit_applied = false
         end
-      else
-        view.zoom_extents
       end
-      # Final safety: always try zoom_extents as a last resort
-      # in case the camera/zoom approach silently failed
       view.zoom_extents
     rescue StandardError => e
       Logger.warn("Pipeline", "Auto-fit view failed: #{e.message}")
@@ -631,10 +630,21 @@ module BlueCollarSystems
           # The internal Ruby parser is too slow for monster PDFs like GIS maps.
           # Fall through to external pdftotext which handles them efficiently.
           stream_bytes = streams.inject(0) { |sum, s| sum + s.length }
-          if stream_bytes > 5_000_000
+          stream_limit_mb = text3d_mode ? 24.0 : 5.0
+          env_limit = ENV['BC_SU_INTERNAL_TEXT_MAX_MB']
+          if env_limit && !env_limit.to_s.strip.empty?
+            begin
+              parsed_limit = env_limit.to_f
+              stream_limit_mb = parsed_limit if parsed_limit > 0.0
+            rescue StandardError
+              # keep default threshold
+            end
+          end
+          stream_limit_bytes = (stream_limit_mb * 1_000_000.0).to_i
+          if stream_bytes > stream_limit_bytes
             Logger.warn("Pipeline",
-              "Page #{page_num}: #{(stream_bytes / 1_000_000.0).round(1)}MB streams — " \
-              "using external text extractor (internal parser too slow for this size)")
+              "Page #{page_num}: #{(stream_bytes / 1_000_000.0).round(1)}MB streams " \
+              "(limit #{stream_limit_mb.round(1)}MB) — using external text extractor")
             prefer_internal_text = false
           end
           if prefer_internal_text
