@@ -1078,8 +1078,12 @@ module BlueCollarSystems
       return unless path && File.exist?(path)
 
       begin
-        fast = ImportDialog::PRESETS['Fast'] || {}
-        opts = ImportDialog.send(:build_opts, fast.merge(pages: 'All'))
+        # BCS-ARCH-001: safe mode uses explicit Vector extraction
+        # (no raster fallback) — the most predictable pure-vector path.
+        mode = ImportDialog::MODES['Vector'] || {}
+        sym_attrs = {}
+        mode.each { |k, v| sym_attrs[k.to_sym] = v }
+        opts = ImportDialog.send(:build_opts, sym_attrs.merge(pages: 'All'))
         stats = run_pipeline(model, path, opts)
         unless stats
           UI.messagebox("No vector content found in PDF.")
@@ -1106,13 +1110,16 @@ module BlueCollarSystems
       return unless folder && File.directory?(folder)
       pdfs = (Dir.glob(File.join(folder, "*.pdf")) + Dir.glob(File.join(folder, "*.PDF"))).uniq
       return UI.messagebox("No PDF files found.") if pdfs.empty?
-      return unless UI.messagebox("Import #{pdfs.length} PDF(s) with Full preset?", MB_YESNO) == IDYES
+      return unless UI.messagebox("Import #{pdfs.length} PDF(s) with Auto mode?", MB_YESNO) == IDYES
       ok = 0; fail_c = 0
-      preset = ImportDialog::PRESETS['Full']
+      # BCS-ARCH-001: batch import uses Auto mode — per-page strategy selection.
+      mode_raw = ImportDialog::MODES['Auto']
+      sym_attrs = {}
+      mode_raw.each { |k, v| sym_attrs[k.to_sym] = v }
       pdfs.sort.each_with_index do |pdf, idx|
         Sketchup.status_text = "Batch: #{idx+1}/#{pdfs.length} #{File.basename(pdf)}"
         begin
-          opts = ImportDialog.send(:build_opts, preset.merge(pages: 'All'))
+          opts = ImportDialog.send(:build_opts, sym_attrs.merge(pages: 'All'))
           ok += 1 if run_pipeline(model, pdf, opts)
         rescue StandardError => e
           fail_c += 1; Logger.error("Batch", File.basename(pdf), e)

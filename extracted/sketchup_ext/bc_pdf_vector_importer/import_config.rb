@@ -1,7 +1,8 @@
 # bc_pdf_vector_importer/import_config.rb
 # Versioned import configuration object.
-# Centralizes all import settings with named presets and backward-compatible
-# conversion to the opts hash consumed by the rest of the pipeline.
+# Centralizes all import settings with the 4-mode system (BCS-ARCH-001) and
+# backward-compatible conversion to the opts hash consumed by the rest of
+# the pipeline.
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
@@ -58,64 +59,92 @@ module BlueCollarSystems
         'Nested: page > lineweight'
       ].freeze
 
-      # --- Import presets (mirror ImportDialog::PRESETS) -------------------
-      PRESETS = {
-        'Fast' => {
-          scale: '1.0', bezier_segments: '8', import_as: 'Edges Only',
-          import_fills: 'No', group_by_color: 'No', detect_arcs: 'No',
-          map_dashes: 'No', text_mode: 'No text', hatch_mode: 'Skip',
-          cleanup_geometry: 'No', recognition_mode: 'None',
-          merge_tolerance: '0.005', units: 'Inches',
-          force_raster: 'No', raster_dpi: '300',
-          arc_mode: 'Auto', cleanup_level: 'Balanced',
-          lineweight_mode: 'Ignore', grouping_mode: 'Group per page',
-          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
-        },
-        'Balanced' => {
-          scale: '1.0', bezier_segments: '16', import_as: 'Edges and Faces',
-          import_fills: 'Yes', group_by_color: 'Yes', detect_arcs: 'Yes',
-          map_dashes: 'Yes', text_mode: 'Labels', hatch_mode: 'Skip',
-          cleanup_geometry: 'Yes', recognition_mode: 'None',
-          merge_tolerance: '0.002', units: 'Inches',
-          force_raster: 'No', raster_dpi: '300',
-          arc_mode: 'Auto', cleanup_level: 'Conservative',
-          lineweight_mode: 'Ignore', grouping_mode: 'Group per page',
-          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
-        },
-        'Full' => {
-          scale: '1.0', bezier_segments: '24', import_as: 'Edges and Faces',
-          import_fills: 'Yes', group_by_color: 'Yes', detect_arcs: 'Yes',
-          map_dashes: 'Yes', text_mode: 'Geometry', hatch_mode: 'Group',
-          cleanup_geometry: 'Yes', recognition_mode: 'None',
-          merge_tolerance: '0.001', units: 'Inches',
-          force_raster: 'No', raster_dpi: '300',
-          arc_mode: 'Auto', cleanup_level: 'Balanced',
-          lineweight_mode: 'Ignore', grouping_mode: 'Group per page',
-          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
-        },
-        'Max Fidelity' => {
-          scale: '1.0', bezier_segments: '32', import_as: 'Edges and Faces',
-          import_fills: 'Yes', group_by_color: 'Yes', detect_arcs: 'Yes',
-          map_dashes: 'Yes', text_mode: 'Geometry', hatch_mode: 'Import',
-          cleanup_geometry: 'Yes', recognition_mode: 'None',
-          merge_tolerance: '0.0005', units: 'Inches',
-          force_raster: 'No', raster_dpi: '300',
-          arc_mode: 'Rebuild arcs', cleanup_level: 'Aggressive',
-          lineweight_mode: 'Preserve visually', grouping_mode: 'Nested: page > layer',
-          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
-        },
-        'Raster Image' => {
-          scale: '1.0', bezier_segments: '8', import_as: 'Edges Only',
-          import_fills: 'No', group_by_color: 'No', detect_arcs: 'No',
-          map_dashes: 'No', text_mode: 'No text', hatch_mode: 'Skip',
-          cleanup_geometry: 'No', recognition_mode: 'None',
-          merge_tolerance: '0.005', units: 'Inches',
-          force_raster: 'Yes', raster_dpi: '300',
-          arc_mode: 'Auto', cleanup_level: 'Balanced',
-          lineweight_mode: 'Ignore', grouping_mode: 'Single group',
-          page_arrangement: 'Spread (20% gap)', page_gap_ratio: '0.20'
-        },
-        'Custom...' => nil
+      # --- Import modes (BCS-ARCH-001 4-mode system) -----------------------
+      # Auto   = decide per-page (vector | raster | hybrid)
+      # Vector = force vector extraction; raster fallback OFF
+      # Raster = force raster rendering; skip vectors/text/fills/arcs
+      # Hybrid = vector + embedded raster images (raster fallback ON)
+      #
+      # Quality parameters are consolidated to tightest values
+      # (bezier_segments=32, merge_tolerance=0.0005, raster_dpi=300)
+      # because "indistinguishable from source" is the quality target.
+      MODES = {
+        'Auto' => {
+          'import_mode'        => 'auto',
+          'text_mode'          => 'Labels',
+          'import_text'        => 'Yes',
+          'import_fills'       => 'Yes',
+          'detect_arcs'        => 'Yes',
+          'map_dashes'         => 'Yes',
+          'bezier_segments'    => '32',
+          'merge_tolerance'    => '0.0005',
+          'cleanup_level'      => 'Balanced',
+          'arc_mode'           => 'Auto',
+          'lineweight_mode'    => 'Preserve visually',
+          'hatch_mode'         => 'Group',
+          'grouping_mode'      => 'Group per page',
+          'force_raster'       => 'No',
+          'raster_fallback'    => 'Yes',
+          'raster_dpi'         => '300',
+          'page_arrangement'   => 'Spread (20% gap)',
+        }.freeze,
+        'Vector' => {
+          'import_mode'        => 'vector',
+          'text_mode'          => 'Labels',
+          'import_text'        => 'Yes',
+          'import_fills'       => 'Yes',
+          'detect_arcs'        => 'Yes',
+          'map_dashes'         => 'Yes',
+          'bezier_segments'    => '32',
+          'merge_tolerance'    => '0.0005',
+          'cleanup_level'      => 'Balanced',
+          'arc_mode'           => 'Auto',
+          'lineweight_mode'    => 'Preserve visually',
+          'hatch_mode'         => 'Group',
+          'grouping_mode'      => 'Group per page',
+          'force_raster'       => 'No',
+          'raster_fallback'    => 'No',
+          'raster_dpi'         => '300',
+          'page_arrangement'   => 'Spread (20% gap)',
+        }.freeze,
+        'Raster' => {
+          'import_mode'        => 'raster',
+          'text_mode'          => 'No text',
+          'import_text'        => 'No',
+          'import_fills'       => 'No',
+          'detect_arcs'        => 'No',
+          'map_dashes'         => 'No',
+          'bezier_segments'    => '32',
+          'merge_tolerance'    => '0.0005',
+          'cleanup_level'      => 'Balanced',
+          'arc_mode'           => 'Auto',
+          'lineweight_mode'    => 'Ignore',
+          'hatch_mode'         => 'Skip',
+          'grouping_mode'      => 'Single group',
+          'force_raster'       => 'Yes',
+          'raster_fallback'    => 'Yes',
+          'raster_dpi'         => '300',
+          'page_arrangement'   => 'Spread (20% gap)',
+        }.freeze,
+        'Hybrid' => {
+          'import_mode'        => 'hybrid',
+          'text_mode'          => 'Labels',
+          'import_text'        => 'Yes',
+          'import_fills'       => 'Yes',
+          'detect_arcs'        => 'Yes',
+          'map_dashes'         => 'Yes',
+          'bezier_segments'    => '32',
+          'merge_tolerance'    => '0.0005',
+          'cleanup_level'      => 'Balanced',
+          'arc_mode'           => 'Auto',
+          'lineweight_mode'    => 'Preserve visually',
+          'hatch_mode'         => 'Group',
+          'grouping_mode'      => 'Group per page',
+          'force_raster'       => 'No',
+          'raster_fallback'    => 'Yes',
+          'raster_dpi'         => '300',
+          'page_arrangement'   => 'Spread (20% gap)',
+        }.freeze,
       }.freeze
 
       # --- Instance attributes --------------------------------------------
@@ -128,23 +157,27 @@ module BlueCollarSystems
                     :text_mode, :units,
                     # Phase 2 additions
                     :arc_mode, :cleanup_level, :lineweight_mode, :grouping_mode,
-                    :page_arrangement, :page_gap_ratio
+                    :page_arrangement, :page_gap_ratio,
+                    # BCS-ARCH-001 additions
+                    :import_mode
 
       def initialize(attrs = {})
-        # Existing defaults
+        # BCS-ARCH-001 consolidated defaults — "tightest correct value" wins
+        # because every mode targets "indistinguishable from source" quality.
         @scale            = attrs[:scale]            || '1.0'
         @pages            = attrs[:pages]            || 'All'
-        @bezier_segments  = attrs[:bezier_segments]  || '24'
+        @bezier_segments  = attrs[:bezier_segments]  || '32'
         @import_as        = attrs[:import_as]        || 'Edges and Faces'
         @layer_name       = attrs[:layer_name]       || 'PDF Import'
         @group_per_page   = attrs[:group_per_page]   || 'Yes'
         @flatten_to_2d    = true
-        @merge_tolerance  = attrs[:merge_tolerance]  || '0.001'
+        @merge_tolerance  = attrs[:merge_tolerance]  || '0.0005'
         @import_fills     = attrs[:import_fills]     || 'Yes'
         @group_by_color   = attrs[:group_by_color]   || 'Yes'
         @detect_arcs      = attrs[:detect_arcs]      || 'Yes'
         @map_dashes       = attrs[:map_dashes]       || 'Yes'
-        @text_mode        = attrs[:text_mode]        || 'Geometry'
+        @import_text      = attrs[:import_text]      || 'Yes'
+        @text_mode        = attrs[:text_mode]        || 'Labels'
         @hatch_mode       = attrs[:hatch_mode]       || 'Group'
         @raster_fallback  = attrs[:raster_fallback]  || 'Yes'
         @force_raster     = attrs[:force_raster]     || 'No'
@@ -156,17 +189,23 @@ module BlueCollarSystems
         # Phase 2 defaults
         @arc_mode         = attrs[:arc_mode]         || 'Auto'
         @cleanup_level    = attrs[:cleanup_level]    || 'Balanced'
-        @lineweight_mode  = attrs[:lineweight_mode]  || 'Ignore'
+        @lineweight_mode  = attrs[:lineweight_mode]  || 'Preserve visually'
         @grouping_mode    = attrs[:grouping_mode]    || 'Group per page'
         @page_arrangement = attrs[:page_arrangement] || 'Spread (20% gap)'
         @page_gap_ratio   = attrs[:page_gap_ratio]   || '0.20'
+
+        # BCS-ARCH-001: 4-mode system (Auto | Vector | Raster | Hybrid)
+        @import_mode      = attrs[:import_mode]      || 'auto'
       end
 
-      # Build from a named preset
-      def self.from_preset(name)
-        preset = PRESETS[name]
-        return new unless preset
-        new(preset)
+      # Build from a named mode (BCS-ARCH-001: Auto|Vector|Raster|Hybrid)
+      def self.from_mode(name)
+        mode = MODES[name]
+        return new unless mode
+        # MODES hash uses string keys; convert to symbol keys for initialize
+        sym_attrs = {}
+        mode.each { |k, v| sym_attrs[k.to_sym] = v }
+        new(sym_attrs)
       end
 
       # Convert to the opts hash that the existing pipeline expects.
@@ -184,13 +223,15 @@ module BlueCollarSystems
           group_per_page: @group_per_page, merge_tolerance: @merge_tolerance,
           import_fills: @import_fills, group_by_color: @group_by_color,
           detect_arcs: @detect_arcs, map_dashes: @map_dashes,
+          import_text: @import_text,
           text_mode: @text_mode, hatch_mode: @hatch_mode,
           raster_fallback: @raster_fallback, force_raster: @force_raster,
           raster_dpi: @raster_dpi, cleanup_geometry: @cleanup_geometry,
           recognition_mode: @recognition_mode, units: @units,
           arc_mode: @arc_mode, cleanup_level: @cleanup_level,
           lineweight_mode: @lineweight_mode, grouping_mode: @grouping_mode,
-          page_arrangement: @page_arrangement, page_gap_ratio: @page_gap_ratio
+          page_arrangement: @page_arrangement, page_gap_ratio: @page_gap_ratio,
+          import_mode: @import_mode
         }
       end
 

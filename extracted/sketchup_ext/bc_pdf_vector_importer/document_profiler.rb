@@ -169,6 +169,41 @@ module BlueCollarSystems
         end
       end
 
+      # ---------------------------------------------------------------
+      # BCS-ARCH-001 Auto-mode resolver.
+      # Given classification + page stats, return [resolved_mode, reason].
+      # Mirrors the Python pdfcadcore document_profiler.suggest_import_mode.
+      #
+      # classification_type: one of 'vectors', 'glyph_flood', 'fill_art',
+      #                     'raster_candidate', or anything else (fallback)
+      # drawing_count:       number of vector drawing primitives on the page
+      # text_count:          number of text items on the page
+      # has_images:          true if the page has embedded raster images
+      # ignore_images:       user passed --ignore-images (hybrid opt-out)
+      #
+      # Returns a two-element array: ['vector'|'raster'|'hybrid', 'reason string']
+      # ---------------------------------------------------------------
+      def self.resolve_auto_mode(classification_type, drawing_count, text_count, has_images, ignore_images=false)
+        if drawing_count == 0 && text_count == 0
+          return ['raster', 'No vector content on page -- rendered image']
+        end
+
+        case classification_type
+        when 'vectors'
+          if has_images && !ignore_images
+            ['hybrid', 'Vectors + embedded raster imagery']
+          else
+            ['vector', 'Standard vector content']
+          end
+        when 'glyph_flood', 'fill_art'
+          ['raster', "#{classification_type}: known-garbage vector content"]
+        when 'raster_candidate'
+          ['raster', 'Raster-dominated page']
+        else
+          ['vector', 'Fallback (unclassified) -- defaulting to vector']
+        end
+      end
+
     end
   end
 end

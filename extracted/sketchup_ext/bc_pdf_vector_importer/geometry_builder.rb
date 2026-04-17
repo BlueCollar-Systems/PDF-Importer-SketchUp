@@ -20,14 +20,17 @@ module BlueCollarSystems
         @text_items = text_items || []
         @media_box = media_box
 
+        # BCS-ARCH-001 consolidated defaults (tightest correct value):
+        # bezier_segments=32 (SU curve quality ceiling),
+        # merge_tolerance=0.0005 inches.
         @scale           = opts[:scale_factor] || 1.0
-        @bezier_segments = opts[:bezier_segments] || 16
+        @bezier_segments = opts[:bezier_segments] || 32
         @import_as       = opts[:import_as] || :edges
         @layer_name      = opts[:layer_name] || 'PDF Import'
         @group_per_page  = opts[:group_per_page] != false
         @page_number     = opts[:page_number] || 1
         @flatten         = opts[:flatten_to_2d] != false
-        @merge_tol       = opts[:merge_tolerance] || 0.001
+        @merge_tol       = opts[:merge_tolerance] || 0.0005
         @import_fills    = opts[:import_fills] != false
         @group_by_color  = opts[:group_by_color] || false
         @detect_arcs     = opts[:detect_arcs] != false
