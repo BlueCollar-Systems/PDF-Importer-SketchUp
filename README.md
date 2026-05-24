@@ -93,14 +93,14 @@ The tool also accepts freeform architectural notation such as `1/4"=1'-0"`, `3/8
 
 After every import, the extension presents a quality assessment report with three sections:
 
-### Quality Assessment
+### Quality Assessment (diagnostics only)
 
-Each import receives a quality grade based on geometry fidelity:
+The post-import report shows a **quality grade** as a diagnostic summary of what the parser observed — not a user-selectable fidelity tier. Every import targets maximum fidelity (BCS-ARCH-001); the grade helps you decide whether to review the result, not which "speed vs quality" mode to use.
 
 - **Excellent** -- All vectors parsed, arcs reconstructed, no anomalies
 - **Good** -- Minor issues (small gaps, unclosed paths) that do not affect usability
 - **Fair** -- Some geometry lost or degraded; manual review recommended
-- **Poor** -- Significant parsing failures; consider alternate export settings
+- **Poor** -- Significant parsing failures; consider alternate export settings or source PDF export settings
 
 ### Warnings
 

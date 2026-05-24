@@ -74,7 +74,17 @@ module BlueCollarSystems
         page_area_pts = page_width * page_height_pts
 
         # ── Vector geometry ──
-        @paths.each do |path|
+        heavy_page = @paths.length >= 500
+        path_yield_every = heavy_page ? 100 : 0
+        @paths.each_with_index do |path, path_idx|
+          if path_yield_every > 0 && (path_idx % path_yield_every).zero?
+            Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)..."
+            begin
+              GC.start if path_idx > 0 && (path_idx % (path_yield_every * 5)).zero?
+            rescue StandardError
+            end
+          end
+
           next unless path.subpaths && !path.subpaths.empty?
 
           should_stroke = path.stroke

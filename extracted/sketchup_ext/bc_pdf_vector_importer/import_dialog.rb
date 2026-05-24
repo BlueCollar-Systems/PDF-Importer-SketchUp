@@ -240,7 +240,7 @@ module BlueCollarSystems
           <p class="sub">#{esc(filename)}</p>
           <div class="row"><label>Mode</label>
             <select id="mode">#{mode_opts}</select>
-            <p class="hint">Auto picks per page &bull; Vector &bull; Raster &bull; Hybrid (vectors + embedded images)</p>
+            <p class="hint">Maximum fidelity in every mode. Auto picks per page &bull; Vector &bull; Raster &bull; Hybrid (vectors + embedded images)</p>
           </div>
           <div class="row"><label>Pages</label>
             <input type="text" id="pages" value="#{esc(pages)}" placeholder="All">

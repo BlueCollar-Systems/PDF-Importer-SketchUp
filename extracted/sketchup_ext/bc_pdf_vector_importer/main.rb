@@ -384,7 +384,9 @@ module BlueCollarSystems
           fit_applied = false
         end
       end
-      view.zoom_extents
+      # Only fall back to model-wide extents when imported-bounds fit failed.
+      # Unconditional zoom_extents regressed autofit by reframing to unrelated geometry.
+      view.zoom_extents unless fit_applied
     rescue StandardError => e
       Logger.warn("Pipeline", "Auto-fit view failed: #{e.message}")
       begin
