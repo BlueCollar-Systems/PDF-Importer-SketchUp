@@ -1209,7 +1209,7 @@ module BlueCollarSystems
     # ================================================================
     # MENU & TOOLBAR
     # ================================================================
-    unless @loaded
+    if !@loaded && defined?(UI) && UI.respond_to?(:menu)
       UI.menu('File').add_item('Import PDF Vectors...') { self.import_pdf }
 
       sub = UI.menu('Extensions').add_submenu('PDF Vector Importer')
