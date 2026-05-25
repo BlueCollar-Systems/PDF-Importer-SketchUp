@@ -194,6 +194,8 @@ bc_pdf_vector_importer/
 
 ## Compatibility
 
+See **[HOST_COMPATIBILITY.md](HOST_COMPATIBILITY.md)** (SketchUp hosts) and **[COMPATIBILITY.md](COMPATIBILITY.md)** (Ruby 2.2 language rules). Summary:
+
 | SketchUp Version | Ruby Version | Status |
 |-----------------|-------------|--------|
 | Make 2017 | 2.2.4 | ⚠️ Expected (CI syntax-checked, not host-verified) |
