@@ -77,6 +77,34 @@ class ImportDialogDefaultsTest < Minitest::Test
     end
   end
 
+  def test_basic_html_professional_flow
+    html = BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', '3D Text', 'Yes')
+
+    assert_includes html, 'Professional import'
+    refute_includes html, 'id="mode"'
+  end
+
+  def test_advanced_html_keeps_mode_selector
+    d = {
+      mode: 'Auto', pages: 'All', scale: '1.0', text_mode: '3D Text',
+      import_text: 'Yes', grouping_mode: 'Group per page',
+      page_arrangement: 'Spread (20% gap)'
+    }
+    html = BID.send(:advanced_html, 'sample.pdf', d)
+
+    assert_includes html, 'id="mode"'
+    %w[Auto Vector Raster Hybrid].each { |m| assert_includes html, m }
+  end
+
+  def test_basic_import_callback_uses_auto_mode
+    mode_raw = BID::MODES['Auto']
+    opts = BID.send(:build_opts, mode_raw.merge(
+      pages: 'All', scale: '1.0', text_mode: '3D Text', import_text: 'Yes'
+    ))
+
+    assert_equal 'auto', opts[:import_mode]
+  end
+
   def test_legacy_saved_mode_migrates_to_auto
     Sketchup.reset_defaults(
       [PREF_KEY, 'last_mode'] => 'Full',

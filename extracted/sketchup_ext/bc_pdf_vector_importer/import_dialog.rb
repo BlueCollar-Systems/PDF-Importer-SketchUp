@@ -1,12 +1,11 @@
 # bc_pdf_vector_importer/import_dialog.rb
-# Import dialog v6 — BCS-ARCH-001 4-mode system + Rule 5 sweep.
+# Import dialog v7 — BCS-ARCH-001 professional single-flow + Rule 5 sweep.
 # HtmlDialog with Modus styling (Trimble design system).
 #
-# BCS-ARCH-001 Rule 5 sweep: every quality-tier dial has been removed
-# from the UI. Users see exactly:
-#   1. Mode selector (Auto, Vector, Raster, Hybrid)
-#   2. Text rendering selector (Labels, 3D Text, Glyphs, Geometry)
-#   3. Import text Yes/No toggle
+# Default UI: professional import (Auto per page internally). Vector/Raster/
+# Hybrid appear only in Advanced. Basic dialog shows:
+#   1. Text rendering selector (Labels, 3D Text, Glyphs, Geometry)
+#   2. Import text Yes/No toggle
 # Plus legitimate workflow controls: pages, scale, grouping, page
 # arrangement. Quality parameters are consolidated to the values in
 # import_config.rb defaults — they are no longer adjustable.
@@ -101,15 +100,14 @@ module BlueCollarSystems
         dlg.set_html(basic_html(filename, mode_val, pages_val, scale_val, text_val, itext_val))
 
         dlg.add_action_callback('on_import') do |_ctx, p|
-          mode_name   = p['mode']        || 'Auto'
           pages_str   = p['pages']       || 'All'
           scale_str   = p['scale']       || '1.0'
           text_mode   = p['text_mode']   || '3D Text'
           import_text = p['import_text'] || 'Yes'
-          save_prefs(last_mode: mode_name, pages: pages_str,
+          save_prefs(last_mode: 'Auto', pages: pages_str,
                      scale: scale_str, text_mode: text_mode,
                      import_text: import_text)
-          mode_raw = MODES[mode_name] || MODES['Auto']
+          mode_raw = MODES['Auto']
           mode_sym = {}
           mode_raw.each { |k, v| mode_sym[k.to_sym] = v }
           result = build_opts(mode_sym.merge(pages: pages_str,
@@ -121,8 +119,7 @@ module BlueCollarSystems
 
         dlg.add_action_callback('on_cancel') { |_ctx, _p| dlg.close }
         dlg.add_action_callback('on_advanced') do |_ctx, p|
-          # User clicked "Advanced" — save the selected mode and open advanced dialog.
-          save_prefs(last_mode: p['mode'] || 'Auto',
+          save_prefs(last_mode: 'Auto',
                      pages: p['pages']     || 'All',
                      scale: p['scale']     || '1.0',
                      text_mode: p['text_mode'] || '3D Text',
@@ -214,12 +211,7 @@ module BlueCollarSystems
         .hint{font-size:11px;color:#888;margin-top:2px}
       CSS
 
-      def self.basic_html(filename, mode, pages, scale, text_mode, import_text)
-        mode_opts = MODES.keys.map { |m|
-          sel = m == mode ? ' selected' : ''
-          "<option value=\"#{esc(m)}\"#{sel}>#{esc(m)}</option>"
-        }.join
-
+      def self.basic_html(filename, _mode, pages, scale, text_mode, import_text)
         text_opts = [
           ['Labels',   'Labels'],
           ['3D Text',  '3D Text'],
@@ -238,10 +230,7 @@ module BlueCollarSystems
           <style>#{DIALOG_CSS}</style></head><body>
           <h2>Import PDF Vectors</h2>
           <p class="sub">#{esc(filename)}</p>
-          <div class="row"><label>Mode</label>
-            <select id="mode">#{mode_opts}</select>
-            <p class="hint">Maximum fidelity in every mode. Auto picks per page &bull; Vector &bull; Raster &bull; Hybrid (vectors + embedded images)</p>
-          </div>
+          <p class="hint" style="margin-bottom:14px">Professional import &mdash; maximum fidelity; Auto picks vector, raster, or hybrid per page. Use Advanced for explicit strategy or layout options.</p>
           <div class="row"><label>Pages</label>
             <input type="text" id="pages" value="#{esc(pages)}" placeholder="All">
             <p class="hint">e.g. All &nbsp;&bull;&nbsp; 1 &nbsp;&bull;&nbsp; 2-5 &nbsp;&bull;&nbsp; 1,3,7</p>
@@ -264,7 +253,6 @@ module BlueCollarSystems
           </div>
           <script>
           function payload(){return {
-            mode:document.getElementById('mode').value,
             pages:document.getElementById('pages').value.trim()||'All',
             scale:document.getElementById('scale').value.trim()||'1.0',
             import_text:document.getElementById('import_text').value,
@@ -360,19 +348,18 @@ module BlueCollarSystems
 
       # ---- UI.inputbox fallbacks (headless / pre-2017 SU) ----------
       def self.show_inputbox_basic(filename, saved)
-        prompts   = ["Mode:","Pages (1, 1-5, or All):","Scale Factor:",
+        prompts   = ["Pages (1, 1-5, or All):","Scale Factor:",
                      "Import Text:","Text Rendering:"]
-        last_m    = valid_mode_name(saved[:last_mode])
-        defaults  = [last_m, saved[:pages]||'All', saved[:scale]||'1.0',
+        defaults  = [saved[:pages]||'All', saved[:scale]||'1.0',
                      saved[:import_text]||'Yes', saved[:text_mode]||'3D Text']
-        dropdowns = [MODE_NAMES, '', '', YES_NO, TEXT_MODES]
+        dropdowns = ['', '', YES_NO, TEXT_MODES]
         result = UI.inputbox(prompts, defaults, dropdowns, "Import PDF \u2014 #{filename}")
         return nil unless result
-        mode_name, pages_str, scale_str, import_text_str, text_mode_str = result
-        save_prefs(last_mode: mode_name, pages: pages_str,
+        pages_str, scale_str, import_text_str, text_mode_str = result
+        save_prefs(last_mode: 'Auto', pages: pages_str,
                    scale: scale_str, import_text: import_text_str,
                    text_mode: text_mode_str)
-        mode_raw = MODES[mode_name] || MODES['Auto']
+        mode_raw = MODES['Auto']
         sym_attrs = {}
         mode_raw.each { |k, v| sym_attrs[k.to_sym] = v }
         build_opts(sym_attrs.merge(pages: pages_str, scale: scale_str,

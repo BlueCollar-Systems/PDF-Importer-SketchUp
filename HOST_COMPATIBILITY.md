@@ -2,6 +2,8 @@
 
 Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality tiers.
 
+**GUI:** Single **professional import** dialog — **Auto** per page by default. **Advanced** exposes explicit Vector/Raster/Hybrid and layout options.
+
 ## SketchUp
 
 | SketchUp | Ruby | Status |
