@@ -335,6 +335,44 @@ module BlueCollarSystems
       nil
     end
 
+    def self.apply_camera_top_ortho(view, bb)
+      return unless view && fit_usable_bounds?(bb)
+      center = bb.center
+      eye = Geom::Point3d.new(center.x, center.y, center.z + 1000)
+      target = center
+      up = Geom::Vector3d.new(0, 1, 0)
+      view.camera = Sketchup::Camera.new(eye, target, up)
+      view.camera.perspective = false
+    rescue StandardError
+      nil
+    end
+
+    # Zoom to imported geometry only — avoids reframing the whole model.
+    def self.zoom_extents_imported_only(model, view, imported_roots)
+      roots = Array(imported_roots).select { |e| e && e.valid? }
+      return false if roots.empty?
+
+      hidden = []
+      begin
+        model.active_entities.each do |e|
+          next unless e.valid? && e.respond_to?(:visible?)
+          next if roots.include?(e)
+          next unless e.visible?
+          e.visible = false
+          hidden << e
+        end
+        view.zoom_extents
+        true
+      rescue StandardError
+        false
+      ensure
+        hidden.each do |e|
+          e.visible = true if e.valid?
+        rescue StandardError
+        end
+      end
+    end
+
     def self.apply_top_view_fit(model, preferred_bb = nil, imported_entities = nil)
       return unless model
       view = model.active_view
@@ -343,6 +381,7 @@ module BlueCollarSystems
       bb = Geom::BoundingBox.new
       bb.add(preferred_bb) if fit_usable_bounds?(preferred_bb)
 
+      fit_targets = []
       unless fit_usable_bounds?(bb)
         targets = Array(imported_entities)
         if targets.empty?
@@ -368,28 +407,43 @@ module BlueCollarSystems
         fit_targets.each { |e| collect_fit_bounds(e, bb) }
       end
 
-      fit_applied = false
+      fit_entities = Array(imported_entities).select { |e| e && e.valid? }
+      if fit_entities.empty?
+        fit_entities = fit_targets
+      end
+
+      framed = false
       if fit_usable_bounds?(bb)
+        apply_camera_top_ortho(view, bb)
         begin
-          center = bb.center
-          eye = Geom::Point3d.new(center.x, center.y, center.z + 1000)
-          target = center
-          up = Geom::Vector3d.new(0, 1, 0)
-          view.camera = Sketchup::Camera.new(eye, target, up)
-          view.camera.perspective = false
           view.zoom(bb)
-          fit_applied = true
+          framed = true
         rescue StandardError
-          # Fallback if zoom(bb) fails on older SketchUp versions
-          fit_applied = false
+          framed = false
+        end
+
+        # SketchUp 2017 often no-ops on zoom(bb) without error; entity zoom is reliable.
+        unless fit_entities.empty?
+          begin
+            view.zoom(fit_entities)
+            framed = true
+          rescue StandardError
+          end
         end
       end
-      # Only fall back to model-wide extents when imported-bounds fit failed.
-      # Unconditional zoom_extents regressed autofit by reframing to unrelated geometry.
-      view.zoom_extents unless fit_applied
+
+      unless framed
+        framed = zoom_extents_imported_only(model, view, fit_entities)
+      end
+
+      # Last resort: model-wide extents when we have no import bounds at all.
+      view.zoom_extents unless framed
     rescue StandardError => e
       Logger.warn("Pipeline", "Auto-fit view failed: #{e.message}")
       begin
+        if view && zoom_extents_imported_only(model, view, Array(imported_entities))
+          return
+        end
         view.zoom_extents if view
       rescue StandardError
       end
