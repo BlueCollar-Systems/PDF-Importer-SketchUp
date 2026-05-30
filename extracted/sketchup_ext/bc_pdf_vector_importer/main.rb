@@ -367,8 +367,11 @@ module BlueCollarSystems
         false
       ensure
         hidden.each do |e|
-          e.visible = true if e.valid?
-        rescue StandardError
+          begin
+            e.visible = true if e.valid?
+          rescue StandardError
+            next
+          end
         end
       end
     end
