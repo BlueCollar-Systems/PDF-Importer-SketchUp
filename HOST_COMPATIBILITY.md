@@ -29,4 +29,4 @@ See also [COMPATIBILITY.md](COMPATIBILITY.md) for Ruby 2.2 language constraints.
 
 ## CI coverage
 
-GitHub Actions: `ruby -c` on extension sources under Ruby **2.2, 2.7, 3.2**.
+GitHub Actions: `ruby -c` on extension sources under Ruby **2.2, 2.7, 3.2**; smoke tests under **2.2, 2.7, 3.0, 3.2** (Docker for 2.2). Graceful degradation paths exist for SU 2017 (line_styles absent, zoom extents fallback, UI.inputbox dialog fallback).
