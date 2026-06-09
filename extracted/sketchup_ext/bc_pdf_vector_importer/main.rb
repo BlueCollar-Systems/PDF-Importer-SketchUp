@@ -12,6 +12,7 @@ module BlueCollarSystems
     dir = File.dirname(__FILE__)
     # Core Engine
     require File.join(dir, 'import_config')
+    require File.join(dir, 'import_bounds')
     require File.join(dir, 'primitives')
     require File.join(dir, 'logger')
     require File.join(dir, 'command_runner')
@@ -267,9 +268,10 @@ module BlueCollarSystems
       x1 = (rx1 - mx0) * (1.0 / 72.0) * s
       y1 = (ry1 - my0) * (1.0 / 72.0) * s + oy
 
+      px0, py0, px1, py1 = ImportBounds.padded_fit_corners(x0, y0, x1, y1, s)
       bb = Geom::BoundingBox.new
-      bb.add(Geom::Point3d.new(x0, y0, 0.0))
-      bb.add(Geom::Point3d.new(x1, y1, 0.0))
+      bb.add(Geom::Point3d.new(px0, py0, 0.0))
+      bb.add(Geom::Point3d.new(px1, py1, 0.0))
       return unless fit_usable_bounds?(bb)
 
       target_bb.add(bb)

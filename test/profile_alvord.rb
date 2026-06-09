@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # One-off profiler for Alvord garden map PDF (headless).
 
+require_relative '../corpus_paths'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/logger'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/pdf_parser'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/content_stream_parser'
@@ -19,7 +20,10 @@ module BlueCollarSystems
   end
 end
 
-pdf = ARGV[0] || 'C:/Users/Rowdy Payton/Desktop/PDFTest Files/Alvord TX — Garden Map · Final.pdf'
+default_pdf = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(
+  'Alvord TX — Garden Map · Final.pdf'
+)
+pdf = ARGV[0] || default_pdf || 'C:/Users/Rowdy Payton/Desktop/PDFTest Files/Alvord TX — Garden Map · Final.pdf'
 unless File.exist?(pdf)
   warn "PDF not found: #{pdf}"
   exit 1
