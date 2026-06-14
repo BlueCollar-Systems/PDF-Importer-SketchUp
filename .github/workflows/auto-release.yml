@@ -133,7 +133,7 @@ jobs:
         run: |
           set -e
           TAG="v${{ steps.version.outputs.version }}"
-          RBZ="bc_pdf_vector_importer_v${{ steps.version.outputs.version }}.rbz"
+          RBZ="SketchUp-PDF-Importer_v${{ steps.version.outputs.version }}.rbz"
 
           git fetch --tags --force
           if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then

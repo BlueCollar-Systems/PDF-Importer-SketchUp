@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# Test script: parse all 28 PDFs through the SU-PDFimporter pipeline
+# Test script: parse all 28 PDFs through the PDF-Importer-SketchUp pipeline
 # Tests PDF structure parsing + content stream extraction (no SketchUp needed)
 
 require 'timeout'
@@ -24,7 +24,7 @@ TIMEOUT_SECONDS = 60
 pdf_files = Dir.glob(File.join(PDF_DIR, '**', '*.{pdf,Pdf,PDF}')).sort
 
 puts "=" * 100
-puts "SU-PDFimporter Parser Test — #{pdf_files.length} PDF files"
+puts "PDF-Importer-SketchUp Parser Test — #{pdf_files.length} PDF files"
 puts "=" * 100
 puts
 

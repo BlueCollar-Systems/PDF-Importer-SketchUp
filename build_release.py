@@ -18,7 +18,7 @@ Usage:
   python build_release.py --out /path/to/output_dir
 
 Output:
-  bc_pdf_vector_importer_v<VERSION>.rbz
+  SketchUp-PDF-Importer_v<VERSION>.rbz
 """
 
 import argparse
@@ -58,7 +58,7 @@ def _read_version() -> str:
 
 def build(out_dir: Path) -> Path:
     version  = _read_version()
-    rbz_name = f"bc_pdf_vector_importer_v{version}.rbz"
+    rbz_name = f"SketchUp-PDF-Importer_v{version}.rbz"
     rbz_path = out_dir / rbz_name
 
     out_dir.mkdir(parents=True, exist_ok=True)
