@@ -1,0 +1,11 @@
+{
+  "pdf_name": "TX_Alvord_20220525_TM_geo.pdf",
+  "corpus_key": "corpus_pdftest/TX_Alvord_20220525_TM_geo.pdf",
+  "pages": 1,
+  "paths": 10930,
+  "text_items": 9713,
+  "bbox_pct": 100.0,
+  "placement_ok": 9716,
+  "placement_total": 9716,
+  "text_hash": "ccca5b1e96b6d244a01b9e1f0530018b8b3a25e38cd5693dc9042ae9fa05f33b"
+}

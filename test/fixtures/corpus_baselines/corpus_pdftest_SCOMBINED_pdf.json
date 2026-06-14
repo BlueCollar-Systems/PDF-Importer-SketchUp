@@ -1,0 +1,11 @@
+{
+  "pdf_name": "SCOMBINED.pdf",
+  "corpus_key": "corpus_pdftest/SCOMBINED.pdf",
+  "pages": 15,
+  "paths": 48657,
+  "text_items": 6076,
+  "bbox_pct": 98.03,
+  "placement_ok": 6132,
+  "placement_total": 6132,
+  "text_hash": "0a9e9b160a0284b5acd043d08254275828d33726d045385978a567b4ee31f5e7"
+}

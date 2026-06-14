@@ -1,0 +1,11 @@
+{
+  "pdf_name": "alvord_plant_list.pdf",
+  "corpus_key": "corpus_pdftest/alvord_plant_list.pdf",
+  "pages": 2,
+  "paths": 125,
+  "text_items": 210,
+  "bbox_pct": 100.0,
+  "placement_ok": 210,
+  "placement_total": 210,
+  "text_hash": "db2824671689bddc28d89a0e51fbb1451d46fb938ba92eba6d6599f206ccaa8c"
+}

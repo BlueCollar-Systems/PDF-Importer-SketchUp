@@ -1,0 +1,11 @@
+{
+  "pdf_name": "1021 - Rev 0.pdf",
+  "corpus_key": "corpus_pdftest/1021 - Rev 0.pdf",
+  "pages": 1,
+  "paths": 178,
+  "text_items": 73,
+  "bbox_pct": 100.0,
+  "placement_ok": 73,
+  "placement_total": 73,
+  "text_hash": "562dc63d9520f6185f55426f65d6c949e9f46f18500ae8ce13530e6504150dd3"
+}

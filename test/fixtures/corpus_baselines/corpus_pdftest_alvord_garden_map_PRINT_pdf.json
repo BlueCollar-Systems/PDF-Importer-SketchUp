@@ -1,0 +1,11 @@
+{
+  "pdf_name": "alvord_garden_map_PRINT.pdf",
+  "corpus_key": "corpus_pdftest/alvord_garden_map_PRINT.pdf",
+  "pages": 4,
+  "paths": 1769,
+  "text_items": 1740,
+  "bbox_pct": 100.0,
+  "placement_ok": 1740,
+  "placement_total": 1740,
+  "text_hash": "18513d5bab24352ddd8d0bd786cda75cd9225e1c935329979a0c089977f731fc"
+}

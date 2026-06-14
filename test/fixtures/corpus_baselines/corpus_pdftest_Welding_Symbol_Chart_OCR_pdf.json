@@ -1,0 +1,11 @@
+{
+  "pdf_name": "Welding-Symbol-Chart OCR.pdf",
+  "corpus_key": "corpus_pdftest/Welding-Symbol-Chart OCR.pdf",
+  "pages": 1,
+  "paths": 642,
+  "text_items": 361,
+  "bbox_pct": 100.0,
+  "placement_ok": 361,
+  "placement_total": 361,
+  "text_hash": "0ee9e7118e321e680bc7de4a377b0e4711b0560396d66baab953167de713a2ac"
+}

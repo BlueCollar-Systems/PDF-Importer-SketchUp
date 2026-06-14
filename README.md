@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.9-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.20-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -23,12 +23,14 @@ The importer profiles each PDF document to identify its origin (fabrication draw
 
 - **4 Import Modes** (BCS-ARCH-001) — Auto (default, picks strategy per page),
   Vector, Raster, Hybrid. Every mode targets maximum fidelity.
-- **4 Text Rendering Options** — Labels, 3D Text, Glyphs, Geometry
-  (orthogonal to mode) + separate Import text toggle
+- **4 Text Rendering Options** — Geometry, Glyphs, Labels, 3D Text
+  (orthogonal to mode) + separate Import text toggle. The dialog reopens
+  with the last text rendering option used; first-run fallback is Geometry.
 - **Pure-Ruby PDF parser** — no gems or external dependencies required
 - **Adaptive Bezier subdivision** with configurable flatness tolerance
 - **Kasa algebraic circle fitting** for arc reconstruction from point sequences
 - **OCG layer support** — PDF Optional Content Groups map to SketchUp Tags
+- **PDF layer matching by default** — PDF layers become same-named SketchUp Tags when the PDF contains layer data
 - **Color-based tag grouping** with dash pattern mapping
 - **Scale by Reference** tool — select an edge, type the real-world dimension
 - **Quick Scale** with 15 architectural/engineering ratio preferences
@@ -211,6 +213,19 @@ Evidence levels:
 - `✅ Verified`: host-run validation evidence captured.
 - `⚠️ Expected`: syntax/runtime compatible but no host-run evidence yet.
 - `❌ Not supported`: outside maintained/tested compatibility scope.
+
+---
+
+## Corpus placement CI
+
+Headless regression gate over the shared PDF corpus: parser metrics, pdftotext
+extraction, and simulated label placement vs committed baselines. See
+[`test/CORPUS_CI.md`](test/CORPUS_CI.md).
+
+```powershell
+ruby test/corpus_placement_test.rb
+ruby tools/generate_corpus_baselines.rb --update   # after reviewed changes
+```
 
 ---
 
