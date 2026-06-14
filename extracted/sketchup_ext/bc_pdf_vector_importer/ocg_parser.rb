@@ -90,7 +90,7 @@ module BlueCollarSystems
       # Generate SketchUp tag names from OCG layer names
       # ---------------------------------------------------------------
       def sketchup_tag_names
-        @layer_list.map { |name| "PDF::Layer::#{name}" }
+        @layer_list.map { |name| LayerManager.sanitize_layer_name(name) }
       end
 
       private

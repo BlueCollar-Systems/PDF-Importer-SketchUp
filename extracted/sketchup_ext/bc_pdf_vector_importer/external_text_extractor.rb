@@ -151,6 +151,10 @@ module BlueCollarSystems
             bbox_h = (y_max - y_min).abs
 
             angle = estimate_angle(words, line_attrs)
+            # CAD weld/fraction callouts and TYP notes are horizontal in SU even when
+            # pdftotext word boxes imply a mild diagonal baseline.
+            angle = 0.0 if line_text =~ /\A\d{1,2}\/\d{1,2}"?\z/
+            angle = 0.0 if line_text =~ /\ATYP\.?\z/i
 
             # For rotated text, the bbox is rotated too.
             # The SHORTER dimension of the bbox is the character height;
@@ -168,6 +172,10 @@ module BlueCollarSystems
 
             x_pdf = x_min + offset_x
             y_pdf = (page_h - y_max) + offset_y
+            bbox_x0 = x_min + offset_x
+            bbox_x1 = x_max + offset_x
+            bbox_y0 = (page_h - y_max) + offset_y
+            bbox_y1 = (page_h - y_min) + offset_y
 
             items << TextParser::TextItem.new(
               line_text,
@@ -175,7 +183,12 @@ module BlueCollarSystems
               y_pdf,
               font_size,
               angle,
-              'pdftotext'
+              'pdftotext',
+              nil,
+              bbox_x0,
+              bbox_y0,
+              bbox_x1,
+              bbox_y1
             )
           end
 
@@ -285,11 +298,153 @@ module BlueCollarSystems
           end
 
           out = repair_whole_fraction_pairs(out)
+          out = stitch_angle_mark_fragments(out)
           out = drop_orphan_fraction_fragments(out)
           drop_redundant_fragments(out)
         rescue StandardError => e
           Logger.warn("ExternalTextExtractor", "merge_split_dimension_labels failed: #{e.message}")
           items
+        end
+
+        # Diagonal angle-member marks in shop drawings can arrive as three bbox
+        # lines, e.g. "a1" + "00" + "5" on a descending brace. Rebuild into one
+        # rotated a-prefixed part-mark item (pattern: a + digits).
+        def stitch_angle_mark_fragments(items)
+          return items if items.length < 3
+
+          used = Array.new(items.length, false)
+          merged = []
+          a1_indices = items.each_index.select { |idx| items[idx].text.to_s.strip =~ /\Aa1\z/i }
+          zero_indices = items.each_index.select { |idx| items[idx].text.to_s.strip == '00' }
+          digit_indices = items.each_index.select { |idx| items[idx].text.to_s.strip =~ /\A\d\z/ }
+
+          a1_indices.each do |ai|
+            next if used[ai]
+            a1 = items[ai]
+            best = nil
+
+            zero_indices.each do |zi|
+              next if used[zi] || zi == ai
+              z = items[zi]
+              next unless angle_mark_fragment_neighbor?(a1, z)
+
+              digit_indices.each do |di|
+                next if used[di] || di == ai || di == zi
+                d = items[di]
+                next unless angle_mark_fragment_neighbor?(z, d)
+                next unless angle_mark_fragment_neighbor?(a1, d, 4.0)
+
+                angle = fragment_angle(a1, d)
+                next if angle.abs < 15.0 || angle.abs > 75.0
+                score = fragment_distance(a1, z) + fragment_distance(z, d) +
+                        (fragment_collinearity(a1, z, d) * 10.0)
+                best = [score, zi, di, angle] if best.nil? || score < best[0]
+              end
+            end
+
+            next unless best
+            _, zi, di, angle = best
+            merged << build_angle_mark_item(a1, items[zi], items[di], angle)
+            used[ai] = true
+            used[zi] = true
+            used[di] = true
+          end
+
+          out = []
+          items.each_with_index { |it, idx| out << it unless used[idx] }
+          out + merged
+        rescue StandardError => e
+          Logger.warn("ExternalTextExtractor", "stitch_angle_mark_fragments failed: #{e.message}")
+          items
+        end
+
+        def angle_mark_fragment_neighbor?(a, b, factor = 2.8)
+          ax, ay = fragment_center(a)
+          bx, by = fragment_center(b)
+          fs = [a.font_size.to_f, b.font_size.to_f, 1.0].max
+          fragment_distance_xy(ax, ay, bx, by) <= fs * factor
+        rescue StandardError
+          false
+        end
+
+        def fragment_center(item)
+          if item.bbox_x0 && item.bbox_x1 && item.bbox_y0 && item.bbox_y1
+            [
+              (item.bbox_x0.to_f + item.bbox_x1.to_f) * 0.5,
+              (item.bbox_y0.to_f + item.bbox_y1.to_f) * 0.5
+            ]
+          else
+            [item.x.to_f, item.y.to_f]
+          end
+        rescue StandardError
+          [0.0, 0.0]
+        end
+
+        def fragment_distance(a, b)
+          ax, ay = fragment_center(a)
+          bx, by = fragment_center(b)
+          fragment_distance_xy(ax, ay, bx, by)
+        rescue StandardError
+          Float::INFINITY
+        end
+
+        def fragment_distance_xy(ax, ay, bx, by)
+          Math.sqrt(((bx - ax) ** 2) + ((by - ay) ** 2))
+        rescue StandardError
+          Float::INFINITY
+        end
+
+        def fragment_angle(a, b)
+          ax, ay = fragment_center(a)
+          bx, by = fragment_center(b)
+          angle = Math.atan2(by - ay, bx - ax) * 180.0 / Math::PI
+          angle += 180.0 while angle <= -90.0
+          angle -= 180.0 while angle > 90.0
+          angle
+        rescue StandardError
+          0.0
+        end
+
+        def fragment_collinearity(a, b, c)
+          ax, ay = fragment_center(a)
+          bx, by = fragment_center(b)
+          cx, cy = fragment_center(c)
+          dx = cx - ax
+          dy = cy - ay
+          len = Math.sqrt((dx * dx) + (dy * dy))
+          return Float::INFINITY if len <= 1.0e-6
+          (((bx - ax) * dy) - ((by - ay) * dx)).abs / len
+        rescue StandardError
+          Float::INFINITY
+        end
+
+        def build_angle_mark_item(a1, zeros, digit, angle)
+          items = [a1, zeros, digit]
+          xs0 = items.map { |it| it.bbox_x0 || it.x }.map(&:to_f)
+          ys0 = items.map { |it| it.bbox_y0 || it.y }.map(&:to_f)
+          xs1 = items.map { |it| it.bbox_x1 || it.x }.map(&:to_f)
+          ys1 = items.map { |it| it.bbox_y1 || it.y }.map(&:to_f)
+          bx0 = xs0.min
+          by0 = ys0.min
+          bx1 = xs1.max
+          by1 = ys1.max
+          merged_text = "#{a1.text.to_s.strip}#{zeros.text.to_s.strip}#{digit.text.to_s.strip}"
+          TextParser::TextItem.new(
+            merged_text,
+            bx0,
+            by0,
+            items.map { |it| it.font_size.to_f }.max,
+            angle,
+            'pdftotext',
+            nil,
+            bx0,
+            by0,
+            bx1,
+            by1,
+            a1.respond_to?(:layer_name) ? a1.layer_name : nil
+          )
+        rescue StandardError
+          a1
         end
 
         # For patterns like "R 2 2" + nearby "1/2" => "R 2 1/2"
@@ -525,6 +680,11 @@ module BlueCollarSystems
             return 0.0
           end
 
+          # Stacked-fraction dimensions (e.g. "1 1/2") place glyphs vertically
+          # inside a tight bbox. First/last word centers then look ~vertical even
+          # though the annotation is horizontal in the drawing.
+          return 0.0 if stacked_fraction_line?(words)
+
           first = word_center(words.first[:attrs])
           last = word_center(words.last[:attrs])
           return 0.0 unless first && last
@@ -535,10 +695,29 @@ module BlueCollarSystems
 
           # Convert top-down screen Y to PDF-style Y-up angle.
           dy_pdf = -dy_screen
-          Math.atan2(dy_pdf, dx) * 180.0 / Math::PI
+          angle = Math.atan2(dy_pdf, dx) * 180.0 / Math::PI
+          # Mild tilt from fraction kerning should not rotate SU labels.
+          angle.abs < 8.0 ? 0.0 : angle
         rescue StandardError => e
           Logger.warn("ExternalTextExtractor", "compute_line_angle failed: #{e.message}")
           0.0
+        end
+
+        # Detect vertically stacked numerator/denominator columns.
+        def stacked_fraction_line?(words)
+          return false if words.length < 2
+
+          xmins = words.map { |w| attr_value(w[:attrs], 'xMin').to_f }
+          xmaxs = words.map { |w| attr_value(w[:attrs], 'xMax').to_f }
+          ymins = words.map { |w| attr_value(w[:attrs], 'yMin').to_f }
+          ymaxs = words.map { |w| attr_value(w[:attrs], 'yMax').to_f }
+          x_span = xmaxs.max - xmins.min
+          y_span = ymaxs.max - ymins.min
+          return false if x_span < 0.5 || y_span < 4.0
+
+          y_span > x_span * 0.85
+        rescue StandardError
+          false
         end
 
         def merge_angle(a, b)

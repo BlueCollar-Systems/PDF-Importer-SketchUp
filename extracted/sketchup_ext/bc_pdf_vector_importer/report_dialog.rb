@@ -43,6 +43,7 @@ module BlueCollarSystems
         if text > 0
           mode_label = case stats[:text_mode]
                        when :geometry then "as geometry"
+                       when :glyphs then "as glyph geometry"
                        when :text3d then "as 3D text"
                        when :labels then "as labels"
                        else ""
@@ -56,6 +57,9 @@ module BlueCollarSystems
         # PDF layers
         if stats[:layers] && !stats[:layers].empty?
           lines << "#{stats[:layers].length} PDF layers mapped to Tags."
+        end
+        if stats[:layer_warning]
+          lines << stats[:layer_warning]
         end
 
         # Document analysis (generic recognition)
@@ -213,6 +217,8 @@ module BlueCollarSystems
 
       def self.pdf_layer_name?(name)
         n = name.to_s
+        imported = PDFVectorImporter.last_import_layer_names
+        return true if imported.include?(n)
         return true if n.start_with?('PDF::')
         return true if n =~ /\APDF(?:\b|:|\s)/i
         return true if n == 'Dashed' || n == 'Dashdot' || n == 'Dash Dot'

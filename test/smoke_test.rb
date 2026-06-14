@@ -145,10 +145,42 @@ end
 
 puts
 # ----------------------------------------------------------------
-# 4. Guardrail: no bare/silent rescue patterns in core extension
+# 4. Guardrail: SketchUp 2017 Ruby compatibility
 # ----------------------------------------------------------------
-puts "--- Check 4: no bare/silent rescue patterns in core extension ---"
+puts "--- Check 4: SketchUp 2017 Ruby compatibility ---"
 core_rb_files = Dir.glob(File.join(SOURCE_DIR, '**', '*.rb'))
+modern_method_hits = []
+
+core_rb_files.each do |f|
+  rel = f.sub("#{REPO_ROOT}/", '').sub("#{REPO_ROOT}\\", '')
+  File.open(f, 'rb') do |io|
+    io.each_line.with_index do |raw_line, idx|
+      line = raw_line.force_encoding('UTF-8')
+      line = line.encode('UTF-8', 'binary', invalid: :replace, undef: :replace)
+      if line =~ /&\.|\.(?:match\?|dig|sum|then|yield_self|filter_map)\b/
+        modern_method_hits << "#{rel}:#{idx + 1}: #{line.strip}"
+      end
+    end
+  end
+end
+
+if modern_method_hits.empty?
+  puts "  PASS: no Ruby 2.3+ convenience methods found in core extension"
+  pass_count += 1
+else
+  failures << "Ruby 2.3+ method usage found in core extension (#{modern_method_hits.length} hit(s))."
+  puts "  FAIL: found SketchUp 2017-incompatible methods:"
+  modern_method_hits.first(20).each { |hit| puts "        #{hit}" }
+  if modern_method_hits.length > 20
+    puts "        ...and #{modern_method_hits.length - 20} more"
+  end
+end
+
+puts
+# ----------------------------------------------------------------
+# 5. Guardrail: no bare/silent rescue patterns in core extension
+# ----------------------------------------------------------------
+puts "--- Check 5: no bare/silent rescue patterns in core extension ---"
 forbidden_rescue_hits = []
 
 core_rb_files.each do |f|

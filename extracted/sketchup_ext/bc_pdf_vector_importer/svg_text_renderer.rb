@@ -109,7 +109,14 @@ module BlueCollarSystems
         x_unit_to_in = PDF_PT_TO_INCH * scale.to_f
         y_unit_to_in = PDF_PT_TO_INCH * scale.to_f
 
-        model = entities.model || Sketchup.active_model
+        model = nil
+        begin
+          model = entities.model if entities.respond_to?(:model)
+        rescue StandardError => e
+          Logger.warn("SvgTextRenderer", "entities.model lookup failed: #{e.message}")
+        end
+        model ||= Sketchup.active_model if defined?(Sketchup) && Sketchup.respond_to?(:active_model)
+        raise "SketchUp model unavailable for glyph definitions" unless model
         edge_count = 0
         glyph_count = 0
 
@@ -205,6 +212,8 @@ module BlueCollarSystems
         begin
           # Common local/system installs
           candidates = []
+          candidates << 'C:\\Program Files\\poppler\\Library\\bin\\pdftocairo.exe'
+          candidates << 'C:\\Program Files\\poppler\\bin\\pdftocairo.exe'
           if ENV['LOCALAPPDATA'] && !ENV['LOCALAPPDATA'].empty?
             candidates << File.join(ENV['LOCALAPPDATA'],
               'Programs', 'MiKTeX', 'miktex', 'bin', 'x64', 'pdftocairo.exe')

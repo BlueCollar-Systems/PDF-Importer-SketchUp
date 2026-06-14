@@ -12,7 +12,7 @@ module BlueCollarSystems
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
 
-      attr_reader :page_group
+      attr_reader :page_group, :text_group
 
       def initialize(model, paths, text_items, media_box, opts = {})
         @model = model
@@ -27,6 +27,7 @@ module BlueCollarSystems
         @bezier_segments = opts[:bezier_segments] || 32
         @import_as       = opts[:import_as] || :edges
         @layer_name      = opts[:layer_name] || 'PDF Import'
+        @layer_manager   = opts[:layer_manager]
         @group_per_page  = opts[:group_per_page] != false
         @page_number     = opts[:page_number] || 1
         @flatten         = opts[:flatten_to_2d] != false
@@ -48,7 +49,7 @@ module BlueCollarSystems
       end
 
       def build
-        base_layer = get_or_create_layer(@layer_name)
+        base_layer = resolve_layer(nil)
         entities = @target_entities || @model.active_entities
 
         # Create page group
@@ -112,12 +113,8 @@ module BlueCollarSystems
                       end
           dest = get_color_group(target, color_rgb)
 
-          # Determine the layer for this path — OCG layer takes priority
-          path_layer = base_layer
-          if path.layer_name && !path.layer_name.empty?
-            ocg_layer_name = "PDF::Layer::#{path.layer_name}"
-            path_layer = get_or_create_layer(ocg_layer_name)
-          end
+          # Determine the layer for this path — OCG layer takes priority when enabled
+          path_layer = resolve_layer(path.layer_name)
 
           # Determine dash rendering info
           dash_spec = nil
@@ -153,17 +150,22 @@ module BlueCollarSystems
 
         # ── Text objects ──
         if @import_text && !@text_items.empty?
-          text_layer = get_or_create_layer("#{@layer_name}:Text")
           text_group = nil
           if @page_group
             text_group = @page_group.entities.add_group
             text_group.name = "Text"
-            set_layer(text_group, text_layer)
+            set_layer(text_group, base_layer)
+            @text_group = text_group
           end
           text_target = text_group ? text_group.entities : target
 
           @text_items.each do |item|
-            place_text(text_target, item, page_origin_x, page_origin_y, page_height, text_layer)
+            item_layer = if @layer_manager && @layer_manager.match_pdf_layers
+                           resolve_layer(item.respond_to?(:layer_name) ? item.layer_name : nil)
+                         else
+                           text_fallback_layer
+                         end
+            place_text(text_target, item, page_origin_x, page_origin_y, page_height, item_layer)
           end
         end
 
@@ -448,130 +450,840 @@ module BlueCollarSystems
         return unless @import_text && item.text && !item.text.strip.empty?
 
         begin
-          # Convert PDF coordinate to SketchUp point
-          pt = pdf_to_su(item.x, item.y, origin_x, origin_y)
-          item_angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
-          rotated_label_geometry = (
-            !@use_3d_text &&
-            @strict_text_fidelity &&
-            angle_needs_geometry_text?(item_angle)
-          )
-
-          if @use_3d_text || rotated_label_geometry
-            # ── Geometry mode: add_3d_text (proper filled letterforms) ──
-            page_h = (@media_box[3] - @media_box[1]).abs
-            page_h = 792.0 if page_h < 1
-
-            fs = item.font_size.to_f
-            raw = (item.respond_to?(:raw_font_size) && item.raw_font_size) ?
-                  item.raw_font_size.to_f : nil
-
-            if raw && raw > 0
-              # Internal parser: use raw if effective is blown up
-              fs = fs > (page_h * 0.04) ? raw : fs
-            else
-              # ExternalTextExtractor: bbox height → add_3d_text letter height.
-              # add_3d_text height = cap height directly.
-              # bbox includes ascenders, descenders, leading.
-              # Typical font metrics (as fraction of bbox height):
-              #   cap height ≈ 0.55-0.65, ascender ≈ 0.70-0.80, descender ≈ 0.20-0.25
-              # 0.55 is conservative — keeps text from being undersized.
-              bbox_h = fs
-              fs = fs * 0.55
-              # Shift origin up: pdftotext bbox anchors at box bottom (descender line).
-              # add_3d_text places baseline at Y origin. Shift = descender depth.
-              # descender ≈ 7% of bbox height for most CAD fonts.
-              baseline_ratio = (item_angle.abs > 10.0) ? 0.05 : 0.07
-              env_ratio = ENV['BC_SU_TEXT_BASELINE_RATIO']
-              if env_ratio && !env_ratio.to_s.strip.empty?
-                begin
-                  parsed_ratio = env_ratio.to_f
-                  baseline_ratio = parsed_ratio if parsed_ratio >= 0.0 && parsed_ratio <= 0.50
-                rescue StandardError
-                  # keep computed baseline ratio
-                end
-              end
-              baseline_shift = bbox_h * baseline_ratio * PDF_POINT_TO_INCH * @scale
-              pt = Geom::Point3d.new(pt.x, pt.y + baseline_shift, pt.z)
-            end
-
-            fs = [fs, page_h * 0.03].min if fs > page_h * 0.03
-            fs = [fs, 1.0].max
-            height = fs * PDF_POINT_TO_INCH * @scale
-            height = [[height, 0.015].max, 1.5].min
-
-            begin
-              # add_3d_text creates geometry at the origin, then we transform it
-              count_before = entities.to_a.length
-              success = entities.add_3d_text(
-                item.text,
-                TextAlignLeft,
-                "Arial",
-                false,             # bold
-                false,             # italic
-                height,            # letter height in inches
-                0.6,               # tolerance (lower = smoother)
-                0.0,               # z extrusion (0 = flat faces)
-                true,              # filled
-                0.0                # z position
-              )
-
-              if success
-                new_ents = entities.to_a[count_before..-1] || []
-                if new_ents.any?
-                  # Keep transform order deterministic:
-                  # rotate text at origin first, then translate to insertion.
-                  if item_angle.abs > 0.1
-                    rot = Geom::Transformation.rotation(ORIGIN, Z_AXIS, item_angle.degrees)
-                    entities.transform_entities(rot, *new_ents)
-                  end
-                  move = Geom::Transformation.new(pt)
-                  entities.transform_entities(move, *new_ents)
-                  new_ents.each do |entity|
-                    begin
-                      set_layer(entity, layer)
-                    rescue StandardError => e
-                      Logger.warn("GeometryBuilder", "set_layer on text geometry failed: #{e.message}")
-                    end
-                  end
-                  @text_count += 1
-                end
-              end
-            rescue StandardError => e
-              Logger.warn("GeometryBuilder", "add_3d_text failed: #{e.message}")
-              # Fallback to annotation text
-              begin
-                text = entities.add_text(item.text, pt)
-                if text
-                  set_layer(text, layer)
-                  @text_count += 1
-                end
-              rescue StandardError => e
-                Logger.warn("GeometryBuilder", "add_text fallback failed: #{e.message}")
-              end
-            end
+          if @use_3d_text
+            place_mesh_text(entities, item, origin_x, origin_y, layer)
+          elsif stacked_vertical_dimension_labels?(item)
+            place_stacked_vertical_dimension_labels(
+              entities, item, origin_x, origin_y, layer
+            )
           else
-            # ── Label mode: annotation text ──
-            text = nil
-            begin
-              text = entities.add_text(item.text, pt, Geom::Vector3d.new(0, 0, 0))
-            rescue StandardError => e
-              Logger.warn("GeometryBuilder", "add_text with vector failed: #{e.message}")
-              text = entities.add_text(item.text, pt)
-            end
-            if text
-              set_layer(text, layer)
-              @text_count += 1
-            end
+            place_annotation_label(entities, item, origin_x, origin_y, layer)
           end
         rescue StandardError => e
           Logger.warn("GeometryBuilder", "place_text failed: #{e.message}")
         end
       end
 
-      # Use geometry text only for non-horizontal labels when strict fidelity is enabled.
-      # This avoids needlessly converting horizontal labels that annotation text handles well.
-      # Threshold is tunable via BC_SU_ROTATED_LABEL_DEG for troubleshooting.
+      # Shared PDF insertion point for Labels and 3D Text — matches label heuristics
+      # used by the external pdftotext path (bbox centering, baseline, angle cleanup).
+      def text_insertion_pdf(item)
+        label_insertion_pdf(item)
+      end
+
+      def mesh_text_height_inches(item, angle_deg, page_h)
+        fs = effective_font_size_pts(item)
+        raw = (item.respond_to?(:raw_font_size) && item.raw_font_size) ?
+              item.raw_font_size.to_f : nil
+
+        if raw && raw > 0
+          fs = fs > (page_h * 0.04) ? raw : fs
+        else
+          fs *= 0.55
+        end
+
+        fs = [fs, page_h * 0.03].min if fs > page_h * 0.03
+        fs = [fs, 1.0].max
+        height = fs * PDF_POINT_TO_INCH * @scale
+        [[height, 0.015].max, 1.5].min
+      rescue StandardError
+        0.015
+      end
+
+      def place_mesh_text(entities, item, origin_x, origin_y, layer)
+        label_x, label_y, label_angle = mesh_label_anchor_pdf(item)
+        pt = pdf_to_su(label_x, label_y, origin_x, origin_y)
+
+        page_h = (@media_box[3] - @media_box[1]).abs
+        page_h = 792.0 if page_h < 1
+        height = mesh_text_height_inches(item, label_angle, page_h)
+        return if height <= 0
+
+        count_before = entities.to_a.length
+        success = entities.add_3d_text(
+          item.text,
+          TextAlignLeft,
+          "Arial",
+          false,
+          false,
+          height,
+          0.6,
+          0.0,
+          true,
+          0.0
+        )
+
+        return unless success
+
+        new_ents = entities.to_a[count_before..-1] || []
+        return if new_ents.empty?
+
+        move = Geom::Transformation.new(pt)
+        entities.transform_entities(move, *new_ents)
+        if label_angle.abs > 0.1
+          rot = Geom::Transformation.rotation(pt, Z_AXIS, label_angle.degrees)
+          entities.transform_entities(rot, *new_ents)
+        end
+        new_ents.each do |entity|
+          begin
+            set_layer(entity, layer)
+          rescue StandardError => e
+            Logger.warn("GeometryBuilder", "set_layer on text geometry failed: #{e.message}")
+          end
+        end
+        @text_count += 1
+      rescue StandardError => e
+        Logger.warn("GeometryBuilder", "add_3d_text failed: #{e.message}")
+        begin
+          text = entities.add_text(item.text, pt)
+          if text
+            set_layer(text, layer)
+            @text_count += 1
+          end
+        rescue StandardError => e2
+          Logger.warn("GeometryBuilder", "add_text fallback failed: #{e2.message}")
+        end
+      end
+
+      def stacked_vertical_dimension_labels?(item)
+        return false unless label_has_bbox?(item)
+        tokens = item.text.to_s.strip.split(/\s+/)
+        return false if tokens.length < 2
+        return false unless tokens.all? { |tok| tok =~ /\A\d{1,2}\z/ }
+        bbox_w = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
+        bbox_h = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
+        narrow_vertical_dimension_bbox?(bbox_w, bbox_h)
+      rescue StandardError
+        false
+      end
+
+      def place_stacked_vertical_dimension_labels(entities, item, origin_x, origin_y, layer)
+        tokens = item.text.to_s.strip.split(/\s+/)
+        bx0 = item.bbox_x0.to_f
+        bx1 = item.bbox_x1.to_f
+        by0 = item.bbox_y0.to_f
+        by1 = item.bbox_y1.to_f
+
+        tokens.each_with_index do |token, idx|
+          sub_by0, sub_by1 = stacked_dimension_row_bounds(by0, by1, idx, tokens.length)
+          sub_item = sub_dimension_text_item(item, token, bx0, bx1, sub_by0, sub_by1)
+          place_annotation_label(entities, sub_item, origin_x, origin_y, layer)
+        end
+      rescue StandardError => e
+        Logger.warn("GeometryBuilder", "stacked vertical dimension placement failed: #{e.message}")
+        place_annotation_label(entities, item, origin_x, origin_y, layer)
+      end
+
+      # CAD drawings leave a visible gap between stacked dimension numerals inside
+      # one pdftotext line bbox (e.g. SECTION F-F "2" over "2").
+      def stacked_dimension_row_bounds(by0, by1, index, count)
+        bh = (by1 - by0).abs
+        count = [count.to_i, 1].max
+        return [by0, by1] if count == 1
+
+        gap_ratio = 1.74
+        glyph_h = bh / (count + ((count - 1) * gap_ratio))
+        gap = bh - (glyph_h * count)
+        cursor = by0.to_f
+        index.times do
+          cursor += glyph_h + gap
+        end
+        [cursor, cursor + glyph_h]
+      rescue StandardError
+        [by0.to_f, by1.to_f]
+      end
+
+      def sub_dimension_text_item(item, token, bx0, bx1, by0, by1)
+        row_h = (by1 - by0).abs
+        fs = [row_h, 1.0].max
+        item.class.new(
+          token,
+          bx0,
+          by0,
+          fs,
+          0.0,
+          item.font_name,
+          item.respond_to?(:raw_font_size) ? item.raw_font_size : nil,
+          bx0,
+          by0,
+          bx1,
+          by1
+        )
+      rescue StandardError
+        item
+      end
+
+      def try_add_annotation_text(entities, text, pt, dir_vec)
+        begin
+          ent = entities.add_text(text, pt, dir_vec)
+          return ent if ent
+        rescue StandardError => e
+          Logger.warn("GeometryBuilder", "add_text with vector failed: #{e.message}")
+        end
+
+        begin
+          ent = entities.add_text(text, pt, Geom::Vector3d.new(0, 0, 0))
+          return ent if ent
+        rescue StandardError => e
+          Logger.warn("GeometryBuilder", "add_text with zero vector failed: #{e.message}")
+        end
+
+        begin
+          entities.add_text(text, pt)
+        rescue StandardError => e
+          Logger.warn("GeometryBuilder", "add_text failed: #{e.message}")
+          nil
+        end
+      end
+
+      def place_annotation_label(entities, item, origin_x, origin_y, layer)
+        label_x, label_y, label_angle = label_insertion_pdf(item)
+        pt = pdf_to_su(label_x, label_y, origin_x, origin_y)
+        dir_vec = label_direction_vector(label_angle, item)
+        text = try_add_annotation_text(entities, item.text, pt, dir_vec)
+        if text
+          set_layer(text, layer)
+          @text_count += 1
+          return
+        end
+
+        Logger.warn("GeometryBuilder",
+          "add_text unavailable for #{item.text.inspect} — falling back to mesh text")
+        place_mesh_text(entities, item, origin_x, origin_y, layer)
+      end
+
+      def label_has_bbox?(item)
+        return false unless item
+        vals = [item.bbox_x0, item.bbox_y0, item.bbox_x1, item.bbox_y1]
+        return false unless vals.all? { |v| !v.nil? }
+        (item.bbox_x1.to_f - item.bbox_x0.to_f).abs > 1.0e-6 &&
+          (item.bbox_y1.to_f - item.bbox_y0.to_f).abs > 1.0e-6
+      rescue StandardError
+        false
+      end
+
+      def external_text_item?(item)
+        item.font_name.to_s == 'pdftotext'
+      rescue StandardError
+        false
+      end
+
+      BOM_TABLE_HEADER = /\A(?:QUAN|MARK|DESCRIPTION|LENGTH|QTY)\z/i
+
+      def label_baseline_ratio(angle_deg)
+        ratio = (angle_deg.to_f.abs > 10.0) ? 0.05 : 0.20
+        env_ratio = ENV['BC_SU_TEXT_BASELINE_RATIO']
+        if env_ratio && !env_ratio.to_s.strip.empty?
+          begin
+            parsed_ratio = env_ratio.to_f
+            ratio = parsed_ratio if parsed_ratio >= 0.0 && parsed_ratio <= 0.50
+          rescue StandardError
+            # keep computed baseline ratio
+          end
+        end
+        ratio
+      end
+
+      ANNOTATION_LABEL = /\A(?:TYP\.?|U\.N\.O\.)\z/i
+      # Weld callouts: any inch fraction (not a fixed 1017 fraction list).
+      WELD_FRACTION_LABEL = /\A\d+\/\d+"?\z/i
+      # Steel part marks: w/p/a prefix + digits (shop-drawing convention).
+      PART_MARK_LABEL = /\A[wap]\d+\z/i
+      SECTION_TITLE_LABEL = /\ASECTION\s+-/i
+
+      # Common shop weld fractions stay callouts even in near-square bboxes.
+      COMMON_WELD_FRACTION = /\A(?:1\/2|1\/4|3\/16|5\/16)"?\z/i
+
+      def weld_fraction_label?(text, bbox_w_pts = nil, bbox_h_pts = nil)
+        t = text.to_s.strip
+        return false unless t =~ WELD_FRACTION_LABEL
+        return true unless bbox_w_pts && bbox_h_pts
+        bw = bbox_w_pts.to_f
+        bh = bbox_h_pts.to_f
+        return false if narrow_vertical_dimension_bbox?(bw, bh)
+        return true if t =~ COMMON_WELD_FRACTION
+        # Other inch fractions (e.g. 3/4", 7/8") in square/tall bboxes are dimensions.
+        return false if bh >= bw * 0.85
+        true
+      rescue StandardError
+        false
+      end
+
+      def annotation_like_label?(text, bbox_w_pts = nil, bbox_h_pts = nil)
+        t = text.to_s.strip
+        return false if t.empty?
+        !!(t =~ ANNOTATION_LABEL) || weld_fraction_label?(t, bbox_w_pts, bbox_h_pts)
+      rescue StandardError
+        false
+      end
+
+      def dimension_like_label?(text)
+        t = text.to_s.strip
+        return false if t.empty?
+        return false if t =~ ANNOTATION_LABEL
+        !!((t =~ /\A\d+(?:[\s'\-]\d+)*(?:\s+\d+\/\d+)?"?\z/) ||
+           (t =~ /\A\d+'-\d+(?:\s+\d+\/\d+)?"?\z/) ||
+           (t =~ /\A\d+-\d+(?:\s+\d+\/\d+)?"?\z/) ||
+           (t =~ /\A\d{1,2}\/\d{1,2}"?\z/) ||
+           (t =~ /\A\d+\s+\d{1,2}\/\d{1,2}"?\z/))
+      rescue StandardError
+        false
+      end
+
+      def feet_inch_dimension_label?(text)
+        t = text.to_s.strip
+        !!((t =~ /\A\d+'-\d+/) ||
+           (t =~ /\A\d+-\d+(?:\s+\d{1,2}\/\d{1,2})?"?\z/))
+      rescue StandardError
+        false
+      end
+
+      def dimension_glyph_width_pts(char, font_size_pts)
+        fs = font_size_pts.to_f
+        case char
+        when "'", '"', '-', ' ' then fs * 0.28
+        when '/' then fs * 0.32
+        when '0'..'9' then fs * 0.52
+        else fs * 0.45
+        end
+      rescue StandardError
+        font_size_pts.to_f * 0.45
+      end
+
+      def feet_inch_label_width_pts(text, font_size_pts)
+        text.to_s.chars.inject(0.0) { |sum, ch| sum + dimension_glyph_width_pts(ch, font_size_pts) }
+      rescue StandardError
+        text.to_s.length * font_size_pts.to_f * 0.55
+      end
+
+      def should_center_label?(text, bbox_w_pts, font_size_pts, angle_deg)
+        return false if angle_deg.to_f.abs > 3.0
+        t = text.to_s.strip
+        return false if t.empty?
+        return false unless t =~ BOM_TABLE_HEADER
+        fs = [font_size_pts.to_f, 1.0].max
+        bw = [bbox_w_pts.to_f, 0.0].max
+        est_w = t.length * fs * 0.55
+        bw > est_w * 1.15
+      rescue StandardError
+        false
+      end
+
+      def narrow_vertical_dimension_bbox?(bbox_w_pts, bbox_h_pts)
+        bw = bbox_w_pts.to_f
+        bh = bbox_h_pts.to_f
+        bw > 0.5 && bh > bw * 1.15
+      rescue StandardError
+        false
+      end
+
+      def chord_spec_label?(text)
+        !!(text.to_s.strip =~ /\A\d+'-\d+\s*\(/)
+      rescue StandardError
+        false
+      end
+
+      def spec_label_width_pts(text, font_size_pts, bbox_w_pts)
+        fs = [font_size_pts.to_f, 1.0].max
+        bw = [bbox_w_pts.to_f, 0.0].max
+        raw = feet_inch_label_width_pts(text, fs)
+        [raw, bw * 0.92].min
+      rescue StandardError
+        dimension_label_est_width_pts(text, font_size_pts, bbox_w_pts)
+      end
+
+      def should_center_spec_label?(text, bbox_w_pts, bbox_h_pts, font_size_pts, angle_deg)
+        return false if angle_deg.to_f.abs > 3.0
+        return false unless chord_spec_label?(text)
+        bw = bbox_w_pts.to_f
+        bh = bbox_h_pts.to_f
+        fs = [font_size_pts.to_f, 1.0].max
+        est_w = spec_label_width_pts(text, fs, bw)
+        bh <= bw * 1.08 && bw > est_w * 1.02
+      rescue StandardError
+        false
+      end
+      def part_mark_label?(text)
+        !!(text.to_s.strip =~ PART_MARK_LABEL)
+      rescue StandardError
+        false
+      end
+
+      def angle_member_mark_label?(text)
+        !!(text.to_s.strip =~ /\Aa\d+\z/i)
+      rescue StandardError
+        false
+      end
+
+      # Part marks rotated ~90° in the PDF (not merely a tall/narrow pdftotext bbox).
+      def rotated_part_mark_label?(item)
+        return false unless part_mark_label?(item.text)
+        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+        angle.abs > 75.0 && angle.abs < 105.0
+      rescue StandardError
+        false
+      end
+
+      # Part marks aligned to diagonal members (~8°–75° PDF baseline).
+      def diagonal_part_mark_label?(item)
+        return false unless part_mark_label?(item.text)
+        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+        angle.abs >= 8.0 && angle.abs < 75.0
+      rescue StandardError
+        false
+      end
+
+      def narrow_part_mark_bbox?(bbox_w_pts, bbox_h_pts)
+        bbox_h_pts.to_f > bbox_w_pts.to_f * 1.08
+      rescue StandardError
+        false
+      end
+
+      # Tall/narrow bbox with horizontal PDF angle — glyph height is the short side.
+      def horizontal_part_mark_in_tall_bbox?(item)
+        return false unless part_mark_label?(item.text) && label_has_bbox?(item)
+        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+        return false if angle.abs >= 12.0
+        bw = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
+        bh = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
+        bh > bw * 1.5
+      rescue StandardError
+        false
+      end
+
+      # pdftotext reports many CAD labels as a horizontal angle with a tall/narrow
+      # bbox. Use bbox short side for font size without assuming every narrow
+      # dimension should rotate.
+      def tall_single_text_bbox?(item, bbox_w_pts = nil, bbox_h_pts = nil)
+        return false unless label_has_bbox?(item)
+        bw = bbox_w_pts || (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
+        bh = bbox_h_pts || (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
+        return false unless narrow_vertical_dimension_bbox?(bw, bh)
+        return false if stacked_vertical_dimension_labels?(item)
+        t = item.text.to_s.strip
+        return false if t.empty?
+        return false if part_mark_label?(t)
+        dimension_like_label?(t) || chord_spec_label?(t)
+      rescue StandardError
+        false
+      end
+
+      def single_vertical_part_mark_bbox?(item, bbox_w_pts = nil, bbox_h_pts = nil)
+        return false unless tall_single_text_bbox?(item, bbox_w_pts, bbox_h_pts)
+        part_mark_label?(item.text)
+      rescue StandardError
+        false
+      end
+
+      def effective_font_size_pts(item)
+        fs = [item.font_size.to_f, 1.0].max
+        return fs unless label_has_bbox?(item)
+        bw = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
+        bh = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
+        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+        if slope_triangle_label?(item.text, bw, bh, angle)
+          [bw, bh].min
+        elsif tall_single_text_bbox?(item, bw, bh)
+          [bw, bh].min
+        elsif horizontal_part_mark_in_tall_bbox?(item)
+          [bw, bh].min
+        elsif rotated_part_mark_label?(item)
+          [bw, bh].min
+        else
+          fs
+        end
+      rescue StandardError
+        [item.font_size.to_f, 1.0].max
+      end
+
+      def slope_triangle_label?(text, bbox_w_pts, bbox_h_pts, angle_deg)
+        return false if angle_deg.to_f.abs > 3.0
+        t = text.to_s.strip
+        return false unless t =~ /\A\d{1,2}(?:\s+\d{1,2}\/\d{1,2})?"?\z/
+        bbox_h_pts.to_f > bbox_w_pts.to_f * 1.15
+      rescue StandardError
+        false
+      end
+
+      def dimension_label_raw_width_pts(text, font_size_pts)
+        fs = [font_size_pts.to_f, 1.0].max
+        t = text.to_s.strip
+        if t =~ /\A\d{1,2}\/\d{1,2}"?\z/
+          fs * 0.58
+        elsif t =~ /\A\d+\s+\d{1,2}\/\d{1,2}"?\z/
+          fs * 1.05
+        elsif t =~ /\A\d{1,2}\z/
+          fs * 0.55
+        elsif feet_inch_dimension_label?(t)
+          feet_inch_label_width_pts(t, fs)
+        else
+          t.length * fs * 0.55
+        end
+      rescue StandardError
+        [font_size_pts.to_f * 0.55, 1.0].max
+      end
+
+      def dimension_label_est_width_pts(text, font_size_pts, bbox_w_pts)
+        bw = [bbox_w_pts.to_f, 0.0].max
+        raw = dimension_label_raw_width_pts(text, font_size_pts)
+        [raw, bw * 0.95].min
+      rescue StandardError
+        [font_size_pts.to_f * 0.55, 1.0].max
+      end
+
+      def should_center_dimension_label?(text, bbox_w_pts, bbox_h_pts, font_size_pts, angle_deg)
+        return false if angle_deg.to_f.abs > 3.0
+        return false unless dimension_like_label?(text)
+        bw = bbox_w_pts.to_f
+        bh = bbox_h_pts.to_f
+        return false if weld_fraction_label?(text, bw, bh)
+        fs = [font_size_pts.to_f, 1.0].max
+        t = text.to_s.strip
+        raw_w = dimension_label_raw_width_pts(text, fs)
+        return true if narrow_vertical_dimension_bbox?(bw, bh)
+        return true if (t =~ /\A\d{1,2}\z/) && bw < fs * 1.8
+        return true if (t =~ /\A\d{1,2}\/\d{1,2}"?\z/) &&
+                       bh >= bw * 0.85 && bw > raw_w * 1.04
+        return true if (t =~ /\A\d{2}\s+\d{1,2}\/\d{1,2}"?\z/) &&
+                       bh <= bw * 1.05 && bw > raw_w * 1.04
+        # Feet-inch horizontal dims: center when pdftotext bbox is wider than glyphs.
+        if feet_inch_dimension_label?(t) && bh <= bw * 1.05
+          est_w = [raw_w, bw * 0.95].min
+          return true if bw > est_w * 1.04
+        end
+        false
+      rescue StandardError
+        false
+      end
+
+      def narrow_fraction_dimension_stays_horizontal?(text, bbox_w_pts, bbox_h_pts, font_size_pts, angle_deg)
+        return false unless should_center_dimension_label?(text, bbox_w_pts, bbox_h_pts, font_size_pts, angle_deg)
+        t = text.to_s.strip
+        # Single-digit stacked fractions (e.g. "1 1/2") stay horizontal in narrow bbox.
+        !!(t =~ /\A\d{1}\s+\d{1,2}\/\d{1,2}"?\z/)
+      rescue StandardError
+        false
+      end
+
+      def label_baseline_pdf_y(item, by0, by1, bbox_h, angle_deg)
+        fs = effective_font_size_pts(item)
+        raw_angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+        ratio = label_baseline_ratio(angle_deg)
+        bbox_w = label_has_bbox?(item) ?
+                 (item.bbox_x1.to_f - item.bbox_x0.to_f).abs : fs
+        ann = annotation_like_label?(item.text, bbox_w, bbox_h)
+        if slope_triangle_label?(item.text, bbox_w, bbox_h, angle_deg)
+          ((by0 + by1) * 0.5) - (fs * 0.35)
+        elsif dimension_like_label?(item.text) && bbox_h > fs * 1.25 &&
+              !feet_inch_dimension_label?(item.text)
+          # Stacked-fraction dimensions: alphabetic baseline hugs bbox bottom.
+          by0 + fs * 0.12
+        elsif rotated_part_mark_label?(item) || diagonal_part_mark_label?(item)
+          by0 + fs * 0.15
+        elsif ann ||
+              (dimension_like_label?(item.text) && raw_angle.abs >= 12.0 && raw_angle.abs < 85.0)
+          # Weld/fraction callouts: anchor near bbox bottom regardless of PDF tilt.
+          by0 + [bbox_h * 0.18, fs * 0.18].min
+        else
+          by0 + [bbox_h * ratio, fs * 0.18].min
+        end
+      rescue StandardError
+        by0.to_f
+      end
+
+      def label_angle_pdf(item)
+        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+        bbox_w = label_has_bbox?(item) ? (item.bbox_x1.to_f - item.bbox_x0.to_f).abs : nil
+        bbox_h = label_has_bbox?(item) ? (item.bbox_y1.to_f - item.bbox_y0.to_f).abs : nil
+        return 0.0 if annotation_like_label?(item.text, bbox_w, bbox_h)
+        if part_mark_label?(item.text)
+          inferred = inferred_part_mark_angle_pdf(item)
+          return inferred if inferred
+          if rotated_part_mark_label?(item)
+            return 90.0 if angle > 0.0
+            return -90.0
+          end
+          return angle if diagonal_part_mark_label?(item)
+          return 0.0
+        end
+        if dimension_like_label?(item.text)
+          fs = effective_font_size_pts(item)
+          if bbox_w && bbox_h && vertical_dimension_bbox?(item, bbox_w, bbox_h) &&
+             !narrow_fraction_dimension_stays_horizontal?(item.text, bbox_w, bbox_h, fs, angle)
+            return 90.0
+          end
+          return 0.0 if angle.abs < 12.0
+          return angle
+        end
+        angle.abs < 12.0 ? 0.0 : angle
+      rescue StandardError
+        0.0
+      end
+
+      def inferred_part_mark_angle_pdf(item)
+        return nil unless part_mark_label?(item.text)
+        return nil unless label_has_bbox?(item)
+        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+        return normalize_text_angle_deg(angle) if angle.abs >= 12.0
+        return nil unless angle_member_mark_label?(item.text)
+        nearest_diagonal_text_angle(item)
+      rescue StandardError
+        nil
+      end
+
+      def nearest_diagonal_text_angle(item)
+        segments = text_angle_segments
+        return nil if segments.empty?
+
+        bx0 = item.bbox_x0.to_f
+        bx1 = item.bbox_x1.to_f
+        by0 = item.bbox_y0.to_f
+        by1 = item.bbox_y1.to_f
+        cx = (bx0 + bx1) * 0.5
+        cy = (by0 + by1) * 0.5
+        bw = (bx1 - bx0).abs
+        bh = (by1 - by0).abs
+        radius = [[bw, bh].max * 1.25, effective_font_size_pts(item) * 2.0, 18.0].max
+
+        best = nil
+        segments.each do |seg|
+          next if cx < seg[:min_x] - radius || cx > seg[:max_x] + radius
+          next if cy < seg[:min_y] - radius || cy > seg[:max_y] + radius
+          dist = point_segment_distance(cx, cy, seg[:x0], seg[:y0], seg[:x1], seg[:y1])
+          next if dist > radius
+
+          # Prefer close, longer member lines over tiny arrow ticks or hatch marks.
+          score = dist - [[seg[:length], 90.0].min * 0.015]
+          best = [score, seg] if best.nil? || score < best[0]
+        end
+
+        best ? best[1][:angle] : nil
+      rescue StandardError
+        nil
+      end
+
+      def text_angle_segments
+        return @text_angle_segments if @text_angle_segments
+
+        @text_angle_segments = []
+        Array(@paths).each do |path|
+          next if path.respond_to?(:stroke) && !path.stroke
+          Array(path.subpaths).each do |subpath|
+            pts = subpath_to_points(subpath)
+            pts.each_cons(2) do |p0, p1|
+              x0, y0 = point_xy(p0)
+              x1, y1 = point_xy(p1)
+              next unless x0 && y0 && x1 && y1
+              dx = x1 - x0
+              dy = y1 - y0
+              length = Math.sqrt((dx * dx) + (dy * dy))
+              next if length < 8.0
+              angle = normalize_text_angle_deg(Math.atan2(dy, dx) * 180.0 / Math::PI)
+              abs_angle = angle.abs
+              next if abs_angle < 15.0 || abs_angle > 75.0
+              @text_angle_segments << {
+                x0: x0, y0: y0, x1: x1, y1: y1, length: length,
+                angle: angle, min_x: [x0, x1].min, max_x: [x0, x1].max,
+                min_y: [y0, y1].min, max_y: [y0, y1].max
+              }
+            end
+          end
+        end
+        @text_angle_segments
+      rescue StandardError
+        @text_angle_segments = []
+      end
+
+      def point_xy(point)
+        if point.respond_to?(:x) && point.respond_to?(:y)
+          [point.x.to_f, point.y.to_f]
+        elsif point.respond_to?(:[])
+          [point[0].to_f, point[1].to_f]
+        else
+          [nil, nil]
+        end
+      rescue StandardError
+        [nil, nil]
+      end
+
+      def normalize_text_angle_deg(angle)
+        a = angle.to_f
+        a += 180.0 while a <= -90.0
+        a -= 180.0 while a > 90.0
+        a
+      rescue StandardError
+        0.0
+      end
+
+      def point_segment_distance(px, py, x0, y0, x1, y1)
+        dx = x1 - x0
+        dy = y1 - y0
+        len2 = (dx * dx) + (dy * dy)
+        return Math.sqrt(((px - x0) ** 2) + ((py - y0) ** 2)) if len2 <= 1.0e-9
+        t = (((px - x0) * dx) + ((py - y0) * dy)) / len2
+        t = [[t, 0.0].max, 1.0].min
+        qx = x0 + (t * dx)
+        qy = y0 + (t * dy)
+        Math.sqrt(((px - qx) ** 2) + ((py - qy) ** 2))
+      rescue StandardError
+        Float::INFINITY
+      end
+
+      def label_run_width_pts(text, font_size_pts, bbox_w_pts = nil, bbox_h_pts = nil)
+        fs = [font_size_pts.to_f, 1.0].max
+        raw = if dimension_like_label?(text)
+                dimension_label_raw_width_pts(text, fs)
+              elsif chord_spec_label?(text)
+                feet_inch_label_width_pts(text, fs)
+              else
+                text.to_s.strip.length * fs * 0.55
+              end
+        limit = [bbox_w_pts.to_f, bbox_h_pts.to_f].max
+        limit > 0.0 ? [raw, limit * 0.96].min : raw
+      rescue StandardError
+        [font_size_pts.to_f * 0.55, 1.0].max
+      end
+
+      def rotated_bbox_text_origin_pdf(item, bx0, by0, bx1, by1, fs, angle)
+        bw = (bx1 - bx0).abs
+        bh = (by1 - by0).abs
+        run_w = label_run_width_pts(item.text, fs, bw, bh)
+        rad = angle.to_f * Math::PI / 180.0
+        dir_x = Math.cos(rad)
+        dir_y = Math.sin(rad)
+        norm_x = -dir_y
+        norm_y = dir_x
+        cx = (bx0 + bx1) * 0.5
+        cy = (by0 + by1) * 0.5
+        baseline_offset = fs.to_f * 0.18
+        [
+          cx - (dir_x * run_w * 0.5) - (norm_x * baseline_offset),
+          cy - (dir_y * run_w * 0.5) - (norm_y * baseline_offset)
+        ]
+      rescue StandardError
+        [bx0.to_f, by0.to_f]
+      end
+
+      def vertical_dimension_bbox?(item, bbox_w_pts, bbox_h_pts)
+        return false if annotation_like_label?(item.text, bbox_w_pts, bbox_h_pts)
+        return false if stacked_vertical_dimension_labels?(item)
+        return false unless dimension_like_label?(item.text)
+        bw = bbox_w_pts.to_f
+        bh = bbox_h_pts.to_f
+        bw > 0.5 && bh > bw * 1.6
+      rescue StandardError
+        false
+      end
+
+      def rotated_bbox_text_origin?(item, bbox_w_pts, bbox_h_pts, angle_deg)
+        return false if annotation_like_label?(item.text, bbox_w_pts, bbox_h_pts)
+        if tall_single_text_bbox?(item, bbox_w_pts, bbox_h_pts)
+          return angle_needs_geometry_text?(angle_deg, 3.0)
+        end
+        return false unless part_mark_label?(item.text) || dimension_like_label?(item.text)
+        angle_needs_geometry_text?(angle_deg, 3.0)
+      rescue StandardError
+        false
+      end
+
+      # Left anchor for add_3d_text when label_insertion_pdf returns a centered X.
+      def mesh_label_anchor_pdf(item)
+        label_x, label_y, label_angle = text_insertion_pdf(item)
+        return [label_x, label_y, label_angle] unless label_has_bbox?(item)
+
+        bx0 = item.bbox_x0.to_f
+        return [label_x, label_y, label_angle] if (label_x - bx0).abs <= 0.25
+
+        fs = effective_font_size_pts(item)
+        bbox_w = (item.bbox_x1.to_f - bx0).abs
+        bbox_h = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
+        run_w = label_run_width_pts(item.text, fs, bbox_w, bbox_h)
+        [label_x - (run_w * 0.5), label_y, label_angle]
+      rescue StandardError
+        text_insertion_pdf(item)
+      end
+
+      def matrix_origin_insertion?(item, angle_deg)
+        return false unless external_text_item?(item)
+        return false unless label_has_bbox?(item)
+        return false if angle_deg.to_f.abs < 8.0
+        bx0 = item.bbox_x0.to_f
+        by0 = item.bbox_y0.to_f
+        (item.x.to_f - bx0).abs > 0.5 || (item.y.to_f - by0).abs > 0.5
+      rescue StandardError
+        false
+      end
+
+      # Returns [x_pdf, y_pdf, angle_deg] for label insertion.
+      def label_insertion_pdf(item)
+        angle = label_angle_pdf(item)
+        x = item.x.to_f
+        y = item.y.to_f
+        fs = effective_font_size_pts(item)
+
+        if label_has_bbox?(item)
+          bx0 = item.bbox_x0.to_f
+          by0 = item.bbox_y0.to_f
+          bx1 = item.bbox_x1.to_f
+          by1 = item.bbox_y1.to_f
+          bbox_h = (by1 - by0).abs
+          bbox_w = (bx1 - bx0).abs
+          if matrix_origin_insertion?(item, angle)
+            return [item.x.to_f, item.y.to_f, angle]
+          end
+          used_rotated_origin = false
+          if rotated_bbox_text_origin?(item, bbox_w, bbox_h, angle)
+            x, y = rotated_bbox_text_origin_pdf(item, bx0, by0, bx1, by1, fs, angle)
+            used_rotated_origin = true
+          elsif slope_triangle_label?(item.text, bbox_w, bbox_h, angle)
+            est_w = dimension_label_est_width_pts(item.text, fs, bbox_w)
+            x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
+          elsif should_center_dimension_label?(item.text, bbox_w, bbox_h, fs, angle)
+            est_w = dimension_label_est_width_pts(item.text, fs, bbox_w)
+            x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
+          elsif should_center_spec_label?(item.text, bbox_w, bbox_h, fs, angle)
+            est_w = spec_label_width_pts(item.text, fs, bbox_w)
+            x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
+          elsif rotated_part_mark_label?(item) ||
+                (diagonal_part_mark_label?(item) && narrow_part_mark_bbox?(bbox_w, bbox_h))
+            est_w = dimension_label_est_width_pts(item.text, fs, bbox_w)
+            x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
+          elsif should_center_label?(item.text, bbox_w, fs, angle)
+            est_w = item.text.to_s.strip.length * fs * 0.55
+            x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
+          else
+            x = bx0
+          end
+          y = label_baseline_pdf_y(item, by0, by1, bbox_h, angle) unless used_rotated_origin
+        elsif external_text_item?(item)
+          bbox_h = [fs, 1.0].max
+          y = y + bbox_h * label_baseline_ratio(angle)
+        end
+
+        [x, y, angle]
+      rescue StandardError
+        [item.x.to_f, item.y.to_f, label_angle_pdf(item)]
+      end
+
+      # SketchUp 2017 label text expects a zero direction vector for horizontal
+      # annotation text. Non-zero unit vectors are reserved for rotated labels.
+      def label_direction_vector(angle_deg, item = nil)
+        text = item ? item.text : nil
+        tol = part_mark_label?(text) ? 8.0 : 12.0
+        return Geom::Vector3d.new(0, 0, 0) unless angle_needs_geometry_text?(angle_deg, tol)
+        label_text_vector(angle_deg)
+      rescue StandardError
+        Geom::Vector3d.new(0, 0, 0)
+      end
+
+      def label_text_vector(angle_deg)
+        rad = angle_deg.to_f * Math::PI / 180.0
+        Geom::Vector3d.new(Math.cos(rad), Math.sin(rad), 0.0)
+      rescue StandardError
+        Geom::Vector3d.new(0, 0, 0)
+      end
+
+      # Non-horizontal labels use a direction vector for add_text when |angle| exceeds
+      # this threshold. Tunable via BC_SU_ROTATED_LABEL_DEG for troubleshooting.
       def angle_needs_geometry_text?(angle_deg, tol_deg = 12.0)
         env = ENV['BC_SU_ROTATED_LABEL_DEG']
         if env && !env.to_s.strip.empty?
@@ -817,6 +1529,22 @@ module BlueCollarSystems
           apply_layer_line_style(layer, name)
         end
         layer
+      end
+
+      def resolve_layer(pdf_layer_name)
+        if @layer_manager
+          layer = @layer_manager.resolve(pdf_layer_name)
+          return layer if layer
+        end
+        get_or_create_layer(@layer_name)
+      end
+
+      def text_fallback_layer
+        if @layer_manager
+          layer = @layer_manager.text_fallback_layer
+          return layer if layer
+        end
+        get_or_create_layer("#{@layer_name}:Text")
       end
 
       def set_layer(entity, layer)

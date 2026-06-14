@@ -4,7 +4,7 @@
 #
 # Default UI: professional import (Auto per page internally). Vector/Raster/
 # Hybrid appear only in Advanced. Basic dialog shows:
-#   1. Text rendering selector (Labels, 3D Text, Glyphs, Geometry)
+#   1. Text rendering selector (Geometry, Glyphs, Labels, 3D Text)
 #   2. Import text Yes/No toggle
 # Plus legitimate workflow controls: pages, scale, grouping, page
 # arrangement. Quality parameters are consolidated to the values in
@@ -26,14 +26,14 @@ module BlueCollarSystems
       MODES = {
         'Auto' => {
           'import_mode'        => 'auto',
-          'text_mode'          => '3D Text',
+          'text_mode'          => 'Geometry',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
         }.freeze,
         'Vector' => {
           'import_mode'        => 'vector',
-          'text_mode'          => '3D Text',
+          'text_mode'          => 'Geometry',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -47,7 +47,7 @@ module BlueCollarSystems
         }.freeze,
         'Hybrid' => {
           'import_mode'        => 'hybrid',
-          'text_mode'          => '3D Text',
+          'text_mode'          => 'Geometry',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -56,7 +56,10 @@ module BlueCollarSystems
 
       YES_NO       = 'Yes|No'
       MODE_NAMES   = MODES.keys.join('|')
-      TEXT_MODES   = 'Labels|3D Text|Glyphs|Geometry'
+      TEXT_MODES   = 'Geometry|Glyphs|Labels|3D Text'
+      TEXT_MODE_CHOICES = TEXT_MODES.split('|').freeze
+      FIRST_RUN_TEXT_MODE = 'Geometry'.freeze
+      FIRST_RUN_MATCH_PDF_LAYERS = 'Yes'.freeze
 
       # Workflow choices kept after the Rule 5 sweep
       GROUPING_CHOICES         = 'Single group|Group per page|Group per layer|Group per color|Nested: page > layer|Nested: page > lineweight'
@@ -88,32 +91,36 @@ module BlueCollarSystems
         dlg = UI::HtmlDialog.new(
           dialog_title: "Import PDF \u2014 #{filename}",
           preferences_key: 'BC_PDFImport_Basic',
-          width: 440, height: 340, resizable: false
+          width: 440, height: 380, resizable: false
         )
 
         mode_val    = valid_mode_name(saved[:last_mode])
         pages_val   = saved[:pages]       || 'All'
         scale_val   = saved[:scale]       || '1.0'
-        text_val    = saved[:text_mode]   || '3D Text'
+        text_val    = effective_text_mode(saved)
         itext_val   = saved[:import_text] || 'Yes'
+        match_val   = effective_match_pdf_layers(saved)
 
-        dlg.set_html(basic_html(filename, mode_val, pages_val, scale_val, text_val, itext_val))
+        dlg.set_html(basic_html(filename, mode_val, pages_val, scale_val, text_val, itext_val, match_val))
 
         dlg.add_action_callback('on_import') do |_ctx, p|
           pages_str   = p['pages']       || 'All'
           scale_str   = p['scale']       || '1.0'
-          text_mode   = p['text_mode']   || '3D Text'
+          text_mode   = p['text_mode']   || text_val
           import_text = p['import_text'] || 'Yes'
+          match_pdf_layers = p['match_pdf_layers'] || match_val
           save_prefs(last_mode: 'Auto', pages: pages_str,
                      scale: scale_str, text_mode: text_mode,
-                     import_text: import_text)
+                     import_text: import_text,
+                     match_pdf_layers: match_pdf_layers)
           mode_raw = MODES['Auto']
           mode_sym = {}
           mode_raw.each { |k, v| mode_sym[k.to_sym] = v }
           result = build_opts(mode_sym.merge(pages: pages_str,
                                              scale: scale_str,
                                              text_mode: text_mode,
-                                             import_text: import_text))
+                                             import_text: import_text,
+                                             match_pdf_layers: match_pdf_layers))
           dlg.close
         end
 
@@ -122,12 +129,13 @@ module BlueCollarSystems
           save_prefs(last_mode: 'Auto',
                      pages: p['pages']     || 'All',
                      scale: p['scale']     || '1.0',
-                     text_mode: p['text_mode'] || '3D Text',
-                     import_text: p['import_text'] || 'Yes')
+                     text_mode: p['text_mode'] || text_val,
+                     import_text: p['import_text'] || 'Yes',
+                     match_pdf_layers: p['match_pdf_layers'] || match_val)
           dlg.close
           result = show_html_advanced(filename, p['pages'] || 'All',
                                       p['scale'] || '1.0',
-                                      p['text_mode'] || '3D Text',
+                                      p['text_mode'] || text_val,
                                       load_prefs)
         end
         dlg.show_modal
@@ -147,8 +155,9 @@ module BlueCollarSystems
           mode:             valid_mode_name(saved[:last_mode]),
           pages:            pages_str      || saved[:pages]            || 'All',
           scale:            scale_str      || saved[:scale]            || '1.0',
-          text_mode:        text_mode_str  || saved[:text_mode]        || '3D Text',
+          text_mode:        text_mode_str  || effective_text_mode(saved),
           import_text:      saved[:import_text]                        || 'Yes',
+          match_pdf_layers: effective_match_pdf_layers(saved),
           grouping_mode:    saved[:grouping_mode]                      || 'Group per page',
           page_arrangement: saved[:page_arrangement]                   || 'Spread (20% gap)',
         }
@@ -160,6 +169,7 @@ module BlueCollarSystems
             last_mode: p['mode'],
             pages: p['pages'], scale: p['scale'],
             text_mode: p['text_mode'], import_text: p['import_text'],
+            match_pdf_layers: p['match_pdf_layers'],
             grouping_mode: p['grouping_mode'],
             page_arrangement: p['page_arrangement']
           )
@@ -172,6 +182,7 @@ module BlueCollarSystems
             group_by_color: 'Yes',
             text_mode: p['text_mode'],
             import_text: p['import_text'],
+            match_pdf_layers: p['match_pdf_layers'],
             grouping_mode: p['grouping_mode'],
             page_arrangement: p['page_arrangement']
           )
@@ -211,12 +222,12 @@ module BlueCollarSystems
         .hint{font-size:11px;color:#888;margin-top:2px}
       CSS
 
-      def self.basic_html(filename, _mode, pages, scale, text_mode, import_text)
+      def self.basic_html(filename, _mode, pages, scale, text_mode, import_text, match_pdf_layers)
         text_opts = [
-          ['Labels',   'Labels'],
-          ['3D Text',  '3D Text'],
+          ['Geometry', 'Geometry'],
           ['Glyphs',   'Glyphs'],
-          ['Geometry', 'Geometry']
+          ['Labels',   'Labels'],
+          ['3D Text',  '3D Text']
         ].map { |v, label|
           sel = v == text_mode ? ' selected' : ''
           "<option value=\"#{v}\"#{sel}>#{label}</option>"
@@ -224,6 +235,8 @@ module BlueCollarSystems
 
         itext_yes = import_text == 'Yes' ? ' selected' : ''
         itext_no  = import_text == 'No'  ? ' selected' : ''
+        match_yes = match_pdf_layers == 'Yes' ? ' selected' : ''
+        match_no  = match_pdf_layers == 'No'  ? ' selected' : ''
 
         <<-HTML
           <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -246,6 +259,13 @@ module BlueCollarSystems
             <div><label>Text Rendering</label>
               <select id="text_mode">#{text_opts}</select></div>
           </div>
+          <div class="row"><label>Match PDF Layers</label>
+            <select id="match_pdf_layers">
+              <option value="Yes"#{match_yes}>Yes — create SketchUp Tags from PDF layers</option>
+              <option value="No"#{match_no}>No — single import layer</option>
+            </select>
+            <p class="hint">When enabled, each PDF Optional Content Group (layer) becomes a matching Tag.</p>
+          </div>
           <div class="actions">
             <button class="btn btn-secondary" onclick="cancel()">Cancel</button>
             <button class="btn btn-secondary" onclick="advanced()">Advanced...</button>
@@ -256,7 +276,8 @@ module BlueCollarSystems
             pages:document.getElementById('pages').value.trim()||'All',
             scale:document.getElementById('scale').value.trim()||'1.0',
             import_text:document.getElementById('import_text').value,
-            text_mode:document.getElementById('text_mode').value};}
+            text_mode:document.getElementById('text_mode').value,
+            match_pdf_layers:document.getElementById('match_pdf_layers').value};}
           function doImport(){sketchup.on_import(payload());}
           function advanced(){sketchup.on_advanced(payload());}
           function cancel(){sketchup.on_cancel({});}
@@ -273,7 +294,7 @@ module BlueCollarSystems
           "<option value=\"#{esc(m)}\"#{sel}>#{esc(m)}</option>"
         }.join
 
-        text_opts = [['Labels','Labels'],['3D Text','3D Text'],['Glyphs','Glyphs'],['Geometry','Geometry']].map{|v,lbl|
+        text_opts = [['Geometry','Geometry'],['Glyphs','Glyphs'],['Labels','Labels'],['3D Text','3D Text']].map{|v,lbl|
           sel = d[:text_mode] == v ? ' selected' : ''
           "<option value=\"#{v}\"#{sel}>#{lbl}</option>"
         }.join
@@ -316,6 +337,14 @@ module BlueCollarSystems
             <div><label>Text Rendering</label>
               <select id="text_mode">#{text_opts}</select></div>
           </div>
+          <div class="section">Layers</div>
+          <div class="row"><label>Match PDF Layers</label>
+            <select id="match_pdf_layers">
+              <option value="Yes"#{' selected' if d[:match_pdf_layers] == 'Yes'}>Yes</option>
+              <option value="No"#{' selected' if d[:match_pdf_layers] == 'No'}>No</option>
+            </select>
+            <p class="hint">Map PDF Optional Content Groups to SketchUp Tags (same name, sanitized).</p>
+          </div>
           <div class="section">Layout</div>
           <div class="row2">
             <div><label>Grouping Mode</label>
@@ -334,6 +363,7 @@ module BlueCollarSystems
             scale:document.getElementById('scale').value.trim()||'1.0',
             import_text:document.getElementById('import_text').value,
             text_mode:document.getElementById('text_mode').value,
+            match_pdf_layers:document.getElementById('match_pdf_layers').value,
             grouping_mode:document.getElementById('grouping_mode').value,
             page_arrangement:document.getElementById('page_arrangement').value});}
           function cancel(){sketchup.on_cancel({});}
@@ -349,45 +379,49 @@ module BlueCollarSystems
       # ---- UI.inputbox fallbacks (headless / pre-2017 SU) ----------
       def self.show_inputbox_basic(filename, saved)
         prompts   = ["Pages (1, 1-5, or All):","Scale Factor:",
-                     "Import Text:","Text Rendering:"]
+                     "Import Text:","Text Rendering:","Match PDF Layers:"]
         defaults  = [saved[:pages]||'All', saved[:scale]||'1.0',
-                     saved[:import_text]||'Yes', saved[:text_mode]||'3D Text']
-        dropdowns = ['', '', YES_NO, TEXT_MODES]
+                     saved[:import_text]||'Yes', effective_text_mode(saved),
+                     effective_match_pdf_layers(saved)]
+        dropdowns = ['', '', YES_NO, TEXT_MODES, YES_NO]
         result = UI.inputbox(prompts, defaults, dropdowns, "Import PDF \u2014 #{filename}")
         return nil unless result
-        pages_str, scale_str, import_text_str, text_mode_str = result
+        pages_str, scale_str, import_text_str, text_mode_str, match_layers_str = result
         save_prefs(last_mode: 'Auto', pages: pages_str,
                    scale: scale_str, import_text: import_text_str,
-                   text_mode: text_mode_str)
+                   text_mode: text_mode_str, match_pdf_layers: match_layers_str)
         mode_raw = MODES['Auto']
         sym_attrs = {}
         mode_raw.each { |k, v| sym_attrs[k.to_sym] = v }
         build_opts(sym_attrs.merge(pages: pages_str, scale: scale_str,
                                    import_text: import_text_str,
-                                   text_mode: text_mode_str))
+                                   text_mode: text_mode_str,
+                                   match_pdf_layers: match_layers_str))
       end
 
       def self.show_inputbox_advanced(filename, pages_str, scale_str, text_mode_str, saved)
         prompts = [
           "Mode:","Pages:","Scale Factor:",
-          "Import Text:","Text Rendering:",
+          "Import Text:","Text Rendering:","Match PDF Layers:",
           "Grouping Mode:","Page Arrangement:"
         ]
         defaults = [
           valid_mode_name(saved[:last_mode]),
           pages_str||saved[:pages]||'All', scale_str||saved[:scale]||'1.0',
           saved[:import_text]||'Yes',
-          text_mode_str||saved[:text_mode]||'3D Text',
+          text_mode_str||effective_text_mode(saved),
+          effective_match_pdf_layers(saved),
           saved[:grouping_mode]||'Group per page',
           saved[:page_arrangement]||'Spread (20% gap)'
         ]
-        dropdowns = [MODE_NAMES,'','',YES_NO,TEXT_MODES,GROUPING_CHOICES,PAGE_ARRANGEMENT_CHOICES]
+        dropdowns = [MODE_NAMES,'','',YES_NO,TEXT_MODES,YES_NO,GROUPING_CHOICES,PAGE_ARRANGEMENT_CHOICES]
         result = UI.inputbox(prompts, defaults, dropdowns, "Advanced Import \u2014 #{filename}")
         return nil unless result
         p_mode,p_pages,p_scale,p_import_text,p_text_mode,
-        p_grouping_mode,p_page_arrangement = result
+        p_match_layers,p_grouping_mode,p_page_arrangement = result
         save_prefs(last_mode:p_mode,pages:p_pages,scale:p_scale,
                    import_text:p_import_text,text_mode:p_text_mode,
+                   match_pdf_layers:p_match_layers,
                    grouping_mode:p_grouping_mode,
                    page_arrangement:p_page_arrangement)
         mode_raw = MODES[p_mode] || MODES['Auto']
@@ -397,6 +431,7 @@ module BlueCollarSystems
                    group_per_page:'Yes',
                    group_by_color:'Yes',
                    import_text:p_import_text,text_mode:p_text_mode,
+                   match_pdf_layers:p_match_layers,
                    grouping_mode:p_grouping_mode,
                    page_arrangement:p_page_arrangement)
       end
@@ -427,16 +462,17 @@ module BlueCollarSystems
           pages = :all if pages.empty?
         end
 
-        # BCS-ARCH-001 text resolver: Labels|3D Text|Glyphs|Geometry
+        # BCS-ARCH-001 text resolver: Geometry|Glyphs|Labels|3D Text.
         # Import Text checkbox is the orthogonal on/off control.
         import_text_flag = (raw[:import_text] || 'Yes') == 'Yes'
-        text_mode_raw = (raw[:text_mode] || '3D Text').to_s
+        text_mode_raw = (raw[:text_mode] || 'Geometry').to_s
         text_mode = case text_mode_raw
-                    when /No text/i           then :labels   # legacy string — treated as labels, gated by import_text_flag
+                    when /No text/i           then :none
+                    when /Labels/i            then :labels
                     when /\A3D\s*Text\z/i     then :text3d
                     when /Glyphs/i            then :glyphs
                     when /Geometry/i          then :geometry
-                    else                            :labels
+                    else                            :geometry
                     end
         # If the user disables Import Text, force the pipeline to :none.
         text_mode = :none unless import_text_flag
@@ -484,34 +520,39 @@ module BlueCollarSystems
           cleanup_level:    'Balanced',
           lineweight_mode:  is_raster ? 'Ignore' : 'Preserve visually',
           grouping_mode:    (raw[:grouping_mode] || 'Group per page').to_s,
-          import_mode:      mode_str
+          import_mode:      mode_str,
+          match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes'
         }
       end
 
       PREF_KEY = 'BlueCollarSystems_PDFVectorImporter'.freeze
-      PREF_MIGRATE_TEXT_DEFAULT_KEY = 'text_mode_default_migrated_v372'.freeze
+
+      # Dialog default: last-used text mode from save_prefs; Geometry on first run.
+      def self.effective_text_mode(prefs)
+        mode = prefs[:text_mode].to_s
+        return mode if TEXT_MODE_CHOICES.include?(mode)
+
+        FIRST_RUN_TEXT_MODE
+      end
+
+      def self.effective_match_pdf_layers(prefs)
+        val = prefs[:match_pdf_layers].to_s
+        return val if %w[Yes No].include?(val)
+
+        FIRST_RUN_MATCH_PDF_LAYERS
+      end
 
       def self.load_prefs
         prefs = {}
         begin
           %w[last_mode last_preset pages scale layer_name
              group_per_page group_by_color
-             import_text text_mode
+             import_text text_mode match_pdf_layers
              grouping_mode
              page_arrangement import_mode
           ].each do |key|
             val = Sketchup.read_default(PREF_KEY, key, nil)
             prefs[key.to_sym] = val if val
-          end
-          # v3.7.2: migrate the old Labels default once. SketchUp labels are
-          # screen-facing annotations, so dense steel sheets can look wildly
-          # oversized compared with the PDF. Users can still choose Labels
-          # after migration; the flag prevents repeated overrides.
-          migrated = Sketchup.read_default(PREF_KEY, PREF_MIGRATE_TEXT_DEFAULT_KEY, nil)
-          if prefs[:text_mode].to_s == 'Labels' && migrated.to_s != 'Yes'
-            prefs[:text_mode] = '3D Text'
-            Sketchup.write_default(PREF_KEY, 'text_mode', '3D Text')
-            Sketchup.write_default(PREF_KEY, PREF_MIGRATE_TEXT_DEFAULT_KEY, 'Yes')
           end
           if prefs[:last_mode] && !MODES.key?(prefs[:last_mode].to_s)
             prefs[:last_mode] = 'Auto'
@@ -528,7 +569,17 @@ module BlueCollarSystems
 
       def self.save_prefs(hash)
         begin
-          hash.each { |key, val| Sketchup.write_default(PREF_KEY, key.to_s, val.to_s) }
+          hash.each do |key, val|
+            stored = case key.to_s
+                     when 'text_mode'
+                       effective_text_mode(text_mode: val)
+                     when 'match_pdf_layers'
+                       effective_match_pdf_layers(match_pdf_layers: val)
+                     else
+                       val.to_s
+                     end
+            Sketchup.write_default(PREF_KEY, key.to_s, stored)
+          end
         rescue StandardError => e
           Logger.warn("ImportDialog", "save_prefs failed: #{e.message}")
         end

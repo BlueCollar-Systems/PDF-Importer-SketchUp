@@ -22,10 +22,16 @@ See also [COMPATIBILITY.md](COMPATIBILITY.md) for Ruby 2.2 language constraints.
 
 | Option | SketchUp result |
 |--------|-----------------|
-| **Labels** | Editable text entities |
-| **3D Text** | 3D / extruded text geometry |
-| **Glyphs** | Per-glyph edges |
-| **Geometry** | Text as edges only |
+| **Geometry** | Text as edges only; first-run fallback and recommended production path |
+| **Glyphs** | Per-glyph edges; same high-fidelity SVG path pipeline |
+| **Labels** | Editable text entities; required to meet the same visual accuracy gate |
+| **3D Text** | 3D / extruded text geometry; required to meet the same visual accuracy gate |
+
+The dialog restores the last text rendering option used. It does not force Geometry after the user chooses another valid mode.
+
+### PDF layers / SketchUp Tags
+
+**Match PDF Layers** defaults to **Yes**. When a PDF has Optional Content Group layer data, the importer creates matching SketchUp Tags from the PDF layer names. Content without a PDF layer falls back to `PDF Import`; disabling the option intentionally routes content to the single import layer.
 
 ## CI coverage
 

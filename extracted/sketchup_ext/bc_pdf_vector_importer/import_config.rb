@@ -79,14 +79,14 @@ module BlueCollarSystems
       MODES = {
         'Auto' => {
           'import_mode'        => 'auto',
-          'text_mode'          => '3D Text',
+          'text_mode'          => 'Geometry',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
         }.freeze,
         'Vector' => {
           'import_mode'        => 'vector',
-          'text_mode'          => '3D Text',
+          'text_mode'          => 'Geometry',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -100,7 +100,7 @@ module BlueCollarSystems
         }.freeze,
         'Hybrid' => {
           'import_mode'        => 'hybrid',
-          'text_mode'          => '3D Text',
+          'text_mode'          => 'Geometry',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -121,18 +121,19 @@ module BlueCollarSystems
                     :arc_mode, :cleanup_level, :lineweight_mode, :grouping_mode,
                     :page_arrangement, :page_gap_ratio,
                     # BCS-ARCH-001 additions
-                    :import_mode
+                    :import_mode, :match_pdf_layers
 
       def initialize(attrs = {})
         # User-facing fields (settable from dialog/UI)
         @scale            = attrs[:scale]            || '1.0'
         @pages            = attrs[:pages]            || 'All'
         @import_text      = attrs[:import_text]      || 'Yes'
-        @text_mode        = attrs[:text_mode]        || '3D Text'
+        @text_mode        = attrs[:text_mode]        || 'Geometry'
         @import_mode      = attrs[:import_mode]      || 'auto'
         @grouping_mode    = attrs[:grouping_mode]    || 'Group per page'
         @page_arrangement = attrs[:page_arrangement] || 'Spread (20% gap)'
         @layer_name       = attrs[:layer_name]       || 'PDF Import'
+        @match_pdf_layers = attrs[:match_pdf_layers] || 'Yes'
         @group_per_page   = attrs[:group_per_page]   || 'Yes'
         @group_by_color   = attrs[:group_by_color]   || 'Yes'
 
@@ -196,7 +197,7 @@ module BlueCollarSystems
           arc_mode: @arc_mode, cleanup_level: @cleanup_level,
           lineweight_mode: @lineweight_mode, grouping_mode: @grouping_mode,
           page_arrangement: @page_arrangement, page_gap_ratio: @page_gap_ratio,
-          import_mode: @import_mode
+          import_mode: @import_mode, match_pdf_layers: @match_pdf_layers
         }
       end
 

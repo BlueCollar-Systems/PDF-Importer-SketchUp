@@ -16,22 +16,32 @@ module BlueCollarSystems
         :font_size,   # Effective font size (matrix-scaled, for text processing)
         :angle,       # Rotation angle in degrees
         :font_name,   # Font name (if available)
-        :raw_font_size # Raw font size from Tf operator (for geometry rendering)
+        :raw_font_size, # Raw font size from Tf operator (for geometry rendering)
+        :bbox_x0,     # Optional PDF bbox min X (points, media space)
+        :bbox_y0,     # Optional PDF bbox min Y (bottom, media space)
+        :bbox_x1,     # Optional PDF bbox max X
+        :bbox_y1,     # Optional PDF bbox max Y (top, media space)
+        :layer_name   # OCG layer name when marked content is active
       )
 
       # Common structural drawing fraction denominators
       VALID_DENOMS = [2, 4, 8, 16, 32, 64].freeze
 
-      def initialize(streams, font_maps = nil, opts = {})
+      def initialize(streams, font_maps = nil, opts = {}, ocg_map = {})
         @streams = streams
         @text_items = []
         @font_maps = {}
+        @ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        @gs_stack = []
         # Strict mode keeps raw text spans as close to source as possible.
         # Default remains false to preserve legacy behavior.
         @strict_text_fidelity = !!opts[:strict_text_fidelity]
         # Optional: disable run-merge heuristics (useful for text3d placement
         # where keeping native spans avoids accidental cross-label concatenation).
         @merge_text_runs = opts.key?(:merge_text_runs) ? !!opts[:merge_text_runs] : true
+        @ocg_map = ocg_map.is_a?(Hash) ? ocg_map : {}
+        @mc_layer_stack = []
+        @current_ocg_layer = nil
 
         (font_maps || {}).each do |k, v|
           key = k.to_s
@@ -70,6 +80,10 @@ module BlueCollarSystems
 
       def extract_text_from_stream(stream)
         # Text state
+        @ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        @gs_stack = []
+        @mc_layer_stack = []
+        @current_ocg_layer = nil
         tm = [1, 0, 0, 1, 0, 0]   # Text matrix
         tlm = [1, 0, 0, 1, 0, 0]  # Text line matrix
         font_size = 12.0
@@ -88,6 +102,15 @@ module BlueCollarSystems
             names = operand_stack.select { |t| t[:type] == :name }.map { |t| t[:value] }
 
             case op
+            when 'q'
+              save_graphics_state
+
+            when 'Q'
+              restore_graphics_state
+
+            when 'cm'
+              concat_matrix(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]) if nums.length >= 6
+
             when 'BT'
               in_text = true
               tm = [1, 0, 0, 1, 0, 0]
@@ -173,6 +196,26 @@ module BlueCollarSystems
                   emit_text(text, tm, font_size, font_name) if readable_text?(text)
                 end
               end
+
+            when 'BDC'
+              if names.length >= 2
+                tag = names[-2].to_s
+                props_name = names[-1].to_s.sub(/\A\//, '')
+                if tag == '/OC' && @ocg_map.key?(props_name)
+                  @mc_layer_stack.push(@current_ocg_layer)
+                  @current_ocg_layer = @ocg_map[props_name]
+                else
+                  @mc_layer_stack.push(@current_ocg_layer)
+                end
+              else
+                @mc_layer_stack.push(@current_ocg_layer)
+              end
+
+            when 'BMC'
+              @mc_layer_stack.push(@current_ocg_layer)
+
+            when 'EMC'
+              @current_ocg_layer = @mc_layer_stack.pop
             end
 
             operand_stack.clear
@@ -183,16 +226,18 @@ module BlueCollarSystems
       end
 
       def emit_text(text, tm, font_size, font_name)
+        text_matrix = multiply_matrix(tm, @ctm)
         # Extract position and rotation from text matrix
-        x = tm[4]
-        y = tm[5]
+        x = text_matrix[4]
+        y = text_matrix[5]
         # Font size is scaled by the text matrix (for text processing/dedup)
-        effective_size = font_size * Math.sqrt(tm[0]**2 + tm[1]**2)
+        effective_size = font_size * Math.sqrt(text_matrix[0]**2 + text_matrix[1]**2)
         effective_size = font_size if effective_size.abs < 0.001
         # Rotation angle
-        angle = -Math.atan2(tm[1], tm[0]) * 180.0 / Math::PI
+        angle = -Math.atan2(text_matrix[1], text_matrix[0]) * 180.0 / Math::PI
 
-        @text_items << TextItem.new(text, x, y, effective_size, angle, font_name, font_size)
+        @text_items << TextItem.new(text, x, y, effective_size, angle, font_name, font_size,
+                                    nil, nil, nil, nil, @current_ocg_layer)
       end
 
       def decode_text_operand(raw, font_name = nil)
@@ -703,6 +748,27 @@ module BlueCollarSystems
       rescue StandardError => e
         Logger.warn("TextParser", "deduplicate_text failed: #{e.message}")
         items
+      end
+
+      def save_graphics_state
+        @gs_stack << @ctm.dup
+      end
+
+      def restore_graphics_state
+        saved = @gs_stack.pop
+        @ctm = saved if saved
+      end
+
+      def concat_matrix(a, b, c, d, e, f)
+        m = @ctm
+        @ctm = [
+          a.to_f * m[0] + b.to_f * m[2],
+          a.to_f * m[1] + b.to_f * m[3],
+          c.to_f * m[0] + d.to_f * m[2],
+          c.to_f * m[1] + d.to_f * m[3],
+          e.to_f * m[0] + f.to_f * m[2] + m[4],
+          e.to_f * m[1] + f.to_f * m[3] + m[5]
+        ]
       end
 
       def multiply_matrix(m1, m2)

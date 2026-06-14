@@ -263,6 +263,47 @@ Every future contributor — human or LLM — who sees an opportunity to "add a 
 
 ---
 
-**BUILT. NOT BOUGHT.**
+---
 
-*END OF BCS-ARCH-001 v1.0*
+## Appendix A — PDF Layer → SketchUp Tag Mapping (ratified 2026-06-14)
+
+**Default:** `Match PDF Layers` is **ON** in the import dialog (persisted like text mode).
+
+| Behavior | Detail |
+|----------|--------|
+| Detection | PDF Optional Content Groups (OCG) via `/OCProperties`, page `/Properties`, and BDC/BMC/EMC marked content in content streams |
+| Tag names | Sanitized PDF OCG name (same name where SketchUp allows); fallback `PDF_Layer_{n}` |
+| Assignment | Vector paths and internal text spans receive the resolved Tag; geometry without OCG stays on `PDF Import` |
+| Cap | Preserve up to 512 layers; warn and assign overflow to base layer |
+| Opt-out | User unchecks **Match PDF Layers** → legacy single-layer import (`PDF Import` + `:Text` suffix) |
+
+**Owner directive:** *"By default, the layers should match the PDF files layers."*
+
+---
+
+## Appendix B — Text Label Insertion (ratified 2026-06-14, updated v3.7.19)
+
+**Default:** Labels and 3D Text share `text_insertion_pdf` (same anchor, angle, and mesh height).
+
+| Rule | Detail |
+|------|--------|
+| Part marks (`w####`, `a####`, `p####`) | Use PDF `estimate_angle`; do **not** force 90° from tall/narrow bbox alone |
+| Diagonal part marks | Preserve PDF angle when \|angle\| ≥ 8° and < 75°; center X when bbox is tall/narrow |
+| Internal matrix hints | When pdftotext bbox items match internal TextParser spans, merge CTM **x/y + angle** (bbox preserved) |
+| Matrix origin insertion | Rotated external items with enriched matrix origin skip bbox heuristics; use CTM anchor |
+| Tall bbox + horizontal PDF angle | Glyph height = shorter bbox side (`effective_font_size_pts`) |
+| Narrow vertical dims (centered) | Single-digit stacked fractions (`1 1/2`) stay horizontal; true vertical dims (`4'-0"`, `10 3/8` on member) rotate 90° |
+| Slope triangle numerals (`12`, `10 3/8`) | Center X and Y inside triangle bbox when height > width × 1.15 |
+| Diagonal dims (`7/8`) | Respect PDF angle; flatten only when \|angle\| < 12° |
+| Weld / TYP | Left-anchor at bbox x0; force horizontal (angle 0°) |
+| Rotated labels (\|angle\| > 8°) | Try `add_text` direction vector; mesh fallback when API returns nil |
+| Labels visual layer | Labels mode renders pdftocairo SVG text and hides native annotations when available |
+| Mesh left anchor | Centered label X converts to left anchor for `add_3d_text` via `mesh_label_anchor_pdf` |
+
+**Owner directive:** *"Part marks should match the PDF — horizontal on vertical members when the PDF says so, not rotated because pdftotext bbox is tall."*
+
+**Platform limits (SU 2017):** Native Labels are screen-space; Geometry/Glyphs use pdftocairo vector text. `add_3d_text` is Arial-only, left-aligned, extruded mesh — fallback when SVG unavailable. Rotated native label direction vectors are unreliable; mesh fallback preserves model-space fidelity.
+
+---
+
+**BUILT. NOT BOUGHT.**

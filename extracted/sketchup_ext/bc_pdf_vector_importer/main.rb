@@ -23,6 +23,7 @@ module BlueCollarSystems
     require File.join(dir, 'bezier')
     require File.join(dir, 'arc_fitter')
     require File.join(dir, 'ocg_parser')
+    require File.join(dir, 'layer_manager')
     require File.join(dir, 'xobject_parser')
     require File.join(dir, 'primitive_extractor')
     require File.join(dir, 'unit_parser')
@@ -50,6 +51,16 @@ module BlueCollarSystems
     # ================================================================
     # SHARED PIPELINE — single source of truth for all import paths
     # ================================================================
+    @last_import_layer_names = []
+
+    def self.register_import_layer_names(names)
+      @last_import_layer_names = Array(names).map(&:to_s)
+    end
+
+    def self.last_import_layer_names
+      @last_import_layer_names || []
+    end
+
     def self.safe_abort_operation(model, source)
       return unless model
       model.abort_operation
@@ -62,6 +73,100 @@ module BlueCollarSystems
     rescue StandardError => e
       Logger.warn("Raster", "pdftocairo lookup failed: #{e.message}")
       nil
+    end
+
+    def self.apply_internal_text_angle_hints(text_items, angle_items)
+      return text_items unless text_items && angle_items && !angle_items.empty?
+
+      hints = angle_items.select do |it|
+        it && it.text && !it.text.to_s.strip.empty? && it.angle.to_f.abs >= 12.0
+      end
+      return text_items if hints.empty?
+
+      text_items.map do |item|
+        next item unless item && item.text
+        next item if item.angle.to_f.abs >= 12.0
+
+        hint = nearest_text_angle_hint(item, hints)
+        hint ? clone_text_item_with_hints(item, hint) : item
+      end
+    rescue StandardError => e
+      Logger.warn("Pipeline", "apply internal text angle hints failed: #{e.message}")
+      text_items
+    end
+
+    def self.nearest_text_angle_hint(item, hints)
+      text = normalize_text_key(item.text)
+      return nil if text.empty?
+      ix, iy = text_item_anchor_for_angle(item)
+      fs = [item.font_size.to_f, 1.0].max
+      threshold = [fs * 2.5, 24.0].max
+      best = nil
+
+      hints.each do |hint|
+        next unless normalize_text_key(hint.text) == text
+        hx, hy = text_item_anchor_for_angle(hint)
+        dist = Math.sqrt(((hx - ix) ** 2) + ((hy - iy) ** 2))
+        next if dist > threshold
+        best = [dist, hint] if best.nil? || dist < best[0]
+      end
+
+      best ? best[1] : nil
+    rescue StandardError
+      nil
+    end
+
+    def self.normalize_text_key(text)
+      text.to_s.gsub(/\s+/, ' ').strip
+    rescue StandardError
+      ''
+    end
+
+    def self.text_item_anchor_for_angle(item)
+      if item.respond_to?(:bbox_x0) && item.bbox_x0 && item.bbox_x1 &&
+         item.bbox_y0 && item.bbox_y1
+        [
+          (item.bbox_x0.to_f + item.bbox_x1.to_f) * 0.5,
+          (item.bbox_y0.to_f + item.bbox_y1.to_f) * 0.5
+        ]
+      else
+        [item.x.to_f, item.y.to_f]
+      end
+    rescue StandardError
+      [0.0, 0.0]
+    end
+
+    def self.clone_text_item_with_angle(item, angle)
+      clone_text_item_with_hints(
+        item,
+        TextParser::TextItem.new(
+          item.text, item.x, item.y, item.font_size, angle,
+          item.font_name,
+          item.respond_to?(:raw_font_size) ? item.raw_font_size : nil
+        )
+      )
+    rescue StandardError
+      item
+    end
+
+    # Merge internal PDF text-matrix origin + angle onto external bbox items.
+    def self.clone_text_item_with_hints(item, hint)
+      TextParser::TextItem.new(
+        item.text,
+        hint.x,
+        hint.y,
+        item.font_size,
+        hint.angle.to_f,
+        item.font_name,
+        hint.respond_to?(:raw_font_size) ? hint.raw_font_size : item.raw_font_size,
+        item.respond_to?(:bbox_x0) ? item.bbox_x0 : nil,
+        item.respond_to?(:bbox_y0) ? item.bbox_y0 : nil,
+        item.respond_to?(:bbox_x1) ? item.bbox_x1 : nil,
+        item.respond_to?(:bbox_y1) ? item.bbox_y1 : nil,
+        item.respond_to?(:layer_name) ? item.layer_name : nil
+      )
+    rescue StandardError
+      item
     end
 
     # Auto-mode flood heuristics (mirrors the FreeCAD importer behavior).
@@ -340,13 +445,44 @@ module BlueCollarSystems
     def self.apply_camera_top_ortho(view, bb)
       return unless view && fit_usable_bounds?(bb)
       center = bb.center
-      eye = Geom::Point3d.new(center.x, center.y, center.z + 1000)
+      dx = (bb.max.x.to_f - bb.min.x.to_f).abs
+      dy = (bb.max.y.to_f - bb.min.y.to_f).abs
+      height = [dy, 1.0e-6].max
+      begin
+        if view.respond_to?(:vpwidth) && view.respond_to?(:vpheight)
+          vw = view.vpwidth.to_f
+          vh = view.vpheight.to_f
+          if vw > 0.0 && vh > 0.0
+            aspect = vw / vh
+            height = [height, dx / aspect].max if aspect > 0.0
+          end
+        end
+      rescue StandardError
+        # keep bbox-height fit
+      end
+      eye_z = [1000.0, height * 10.0].max
+      eye = Geom::Point3d.new(center.x, center.y, center.z + eye_z)
       target = center
       up = Geom::Vector3d.new(0, 1, 0)
-      view.camera = Sketchup::Camera.new(eye, target, up)
-      view.camera.perspective = false
+      camera = Sketchup::Camera.new(eye, target, up)
+      camera.perspective = false
+      framed = false
+      begin
+        if camera.respond_to?(:height=)
+          camera.height = height
+          framed = true
+        end
+      rescue StandardError
+        framed = false
+      end
+      view.camera = camera
+      begin
+        view.refresh if view.respond_to?(:refresh)
+      rescue StandardError
+      end
+      framed
     rescue StandardError
-      nil
+      false
     end
 
     # Zoom to imported geometry only — avoids reframing the whole model.
@@ -383,8 +519,9 @@ module BlueCollarSystems
       view = model.active_view
       return unless view
 
+      preferred_valid = fit_usable_bounds?(preferred_bb)
       bb = Geom::BoundingBox.new
-      bb.add(preferred_bb) if fit_usable_bounds?(preferred_bb)
+      bb.add(preferred_bb) if preferred_valid
 
       fit_targets = []
       unless fit_usable_bounds?(bb)
@@ -419,16 +556,22 @@ module BlueCollarSystems
 
       framed = false
       if fit_usable_bounds?(bb)
-        apply_camera_top_ortho(view, bb)
-        begin
-          view.zoom(bb)
-          framed = true
-        rescue StandardError
-          framed = false
+        framed = apply_camera_top_ortho(view, bb)
+        unless framed
+          begin
+            view.zoom(bb)
+            framed = true
+          rescue StandardError
+            framed = false
+          end
         end
+      end
 
-        # SketchUp 2017 often no-ops on zoom(bb) without error; entity zoom is reliable.
-        unless fit_entities.empty?
+      # Entity zoom is a fallback when page/geometry bounds zoom failed.
+      # Do not run after a successful bounds zoom — entity bounds ignore
+      # annotation text and can reframe to a corner clump of edges only.
+      unless framed
+        unless preferred_valid || fit_entities.empty?
           begin
             view.zoom(fit_entities)
             framed = true
@@ -562,19 +705,21 @@ module BlueCollarSystems
       # Reset ID counter once at the start of a multi-page import
       IDGen.reset
 
-      ocg.layer_list.each do |n|
-        t = "PDF::Layer::#{n}"
-        model.layers.add(t) unless model.layers[t]
-      end
+      match_pdf_layers = opts[:match_pdf_layers] != false
+      layer_mgr = LayerManager.new(model,
+        base_layer_name: opts[:layer_name] || 'PDF Import',
+        match_pdf_layers: match_pdf_layers)
+      layer_mgr.precreate_pdf_layers(ocg.layer_list)
+      layer_mgr.register_imported_names!
 
       requested_text_mode = opts[:text_mode]
-      requested_text_mode ||= (opts[:use_3d_text] ? :geometry : (opts[:import_text] ? :labels : :none))
+      requested_text_mode ||= (opts[:use_3d_text] ? :text3d : (opts[:import_text] ? :geometry : :none))
       requested_text_mode = :none unless opts[:import_text]
 
       stats = { pages: 0, primitives: 0, edges: 0, faces: 0, arcs: 0,
-                text: 0, components: 0, layers: ocg.layer_list, cleanup: {},
+                text: 0, components: 0, layers: [], cleanup: {},
                 generic: nil, mode_used: nil, xobjects: 0,
-                text_mode: requested_text_mode }
+                text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers }
       page_fit_bounds = Geom::BoundingBox.new
 
       import_start = Time.now
@@ -680,13 +825,11 @@ module BlueCollarSystems
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Extracting text... [#{(Time.now - import_start).round(1)}s]"
           strict_text_fidelity = !!opts[:strict_text_fidelity]
           text3d_mode = (requested_text_mode == :text3d)
-          # Strict mode is opt-in only. For text3d we still prefer internal
-          # placement, but do not force strict token mode (it can regress
-          # reconstructed dimensions like 15/16 and 3'-10 1/2).
           strict_text_processing = strict_text_fidelity
-          # For text3d, baseline/matrix placement from stream parsing is usually
-          # the most stable for rotated/angled dimensions and callouts.
-          prefer_internal_text = text3d_mode || strict_text_processing
+          # Geometry/Labels/3D Text favor external bbox extraction for maximum visible
+          # text coverage and shared placement heuristics. Internal parsing remains
+          # for strict modes or when external extraction returns nothing.
+          prefer_internal_text = strict_text_processing
           # Guard: skip internal parsing for very large streams (>5MB total).
           # The internal Ruby parser is too slow for monster PDFs like GIS maps.
           # Fall through to external pdftotext which handles them efficiently.
@@ -714,7 +857,7 @@ module BlueCollarSystems
             # For 3D text, preserving native spans avoids accidental
             # concatenation/offset caused by run-merge heuristics.
             parser_opts[:merge_text_runs] = false if requested_text_mode == :text3d
-            text_items = TextParser.new(streams, font_maps, parser_opts).parse
+            text_items = TextParser.new(streams, font_maps, parser_opts, ocg_map).parse
             text_source = :internal
             if text_items.nil? || text_items.empty?
               text_items = ExternalTextExtractor.extract(path, page_num,
@@ -731,8 +874,23 @@ module BlueCollarSystems
               font_maps = parser.page_font_maps(page_num)
               parser_opts = { strict_text_fidelity: strict_text_processing }
               parser_opts[:merge_text_runs] = false if requested_text_mode == :text3d
-              text_items = TextParser.new(streams, font_maps, parser_opts).parse
+              text_items = TextParser.new(streams, font_maps, parser_opts, ocg_map).parse
               text_source = :internal
+            end
+          end
+          if text_source == :external && text_items && !text_items.empty? &&
+             stream_bytes <= stream_limit_bytes
+            begin
+              angle_font_maps = defined?(font_maps) && font_maps ? font_maps : parser.page_font_maps(page_num)
+              angle_items = TextParser.new(
+                streams,
+                angle_font_maps,
+                { strict_text_fidelity: true, merge_text_runs: false },
+                ocg_map
+              ).parse
+              text_items = apply_internal_text_angle_hints(text_items, angle_items)
+            rescue StandardError => e
+              Logger.warn("Pipeline", "Page #{page_num}: internal text angle hints unavailable: #{e.message}")
             end
           end
           Logger.info("Pipeline", "Page #{page_num}: text extractor=#{text_source}, items=#{text_items ? text_items.length : 0}")
@@ -831,8 +989,17 @@ module BlueCollarSystems
           end
         end
 
-        # When geometry text mode: try pdftocairo first, skip text in builder
-        use_svg_text = (requested_text_mode == :geometry) && opts[:import_text]
+        # When glyph/geometry/3D Text mode: try pdftocairo first, skip text in builder.
+        # Labels mode keeps native SketchUp labels, then adds an SVG-backed visual
+        # text layer where available so PDF scale/rotation stays faithful. Native
+        # labels are hidden after the visual layer succeeds because SU annotations
+        # are screen-size objects and cannot be the sole PDF-accurate rendering.
+        # Layer-matched imports use internal text parsing so each span lands on its OCG tag.
+        use_svg_text = [:geometry, :glyphs, :text3d].include?(requested_text_mode) && opts[:import_text]
+        label_visual_text = (requested_text_mode == :labels) && opts[:import_text]
+        if match_pdf_layers && !ocg.layer_list.empty?
+          use_svg_text = false
+        end
         builder_use_3d_text = (requested_text_mode == :text3d)
         builder_text_items = use_svg_text ? [] : text_items
 
@@ -846,10 +1013,32 @@ module BlueCollarSystems
           import_text: use_svg_text ? false : opts[:import_text],
           use_3d_text: builder_use_3d_text,
           strict_text_fidelity: opts[:strict_text_fidelity],
+          layer_manager: layer_mgr,
           y_offset: page_y_offset)
         result = builder.build
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
+
+        if label_visual_text && builder.page_group
+          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering label visual text... [#{(Time.now - import_start).round(1)}s]"
+          label_text_layer = layer_mgr.text_fallback_layer
+          label_svg_result = SvgTextRenderer.render(
+            builder.page_group.entities, path, page_num, media_box,
+            scale: opts[:scale], layer: label_text_layer, y_offset: page_y_offset,
+            svg_page_box: svg_page_box)
+          if label_svg_result
+            stats[:text] += label_svg_result[:glyphs]
+            stats[:edges] += label_svg_result[:edges]
+            stats[:text_mode] = :labels
+            begin
+              builder.text_group.hidden = true if builder.text_group && builder.text_group.respond_to?(:hidden=)
+            rescue StandardError => e
+              Logger.warn("Pipeline", "Could not hide native label annotations: #{e.message}")
+            end
+          else
+            Logger.warn("Pipeline", "Label visual text unavailable — native SketchUp labels preserved.")
+          end
+        end
 
         # Build hatching on separate layer if group mode
         if hatch_mode == :group && !hatch_paths.empty? && builder.page_group
@@ -862,6 +1051,7 @@ module BlueCollarSystems
             import_fills: false, group_by_color: false,
             detect_arcs: false, map_dashes: false,
             import_text: false, use_3d_text: false,
+            layer_manager: layer_mgr,
             target_entities: builder.page_group.entities)
           hatch_result = hatch_builder.build
           stats[:edges] += hatch_result[:edges]
@@ -877,9 +1067,7 @@ module BlueCollarSystems
         # Render text as precise vector geometry via pdftocairo
         if use_svg_text && builder.page_group
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
-          text_layer_name = "#{opts[:layer_name] || 'PDF Import'}:Text"
-          text_layer = model.layers[text_layer_name] ||
-                       model.layers.add(text_layer_name)
+          text_layer = layer_mgr.text_fallback_layer
           svg_result = SvgTextRenderer.render(
             builder.page_group.entities, path, page_num, media_box,
             scale: opts[:scale], layer: text_layer, y_offset: page_y_offset,
@@ -888,7 +1076,11 @@ module BlueCollarSystems
           if svg_result
             stats[:text] += svg_result[:glyphs]
             stats[:edges] += svg_result[:edges]
-            stats[:text_mode] = :geometry
+            stats[:text_mode] = case requested_text_mode
+                                when :glyphs then :glyphs
+                                when :text3d then :text3d
+                                else :geometry
+                                end
           else
             # SVG glyph text unavailable/disabled — preserve the user's selected
             # fallback intent (geometry/text3d => add_3d_text, labels => add_text).
@@ -901,6 +1093,7 @@ module BlueCollarSystems
               group_per_page: false, page_number: page_num,
               flatten_to_2d: true, import_text: true, use_3d_text: fallback_use_3d,
               strict_text_fidelity: opts[:strict_text_fidelity],
+              layer_manager: layer_mgr,
               y_offset: page_y_offset,
               target_entities: builder.page_group.entities)
             fb_result = fallback_builder.build
@@ -934,6 +1127,10 @@ module BlueCollarSystems
       end
 
       model.commit_operation
+
+      layer_mgr.register_imported_names!
+      stats[:layers] = layer_mgr.imported_names
+      stats[:layer_warning] = layer_mgr.warning
 
       # Release the raw PDF buffer and object cache to free memory.
       begin
