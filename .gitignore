@@ -58,3 +58,6 @@ __pycache__/
 # Dev artifacts
 dev_logs/
 _rbz_compare/
+
+# Local debug scratch files
+tmp_*
