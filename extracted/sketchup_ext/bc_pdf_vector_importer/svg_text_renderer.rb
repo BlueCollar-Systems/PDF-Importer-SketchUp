@@ -61,6 +61,7 @@ module BlueCollarSystems
 
         used_cropbox_fallback = false
         render_ok = false
+        render_stderr = ""
         arg_variants.each_with_index do |args, idx|
           begin
             File.delete(svg_path) if File.exist?(svg_path)
@@ -75,6 +76,7 @@ module BlueCollarSystems
           )
           if run[:ok] && File.exist?(svg_path)
             used_cropbox_fallback = (idx == 1 && use_cropbox)
+            render_stderr = run[:stderr].to_s
             render_ok = true
             break
           end
@@ -141,6 +143,13 @@ module BlueCollarSystems
           glyph_defs[glyph_id] = defn if defn.entities.count > 0
         end
 
+        # Guard against font-substitution failures (see collapsed_signature_keys):
+        # skip glyphs pdftocairo stamped at one identical transform so they do
+        # not pile into a blob.
+        collapsed_set = {}
+        collapsed_signature_keys(placements).each { |k| collapsed_set[k] = true }
+        skipped_collapsed = 0
+
         # Place instances (fast)
         total = placements.length
         placements.each_with_index do |p, idx|
@@ -150,6 +159,11 @@ module BlueCollarSystems
 
           defn = glyph_defs[p[:glyph_id]]
           next unless defn
+
+          if collapsed_set[placement_signature(p)]
+            skipped_collapsed += 1
+            next
+          end
 
           begin
             tr = nil
@@ -187,7 +201,22 @@ module BlueCollarSystems
           end
         end
 
-        { edges: edge_count, glyphs: glyph_count }
+        missing_fonts = missing_display_fonts(render_stderr)
+        if skipped_collapsed > 0
+          note = missing_fonts.empty? ? "" : " (unresolved font#{missing_fonts.length > 1 ? 's' : ''}: #{missing_fonts.join(', ')})"
+          begin
+            Logger.warn("SvgTextRenderer",
+              "Page #{page_num}: skipped #{skipped_collapsed} glyph(s) collapsed onto one point#{note}; " \
+              "those characters were not rendered. Install/enable the font for full fidelity.")
+          rescue StandardError
+          end
+          begin
+            Sketchup.status_text = "PDF text: skipped #{skipped_collapsed} unresolved glyph(s)#{note}" if defined?(Sketchup)
+          rescue StandardError
+          end
+        end
+
+        { edges: edge_count, glyphs: glyph_count, skipped_glyphs: skipped_collapsed, missing_fonts: missing_fonts }
       rescue StandardError => e
         begin
           Logger.warn("SvgTextRenderer", "Failed: #{e.message}")
@@ -278,6 +307,41 @@ module BlueCollarSystems
           a << { glyph_id: id, x: x, y: y, matrix: matrix }
         end
         a
+      end
+
+      # ------------------------------------------------------------------
+      # Missing-font / collapsed-glyph guard.
+      # When pdftocairo cannot resolve a font (e.g. the non-embedded base-14
+      # "Symbol" font), it stamps many glyph <use> placements at one identical
+      # transform (typically the page-box corner). Rendering those piles
+      # hundreds of glyphs on a single point -> an illegible blob. Detect any
+      # transform shared by >= MIN_COLLAPSE_REPEAT placements and skip them.
+      # ------------------------------------------------------------------
+      MIN_COLLAPSE_REPEAT = 12
+
+      def self.placement_signature(p)
+        m = p[:matrix]
+        if m.is_a?(Array) && m.length >= 6
+          a = m[0].to_f; b = m[1].to_f; c = m[2].to_f; d = m[3].to_f
+          e = m[4].to_f + p[:x].to_f
+          f = m[5].to_f + p[:y].to_f
+          "m:#{a.round(3)},#{b.round(3)},#{c.round(3)},#{d.round(3)},#{e.round(2)},#{f.round(2)}"
+        else
+          "p:#{p[:x].to_f.round(2)},#{p[:y].to_f.round(2)}"
+        end
+      end
+
+      def self.collapsed_signature_keys(placements, min_repeat = MIN_COLLAPSE_REPEAT)
+        counts = Hash.new(0)
+        placements.each { |pl| counts[placement_signature(pl)] += 1 }
+        keys = []
+        counts.each { |k, n| keys << k if n >= min_repeat }
+        keys
+      end
+
+      def self.missing_display_fonts(stderr)
+        return [] unless stderr.is_a?(String) && !stderr.empty?
+        stderr.scan(/No display font for '([^']+)'/).map { |mm| mm[0] }.uniq
       end
 
       def self.parse_viewbox(svg)
