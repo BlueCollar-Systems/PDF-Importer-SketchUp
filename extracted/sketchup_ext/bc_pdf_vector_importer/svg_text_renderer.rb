@@ -20,6 +20,11 @@ module BlueCollarSystems
         exe = find_pdftocairo
         return nil unless exe
 
+        # If the PDF references non-embedded fonts (e.g. the base-14 "Symbol"
+        # font) that pdftocairo can't resolve on this platform, embed them once
+        # via Ghostscript so text renders instead of collapsing to a blob.
+        render_pdf = ensure_renderable_pdf(pdf_path, exe)
+
         scale = opts[:scale] || 1.0
         y_offset = opts[:y_offset] || 0.0
         text_layer = opts[:layer]
@@ -52,7 +57,7 @@ module BlueCollarSystems
           '-f', page_num.to_i.to_s,
           '-l', page_num.to_i.to_s,
           '--',
-          pdf_path.to_s,
+          render_pdf.to_s,
           svg_path.to_s
         ]
         arg_variants = []
@@ -342,6 +347,130 @@ module BlueCollarSystems
       def self.missing_display_fonts(stderr)
         return [] unless stderr.is_a?(String) && !stderr.empty?
         stderr.scan(/No display font for '([^']+)'/).map { |mm| mm[0] }.uniq
+      end
+
+      # ------------------------------------------------------------------
+      # Ghostscript font-embedding fallback.
+      # poppler on some platforms cannot substitute non-embedded base-14
+      # fonts (notably "Symbol"). When the PDF has non-embedded fonts and
+      # Ghostscript is available, embed them once into a temp copy so
+      # pdftocairo renders them. Cached per source path+mtime+size.
+      # ------------------------------------------------------------------
+      def self.ghostscript_embed_args(gs, in_pdf, out_pdf)
+        [
+          gs.to_s,
+          '-dNOSAFER', '-dBATCH', '-dNOPAUSE', '-dQUIET',
+          '-sDEVICE=pdfwrite',
+          '-dEmbedAllFonts=true',
+          '-dSubsetFonts=true',
+          '-dCompatibilityLevel=1.7',
+          '-o', out_pdf.to_s,
+          in_pdf.to_s
+        ]
+      end
+
+      def self.pdffonts_reports_unembedded?(output)
+        return false unless output.is_a?(String)
+        output.each_line do |line|
+          m = line.match(/\b(yes|no)\s+(yes|no)\s+(yes|no)\s+\d+\s+\d+\s*$/)
+          return true if m && m[1] == 'no'
+        end
+        false
+      end
+
+      def self.cache_key(pdf_path)
+        st = File.stat(pdf_path)
+        "#{pdf_path}|#{st.mtime.to_i}|#{st.size}"
+      rescue StandardError
+        pdf_path.to_s
+      end
+
+      def self.find_pdffonts(pdftocairo_exe)
+        return nil unless pdftocairo_exe
+        name = (RUBY_PLATFORM =~ /mswin|mingw|cygwin/) ? 'pdffonts.exe' : 'pdffonts'
+        cand = File.join(File.dirname(pdftocairo_exe.to_s), name)
+        File.exist?(cand) ? cand : nil
+      end
+
+      def self.find_ghostscript
+        env = ENV['BC_GHOSTSCRIPT_PATH']
+        return env if env && !env.empty? && File.exist?(env)
+        begin
+          if (RUBY_PLATFORM =~ /mswin|mingw|cygwin/)
+            matches = []
+            ['C:/Program Files/gs/gs*/bin/gswin64c.exe',
+             'C:/Program Files (x86)/gs/gs*/bin/gswin32c.exe'].each do |pat|
+              Dir.glob(pat).each { |p| matches << p }
+            end
+            return matches.sort.last unless matches.empty?
+            r = `where gswin64c.exe 2>NUL`.strip
+            r = `where gswin32c.exe 2>NUL`.strip if r.empty?
+            return r.split("\n").first.strip unless r.empty?
+          else
+            r = `which gs 2>/dev/null`.strip
+            return r.split("\n").first.strip unless r.empty?
+          end
+        rescue StandardError => e
+          (Logger.warn("SvgTextRenderer", "find_ghostscript failed: #{e.message}") rescue nil)
+        end
+        nil
+      end
+
+      def self.pdf_needs_embedding?(pdf_path, pdftocairo_exe)
+        @font_check_cache ||= {}
+        key = cache_key(pdf_path)
+        return @font_check_cache[key] if @font_check_cache.key?(key)
+        result = false
+        begin
+          pf = find_pdffonts(pdftocairo_exe)
+          if pf
+            run = CommandRunner.run([pf.to_s, '--', pdf_path.to_s],
+              timeout_s: 30, context: 'SvgTextRenderer.pdffonts')
+            result = run[:ok] && pdffonts_reports_unembedded?(run[:stdout].to_s)
+          end
+        rescue StandardError => e
+          (Logger.warn("SvgTextRenderer", "pdf_needs_embedding? failed: #{e.message}") rescue nil)
+          result = false
+        end
+        @font_check_cache[key] = result
+        result
+      end
+
+      def self.embed_fonts_cached(pdf_path, gs)
+        @embed_cache ||= {}
+        key = cache_key(pdf_path)
+        cached = @embed_cache[key]
+        return cached if cached && File.exist?(cached)
+        out = File.join(Dir.tmpdir,
+          "bc_embed_#{Process.pid}_#{Time.now.to_i}_#{rand(100000)}.pdf")
+        begin
+          run = CommandRunner.run(ghostscript_embed_args(gs, pdf_path, out),
+            timeout_s: 180, context: 'SvgTextRenderer.ghostscript')
+          if run[:ok] && File.exist?(out) && File.size(out) > 0
+            @embed_cache[key] = out
+            return out
+          end
+          File.delete(out) if File.exist?(out)
+        rescue StandardError => e
+          (Logger.warn("SvgTextRenderer", "embed_fonts_cached failed: #{e.message}") rescue nil)
+        end
+        nil
+      end
+
+      def self.ensure_renderable_pdf(pdf_path, pdftocairo_exe)
+        return pdf_path unless pdf_needs_embedding?(pdf_path, pdftocairo_exe)
+        gs = find_ghostscript
+        unless gs
+          (Logger.warn("SvgTextRenderer",
+            "PDF has non-embedded fonts and Ghostscript was not found; symbols from " \
+            "unresolved fonts may be skipped. Install Ghostscript for full fidelity.") rescue nil)
+          return pdf_path
+        end
+        embedded = embed_fonts_cached(pdf_path, gs)
+        embedded || pdf_path
+      rescue StandardError => e
+        (Logger.warn("SvgTextRenderer", "ensure_renderable_pdf failed: #{e.message}") rescue nil)
+        pdf_path
       end
 
       def self.parse_viewbox(svg)
