@@ -51,6 +51,8 @@ module BlueCollarSystems
           lines << "#{text} text items imported#{mode_label.empty? ? '.' : ' ' + mode_label + '.'}"
         end
 
+        append_text_renderer_lines(lines, stats)
+
         comps = stats[:components] || 0
         lines << "#{comps} repeated symbols converted to components." if comps > 0
 
@@ -136,6 +138,71 @@ module BlueCollarSystems
         end
 
         lines.join("\n")
+      end
+
+      def self.append_text_renderer_lines(lines, stats)
+        entries = stats[:text_renderers] || []
+        return if entries.empty?
+
+        grouped = {}
+        entries.each do |entry|
+          renderer = entry[:renderer] || entry['renderer'] || :unknown
+          degraded = entry[:degraded] || entry['degraded'] ? true : false
+          key = [renderer.to_s, degraded]
+          grouped[key] ||= []
+          grouped[key] << entry
+        end
+
+        lines << ""
+        lines << "Text renderer details:"
+        grouped.keys.sort.each do |key|
+          renderer_key, degraded = key
+          pages = grouped[key].map { |entry| entry[:page] || entry['page'] }
+          page_word = pages.compact.length == 1 ? "page" : "pages"
+          suffix = degraded ? " (degraded)." : "."
+          lines << "#{text_renderer_label(renderer_key)}: #{page_word} #{format_page_list(pages)}#{suffix}"
+        end
+      end
+
+      def self.text_renderer_label(renderer)
+        case renderer.to_s
+        when 'pdftocairo'
+          'Poppler SVG (pdftocairo)'
+        when 'mutool'
+          'MuPDF SVG (mutool)'
+        when 'add_3d_text'
+          'SketchUp 3D text fallback'
+        when 'labels'
+          'SketchUp label fallback'
+        when 'internal_parser'
+          'Internal PDF text parser'
+        else
+          renderer.to_s.empty? ? 'Unknown text renderer' : renderer.to_s
+        end
+      end
+
+      def self.format_page_list(pages)
+        nums = pages.compact.map { |p| p.to_i }.select { |p| p > 0 }.sort.uniq
+        return "" if nums.empty?
+
+        ranges = []
+        start_page = nums[0]
+        prev_page = nums[0]
+        nums[1..-1].to_a.each do |page|
+          if page == prev_page + 1
+            prev_page = page
+          else
+            ranges << page_range_label(start_page, prev_page)
+            start_page = page
+            prev_page = page
+          end
+        end
+        ranges << page_range_label(start_page, prev_page)
+        ranges.join(', ')
+      end
+
+      def self.page_range_label(first_page, last_page)
+        first_page == last_page ? first_page.to_s : "#{first_page}-#{last_page}"
       end
 
       # ---------------------------------------------------------------

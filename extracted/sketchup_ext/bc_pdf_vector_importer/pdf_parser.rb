@@ -87,6 +87,7 @@ module BlueCollarSystems
         media_box = parse_array_nums(media_box) if media_box
         crop_box = find_inherited(dict, '/CropBox')
         crop_box = parse_array_nums(crop_box) if crop_box
+        rotation = normalize_rotation(find_inherited(dict, '/Rotate'))
 
         # Content streams
         contents = dict['/Contents']
@@ -95,7 +96,7 @@ module BlueCollarSystems
           streams = collect_content_streams(contents)
         end
 
-        { media_box: media_box, crop_box: crop_box, content_streams: streams }
+        { media_box: media_box, crop_box: crop_box, rotation: rotation, content_streams: streams }
       end
 
       # ---------------------------------------------------------------
@@ -488,6 +489,13 @@ module BlueCollarSystems
         elsif pb <= pc then b
         else c
         end
+      end
+
+      def normalize_rotation(raw)
+        rot = raw.to_i % 360
+        [0, 90, 180, 270].include?(rot) ? rot : 0
+      rescue StandardError
+        0
       end
 
       private

@@ -12,8 +12,11 @@ $LOAD_PATH.unshift(SRC_ROOT)
 require 'bc_pdf_vector_importer/logger'
 require 'bc_pdf_vector_importer/text_parser'
 require 'bc_pdf_vector_importer/external_text_extractor'
+require_relative '../corpus_paths'
 
-PDF_1017 = 'C:/Users/Rowdy Payton/Desktop/PDFTest Files/1017 - Rev 0.pdf'
+pdf_1017 = ENV['BCS_1017_PDF'].to_s
+pdf_1017 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('1017 - Rev 0.pdf').to_s if pdf_1017.empty?
+PDF_1017 = pdf_1017
 PDF_TOL = 1.5
 
 $failures = []

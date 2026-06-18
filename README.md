@@ -3,17 +3,17 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.23-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.26-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
-Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support. Pure-Ruby PDF parser -- no external dependencies.
+Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support. Core vector import uses the built-in Ruby parser; optional MuPDF, Poppler, and Ghostscript helpers increase fidelity for text, raster, SVG, and non-embedded font cases.
 
 ---
 
 ## Overview
 
-PDF Vector Importer parses PDF content streams directly in Ruby and reconstructs vector geometry as native SketchUp edges. No gems, no external binaries, no C extensions. It runs on every platform SketchUp supports, from SketchUp 2017 Make (Ruby 2.2) through the current Pro release.
+PDF Vector Importer parses PDF content streams directly in Ruby and reconstructs vector geometry as native SketchUp edges. The core vector path does not require Ruby gems, C extensions, or external binaries. Higher-fidelity helper paths can use MuPDF (`mutool`), Poppler (`pdftocairo`, `pdftotext`) and Ghostscript when present, and degrade to built-in parsing when they are missing. It runs on supported SketchUp PCs from SketchUp 2017 Make (Ruby 2.2) through the current Pro release.
 
 The importer profiles each PDF document to identify its origin (fabrication drawings, CAD exports, architectural plans, vector art, or raster scans) and adapts its import strategy accordingly.
 
@@ -26,7 +26,7 @@ The importer profiles each PDF document to identify its origin (fabrication draw
 - **4 Text Rendering Options** — Geometry, Glyphs, Labels, 3D Text
   (orthogonal to mode) + separate Import text toggle. The dialog reopens
   with the last text rendering option used; first-run fallback is Geometry.
-- **Pure-Ruby PDF parser** — no gems or external dependencies required
+- **Built-in Ruby vector parser** — core vector import requires no gems or C extensions
 - **Adaptive Bezier subdivision** with configurable flatness tolerance
 - **Kasa algebraic circle fitting** for arc reconstruction from point sequences
 - **OCG layer support** — PDF Optional Content Groups map to SketchUp Tags
@@ -58,6 +58,23 @@ The extension registers under **File > Import** and adds a PDF Vector Importer t
 
 For SketchUp 2025 users: native PDF import discoverability changed in SketchUp UI,
 but this extension still provides dedicated PDF import menu and toolbar commands.
+
+## Optional Helpers / Any-PC Behavior
+
+The importer must run on a supported PC without hardcoded local paths. Optional
+helpers are detected at runtime and reported through **Extensions > PDF Vector
+Importer > Compatibility Report**.
+
+| Helper | Used for | If missing |
+|--------|----------|------------|
+| MuPDF `mutool` | SVG/glyph text geometry when Poppler is not installed | Poppler or built-in text fallback is used |
+| Poppler `pdftocairo` | SVG/glyph text geometry, raster page rendering, and SVG-assisted geometry recovery | Built-in Ruby parser remains available; SVG/raster helper paths are disabled |
+| Poppler `pdftotext` | Higher-fidelity text bounding boxes and line reconstruction | Internal text parser fallback is used |
+| Poppler `pdffonts` | Detecting non-embedded fonts before SVG text rendering | Font preflight is unavailable |
+| Ghostscript | Embedding non-embedded fonts into a temporary render copy when needed | Text still imports, but unresolved symbols may be skipped or approximated |
+
+Environment overrides are supported for managed PCs: `BC_PDFTOCAIRO_PATH`,
+`BC_MUTOOL_PATH`, `BC_PDFTOTEXT_PATH`, and `BC_GHOSTSCRIPT_PATH`.
 
 ---
 
@@ -187,7 +204,7 @@ bc_pdf_vector_importer/
 |-----------|---------|
 | **Encrypted PDFs** | Password-protected PDFs cannot be imported. Remove encryption first using Adobe Acrobat, Preview (macOS), or qpdf. |
 | **Compression filters** | FlateDecode is supported. LZWDecode, ASCII85Decode, ASCIIHexDecode, and RunLengthDecode streams are not fully supported and may be skipped. |
-| **Embedded fonts** | Text rendered with embedded subset fonts may not extract correctly. The importer can fall back to external pdftotext for higher-fidelity text extraction. |
+| **Font-dependent text** | Text rendered with embedded subset fonts, non-embedded fonts, or platform-missing display fonts may require Poppler and Ghostscript for maximum fidelity. Without those helpers, the importer falls back to internal parsing and reports the reduced capability. |
 | **Clipped/XObject-heavy PDFs** | Deeply nested form XObjects and aggressive clipping can lead to partial geometry recovery. |
 | **Raster-only scans** | Pure image/scanned PDFs with no vector operators will not produce SketchUp edges. |
 | **Very large PDFs** | Files over 500 MB are rejected. Dense drawings with over 1 million path operators per stream are truncated. Split large documents before importing. |

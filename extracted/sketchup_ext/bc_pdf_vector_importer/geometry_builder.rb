@@ -5,6 +5,8 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
+require File.join(File.dirname(__FILE__), 'page_transform')
+
 module BlueCollarSystems
   module PDFVectorImporter
     class GeometryBuilder
@@ -41,6 +43,7 @@ module BlueCollarSystems
         @strict_text_fidelity = opts[:strict_text_fidelity] || false
         @target_entities = opts[:target_entities] || nil
         @y_offset        = opts[:y_offset] || 0.0
+        @page_rotation   = PageTransform.normalize_rotation(opts[:page_rotation])
 
         @edge_count = 0
         @face_count = 0
@@ -63,15 +66,15 @@ module BlueCollarSystems
           target = entities
         end
 
-        page_height = @media_box[3] - @media_box[1]
+        page_height = PageTransform.effective_height(@media_box, @page_rotation)
         page_origin_x = @media_box[0]
         page_origin_y = @media_box[1]
 
         # Color group cache
         @color_groups = {}
 
-        page_width  = (@media_box[2] - @media_box[0]).abs
-        page_height_pts = (@media_box[3] - @media_box[1]).abs
+        page_width  = PageTransform.effective_width(@media_box, @page_rotation)
+        page_height_pts = PageTransform.effective_height(@media_box, @page_rotation)
         page_area_pts = page_width * page_height_pts
 
         # ── Vector geometry ──
@@ -182,11 +185,34 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Coordinate conversion
       # ---------------------------------------------------------------
-      def pdf_to_su(pdf_x, pdf_y, origin_x, origin_y)
-        x_inch = (pdf_x - origin_x) * PDF_POINT_TO_INCH * @scale
-        y_inch = (pdf_y - origin_y) * PDF_POINT_TO_INCH * @scale + @y_offset
+      def pdf_to_su(pdf_x, pdf_y, origin_x, origin_y, displayed_space = false)
+        if @page_rotation != 0 && displayed_space
+          x_pts = pdf_x.to_f
+          y_pts = pdf_y.to_f
+        elsif @page_rotation != 0
+          x_pts, y_pts = PageTransform.transform_point(pdf_x, pdf_y, @media_box, @page_rotation)
+        else
+          x_pts = pdf_x.to_f - origin_x.to_f
+          y_pts = pdf_y.to_f - origin_y.to_f
+        end
+
+        x_inch = x_pts * PDF_POINT_TO_INCH * @scale
+        y_inch = y_pts * PDF_POINT_TO_INCH * @scale + @y_offset
         z_inch = 0.0
         Geom::Point3d.new(x_inch, y_inch, z_inch)
+      end
+
+      def text_point_to_su(item, pdf_x, pdf_y, origin_x, origin_y)
+        # pdftotext -bbox-layout reports positions in MediaBox space; rotate them
+        # into displayed sheet space like internal TextParser coordinates.
+        pdf_to_su(pdf_x, pdf_y, origin_x, origin_y, false)
+      end
+
+      def display_text_angle(item, angle_deg)
+        return angle_deg.to_f if @page_rotation == 0
+        PageTransform.transform_angle(angle_deg, @page_rotation)
+      rescue StandardError
+        angle_deg.to_f
       end
 
       # ---------------------------------------------------------------
@@ -491,11 +517,12 @@ module BlueCollarSystems
 
       def place_mesh_text(entities, item, origin_x, origin_y, layer)
         label_x, label_y, label_angle = mesh_label_anchor_pdf(item)
-        pt = pdf_to_su(label_x, label_y, origin_x, origin_y)
+        display_angle = display_text_angle(item, label_angle)
+        pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
 
-        page_h = (@media_box[3] - @media_box[1]).abs
+        page_h = PageTransform.effective_height(@media_box, @page_rotation)
         page_h = 792.0 if page_h < 1
-        height = mesh_text_height_inches(item, label_angle, page_h)
+        height = mesh_text_height_inches(item, display_angle, page_h)
         return if height <= 0
 
         count_before = entities.to_a.length
@@ -519,8 +546,8 @@ module BlueCollarSystems
 
         move = Geom::Transformation.new(pt)
         entities.transform_entities(move, *new_ents)
-        if label_angle.abs > 0.1
-          rot = Geom::Transformation.rotation(pt, Z_AXIS, label_angle.degrees)
+        if display_angle.abs > 0.1
+          rot = Geom::Transformation.rotation(pt, Z_AXIS, display_angle.degrees)
           entities.transform_entities(rot, *new_ents)
         end
         new_ents.each do |entity|
@@ -637,8 +664,9 @@ module BlueCollarSystems
 
       def place_annotation_label(entities, item, origin_x, origin_y, layer)
         label_x, label_y, label_angle = label_insertion_pdf(item)
-        pt = pdf_to_su(label_x, label_y, origin_x, origin_y)
-        dir_vec = label_direction_vector(label_angle, item)
+        display_angle = display_text_angle(item, label_angle)
+        pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
+        dir_vec = label_direction_vector(display_angle, item)
         text = try_add_annotation_text(entities, item.text, pt, dir_vec)
         if text
           set_layer(text, layer)

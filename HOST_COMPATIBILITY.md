@@ -18,6 +18,24 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 
 See also [COMPATIBILITY.md](COMPATIBILITY.md) for Ruby 2.2 language constraints.
 
+## Any-PC helper policy
+
+Core vector import must run inside supported SketchUp versions without Ruby gems
+or C extensions. Optional helper executables may improve fidelity, but the
+importer must detect them rather than assume this workstation's paths.
+
+| Helper | Capability unlocked |
+|--------|---------------------|
+| MuPDF `mutool` | SVG/glyph text rendering when Poppler is absent |
+| Poppler `pdftocairo` | SVG/glyph text rendering, raster page placement, SVG-assisted geometry recovery |
+| Poppler `pdftotext` | Higher-fidelity external text extraction and bbox placement |
+| Poppler `pdffonts` | Non-embedded font preflight before SVG rendering |
+| Ghostscript | Temporary font embedding repair for PDFs with non-embedded fonts |
+
+If a helper is missing, the feature must degrade through the built-in parser or a
+documented host-native fallback, and the Compatibility Report must say what was
+disabled.
+
 ### Text rendering
 
 | Option | SketchUp result |

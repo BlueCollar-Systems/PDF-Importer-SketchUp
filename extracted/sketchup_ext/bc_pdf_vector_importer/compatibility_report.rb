@@ -33,7 +33,10 @@ module BlueCollarSystems
           model = safe_call { Sketchup.active_model }
           entities = model ? safe_call { model.active_entities } : nil
           pdftocairo = find_pdftocairo
+          mutool = find_mutool
           pdftotext = find_pdftotext
+          pdffonts = find_pdffonts(pdftocairo)
+          ghostscript = find_ghostscript
 
           lines = []
           lines << "=== PDF Vector Importer Compatibility Report ==="
@@ -61,14 +64,18 @@ module BlueCollarSystems
           lines << capability_line("Entities#add_3d_text available", entities_responds?(entities, :add_3d_text))
           lines << capability_line("Model#line_styles available", line_styles_supported?(model))
           lines << capability_line("pdftocairo found", !pdftocairo.nil?, pdftocairo)
+          lines << capability_line("mutool found", !mutool.nil?, mutool)
           lines << capability_line("pdftotext found", !pdftotext.nil?, pdftotext)
+          lines << capability_line("pdffonts found", !pdffonts.nil?, pdffonts)
+          lines << capability_line("Ghostscript found", !ghostscript.nil?, ghostscript)
           lines << ""
           lines << "[Feature Impact]"
-          lines.concat(feature_impact_lines(model, entities, pdftocairo, pdftotext))
+          lines.concat(feature_impact_lines(model, entities, pdftocairo, mutool, pdftotext, pdffonts, ghostscript))
           lines << ""
           lines << "[Notes]"
           lines << "- This report is safe to share for support diagnostics."
           lines << "- It includes environment versions and local executable paths."
+          lines << "- Test PDFs are regression examples; importer behavior should generalize to supported PDFs on any supported PC."
 
           lines.join("\n")
         end
@@ -110,9 +117,30 @@ module BlueCollarSystems
           nil
         end
 
+        def find_mutool
+          return nil unless defined?(SvgTextRenderer)
+          SvgTextRenderer.find_mutool
+        rescue StandardError
+          nil
+        end
+
         def find_pdftotext
           return nil unless defined?(ExternalTextExtractor)
           ExternalTextExtractor.send(:pdftotext_executable)
+        rescue StandardError
+          nil
+        end
+
+        def find_pdffonts(pdftocairo)
+          return nil unless defined?(SvgTextRenderer) && pdftocairo
+          SvgTextRenderer.find_pdffonts(pdftocairo)
+        rescue StandardError
+          nil
+        end
+
+        def find_ghostscript
+          return nil unless defined?(SvgTextRenderer)
+          SvgTextRenderer.find_ghostscript
         rescue StandardError
           nil
         end
@@ -126,8 +154,10 @@ module BlueCollarSystems
           end
         end
 
-        def feature_impact_lines(model, entities, pdftocairo, pdftotext)
+        def feature_impact_lines(model, entities, pdftocairo, mutool, pdftotext, pdffonts, ghostscript)
           lines = []
+          lines << "- Core vector parser: Built-in Ruby parser available; no helper executable required for baseline vector extraction."
+
           if !html_dialog_supported?
             lines << "- Dialog UI: Using basic input boxes (HtmlDialog unavailable)."
           else
@@ -154,14 +184,26 @@ module BlueCollarSystems
 
           if pdftocairo
             lines << "- SVG/geometry text render: Enabled via pdftocairo."
+          elsif mutool
+            lines << "- SVG/geometry text render: Enabled via mutool."
           else
-            lines << "- SVG/geometry text render: Disabled (pdftocairo not found)."
+            lines << "- SVG/geometry text render: Disabled (pdftocairo/mutool not found)."
           end
 
           if pdftotext
             lines << "- External text extraction: Enabled via pdftotext."
           else
             lines << "- External text extraction: Disabled (internal parser fallback)."
+          end
+
+          if pdffonts && ghostscript
+            lines << "- Non-embedded font repair: Enabled via pdffonts + Ghostscript."
+          elsif pdffonts && !ghostscript
+            lines << "- Non-embedded font repair: Detection enabled, repair disabled (Ghostscript not found)."
+          elsif ghostscript && !pdffonts
+            lines << "- Non-embedded font repair: Ghostscript found, but pdffonts preflight unavailable."
+          else
+            lines << "- Non-embedded font repair: Disabled (pdffonts/Ghostscript not found)."
           end
 
           lines

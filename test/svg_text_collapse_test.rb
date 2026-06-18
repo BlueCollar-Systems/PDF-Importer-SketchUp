@@ -72,4 +72,34 @@ class SvgTextCollapseTest < Minitest::Test
     assert_empty R.missing_display_fonts('')
     assert_empty R.missing_display_fonts(nil)
   end
+
+  def test_parses_mutool_font_path_ids_and_placements
+    svg = '<svg viewBox="0 0 100 100"><defs>' \
+          '<path id="font_7_38" d="M.1 0L.2 0Z"/>' \
+          '</defs><use data-text="C" xlink:href="#font_7_38" ' \
+          'transform="matrix(9,0,0,-9,10,20)"/></svg>'
+
+    defs = R.parse_glyph_defs(svg)
+    assert_equal 'M.1 0L.2 0Z', defs['font_7_38']
+
+    placements = R.parse_use_placements(svg)
+    assert_equal 1, placements.length
+    assert_equal 'font_7_38', placements[0][:glyph_id]
+    assert_equal [9.0, 0.0, 0.0, -9.0, 10.0, 20.0], placements[0][:matrix]
+  end
+
+  def test_svg_render_args_support_mutool
+    renderer = { kind: :mutool, exe: 'mutool' }
+    variants = R.svg_render_arg_variants(renderer, 'in.pdf', 'out.svg', 3, true)
+
+    assert_equal ['mutool', 'draw', '-q', '-F', 'svg', '-b', 'CropBox',
+                  '-o', 'out.svg', 'in.pdf', '3'], variants[0]
+    assert_equal ['mutool', 'draw', '-q', '-F', 'svg',
+                  '-o', 'out.svg', 'in.pdf', '3'], variants[1]
+  end
+
+  def test_temp_svg_path_is_extensionless_for_pdftocairo_multi_page_svg
+    path = R.temp_svg_path
+    refute_match(/\.svg\z/i, path)
+  end
 end

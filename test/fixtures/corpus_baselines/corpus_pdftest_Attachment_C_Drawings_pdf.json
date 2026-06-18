@@ -1,0 +1,11 @@
+{
+  "pdf_name": "Attachment-C-Drawings.pdf",
+  "corpus_key": "corpus_pdftest/Attachment-C-Drawings.pdf",
+  "pages": 44,
+  "paths": 1410961,
+  "text_items": 15140,
+  "bbox_pct": 99.95,
+  "placement_ok": 15140,
+  "placement_total": 15140,
+  "text_hash": "2f7089481877ed566676b9add366e952af5bbd67c90fab196ef9424523d47e3e"
+}

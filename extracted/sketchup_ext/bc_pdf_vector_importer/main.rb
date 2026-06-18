@@ -13,6 +13,7 @@ module BlueCollarSystems
     # Core Engine
     require File.join(dir, 'import_config')
     require File.join(dir, 'import_bounds')
+    require File.join(dir, 'page_transform')
     require File.join(dir, 'primitives')
     require File.join(dir, 'logger')
     require File.join(dir, 'command_runner')
@@ -47,6 +48,7 @@ module BlueCollarSystems
     require File.join(dir, 'scale_tool')
     require File.join(dir, 'import_dialog')
     require File.join(dir, 'report_dialog')
+    require File.join(dir, 'compatibility_report')
 
     # ================================================================
     # SHARED PIPELINE — single source of truth for all import paths
@@ -73,6 +75,13 @@ module BlueCollarSystems
     rescue StandardError => e
       Logger.warn("Raster", "pdftocairo lookup failed: #{e.message}")
       nil
+    end
+
+    def self.record_text_renderer(stats, page_num, attrs)
+      stats[:text_renderers] ||= []
+      entry = { page: page_num }
+      attrs.each { |k, v| entry[k] = v } if attrs.respond_to?(:each)
+      stats[:text_renderers] << entry
     end
 
     def self.apply_internal_text_angle_hints(text_items, angle_items)
@@ -351,7 +360,7 @@ module BlueCollarSystems
     # Add a deterministic page-sized fit box in SketchUp model space.
     # This makes "fit all" resilient even when imported entities contain
     # sparse labels, nested groups, or occasional outlier bounds.
-    def self.add_page_fit_bounds(target_bb, media_box, render_box, scale, y_offset)
+    def self.add_page_fit_bounds(target_bb, media_box, render_box, scale, y_offset, page_rotation = 0)
       return unless target_bb
       return unless media_box.is_a?(Array) && media_box.length >= 4
       return unless render_box.is_a?(Array) && render_box.length >= 4
@@ -360,18 +369,16 @@ module BlueCollarSystems
       s = 1.0 if s <= 0.0
       oy = y_offset.to_f
 
-      mx0 = media_box[0].to_f
-      my0 = media_box[1].to_f
-
       rx0 = render_box[0].to_f
       ry0 = render_box[1].to_f
       rx1 = render_box[2].to_f
       ry1 = render_box[3].to_f
 
-      x0 = (rx0 - mx0) * (1.0 / 72.0) * s
-      y0 = (ry0 - my0) * (1.0 / 72.0) * s + oy
-      x1 = (rx1 - mx0) * (1.0 / 72.0) * s
-      y1 = (ry1 - my0) * (1.0 / 72.0) * s + oy
+      rb = PageTransform.transform_bbox(rx0, ry0, rx1, ry1, media_box, page_rotation)
+      x0 = rb[0] * (1.0 / 72.0) * s
+      y0 = rb[1] * (1.0 / 72.0) * s + oy
+      x1 = rb[2] * (1.0 / 72.0) * s
+      y1 = rb[3] * (1.0 / 72.0) * s + oy
 
       px0, py0, px1, py1 = ImportBounds.padded_fit_corners(x0, y0, x1, y1, s)
       bb = Geom::BoundingBox.new
@@ -719,7 +726,8 @@ module BlueCollarSystems
       stats = { pages: 0, primitives: 0, edges: 0, faces: 0, arcs: 0,
                 text: 0, components: 0, layers: [], cleanup: {},
                 generic: nil, mode_used: nil, xobjects: 0,
-                text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers }
+                text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
+                text_renderers: [] }
       page_fit_bounds = Geom::BoundingBox.new
 
       import_start = Time.now
@@ -737,6 +745,7 @@ module BlueCollarSystems
         raw = parser.page_data(page_num)
         next unless raw
         media_box = raw[:media_box] || [0, 0, 612, 792]
+        page_rotation = PageTransform.normalize_rotation(raw[:rotation])
         crop_box = raw[:crop_box]
         crop_box = nil unless crop_box.is_a?(Array) && crop_box.length >= 4
         svg_page_box = crop_box || media_box
@@ -744,9 +753,10 @@ module BlueCollarSystems
         text_offset_y = svg_page_box[1].to_f - media_box[1].to_f
         Logger.info("Pipeline",
           "Page #{page_num}: text_mode=#{requested_text_mode}, media_box=#{media_box.inspect}, " \
-          "crop_box=#{crop_box ? crop_box.inspect : 'nil'}, text_offset_pts=(#{text_offset_x.round(3)},#{text_offset_y.round(3)})")
+          "crop_box=#{crop_box ? crop_box.inspect : 'nil'}, rotation=#{page_rotation}, " \
+          "text_offset_pts=(#{text_offset_x.round(3)},#{text_offset_y.round(3)})")
         stack_box = svg_page_box
-        curr_page_height_in = (stack_box[3].to_f - stack_box[1].to_f).abs * (1.0 / 72.0) * opts[:scale].to_f
+        curr_page_height_in = PageTransform.effective_height(stack_box, page_rotation) * (1.0 / 72.0) * opts[:scale].to_f
         curr_page_height_in = 11.0 * opts[:scale].to_f if curr_page_height_in <= 0.0
         page_y_offset = running_y_offset
         streams = raw[:content_streams]
@@ -760,7 +770,7 @@ module BlueCollarSystems
             if raster_ok
               stats[:pages] += 1
               stats[:raster_fallback_used] = true
-              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
+              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
               running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
             end
           end
@@ -793,7 +803,7 @@ module BlueCollarSystems
             if raster_ok
               stats[:pages] += 1
               stats[:raster_fallback_used] = true
-              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
+              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
               running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
               next
             end
@@ -909,7 +919,7 @@ module BlueCollarSystems
           if raster_ok
             stats[:pages] += 1
             stats[:raster_fallback_used] = true
-            add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
+            add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
             running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
             next
           end
@@ -925,7 +935,7 @@ module BlueCollarSystems
             if raster_ok
               stats[:pages] += 1
               stats[:edges] += 0
-              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
+              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
               running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
             else
               Logger.warn("Pipeline",
@@ -938,7 +948,8 @@ module BlueCollarSystems
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — #{paths.length} paths, #{text_items.length} text items... [#{(Time.now - import_start).round(1)}s]"
 
         page_data = PrimitiveExtractor.extract(paths, text_items, media_box, page_num,
-          scale: opts[:scale], bezier_segments: opts[:bezier_segments])
+          scale: opts[:scale], bezier_segments: opts[:bezier_segments],
+          page_rotation: page_rotation)
         page_data.layers = ocg.layer_list
         page_data.xobject_names = xobj.form_xobjects.keys
         stats[:primitives] += page_data.primitives.length
@@ -989,15 +1000,16 @@ module BlueCollarSystems
           end
         end
 
-        # When glyph/geometry/3D Text mode: try pdftocairo first, skip text in builder.
+        # When glyph/geometry/3D Text mode: try an SVG text renderer first, skip text in builder.
         # Labels mode keeps native SketchUp labels, then adds an SVG-backed visual
         # text layer where available so PDF scale/rotation stays faithful. Native
         # labels are hidden after the visual layer succeeds because SU annotations
         # are screen-size objects and cannot be the sole PDF-accurate rendering.
-        # Layer-matched imports use internal text parsing so each span lands on its OCG tag.
+        # Labels with layer matching use internal parsing so each span lands on its OCG tag.
+        # Geometry/Glyphs/3D Text still use SVG text so rotated sheets stay aligned with vectors.
         use_svg_text = [:geometry, :glyphs, :text3d].include?(requested_text_mode) && opts[:import_text]
         label_visual_text = (requested_text_mode == :labels) && opts[:import_text]
-        if match_pdf_layers && !ocg.layer_list.empty?
+        if match_pdf_layers && !ocg.layer_list.empty? && requested_text_mode == :labels
           use_svg_text = false
         end
         builder_use_3d_text = (requested_text_mode == :text3d)
@@ -1014,7 +1026,8 @@ module BlueCollarSystems
           use_3d_text: builder_use_3d_text,
           strict_text_fidelity: opts[:strict_text_fidelity],
           layer_manager: layer_mgr,
-          y_offset: page_y_offset)
+          y_offset: page_y_offset,
+          page_rotation: page_rotation)
         result = builder.build
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
@@ -1025,11 +1038,16 @@ module BlueCollarSystems
           label_svg_result = SvgTextRenderer.render(
             builder.page_group.entities, path, page_num, media_box,
             scale: opts[:scale], layer: label_text_layer, y_offset: page_y_offset,
-            svg_page_box: svg_page_box)
+            svg_page_box: svg_page_box,
+            page_rotation: page_rotation)
           if label_svg_result
             stats[:text] += label_svg_result[:glyphs]
             stats[:edges] += label_svg_result[:edges]
             stats[:text_mode] = :labels
+            record_text_renderer(stats, page_num,
+              renderer: label_svg_result[:renderer], mode: :labels,
+              requested_mode: requested_text_mode, visual_layer: true,
+              degraded: false)
             begin
               builder.text_group.hidden = true if builder.text_group && builder.text_group.respond_to?(:hidden=)
             rescue StandardError => e
@@ -1037,6 +1055,10 @@ module BlueCollarSystems
             end
           else
             Logger.warn("Pipeline", "Label visual text unavailable — native SketchUp labels preserved.")
+            record_text_renderer(stats, page_num,
+              renderer: :labels, mode: :labels,
+              requested_mode: requested_text_mode,
+              degraded: true, note: 'SVG visual text unavailable')
           end
         end
 
@@ -1052,6 +1074,8 @@ module BlueCollarSystems
             detect_arcs: false, map_dashes: false,
             import_text: false, use_3d_text: false,
             layer_manager: layer_mgr,
+            y_offset: page_y_offset,
+            page_rotation: page_rotation,
             target_entities: builder.page_group.entities)
           hatch_result = hatch_builder.build
           stats[:edges] += hatch_result[:edges]
@@ -1064,14 +1088,15 @@ module BlueCollarSystems
           end
         end
 
-        # Render text as precise vector geometry via pdftocairo
+        # Render text as precise vector geometry via Poppler/MuPDF SVG.
         if use_svg_text && builder.page_group
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
           text_layer = layer_mgr.text_fallback_layer
           svg_result = SvgTextRenderer.render(
             builder.page_group.entities, path, page_num, media_box,
             scale: opts[:scale], layer: text_layer, y_offset: page_y_offset,
-            svg_page_box: svg_page_box)
+            svg_page_box: svg_page_box,
+            page_rotation: page_rotation)
 
           if svg_result
             stats[:text] += svg_result[:glyphs]
@@ -1081,13 +1106,18 @@ module BlueCollarSystems
                                 when :text3d then :text3d
                                 else :geometry
                                 end
+            record_text_renderer(stats, page_num,
+              renderer: svg_result[:renderer], mode: stats[:text_mode],
+              requested_mode: requested_text_mode, degraded: false,
+              cropbox_fallback: svg_result[:cropbox_fallback])
           else
-            # SVG glyph text unavailable/disabled — preserve the user's selected
-            # fallback intent (geometry/text3d => add_3d_text, labels => add_text).
+            # SVG glyph text unavailable/disabled. Geometry/Glyphs fail closed to
+            # labels so dense CAD text does not become inaccurate mesh text.
+            # Explicit 3D Text mode still honors the user's selected mesh path.
             Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Fallback text rendering... [#{(Time.now - import_start).round(1)}s]"
-            fallback_use_3d = (requested_text_mode == :geometry || requested_text_mode == :text3d)
+            fallback_use_3d = (requested_text_mode == :text3d)
             fallback_mode = fallback_use_3d ? "3D text" : "labels"
-            Logger.warn("Pipeline", "SVG text unavailable — falling back to #{fallback_mode} text")
+            Logger.warn("Pipeline", "SVG text unavailable — falling back to #{fallback_mode} text (degraded fidelity)")
             fallback_builder = GeometryBuilder.new(model, [], text_items, media_box,
               scale_factor: opts[:scale], layer_name: opts[:layer_name],
               group_per_page: false, page_number: page_num,
@@ -1095,10 +1125,15 @@ module BlueCollarSystems
               strict_text_fidelity: opts[:strict_text_fidelity],
               layer_manager: layer_mgr,
               y_offset: page_y_offset,
+              page_rotation: page_rotation,
               target_entities: builder.page_group.entities)
             fb_result = fallback_builder.build
             stats[:text] += fb_result[:text_objects]
             stats[:text_mode] = fallback_use_3d ? :text3d : :labels
+            record_text_renderer(stats, page_num,
+              renderer: (fallback_use_3d ? :add_3d_text : :labels),
+              mode: stats[:text_mode], requested_mode: requested_text_mode,
+              degraded: true, note: 'SVG text unavailable')
           end
         end
 
@@ -1111,7 +1146,7 @@ module BlueCollarSystems
           cl.each { |k, v| stats[:cleanup][k] = (stats[:cleanup][k] || 0) + v }
         end
 
-        add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset)
+        add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
 
         # Advance the running page stack only after a successful import.
         running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
@@ -1421,6 +1456,8 @@ module BlueCollarSystems
       sub.add_separator
       sub.add_item('Scale to Real Dimensions...') { self.scale_by_reference }
       sub.add_item('Quick Scale...') { self.quick_scale }
+      sub.add_separator
+      sub.add_item('Compatibility Report...') { CompatibilityReport.show }
       sub.add_separator
       sub.add_item('About') {
         UI.messagebox(

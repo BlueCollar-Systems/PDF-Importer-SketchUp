@@ -8,6 +8,8 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
+require File.join(File.dirname(__FILE__), 'page_transform')
+
 module BlueCollarSystems
   module PDFVectorImporter
     module PrimitiveExtractor
@@ -20,10 +22,11 @@ module BlueCollarSystems
       def self.extract(paths, text_items, media_box, page_num, opts = {})
         scale = opts[:scale] || 1.0
         bezier_segs = opts[:bezier_segments] || 16
+        page_rotation = PageTransform.normalize_rotation(opts[:page_rotation])
         origin_x = media_box[0]
         origin_y = media_box[1]
-        page_w = (media_box[2] - media_box[0]) * PDF_PT_TO_INCH * scale
-        page_h = (media_box[3] - media_box[1]) * PDF_PT_TO_INCH * scale
+        page_w = PageTransform.effective_width(media_box, page_rotation) * PDF_PT_TO_INCH * scale
+        page_h = PageTransform.effective_height(media_box, page_rotation) * PDF_PT_TO_INCH * scale
 
         # NOTE: Do NOT reset IDGen here — IDs must be unique across all pages
         # in a multi-page import. IDGen.reset is called once in run_pipeline.
@@ -32,14 +35,16 @@ module BlueCollarSystems
         paths.each do |path|
           next unless path.subpaths && !path.subpaths.empty?
           path.subpaths.each do |sp|
-            prim = subpath_to_primitive(sp, path, origin_x, origin_y, scale, bezier_segs, page_num)
+            prim = subpath_to_primitive(sp, path, media_box, origin_x, origin_y,
+              scale, bezier_segs, page_num, page_rotation)
             primitives << prim if prim
           end
         end
 
         norm_texts = []
         (text_items || []).each do |ti|
-          nt = normalize_text_item(ti, origin_x, origin_y, scale, page_num)
+          nt = normalize_text_item(ti, media_box, origin_x, origin_y,
+            scale, page_num, page_rotation)
           norm_texts << nt if nt
         end
 
@@ -56,21 +61,23 @@ module BlueCollarSystems
 
       private
 
-      def self.subpath_to_primitive(subpath, path, ox, oy, scale, bezier_segs, page_num)
+      def self.subpath_to_primitive(subpath, path, media_box, ox, oy, scale, bezier_segs, page_num, page_rotation)
         points = []
         subpath.segments.each do |seg|
           case seg.type
           when :move
-            points << convert_pt(seg.points[0], ox, oy, scale)
+            points << convert_pt(seg.points[0], media_box, ox, oy, scale, page_rotation)
           when :line
-            points << convert_pt(seg.points[1], ox, oy, scale)
+            points << convert_pt(seg.points[1], media_box, ox, oy, scale, page_rotation)
           when :curve
             p0, p1, p2, p3 = seg.points
             curve_pts = Bezier.cubic_to_points(p0, p1, p2, p3,
               max_segments: bezier_segs, tolerance: 0.25)
-            curve_pts[1..-1].each { |pt| points << convert_pt(pt, ox, oy, scale) }
+            curve_pts[1..-1].each do |pt|
+              points << convert_pt(pt, media_box, ox, oy, scale, page_rotation)
+            end
           when :rect
-            seg.points.each { |pt| points << convert_pt(pt, ox, oy, scale) }
+            seg.points.each { |pt| points << convert_pt(pt, media_box, ox, oy, scale, page_rotation) }
           end
         end
 
@@ -131,16 +138,25 @@ module BlueCollarSystems
         )
       end
 
-      def self.convert_pt(pdf_pt, ox, oy, scale)
-        x = (pdf_pt[0] - ox) * PDF_PT_TO_INCH * scale
-        y = (pdf_pt[1] - oy) * PDF_PT_TO_INCH * scale
+      def self.convert_pt(pdf_pt, media_box, ox, oy, scale, page_rotation, displayed_space = false)
+        if page_rotation.to_i != 0 && displayed_space
+          x_pts = pdf_pt[0].to_f
+          y_pts = pdf_pt[1].to_f
+        elsif page_rotation.to_i != 0
+          x_pts, y_pts = PageTransform.transform_point(pdf_pt[0], pdf_pt[1], media_box, page_rotation)
+        else
+          x_pts = pdf_pt[0].to_f - ox.to_f
+          y_pts = pdf_pt[1].to_f - oy.to_f
+        end
+        x = x_pts * PDF_PT_TO_INCH * scale
+        y = y_pts * PDF_PT_TO_INCH * scale
         [x, y]
       end
 
-      def self.normalize_text_item(ti, ox, oy, scale, page_num)
+      def self.normalize_text_item(ti, media_box, ox, oy, scale, page_num, page_rotation)
         return nil unless ti.text && !ti.text.strip.empty?
 
-        ins = convert_pt([ti.x, ti.y], ox, oy, scale)
+        ins = convert_pt([ti.x, ti.y], media_box, ox, oy, scale, page_rotation, false)
         fs = ti.font_size * PDF_PT_TO_INCH * scale
         fs = 0.05 if fs < 0.01
 
@@ -161,7 +177,7 @@ module BlueCollarSystems
           ins,
           bbox,
           fs,
-          ti.angle || 0.0,
+          PageTransform.transform_angle(ti.angle || 0.0, page_rotation),
           ti.font_name || "",
           page_num,
           generic_tags  # domain classification happens later in the pipeline

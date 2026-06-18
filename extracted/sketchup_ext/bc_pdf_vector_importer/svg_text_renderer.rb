@@ -1,5 +1,5 @@
 # bc_pdf_vector_importer/svg_text_renderer.rb
-# Renders PDF text as precise vector geometry using pdftocairo.
+# Renders PDF text as precise vector geometry using Poppler or MuPDF SVG.
 #
 # Performance: each unique glyph is drawn ONCE as a Component, then
 # placed as lightweight instances. ~500 draws + ~3000 placements
@@ -17,13 +17,14 @@ module BlueCollarSystems
       PDF_PT_TO_INCH = 1.0 / 72.0
 
       def self.render(entities, pdf_path, page_num, media_box, opts = {})
-        exe = find_pdftocairo
-        return nil unless exe
+        renderer = find_svg_renderer
+        return nil unless renderer
 
         # If the PDF references non-embedded fonts (e.g. the base-14 "Symbol"
         # font) that pdftocairo can't resolve on this platform, embed them once
         # via Ghostscript so text renders instead of collapsing to a blob.
-        render_pdf = ensure_renderable_pdf(pdf_path, exe)
+        render_pdf = renderer[:kind] == :pdftocairo ?
+          ensure_renderable_pdf(pdf_path, renderer[:exe]) : pdf_path
 
         scale = opts[:scale] || 1.0
         y_offset = opts[:y_offset] || 0.0
@@ -38,8 +39,10 @@ module BlueCollarSystems
         box_offset_x_in = (svg_min_x - media_min_x) * PDF_PT_TO_INCH * scale.to_f
         box_offset_y_in = (svg_min_y - media_min_y) * PDF_PT_TO_INCH * scale.to_f
 
-        svg_path = File.join(Dir.tmpdir,
-          "bc_svg_#{Process.pid}_#{Time.now.to_i}_#{rand(100000)}.svg")
+        # pdftocairo's SVG backend writes later pages reliably when the output
+        # target is a bare filename, not a .svg-suffixed path. MuPDF also accepts
+        # the extensionless path because the format is supplied explicitly.
+        svg_path = temp_svg_path
 
         use_cropbox = false
         begin
@@ -51,18 +54,9 @@ module BlueCollarSystems
           Logger.warn("SvgTextRenderer", "cropbox compare failed: #{e.message}")
         end
 
-        base_args = [
-          exe.to_s,
-          '-svg',
-          '-f', page_num.to_i.to_s,
-          '-l', page_num.to_i.to_s,
-          '--',
-          render_pdf.to_s,
-          svg_path.to_s
-        ]
-        arg_variants = []
-        arg_variants << [exe.to_s, '-svg', '-cropbox'] + base_args[2..-1] if use_cropbox
-        arg_variants << base_args
+        arg_variants = svg_render_arg_variants(
+          renderer, render_pdf, svg_path, page_num, use_cropbox
+        )
 
         used_cropbox_fallback = false
         render_ok = false
@@ -77,7 +71,7 @@ module BlueCollarSystems
           run = CommandRunner.run(
             args,
             timeout_s: 90,
-            context: 'SvgTextRenderer.pdftocairo'
+            context: "SvgTextRenderer.#{renderer[:kind]}"
           )
           if run[:ok] && File.exist?(svg_path)
             used_cropbox_fallback = (idx == 1 && use_cropbox)
@@ -90,13 +84,13 @@ module BlueCollarSystems
         return nil unless render_ok
         if used_cropbox_fallback
           Logger.warn("SvgTextRenderer",
-            "Page #{page_num}: pdftocairo -cropbox unavailable; used media box SVG fallback")
+            "Page #{page_num}: #{renderer[:kind]} crop box render unavailable; used media box SVG fallback")
         end
 
         svg = File.read(svg_path, encoding: 'UTF-8')
         glyphs = parse_glyph_defs(svg)
         placements = parse_use_placements(svg)
-        return { edges: 0, glyphs: 0 } if placements.empty?
+        return { edges: 0, glyphs: 0, renderer: renderer[:kind] } if placements.empty?
 
         # OCR-backed PDFs can contain many "#source-*" uses for embedded images.
         # Do not disable glyph rendering solely because of source image uses:
@@ -221,7 +215,9 @@ module BlueCollarSystems
           end
         end
 
-        { edges: edge_count, glyphs: glyph_count, skipped_glyphs: skipped_collapsed, missing_fonts: missing_fonts }
+        { edges: edge_count, glyphs: glyph_count, renderer: renderer[:kind],
+          cropbox_fallback: used_cropbox_fallback,
+          skipped_glyphs: skipped_collapsed, missing_fonts: missing_fonts }
       rescue StandardError => e
         begin
           Logger.warn("SvgTextRenderer", "Failed: #{e.message}")
@@ -238,6 +234,27 @@ module BlueCollarSystems
       end
 
       private
+
+      def self.warn_safe(message)
+        Logger.warn("SvgTextRenderer", message)
+      rescue StandardError
+        # Logger may be unavailable in minimal runtime/test contexts.
+      end
+
+      def self.temp_svg_path
+        File.join(Dir.tmpdir,
+          "bc_svg_#{Process.pid}_#{Time.now.to_i}_#{rand(100000)}")
+      end
+
+      def self.find_svg_renderer
+        poppler = find_pdftocairo
+        return { kind: :pdftocairo, exe: poppler } if poppler
+
+        mupdf = find_mutool
+        return { kind: :mutool, exe: mupdf } if mupdf
+
+        nil
+      end
 
       def self.find_pdftocairo
         env = ENV['BC_PDFTOCAIRO_PATH']
@@ -282,9 +299,68 @@ module BlueCollarSystems
         nil
       end
 
+      def self.find_mutool
+        env = ENV['BC_MUTOOL_PATH']
+        return env if env && !env.empty? && File.exist?(env)
+
+        begin
+          candidates = []
+          local = File.expand_path(File.join(File.dirname(__FILE__), '..', '..', '..', 'bin', 'mutool.exe'))
+          candidates << local
+          candidates << 'C:\\Program Files\\MuPDF\\mutool.exe'
+          Dir.glob('C:/Program Files/MuPDF*/mutool.exe').each { |p| candidates << p }
+          Dir.glob('C:/Program Files/mupdf*/mutool.exe').each { |p| candidates << p }
+          candidates.each { |p| return p if File.exist?(p) }
+        rescue StandardError => e
+          Logger.warn("SvgTextRenderer", "find_mutool path search failed: #{e.message}")
+        end
+
+        begin
+          if (RUBY_PLATFORM =~ /mswin|mingw|cygwin/)
+            r = `where mutool.exe 2>NUL`.strip
+          else
+            r = `which mutool 2>/dev/null`.strip
+          end
+          return r.split("\n").first.strip if !r.empty?
+        rescue StandardError => e
+          Logger.warn("SvgTextRenderer", "find_mutool which/where failed: #{e.message}")
+        end
+        nil
+      end
+
+      def self.svg_render_arg_variants(renderer, pdf_path, svg_path, page_num, use_cropbox)
+        exe = renderer[:exe].to_s
+        page = page_num.to_i.to_s
+        if renderer[:kind] == :mutool
+          base = [exe, 'draw', '-q', '-F', 'svg', '-o', svg_path.to_s, pdf_path.to_s, page]
+          variants = []
+          variants << [exe, 'draw', '-q', '-F', 'svg', '-b', 'CropBox', '-o', svg_path.to_s, pdf_path.to_s, page] if use_cropbox
+          variants << base
+          return variants
+        end
+
+        base = [
+          exe,
+          '-svg',
+          '-f', page,
+          '-l', page,
+          '--',
+          pdf_path.to_s,
+          svg_path.to_s
+        ]
+        variants = []
+        variants << [exe, '-svg', '-cropbox'] + base[2..-1] if use_cropbox
+        variants << base
+        variants
+      end
+
       def self.parse_glyph_defs(svg)
         h = {}
         svg.scan(/<g id="(glyph-\d+-\d+)">\s*<path d="([^"]*)"/m) do |id, d|
+          h[id] = d unless d.strip.empty?
+        end
+        svg.scan(/<path\b[^>]*\bid="([^"]+)"[^>]*\bd="([^"]*)"/m) do |id, d|
+          next unless glyph_reference_id?(id)
           h[id] = d unless d.strip.empty?
         end
         h
@@ -297,7 +373,7 @@ module BlueCollarSystems
           href = tag[/\bxlink:href="([^"]+)"/, 1] || tag[/\bhref="([^"]+)"/, 1]
           next unless href && href.start_with?('#')
           id = href[1..-1]
-          next unless id.start_with?('glyph-')
+          next unless glyph_reference_id?(id)
 
           x = (tag[/\bx="([^"]+)"/, 1] || '0').to_f
           y = (tag[/\by="([^"]+)"/, 1] || '0').to_f
@@ -312,6 +388,11 @@ module BlueCollarSystems
           a << { glyph_id: id, x: x, y: y, matrix: matrix }
         end
         a
+      end
+
+      def self.glyph_reference_id?(id)
+        s = id.to_s
+        s.start_with?('glyph-') || s =~ /\Afont[_-]/
       end
 
       # ------------------------------------------------------------------
@@ -411,7 +492,7 @@ module BlueCollarSystems
             return r.split("\n").first.strip unless r.empty?
           end
         rescue StandardError => e
-          (Logger.warn("SvgTextRenderer", "find_ghostscript failed: #{e.message}") rescue nil)
+          warn_safe("find_ghostscript failed: #{e.message}")
         end
         nil
       end
@@ -429,7 +510,7 @@ module BlueCollarSystems
             result = run[:ok] && pdffonts_reports_unembedded?(run[:stdout].to_s)
           end
         rescue StandardError => e
-          (Logger.warn("SvgTextRenderer", "pdf_needs_embedding? failed: #{e.message}") rescue nil)
+          warn_safe("pdf_needs_embedding? failed: #{e.message}")
           result = false
         end
         @font_check_cache[key] = result
@@ -452,7 +533,7 @@ module BlueCollarSystems
           end
           File.delete(out) if File.exist?(out)
         rescue StandardError => e
-          (Logger.warn("SvgTextRenderer", "embed_fonts_cached failed: #{e.message}") rescue nil)
+          warn_safe("embed_fonts_cached failed: #{e.message}")
         end
         nil
       end
@@ -461,15 +542,15 @@ module BlueCollarSystems
         return pdf_path unless pdf_needs_embedding?(pdf_path, pdftocairo_exe)
         gs = find_ghostscript
         unless gs
-          (Logger.warn("SvgTextRenderer",
+          warn_safe(
             "PDF has non-embedded fonts and Ghostscript was not found; symbols from " \
-            "unresolved fonts may be skipped. Install Ghostscript for full fidelity.") rescue nil)
+            "unresolved fonts may be skipped. Install Ghostscript for full fidelity.")
           return pdf_path
         end
         embedded = embed_fonts_cached(pdf_path, gs)
         embedded || pdf_path
       rescue StandardError => e
-        (Logger.warn("SvgTextRenderer", "ensure_renderable_pdf failed: #{e.message}") rescue nil)
+        warn_safe("ensure_renderable_pdf failed: #{e.message}")
         pdf_path
       end
 
