@@ -11,6 +11,7 @@ on:
       - "_archived/**"
       - "dist/_archived/**"
       - "dev_logs/**"
+      - "steel_shapes/**"
   workflow_dispatch:
 
 env:

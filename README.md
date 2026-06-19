@@ -19,6 +19,17 @@ The importer profiles each PDF document to identify its origin (fabrication draw
 
 ---
 
+## Structural Steel Shape Assets
+
+The former standalone `Structural-Steel-SU-Shapes` repository has been
+consolidated here under `resources/steel_shapes/sketchup/` so the SketchUp
+importer repo is the source home for the `.skp` steel shape packs. The
+versioned release ZIP from that old repo is intentionally not stored here;
+GitHub Releases remain the download layer, while this repo keeps the source
+assets, checksums, license, and notes.
+
+---
+
 ## Key Features
 
 - **4 Import Modes** (BCS-ARCH-001) — Auto (default, picks strategy per page),
@@ -243,6 +254,23 @@ extraction, and simulated label placement vs committed baselines. See
 ruby test/corpus_placement_test.rb
 ruby tools/generate_corpus_baselines.rb --update   # after reviewed changes
 ```
+
+---
+
+## Free Structural Steel Shapes (CC0)
+
+This repository also hosts the public-domain AISC v16.0 SketchUp shape packs
+previously distributed from `Structural-Steel-SU-Shapes`.
+
+| Location | Contents |
+|----------|----------|
+| [`steel_shapes/family_packs/`](steel_shapes/family_packs/) | 14 `.skp` family files (2L, C, HP, HSS, L, M, MC, MT, PIPE, S, ST, W, WT) |
+| [`steel_shapes/README.md`](steel_shapes/README.md) | Usage, license, checksum notes |
+| [`steel_shapes/ATTRIBUTION.md`](steel_shapes/ATTRIBUTION.md) | Merge provenance from the former standalone repo |
+
+**Releases:** tag `steel-v1.0.0` (etc.) to publish
+`Structural-Steel-SU-Shapes-*.zip` via the `steel-shapes-release` workflow.
+PDF Importer extension releases continue to use `v3.x.x` tags.
 
 ---
 
