@@ -38,23 +38,22 @@ module BlueCollarSystems
       end
 
       def resolve_corpus_pdf(relative_name, subdir: '')
-        root = resolve_corpus_root
-        return nil unless root
-
         rel = relative_name.to_s
-        search_dirs = [root]
-        search_dirs.unshift(File.join(root, subdir)) unless subdir.to_s.empty?
-        %w[PDFTest\ Files pdfs New\ folder\ (2)].each do |folder|
-          candidate = File.join(root, folder)
-          search_dirs << candidate if File.directory?(candidate)
-        end
+        corpus_scan_roots.each do |root|
+          search_dirs = [root]
+          search_dirs.unshift(File.join(root, subdir)) unless subdir.to_s.empty?
+          %w[PDFTest\ Files pdfs New\ folder\ (2)].each do |folder|
+            candidate = File.join(root, folder)
+            search_dirs << candidate if File.directory?(candidate)
+          end
 
-        search_dirs.each do |base|
-          direct = File.join(base, rel)
-          return File.expand_path(direct) if File.file?(direct)
-          unless File.extname(rel).casecmp('.pdf').zero?
-            with_pdf = File.join(base, "#{File.basename(rel)}.pdf")
-            return File.expand_path(with_pdf) if File.file?(with_pdf)
+          search_dirs.each do |base|
+            direct = File.join(base, rel)
+            return File.expand_path(direct) if File.file?(direct)
+            unless File.extname(rel).casecmp('.pdf').zero?
+              with_pdf = File.join(base, "#{File.basename(rel)}.pdf")
+              return File.expand_path(with_pdf) if File.file?(with_pdf)
+            end
           end
         end
         nil
