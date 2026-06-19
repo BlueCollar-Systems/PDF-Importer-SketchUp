@@ -49,6 +49,7 @@ module BlueCollarSystems
     require File.join(dir, 'import_dialog')
     require File.join(dir, 'report_dialog')
     require File.join(dir, 'compatibility_report')
+    require File.join(dir, 'qa_report')
 
     # ================================================================
     # SHARED PIPELINE — single source of truth for all import paths
@@ -79,8 +80,12 @@ module BlueCollarSystems
 
     def self.record_text_renderer(stats, page_num, attrs)
       stats[:text_renderers] ||= []
+      stats[:page_text_sources] ||= {}
       entry = { page: page_num }
       attrs.each { |k, v| entry[k] = v } if attrs.respond_to?(:each)
+      if stats[:page_text_sources][page_num] && !entry.key?(:text_source)
+        entry[:text_source] = stats[:page_text_sources][page_num]
+      end
       stats[:text_renderers] << entry
     end
 
@@ -727,7 +732,7 @@ module BlueCollarSystems
                 text: 0, components: 0, layers: [], cleanup: {},
                 generic: nil, mode_used: nil, xobjects: 0,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
-                text_renderers: [] }
+                text_renderers: [], page_text_sources: {} }
       page_fit_bounds = Geom::BoundingBox.new
 
       import_start = Time.now
@@ -904,6 +909,7 @@ module BlueCollarSystems
             end
           end
           Logger.info("Pipeline", "Page #{page_num}: text extractor=#{text_source}, items=#{text_items ? text_items.length : 0}")
+          stats[:page_text_sources][page_num] = text_source if text_source
         end
 
         # If the page is text-dominant with little/no vector geometry, importing
@@ -1189,6 +1195,13 @@ module BlueCollarSystems
       apply_top_view_fit(model, page_fit_bounds, imported_entities)
 
       stats[:log_path] = Logger.log_path
+      begin
+        report = QAReport.build_from_stats(path, opts, stats)
+        report_path = QAReport.write_json(report, QAReport.default_output_path(path))
+        stats[:import_report_path] = report_path if report_path
+      rescue StandardError => e
+        Logger.warn("Pipeline", "import_report.json write failed: #{e.message}")
+      end
       stats
     ensure
       Logger.flush_log

@@ -10,11 +10,15 @@ class SvgTextMultiPageGateTest < Minitest::Test
   R = BlueCollarSystems::PDFVectorImporter::SvgTextRenderer
   Runner = BlueCollarSystems::PDFVectorImporter::CommandRunner
   TARGET_PDF = 'BOUND SET SEALED DRAWINGS 18 FEB 2026.pdf'.freeze
+  FALLBACK_PDF = 'SCOMBINED.pdf'.freeze
 
   def test_available_svg_renderers_handle_non_page_one_text
     pdf_path = ENV['BCS_SVG_TEXT_GATE_PDF'].to_s
-    pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(TARGET_PDF).to_s if pdf_path.empty?
-    skip "Set BCS_SVG_TEXT_GATE_PDF or add #{TARGET_PDF} to the corpus" unless File.file?(pdf_path)
+    if pdf_path.empty?
+      pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(TARGET_PDF).to_s
+      pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(FALLBACK_PDF).to_s unless File.file?(pdf_path)
+    end
+    skip "Set BCS_SVG_TEXT_GATE_PDF or add #{TARGET_PDF}/#{FALLBACK_PDF} to the corpus" unless File.file?(pdf_path)
 
     renderers = available_renderers
     skip 'No SVG text renderer found' if renderers.empty?

@@ -13,11 +13,12 @@ $LOAD_PATH.unshift(SRC_ROOT)
 require 'bc_pdf_vector_importer/logger'
 require 'bc_pdf_vector_importer/pdf_parser'
 require 'bc_pdf_vector_importer/content_stream_parser'
+require_relative 'corpus_paths'
 
 # Enable debug output from Logger
 BlueCollarSystems::PDFVectorImporter::Logger.debug = false
 
-PDF_DIR = 'C:/Users/Rowdy Payton/Desktop/New folder (2)'
+PDF_DIR = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_root.to_s
 TIMEOUT_SECONDS = 60
 
 # Collect all PDFs recursively
