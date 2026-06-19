@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# Test script: parse all 28 PDFs through the PDF-Importer-SketchUp pipeline
+# Test script: parse all corpus PDFs through the PDF-Importer-SketchUp pipeline
 # Tests PDF structure parsing + content stream extraction (no SketchUp needed)
 
 require 'timeout'
@@ -19,7 +19,15 @@ require_relative 'corpus_paths'
 BlueCollarSystems::PDFVectorImporter::Logger.debug = false
 
 PDF_DIR = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_root.to_s
-TIMEOUT_SECONDS = 60
+TIMEOUT_SECONDS = (ENV['PDF_IMPORTER_TEST_TIMEOUT'] || '60').to_i
+HEAVY_TIMEOUT_SECONDS = (ENV['PDF_IMPORTER_HEAVY_TIMEOUT'] || '240').to_i
+HEAVY_MB = (ENV['PDF_IMPORTER_HEAVY_MB'] || '8').to_f
+ALLOW_TIMEOUTS = ENV['PDF_IMPORTER_ALLOW_TIMEOUTS'] == '1'
+
+def timeout_for(size_kb)
+  size_mb = size_kb.to_f / 1024.0
+  size_mb > HEAVY_MB ? HEAVY_TIMEOUT_SECONDS : TIMEOUT_SECONDS
+end
 
 # Collect all PDFs recursively
 pdf_files = Dir.glob(File.join(PDF_DIR, '**', '*.{pdf,Pdf,PDF}')).sort
@@ -34,6 +42,7 @@ results = []
 pdf_files.each_with_index do |pdf_path, idx|
   short_name = pdf_path.sub(PDF_DIR + '/', '')
   file_size_kb = (File.size(pdf_path) / 1024.0).round(1)
+  timeout_s = timeout_for(file_size_kb)
 
   print "#{idx + 1}/#{pdf_files.length}  #{short_name} (#{file_size_kb} KB) ... "
   $stdout.flush
@@ -52,7 +61,7 @@ pdf_files.each_with_index do |pdf_path, idx|
   start_time = Time.now
 
   begin
-    Timeout.timeout(TIMEOUT_SECONDS) do
+    Timeout.timeout(timeout_s) do
       # Phase 1: Parse PDF structure (xref, page tree)
       parser = BlueCollarSystems::PDFVectorImporter::PDFParser.new(pdf_path)
       parser.parse
@@ -90,7 +99,7 @@ pdf_files.each_with_index do |pdf_path, idx|
     end
   rescue Timeout::Error
     result[:status] = 'TIMEOUT'
-    result[:error] = "Exceeded #{TIMEOUT_SECONDS}s"
+    result[:error] = "Exceeded #{timeout_s}s"
   rescue => e
     result[:status] = 'FAIL'
     result[:error] = "#{e.class}: #{e.message}"
@@ -150,3 +159,5 @@ if fail_count > 0 || timeout_count > 0
     puts "  [#{r[:status]}] #{r[:file]}: #{r[:error]}"
   end
 end
+
+exit 1 if fail_count > 0 || (timeout_count > 0 && !ALLOW_TIMEOUTS)

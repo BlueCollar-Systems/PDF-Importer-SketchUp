@@ -22,7 +22,7 @@ The importer profiles each PDF document to identify its origin (fabrication draw
 ## Structural Steel Shape Assets
 
 The former standalone `Structural-Steel-SU-Shapes` repository has been
-consolidated here under `resources/steel_shapes/sketchup/` so the SketchUp
+consolidated here under `steel_shapes/` so the SketchUp
 importer repo is the source home for the `.skp` steel shape packs. The
 versioned release ZIP from that old repo is intentionally not stored here;
 GitHub Releases remain the download layer, while this repo keeps the source

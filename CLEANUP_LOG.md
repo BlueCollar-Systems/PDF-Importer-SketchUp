@@ -7,8 +7,8 @@ Paths use canonical `C:\1PDF-Importer-*` naming.
 
 | Repo | Items removed | Notes |
 |------|---------------|-------|
-| PDF-Importer-SketchUp | 12 | caches, 5 superseded RBZ, dist duplicate, dev_logs |
-| PDF-Importer-FreeCAD | 10 | caches, 2 superseded ZIPs, `_archived` |
+| PDF-Importer-SketchUp | 12+ | caches, local RBZ builds, dist duplicate, dev_logs |
+| PDF-Importer-FreeCAD | 10+ | caches, local ZIP builds, `_archived` |
 | PDF-Importer-LibreCAD | 11 | caches, `--out` stale build |
 | PDF-Importer-Blender | 14 | caches, egg-info, 2 superseded dist ZIPs |
 | pdfcadcore | 4 | caches |
@@ -22,14 +22,14 @@ Paths use canonical `C:\1PDF-Importer-*` naming.
 ## PDF-Importer-SketchUp
 
 - `__pycache__/`
-- `SketchUp-PDF-Importer_v3.7.24.rbz` … `v3.7.28.rbz` (kept `v3.7.29.rbz`)
+- `SketchUp-PDF-Importer_v3.7.24.rbz` … `v3.7.29.rbz` (local package builds are reproducible and published through GitHub Releases)
 - `dist/SketchUp-PDF-Importer_v3.7.24.rbz`
 - `dev_logs/` (LLM context scratch + archived_packages)
 
 ## PDF-Importer-FreeCAD
 
 - `__pycache__/`, `.pytest_cache/`, `.ruff_cache/` (repo + PDFVectorImporter subtrees)
-- `FreeCAD-PDF-Importer_v4.0.22.zip`, `v4.0.23.zip` (kept `v4.0.24.zip`)
+- `FreeCAD-PDF-Importer_v4.0.22.zip` … local current ZIP builds (package builds are reproducible and published through GitHub Releases)
 - `PDFVectorImporter/_archived/` (legacy mirror)
 
 ## PDF-Importer-LibreCAD
@@ -41,7 +41,7 @@ Paths use canonical `C:\1PDF-Importer-*` naming.
 
 - Python/pytest/ruff caches across repo
 - `pdf_vector_importer.egg-info/`
-- `dist/Blender-PDF-Importer_v1.0.20.zip`, `v1.0.21.zip` (kept `v1.0.22.zip`)
+- local `dist/` ZIP builds (package builds are reproducible and published through GitHub Releases)
 
 ## pdfcadcore
 
@@ -67,7 +67,7 @@ Paths use canonical `C:\1PDF-Importer-*` naming.
 
 - Source code, tests, CI workflows, LICENSE, README, golden baselines
 - `_LLM_CONTROL_PACK/` (one per importer — not duplicated across repos)
-- Latest release artifacts per repo
+- Source assets and build scripts; local release artifacts are reproducible and can be downloaded from GitHub Releases
 - `extracted/` SketchUp extension source (tracked)
 - Corpus PDFs and Desktop Q&A (not touched)
 
