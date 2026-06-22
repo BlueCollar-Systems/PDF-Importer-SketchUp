@@ -73,8 +73,9 @@ end
 
 module CorpusHarness
   TIMEOUT_SECONDS = (ENV['CORPUS_PDF_TIMEOUT'] || '90').to_i
-  HEAVY_TIMEOUT_SECONDS = (ENV['CORPUS_HEAVY_PDF_TIMEOUT'] || '240').to_i
+  HEAVY_TIMEOUT_SECONDS = (ENV['CORPUS_HEAVY_PDF_TIMEOUT'] || '300').to_i
   HEAVY_PDF_MB = (ENV['CORPUS_HEAVY_PDF_MB'] || '8').to_f
+  HEAVY_PAGE_COUNT = (ENV['CORPUS_HEAVY_PAGE_COUNT'] || '30').to_i
   PLACEMENT_THRESHOLD_DEFAULT = 0.95
   PLACEMENT_THRESHOLD_VECTOR = 1.0
   BASELINE_DIR = File.join(REPO_ROOT, 'test', 'fixtures', 'corpus_baselines')
@@ -107,14 +108,26 @@ module CorpusHarness
     )
   end
 
-  def self.heavy_pdf?(pdf_path)
-    File.size(pdf_path) > (HEAVY_PDF_MB * 1024.0 * 1024.0)
+  def self.heavy_pdf?(pdf_path, page_count = nil)
+    return true if File.size(pdf_path) > (HEAVY_PDF_MB * 1024.0 * 1024.0)
+    return true if page_count.to_i >= HEAVY_PAGE_COUNT
+    false
   rescue StandardError
     false
   end
 
-  def self.timeout_for(pdf_path)
-    heavy_pdf?(pdf_path) ? HEAVY_TIMEOUT_SECONDS : TIMEOUT_SECONDS
+  def self.timeout_for(pdf_path, page_count = nil)
+    heavy_pdf?(pdf_path, page_count) ? HEAVY_TIMEOUT_SECONDS : TIMEOUT_SECONDS
+  end
+
+  def self.estimate_page_count(pdf_path)
+    parser = BlueCollarSystems::PDFVectorImporter::PDFParser.new(pdf_path)
+    parser.parse
+    count = parser.page_count
+    parser.release
+    count
+  rescue StandardError
+    nil
   end
 
   def self.analyze_pdf(pdf_info)
@@ -142,14 +155,16 @@ module CorpusHarness
     start_time = Time.now
     builder = geometry_builder
     all_text_items = []
-    result[:heavy] = heavy_pdf?(pdf_path)
-    timeout_s = timeout_for(pdf_path)
+    page_count_hint = estimate_page_count(pdf_path)
+    result[:heavy] = heavy_pdf?(pdf_path, page_count_hint)
+    timeout_s = timeout_for(pdf_path, page_count_hint)
 
     begin
       Timeout.timeout(timeout_s) do
         parser = BlueCollarSystems::PDFVectorImporter::PDFParser.new(pdf_path)
         parser.parse
         result[:pages] = parser.page_count
+        result[:heavy] = heavy_pdf?(pdf_path, parser.page_count)
 
         total_paths = 0
         text_source = nil

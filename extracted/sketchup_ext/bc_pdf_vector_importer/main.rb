@@ -735,6 +735,26 @@ module BlueCollarSystems
                 generic: nil, mode_used: nil, xobjects: 0,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
                 text_renderers: [], page_text_sources: {} }
+
+      svg_text_mode = [:geometry, :glyphs].include?(requested_text_mode)
+      if svg_text_mode && opts[:import_text] && !SvgTextRenderer.svg_renderer_available?
+        stats[:svg_renderer_missing] = true
+        Logger.warn(
+          "Pipeline",
+          "Geometry/Glyphs text requested but Poppler (pdftocairo) and MuPDF (mutool) were not found; " \
+          "text will fail closed to native labels with degraded fidelity."
+        )
+        if defined?(UI) && UI.respond_to?(:messagebox)
+          choice = UI.messagebox(
+            "Geometry/Glyphs text mode needs Poppler (pdftocairo) or MuPDF (mutool).\n\n" \
+            "Without one of these helpers, text will import as native SketchUp labels " \
+            "with reduced fidelity instead of outline geometry.\n\n" \
+            "Install Poppler or open Extensions > PDF Vector Importer > Compatibility Report.\n\n" \
+            "Continue with degraded text?",
+            MB_OKCANCEL)
+          return nil unless choice == IDOK
+        end
+      end
       page_fit_bounds = Geom::BoundingBox.new
 
       import_start = Time.now
@@ -1096,7 +1116,10 @@ module BlueCollarSystems
             record_text_renderer(stats, page_num,
               renderer: svg_result[:renderer], mode: stats[:text_mode],
               requested_mode: requested_text_mode, degraded: false,
-              cropbox_fallback: svg_result[:cropbox_fallback])
+              cropbox_fallback: svg_result[:cropbox_fallback],
+              raw_edge_glyphs: svg_result[:raw_edge_glyphs],
+              glyph_instances: svg_result[:glyph_instances],
+              flattened_glyph_instances: svg_result[:flattened_glyph_instances])
           else
             # SVG glyph text unavailable/disabled. Geometry/Glyphs fail closed to
             # labels so dense CAD text does not become inaccurate mesh text.
@@ -1104,7 +1127,15 @@ module BlueCollarSystems
             Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Fallback text rendering... [#{(Time.now - import_start).round(1)}s]"
             fallback_use_3d = (requested_text_mode == :text3d)
             fallback_mode = fallback_use_3d ? "3D text" : "labels"
-            Logger.warn("Pipeline", "SVG text unavailable — falling back to #{fallback_mode} text (degraded fidelity)")
+            missing_renderer_note = if stats[:svg_renderer_missing]
+                                      'Poppler/MuPDF not found'
+                                    else
+                                      'SVG text unavailable'
+                                    end
+            Logger.warn(
+              "Pipeline",
+              "#{missing_renderer_note} — falling back to #{fallback_mode} text (degraded fidelity)"
+            )
             fallback_builder = GeometryBuilder.new(model, [], text_items, media_box,
               scale_factor: opts[:scale], layer_name: opts[:layer_name],
               group_per_page: false, page_number: page_num,
@@ -1120,7 +1151,7 @@ module BlueCollarSystems
             record_text_renderer(stats, page_num,
               renderer: (fallback_use_3d ? :add_3d_text : :labels),
               mode: stats[:text_mode], requested_mode: requested_text_mode,
-              degraded: true, note: 'SVG text unavailable')
+              degraded: true, note: missing_renderer_note)
           end
         end
 

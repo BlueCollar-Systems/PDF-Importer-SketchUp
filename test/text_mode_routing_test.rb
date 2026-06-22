@@ -27,13 +27,13 @@ class TextModeRoutingTest < Minitest::Test
   end
 
   def test_svg_fallback_only_for_geometry_and_glyphs_modes
-    assert_match(/note: 'SVG text unavailable'/, @main)
-    assert_match(/degraded: true, note: 'SVG text unavailable'/, @main)
+    assert_match(/note: 'SVG text unavailable'|note: missing_renderer_note/, @main)
+    assert_match(/degraded: true, note: missing_renderer_note/, @main)
     assert_match(/Geometry\/Glyphs fail closed to[\s#]+labels/m, @main)
     assert_match(/fallback_use_3d = \(requested_text_mode == :text3d\)/, @main)
     assert_match(/fallback_mode = fallback_use_3d \? "3D text" : "labels"/, @main)
     refute_match(/else\s+SvgTextRenderer\.render/m, @main)
-    svg_fallback_section = @main[/SVG glyph text unavailable\/disabled\..*?degraded: true, note: 'SVG text unavailable'/m]
+    svg_fallback_section = @main[/Fallback text rendering.*?degraded: true, note: missing_renderer_note/m]
     assert svg_fallback_section, 'expected SVG unavailable fallback block'
     refute_match(/SvgTextRenderer\.render/, svg_fallback_section)
     assert_match(/renderer: \(fallback_use_3d \? :add_3d_text : :labels\)/, svg_fallback_section)
@@ -71,6 +71,13 @@ class TextModeRoutingTest < Minitest::Test
     assert_match(/inst = entities\.add_instance\(glyph_data, tr\)/, renderer)
     assert_match(/exploded_edges = explode_glyph_instance\(inst, text_layer\)/, renderer)
     assert_match(/flattened_glyph_instances: flattened_glyph_instances/, renderer)
+  end
+
+  def test_geometry_glyphs_preflight_warns_when_svg_renderer_missing
+    assert_match(/svg_renderer_missing/, @main)
+    assert_match(/SvgTextRenderer\.svg_renderer_available\?/, @main)
+    assert_match(/Poppler \(pdftocairo\) or MuPDF \(mutool\)/, @main)
+    assert_match(/Continue with degraded text\?/, @main)
   end
 
   def test_large_import_component_visibility_is_opt_in_for_emergency_performance

@@ -159,7 +159,9 @@ module BlueCollarSystems
           renderer_key, degraded = key
           pages = grouped[key].map { |entry| entry[:page] || entry['page'] }
           page_word = pages.compact.length == 1 ? "page" : "pages"
-          suffix = degraded ? " (degraded)." : "."
+          notes = grouped[key].map { |entry| entry[:note] || entry['note'] }.compact.map(&:to_s).reject(&:empty?).uniq
+          note_suffix = degraded && !notes.empty? ? " — #{notes.join('; ')}" : ""
+          suffix = degraded ? " (degraded)#{note_suffix}." : "."
           lines << "#{text_renderer_label(renderer_key)}: #{page_word} #{format_page_list(pages)}#{suffix}"
         end
       end

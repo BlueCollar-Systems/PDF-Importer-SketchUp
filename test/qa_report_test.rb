@@ -39,6 +39,26 @@ class QAReportTest < Minitest::Test
     assert_in_delta 48.0, report[:extra][:resolved_scale]['factor'], 0.01
   end
 
+  def test_records_text_degradation_in_fallback_block
+    stats = {
+      pages: 1,
+      primitives: 1,
+      edges: 1,
+      text: 1,
+      layers: [],
+      elapsed_seconds: 0.5,
+      svg_renderer_missing: true,
+      text_renderers: [
+        { page: 1, renderer: :labels, degraded: true, note: 'Poppler/MuPDF not found' }
+      ]
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('x.pdf', {}, stats)
+    assert_equal true, report[:fallback][:used]
+    assert_equal 'text_degraded_missing_svg_renderer', report[:fallback][:reason]
+    assert_equal ['Poppler/MuPDF not found'], report[:fallback][:notes]
+    assert_equal true, report[:extra][:svg_renderer_missing]
+  end
+
   def test_writes_json_file
     stats = { pages: 1, primitives: 1, edges: 1, text: 0, layers: [], text_renderers: [] }
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('x.pdf', {}, stats)

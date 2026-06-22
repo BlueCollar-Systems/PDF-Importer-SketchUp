@@ -20,6 +20,10 @@ module BlueCollarSystems
         layers = Array(stats[:layers]).compact
         warnings = Array(stats[:failed_pages]).length
         warnings += 1 if stats[:layer_warning]
+        degraded_renderers = Array(stats[:text_renderers]).select do |entry|
+          entry[:degraded] || entry['degraded']
+        end
+        warnings += degraded_renderers.length
         version = importer_version
 
         {
@@ -52,10 +56,7 @@ module BlueCollarSystems
             elapsed_ms: elapsed_ms,
             peak_mb: 0.0
           },
-          fallback: {
-            used: !!stats[:raster_fallback_used],
-            reason: stats[:raster_fallback_used] ? 'raster_fallback' : nil
-          },
+          fallback: fallback_block(stats, degraded_renderers),
           mode: import_mode_label(opts),
           extra: extra_block(stats)
         }
@@ -91,6 +92,33 @@ module BlueCollarSystems
         block
       end
 
+      def fallback_block(stats, degraded_renderers = [])
+        if stats[:raster_fallback_used]
+          return { used: true, reason: 'raster_fallback' }
+        end
+
+        degraded = Array(degraded_renderers)
+        if degraded.empty?
+          return { used: false, reason: nil }
+        end
+
+        notes = degraded.map do |entry|
+          entry[:note] || entry['note']
+        end.compact.map(&:to_s).reject(&:empty?).uniq
+        reason = if stats[:svg_renderer_missing]
+                   'text_degraded_missing_svg_renderer'
+                 elsif notes.include?('Poppler/MuPDF not found')
+                   'text_degraded_missing_svg_renderer'
+                 else
+                   'text_degraded_svg_unavailable'
+                 end
+        {
+          used: true,
+          reason: reason,
+          notes: notes
+        }
+      end
+
       def extra_block(stats)
         renderers = Array(stats[:text_renderers]).map do |entry|
           normalize_json(entry)
@@ -100,6 +128,7 @@ module BlueCollarSystems
           edges: stats[:edges].to_i,
           arcs: stats[:arcs].to_i,
           text_mode: stats[:text_mode].to_s,
+          svg_renderer_missing: !!stats[:svg_renderer_missing],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil
         }
       end

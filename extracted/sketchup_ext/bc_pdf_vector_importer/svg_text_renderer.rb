@@ -365,6 +365,10 @@ module BlueCollarSystems
           "bc_svg_#{Process.pid}_#{Time.now.to_i}_#{rand(100000)}")
       end
 
+      def self.svg_renderer_available?
+        !!find_svg_renderer
+      end
+
       def self.find_svg_renderer
         poppler = find_pdftocairo
         return { kind: :pdftocairo, exe: poppler } if poppler

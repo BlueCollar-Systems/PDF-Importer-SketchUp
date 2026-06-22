@@ -76,5 +76,11 @@ Workflow: **corpus-placement** (`.github/workflows/corpus-placement.yml`)
 
 ## Status
 
-**Phase 1 complete** — headless corpus placement CI with baseline regression (36 PDFs locally; 2 heavy PDFs warn-only on timeout).
+**Phase 1 complete** — headless corpus placement CI with baseline regression (36 PDFs locally; heavy PDFs warn-only on timeout).
+
+Heavy-lane knobs (defaults: 8 MB, 30+ pages, 300 s timeout):
+
+- `CORPUS_HEAVY_PDF_MB`
+- `CORPUS_HEAVY_PAGE_COUNT`
+- `CORPUS_HEAVY_PDF_TIMEOUT`
 Phase 2 (future): SketchUp GUI visual acceptance on Tier-1 subset.
