@@ -18,7 +18,7 @@ module BlueCollarSystems
       def sample_process_mb
         if RUBY_PLATFORM =~ /mswin|mingw|cygwin/i
           size = `powershell -NoProfile -Command "(Get-Process -Id #{Process.pid}).WorkingSet64"`.strip.to_i
-          return (size / 1024.0 / 1024.0).round(2) if size.positive?
+          return (size / 1024.0 / 1024.0).round(2) if size > 0
         elsif File.readable?('/proc/self/status')
           rss = File.read('/proc/self/status').each_line.find { |line| line.start_with?('VmRSS:') }
           if rss && rss =~ /(\d+)\s*kB/i
@@ -69,7 +69,7 @@ module BlueCollarSystems
           },
           performance: {
             elapsed_ms: elapsed_ms,
-            peak_mb: stats[:peak_mb].to_f.positive? ? stats[:peak_mb].to_f.round(2) : sample_process_mb
+            peak_mb: stats[:peak_mb].to_f > 0.0 ? stats[:peak_mb].to_f.round(2) : sample_process_mb
           },
           fallback: fallback_block(stats, degraded_renderers),
           mode: import_mode_label(opts),

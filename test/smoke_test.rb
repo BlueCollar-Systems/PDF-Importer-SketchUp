@@ -150,6 +150,8 @@ puts
 puts "--- Check 4: SketchUp 2017 Ruby compatibility ---"
 core_rb_files = Dir.glob(File.join(SOURCE_DIR, '**', '*.rb'))
 modern_method_hits = []
+modern_method_pattern =
+  /&\.|\.(?:match\?|positive\?|negative\?|dig|sum|then|yield_self|filter_map)(?=[^A-Za-z0-9_]|$)/
 
 core_rb_files.each do |f|
   rel = f.sub("#{REPO_ROOT}/", '').sub("#{REPO_ROOT}\\", '')
@@ -157,7 +159,7 @@ core_rb_files.each do |f|
     io.each_line.with_index do |raw_line, idx|
       line = raw_line.force_encoding('UTF-8')
       line = line.encode('UTF-8', 'binary', invalid: :replace, undef: :replace)
-      if line =~ /&\.|\.(?:match\?|dig|sum|then|yield_self|filter_map)\b/
+      if line =~ modern_method_pattern
         modern_method_hits << "#{rel}:#{idx + 1}: #{line.strip}"
       end
     end

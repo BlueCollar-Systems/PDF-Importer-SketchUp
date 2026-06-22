@@ -286,7 +286,7 @@ module BlueCollarSystems
       def self.raw_edge_glyph_threshold
         raw = ENV['BC_SU_GLYPH_EDGE_THRESHOLD'].to_s.strip
         value = raw.empty? ? DEFAULT_EDGE_GLYPH_THRESHOLD : raw.to_i
-        value.positive? ? value : DEFAULT_EDGE_GLYPH_THRESHOLD
+        value > 0 ? value : DEFAULT_EDGE_GLYPH_THRESHOLD
       rescue StandardError
         DEFAULT_EDGE_GLYPH_THRESHOLD
       end

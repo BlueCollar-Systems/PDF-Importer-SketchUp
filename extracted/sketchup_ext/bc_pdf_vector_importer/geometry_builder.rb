@@ -95,17 +95,12 @@ module BlueCollarSystems
           should_fill = path.fill && @import_fills
           next unless should_stroke || should_fill
 
-          # ── Skip paths whose bounding box exceeds the page ──
-          # These are typically decorative backgrounds, clip-fill regions, or
-          # graphic elements that extend far beyond the visible page area.
-          # They produce huge arcs/circles that clutter the import.
+          # Skip only simple fill-only page backgrounds. Stroked page-sized
+          # paths are often real sheet borders or title-block frames and must
+          # be preserved for drawing accuracy.
           path_bbox = compute_path_bbox(path)
-          if path_bbox
-            pw = (path_bbox[2] - path_bbox[0]).abs
-            ph = (path_bbox[3] - path_bbox[1]).abs
-            if pw * ph > page_area_pts * 0.95
-              next
-            end
+          if path_bbox && discardable_page_artifact?(path, path_bbox, page_area_pts)
+            next
           end
 
           # Determine target group based on color
@@ -1386,6 +1381,29 @@ module BlueCollarSystems
         end
         return nil if xs.empty?
         [xs.min, ys.min, xs.max, ys.max]
+      end
+
+      def discardable_page_artifact?(path, bbox, page_area_pts)
+        return false unless path && path.fill && !path.stroke
+        return false unless page_area_pts.to_f > 0.0
+        pw = (bbox[2] - bbox[0]).abs
+        ph = (bbox[3] - bbox[1]).abs
+        return false unless pw * ph > page_area_pts.to_f * 0.95
+        simple_filled_background_path?(path)
+      rescue StandardError
+        false
+      end
+
+      def simple_filled_background_path?(path)
+        subpaths = Array(path.subpaths)
+        return false unless subpaths.length == 1
+        segments = Array(subpaths[0].segments)
+        draw_segments = segments.reject { |seg| seg.type == :move }
+        return false if draw_segments.empty?
+        return false if draw_segments.length > 5
+        draw_segments.all? { |seg| seg.type == :line || seg.type == :rect }
+      rescue StandardError
+        false
       end
 
       def classify_dash(dash_pattern)
