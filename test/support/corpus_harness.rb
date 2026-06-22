@@ -74,8 +74,10 @@ end
 module CorpusHarness
   TIMEOUT_SECONDS = (ENV['CORPUS_PDF_TIMEOUT'] || '90').to_i
   HEAVY_TIMEOUT_SECONDS = (ENV['CORPUS_HEAVY_PDF_TIMEOUT'] || '300').to_i
+  PAGE_COUNT_TIMEOUT_SECONDS = (ENV['CORPUS_PAGE_COUNT_TIMEOUT'] || '10').to_i
   HEAVY_PDF_MB = (ENV['CORPUS_HEAVY_PDF_MB'] || '8').to_f
   HEAVY_PAGE_COUNT = (ENV['CORPUS_HEAVY_PAGE_COUNT'] || '30').to_i
+  HEAVY_PATH_BUDGET = (ENV['CORPUS_HEAVY_PATH_BUDGET'] || '750000').to_i
   PLACEMENT_THRESHOLD_DEFAULT = 0.95
   PLACEMENT_THRESHOLD_VECTOR = 1.0
   BASELINE_DIR = File.join(REPO_ROOT, 'test', 'fixtures', 'corpus_baselines')
@@ -108,6 +110,10 @@ module CorpusHarness
     )
   end
 
+  def self.timeout_exceeded?(start_time, timeout_s)
+    (Time.now - start_time) >= timeout_s.to_f
+  end
+
   def self.heavy_pdf?(pdf_path, page_count = nil)
     return true if File.size(pdf_path) > (HEAVY_PDF_MB * 1024.0 * 1024.0)
     return true if page_count.to_i >= HEAVY_PAGE_COUNT
@@ -120,14 +126,29 @@ module CorpusHarness
     heavy_pdf?(pdf_path, page_count) ? HEAVY_TIMEOUT_SECONDS : TIMEOUT_SECONDS
   end
 
-  def self.estimate_page_count(pdf_path)
-    parser = BlueCollarSystems::PDFVectorImporter::PDFParser.new(pdf_path)
-    parser.parse
-    count = parser.page_count
-    parser.release
-    count
+  def self.page_count_hint_for(pdf_path)
+    return nil if heavy_pdf?(pdf_path, nil)
+    estimate_page_count(pdf_path)
   rescue StandardError
     nil
+  end
+
+  def self.estimate_page_count(pdf_path)
+    parser = nil
+    count = nil
+    Timeout.timeout(PAGE_COUNT_TIMEOUT_SECONDS) do
+      parser = BlueCollarSystems::PDFVectorImporter::PDFParser.new(pdf_path)
+      parser.parse
+      count = parser.page_count
+    end
+    count
+  rescue StandardError, Timeout::Error
+    nil
+  ensure
+    begin
+      parser.release if parser
+    rescue StandardError
+    end
   end
 
   def self.analyze_pdf(pdf_info)
@@ -155,7 +176,7 @@ module CorpusHarness
     start_time = Time.now
     builder = geometry_builder
     all_text_items = []
-    page_count_hint = estimate_page_count(pdf_path)
+    page_count_hint = page_count_hint_for(pdf_path)
     result[:heavy] = heavy_pdf?(pdf_path, page_count_hint)
     timeout_s = timeout_for(pdf_path, page_count_hint)
 
@@ -170,6 +191,10 @@ module CorpusHarness
         text_source = nil
 
         (1..parser.page_count).each do |pg|
+          if timeout_exceeded?(start_time, timeout_s)
+            raise Timeout::Error, "Exceeded #{timeout_s}s"
+          end
+
           page_info = parser.page_data(pg)
           next unless page_info
 
@@ -183,7 +208,12 @@ module CorpusHarness
           csp = BlueCollarSystems::PDFVectorImporter::ContentStreamParser.new(
             streams, parser, ocg_map
           )
-          total_paths += csp.parse.length
+          page_paths = csp.parse.length
+          total_paths += page_paths
+          if result[:heavy] && total_paths > HEAVY_PATH_BUDGET
+            raise Timeout::Error,
+                  "Heavy PDF path budget exceeded (#{total_paths} > #{HEAVY_PATH_BUDGET})"
+          end
 
           page_items, source = extract_page_text(parser, pdf_path, pg, streams, ocg_map)
           text_source ||= source

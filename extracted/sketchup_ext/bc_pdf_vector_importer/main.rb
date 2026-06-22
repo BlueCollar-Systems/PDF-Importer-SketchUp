@@ -734,7 +734,7 @@ module BlueCollarSystems
                 text: 0, components: 0, layers: [], cleanup: {},
                 generic: nil, mode_used: nil, xobjects: 0,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
-                text_renderers: [], page_text_sources: {} }
+                text_renderers: [], page_text_sources: {}, peak_mb: 0.0 }
 
       svg_text_mode = [:geometry, :glyphs].include?(requested_text_mode)
       if svg_text_mode && opts[:import_text] && !SvgTextRenderer.svg_renderer_available?

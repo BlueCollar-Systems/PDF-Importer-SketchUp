@@ -15,6 +15,21 @@ module BlueCollarSystems
 
       module_function
 
+      def sample_process_mb
+        if RUBY_PLATFORM =~ /mswin|mingw|cygwin/i
+          size = `powershell -NoProfile -Command "(Get-Process -Id #{Process.pid}).WorkingSet64"`.strip.to_i
+          return (size / 1024.0 / 1024.0).round(2) if size.positive?
+        elsif File.readable?('/proc/self/status')
+          rss = File.read('/proc/self/status').each_line.find { |line| line.start_with?('VmRSS:') }
+          if rss && rss =~ /(\d+)\s*kB/i
+            return ($1.to_f / 1024.0).round(2)
+          end
+        end
+        0.0
+      rescue StandardError
+        0.0
+      end
+
       def build_from_stats(pdf_path, opts, stats)
         elapsed_ms = ((stats[:elapsed_seconds] || 0).to_f * 1000.0).round(1)
         layers = Array(stats[:layers]).compact
@@ -54,7 +69,7 @@ module BlueCollarSystems
           },
           performance: {
             elapsed_ms: elapsed_ms,
-            peak_mb: 0.0
+            peak_mb: stats[:peak_mb].to_f.positive? ? stats[:peak_mb].to_f.round(2) : sample_process_mb
           },
           fallback: fallback_block(stats, degraded_renderers),
           mode: import_mode_label(opts),
