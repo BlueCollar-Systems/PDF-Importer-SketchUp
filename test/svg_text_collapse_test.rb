@@ -102,4 +102,46 @@ class SvgTextCollapseTest < Minitest::Test
     path = R.temp_svg_path
     refute_match(/\.svg\z/i, path)
   end
+
+  def test_glyph_component_flattening_defaults_on_with_escape_hatch
+    old = ENV['BC_SU_KEEP_GLYPH_COMPONENTS']
+    ENV.delete('BC_SU_KEEP_GLYPH_COMPONENTS')
+    assert R.flatten_glyph_instances?({})
+
+    ENV['BC_SU_KEEP_GLYPH_COMPONENTS'] = '1'
+    refute R.flatten_glyph_instances?({})
+    refute R.flatten_glyph_instances?({ flatten_glyph_instances: false })
+    assert R.flatten_glyph_instances?({ flatten_glyph_instances: true })
+  ensure
+    if old.nil?
+      ENV.delete('BC_SU_KEEP_GLYPH_COMPONENTS')
+    else
+      ENV['BC_SU_KEEP_GLYPH_COMPONENTS'] = old
+    end
+  end
+
+  class DummyEdge
+    attr_accessor :layer
+    def typename
+      'Edge'
+    end
+  end
+
+  class DummyInstance
+    def initialize(exploded)
+      @exploded = exploded
+    end
+
+    def explode
+      @exploded
+    end
+  end
+
+  def test_explode_glyph_instance_counts_edges_and_applies_layer
+    edge = DummyEdge.new
+    exploded_edges = R.explode_glyph_instance(DummyInstance.new([edge]), 'PDF Text')
+
+    assert_equal 1, exploded_edges
+    assert_equal 'PDF Text', edge.layer
+  end
 end
