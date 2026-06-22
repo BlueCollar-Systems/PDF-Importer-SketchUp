@@ -99,7 +99,8 @@ module BlueCollarSystems
           text_renderers: renderers,
           edges: stats[:edges].to_i,
           arcs: stats[:arcs].to_i,
-          text_mode: stats[:text_mode].to_s
+          text_mode: stats[:text_mode].to_s,
+          resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil
         }
       end
 

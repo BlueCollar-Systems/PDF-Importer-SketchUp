@@ -2,7 +2,6 @@
 
 require 'minitest/autorun'
 require 'json'
-require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/metadata'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/qa_report'
 
 class QAReportTest < Minitest::Test
@@ -20,7 +19,13 @@ class QAReportTest < Minitest::Test
         { page: 2, renderer: :labels, text_source: :internal, degraded: true }
       ],
       page_text_sources: { 1 => :external, 2 => :internal },
-      text_mode: :geometry
+      text_mode: :geometry,
+      resolved_scale: {
+        factor: 48.0,
+        notation: '1/4" = 1\'-0"',
+        source: 'titleblock',
+        confidence: 0.91
+      }
     }
     opts = { import_mode: 'auto' }
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('sample.pdf', opts, stats)
@@ -31,6 +36,7 @@ class QAReportTest < Minitest::Test
     assert_equal 2, report[:result][:layers]
     assert_equal 2, report[:extra][:text_renderers].length
     assert_equal 'pdftocairo', report[:extra][:text_renderers][0]['renderer']
+    assert_in_delta 48.0, report[:extra][:resolved_scale]['factor'], 0.01
   end
 
   def test_writes_json_file

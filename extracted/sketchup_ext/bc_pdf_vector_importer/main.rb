@@ -30,6 +30,7 @@ module BlueCollarSystems
     require File.join(dir, 'primitive_extractor')
     require File.join(dir, 'unit_parser')
     require File.join(dir, 'dimension_parser')
+    require File.join(dir, 'resolved_scale')
     require File.join(dir, 'generic_classifier')
     require File.join(dir, 'document_profiler')
     require File.join(dir, 'region_segmenter')
@@ -960,6 +961,10 @@ module BlueCollarSystems
         page_data.layers = ocg.layer_list
         page_data.xobject_names = xobj.form_xobjects.keys
         stats[:primitives] += page_data.primitives.length
+        stats[:resolved_scale] = ResolvedScaleDetect.merge_best(
+          stats[:resolved_scale],
+          ResolvedScaleDetect.resolve(page_data)
+        )
         stats[:pages] += 1
         stats[:xobjects] += xobj.form_xobjects.length
 

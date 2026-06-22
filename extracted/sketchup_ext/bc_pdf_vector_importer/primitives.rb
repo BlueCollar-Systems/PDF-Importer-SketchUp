@@ -76,6 +76,15 @@ module BlueCollarSystems
       :classifications  # Array of hashes — generic text classifications
     )
 
+    # ── ResolvedScale (title-block scale detection) ───────────────
+    ResolvedScale = Struct.new(
+      :factor,
+      :notation,
+      :source,
+      :confidence,
+      :fallback_reason
+    )
+
     # ── PageData (everything from one PDF page) ─────────────────────
     PageData = Struct.new(
       :page_number,
