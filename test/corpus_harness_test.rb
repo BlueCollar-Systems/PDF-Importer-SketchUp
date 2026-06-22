@@ -5,6 +5,10 @@ require 'tempfile'
 require_relative 'support/corpus_harness'
 
 class CorpusHarnessTest < Minitest::Test
+  def test_stress_pdf_optout_is_not_hard_coded
+    assert_empty CorpusHarness::STRESS_PDF_SLUGS
+  end
+
   def test_size_heavy_pdf_skips_page_count_preflight
     Tempfile.create(['heavy', '.pdf']) do |f|
       f.binmode

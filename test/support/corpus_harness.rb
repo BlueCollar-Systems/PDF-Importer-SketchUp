@@ -78,6 +78,8 @@ module CorpusHarness
   HEAVY_PDF_MB = (ENV['CORPUS_HEAVY_PDF_MB'] || '8').to_f
   HEAVY_PAGE_COUNT = (ENV['CORPUS_HEAVY_PAGE_COUNT'] || '30').to_i
   HEAVY_PATH_BUDGET = (ENV['CORPUS_HEAVY_PATH_BUDGET'] || '750000').to_i
+  STRESS_PDF_SLUGS = (ENV['CORPUS_STRESS_OPTOUT'] || '')
+                     .split('|').map(&:strip).reject(&:empty?).freeze
   PLACEMENT_THRESHOLD_DEFAULT = 0.95
   PLACEMENT_THRESHOLD_VECTOR = 1.0
   BASELINE_DIR = File.join(REPO_ROOT, 'test', 'fixtures', 'corpus_baselines')
@@ -179,6 +181,13 @@ module CorpusHarness
     page_count_hint = page_count_hint_for(pdf_path)
     result[:heavy] = heavy_pdf?(pdf_path, page_count_hint)
     timeout_s = timeout_for(pdf_path, page_count_hint)
+
+    if STRESS_PDF_SLUGS.include?(File.basename(pdf_path))
+      result[:status] = 'TIMEOUT'
+      result[:error] = 'Stress PDF opt-out (manual QA only; exceeds CI budget)'
+      result[:time_s] = (Time.now - start_time).round(2)
+      return result
+    end
 
     begin
       Timeout.timeout(timeout_s) do
