@@ -1,9 +1,9 @@
 # bc_pdf_vector_importer/svg_text_renderer.rb
 # Renders PDF text as precise vector geometry using Poppler or MuPDF SVG.
 #
-# Performance: each unique glyph is drawn ONCE as a Component, then
-# placed as lightweight instances. ~500 draws + ~3000 placements
-# instead of ~3000 individual draws.
+# Normal PDFs draw glyphs as raw transformed edges so selecting text does not
+# show one bounding box per glyph. Very large glyph runs fall back to component
+# instances for performance.
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
@@ -17,6 +17,7 @@ module BlueCollarSystems
     module SvgTextRenderer
 
       PDF_PT_TO_INCH = 1.0 / 72.0
+      DEFAULT_EDGE_GLYPH_THRESHOLD = 5_000
 
       def self.render(entities, pdf_path, page_num, media_box, opts = {})
         renderer = find_svg_renderer
@@ -122,26 +123,34 @@ module BlueCollarSystems
         raise "SketchUp model unavailable for glyph definitions" unless model
         edge_count = 0
         glyph_count = 0
+        placement_count = placements.length
+        raw_edge_glyphs = raw_edge_glyphs?(opts, placement_count)
 
-        # Build each unique glyph as a Component (draw once)
+        # Build each unique glyph once. Normal-size text imports keep point
+        # paths and stamp raw edges; huge imports use component definitions.
         Sketchup.status_text = "Building #{glyphs.length} glyph shapes..."
         glyph_defs = {}
+        glyph_paths = {}
         glyphs.each do |glyph_id, path_d|
           next if path_d.strip.empty?
           subpaths = svg_path_to_points(path_d, x_unit_to_in, y_unit_to_in)
           next if subpaths.empty?
 
-          defn = model.definitions.add("_g_#{glyph_id}")
-          subpaths.each do |pts|
-            next if pts.length < 2
-            begin
-              r = defn.entities.add_edges(pts)
-              edge_count += r.length if r
-            rescue StandardError => e
-              Logger.warn("SvgTextRenderer", "add_edges for glyph failed: #{e.message}")
+          if raw_edge_glyphs
+            glyph_paths[glyph_id] = subpaths
+          else
+            defn = model.definitions.add("_g_#{glyph_id}")
+            subpaths.each do |pts|
+              next if pts.length < 2
+              begin
+                r = defn.entities.add_edges(pts)
+                edge_count += r.length if r
+              rescue StandardError => e
+                Logger.warn("SvgTextRenderer", "add_edges for glyph failed: #{e.message}")
+              end
             end
+            glyph_defs[glyph_id] = defn if defn.entities.count > 0
           end
-          glyph_defs[glyph_id] = defn if defn.entities.count > 0
         end
 
         # Guard against font-substitution failures (see collapsed_signature_keys):
@@ -158,8 +167,8 @@ module BlueCollarSystems
             Sketchup.status_text = "Placing text: #{idx}/#{total} [#{((idx.to_f/total)*100).round}%]"
           end
 
-          defn = glyph_defs[p[:glyph_id]]
-          next unless defn
+          glyph_data = raw_edge_glyphs ? glyph_paths[p[:glyph_id]] : glyph_defs[p[:glyph_id]]
+          next unless glyph_data
 
           if collapsed_set[placement_signature(p)]
             skipped_collapsed += 1
@@ -190,15 +199,21 @@ module BlueCollarSystems
               tr = Geom::Transformation.new(Geom::Point3d.new(tx, ty, 0.0))
             end
 
-            inst = entities.add_instance(defn, tr)
-            begin
-              inst.layer = text_layer if inst && text_layer
-            rescue StandardError => e
-              Logger.warn("SvgTextRenderer", "set_layer on glyph instance failed: #{e.message}")
+            if raw_edge_glyphs
+              added = add_transformed_glyph_edges(entities, glyph_data, tr, text_layer)
+              edge_count += added
+              next if added <= 0
+            else
+              inst = entities.add_instance(glyph_data, tr)
+              begin
+                inst.layer = text_layer if inst && text_layer
+              rescue StandardError => e
+                Logger.warn("SvgTextRenderer", "set_layer on glyph instance failed: #{e.message}")
+              end
             end
             glyph_count += 1
           rescue StandardError => e
-            Logger.warn("SvgTextRenderer", "add_instance for glyph failed: #{e.message}")
+            Logger.warn("SvgTextRenderer", "place glyph failed: #{e.message}")
           end
         end
 
@@ -219,6 +234,8 @@ module BlueCollarSystems
 
         { edges: edge_count, glyphs: glyph_count, renderer: renderer[:kind],
           cropbox_fallback: used_cropbox_fallback,
+          glyph_instances: raw_edge_glyphs ? 0 : glyph_count,
+          raw_edge_glyphs: raw_edge_glyphs,
           skipped_glyphs: skipped_collapsed, missing_fonts: missing_fonts }
       rescue StandardError => e
         begin
@@ -236,6 +253,42 @@ module BlueCollarSystems
       end
 
       private
+
+      def self.raw_edge_glyphs?(opts, placement_count)
+        return false if opts[:raw_edge_glyphs] == false
+        placement_count.to_i <= raw_edge_glyph_threshold
+      end
+
+      def self.raw_edge_glyph_threshold
+        raw = ENV['BC_SU_GLYPH_EDGE_THRESHOLD'].to_s.strip
+        value = raw.empty? ? DEFAULT_EDGE_GLYPH_THRESHOLD : raw.to_i
+        value.positive? ? value : DEFAULT_EDGE_GLYPH_THRESHOLD
+      rescue StandardError
+        DEFAULT_EDGE_GLYPH_THRESHOLD
+      end
+
+      def self.add_transformed_glyph_edges(entities, subpaths, tr, text_layer)
+        added = 0
+        Array(subpaths).each do |pts|
+          next unless pts && pts.length >= 2
+          pts.each_cons(2) do |a, b|
+            begin
+              pa = a.respond_to?(:transform) ? a.transform(tr) : tr * a
+              pb = b.respond_to?(:transform) ? b.transform(tr) : tr * b
+              edge = entities.add_line(pa, pb)
+              begin
+                edge.layer = text_layer if edge && text_layer
+              rescue StandardError => e
+                Logger.warn("SvgTextRenderer", "set_layer on glyph edge failed: #{e.message}")
+              end
+              added += 1 if edge
+            rescue StandardError => e
+              Logger.warn("SvgTextRenderer", "add_line for glyph edge failed: #{e.message}")
+            end
+          end
+        end
+        added
+      end
 
       def self.warn_safe(message)
         Logger.warn("SvgTextRenderer", message)

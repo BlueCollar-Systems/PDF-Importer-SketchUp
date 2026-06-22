@@ -50,4 +50,23 @@ class TextModeRoutingTest < Minitest::Test
     assert_match(/when \/Labels\/i\s+then :labels/, @import_dialog)
     assert_match(/when \/Glyphs\/i\s+then :glyphs/, @import_dialog)
   end
+
+  def test_svg_glyphs_default_to_raw_edges_to_avoid_component_boxes
+    renderer_path = File.expand_path('../extracted/sketchup_ext/bc_pdf_vector_importer/svg_text_renderer.rb', __dir__)
+    renderer = File.read(renderer_path)
+
+    assert_match(/raw_edge_glyphs = raw_edge_glyphs\?\(opts, placement_count\)/, renderer)
+    assert_match(/glyph_instances: raw_edge_glyphs \? 0 : glyph_count/, renderer)
+    assert_match(/def self\.add_transformed_glyph_edges/, renderer)
+    assert_match(/entities\.add_line\(pa, pb\)/, renderer)
+  end
+
+  def test_svg_glyphs_keep_large_import_component_fallback
+    renderer_path = File.expand_path('../extracted/sketchup_ext/bc_pdf_vector_importer/svg_text_renderer.rb', __dir__)
+    renderer = File.read(renderer_path)
+
+    assert_match(/DEFAULT_EDGE_GLYPH_THRESHOLD = 5_000/, renderer)
+    assert_match(/placement_count\.to_i <= raw_edge_glyph_threshold/, renderer)
+    assert_match(/inst = entities\.add_instance\(glyph_data, tr\)/, renderer)
+  end
 end

@@ -297,7 +297,8 @@ Every future contributor — human or LLM — who sees an opportunity to "add a 
 | Diagonal dims (`7/8`) | Respect PDF angle; flatten only when \|angle\| < 12° |
 | Weld / TYP | Left-anchor at bbox x0; force horizontal (angle 0°) |
 | Rotated labels (\|angle\| > 8°) | Try `add_text` direction vector; mesh fallback when API returns nil |
-| Labels visual layer | Labels mode renders pdftocairo SVG text and hides native annotations when available |
+| Labels rendering | Labels mode stays native `add_text`; never hide annotations behind SVG glyph geometry |
+| Glyph/Geometry boxes | Normal-size SVG text imports stamp raw transformed edges; huge glyph runs may use component instances for performance |
 | Mesh left anchor | Centered label X converts to left anchor for `add_3d_text` via `mesh_label_anchor_pdf` |
 
 **Owner directive:** *"Part marks should match the PDF — horizontal on vertical members when the PDF says so, not rotated because pdftotext bbox is tall."*
