@@ -66,12 +66,16 @@ module BlueCollarSystems
         root
       end
 
-      # Ordered roots used by corpus placement CI. Honors BCS_CORPUS_ROOT first,
-      # then canonical corpus + Desktop mirrors.
+      # Ordered roots used by corpus placement CI. An explicit BCS_CORPUS_ROOT
+      # or PDF_TEST_CORPUS restricts the scan to that root; otherwise the local
+      # canonical corpus and Desktop mirrors are scanned.
       def corpus_scan_roots
         roots = []
         env_root = ENV['BCS_CORPUS_ROOT'] || ENV['PDF_TEST_CORPUS']
-        roots << File.expand_path(env_root) if env_root && !env_root.to_s.strip.empty?
+        if env_root && !env_root.to_s.strip.empty?
+          path = File.expand_path(env_root)
+          return File.directory?(path) ? [path] : []
+        end
         roots.concat(DEFAULT_CORPUS_ROOTS)
         roots << File.join(Dir.home, 'Desktop', 'New folder (2)')
         roots << 'C:/Users/Rowdy Payton/Desktop/New folder (2)'
