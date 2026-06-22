@@ -1012,15 +1012,12 @@ module BlueCollarSystems
           end
         end
 
-        # When glyph/geometry/3D Text mode: try an SVG text renderer first, skip text in builder.
-        # Labels mode keeps native SketchUp labels, then adds an SVG-backed visual
-        # text layer where available so PDF scale/rotation stays faithful. Native
-        # labels are hidden after the visual layer succeeds because SU annotations
-        # are screen-size objects and cannot be the sole PDF-accurate rendering.
+        # Glyph/Geometry modes use SVG glyph outlines for model-space visual
+        # fidelity. Labels and 3D Text must stay native to the selected SketchUp
+        # mode; otherwise a clean-PC import can appear to ignore the text-mode
+        # dropdown by showing glyph outlines.
         # Labels with layer matching use internal parsing so each span lands on its OCG tag.
-        # Geometry/Glyphs/3D Text still use SVG text so rotated sheets stay aligned with vectors.
-        use_svg_text = [:geometry, :glyphs, :text3d].include?(requested_text_mode) && opts[:import_text]
-        label_visual_text = (requested_text_mode == :labels) && opts[:import_text]
+        use_svg_text = [:geometry, :glyphs].include?(requested_text_mode) && opts[:import_text]
         if match_pdf_layers && !ocg.layer_list.empty? && requested_text_mode == :labels
           use_svg_text = false
         end
@@ -1044,34 +1041,12 @@ module BlueCollarSystems
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
 
-        if label_visual_text && builder.page_group
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering label visual text... [#{(Time.now - import_start).round(1)}s]"
-          label_text_layer = layer_mgr.text_fallback_layer
-          label_svg_result = SvgTextRenderer.render(
-            builder.page_group.entities, path, page_num, media_box,
-            scale: opts[:scale], layer: label_text_layer, y_offset: page_y_offset,
-            svg_page_box: svg_page_box,
-            page_rotation: page_rotation)
-          if label_svg_result
-            stats[:text] += label_svg_result[:glyphs]
-            stats[:edges] += label_svg_result[:edges]
-            stats[:text_mode] = :labels
-            record_text_renderer(stats, page_num,
-              renderer: label_svg_result[:renderer], mode: :labels,
-              requested_mode: requested_text_mode, visual_layer: true,
-              degraded: false)
-            begin
-              builder.text_group.hidden = true if builder.text_group && builder.text_group.respond_to?(:hidden=)
-            rescue StandardError => e
-              Logger.warn("Pipeline", "Could not hide native label annotations: #{e.message}")
-            end
-          else
-            Logger.warn("Pipeline", "Label visual text unavailable — native SketchUp labels preserved.")
-            record_text_renderer(stats, page_num,
-              renderer: :labels, mode: :labels,
-              requested_mode: requested_text_mode,
-              degraded: true, note: 'SVG visual text unavailable')
-          end
+        if opts[:import_text] && !use_svg_text && result[:text_objects].to_i > 0
+          renderer = builder_use_3d_text ? :add_3d_text : :labels
+          stats[:text_mode] = builder_use_3d_text ? :text3d : :labels
+          record_text_renderer(stats, page_num,
+            renderer: renderer, mode: stats[:text_mode],
+            requested_mode: requested_text_mode, degraded: false)
         end
 
         # Build hatching on separate layer if group mode
