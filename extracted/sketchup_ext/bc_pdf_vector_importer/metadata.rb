@@ -6,7 +6,7 @@
 
 module BlueCollarSystems
   module PDFVectorImporter
-    VERSION = '3.7.41'.freeze
+    VERSION = '3.7.42'.freeze
 
     module Metadata
 
