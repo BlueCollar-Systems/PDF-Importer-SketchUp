@@ -72,4 +72,21 @@ class QAReportTest < Minitest::Test
       File.delete(path) if File.exist?(path)
     end
   end
+
+  def test_builds_open_failure_report
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_open_failure(
+      'bad.pdf',
+      { import_mode: 'auto' },
+      'not_a_pdf',
+      'This file is not a valid PDF.'
+    )
+
+    assert_equal 'bcs.import_report/1.1', report[:schema]
+    assert_equal true, report[:fallback][:used]
+    assert_equal 'not_a_pdf', report[:fallback][:reason]
+    assert_equal ['This file is not a valid PDF.'], report[:fallback][:notes]
+    assert_equal 0, report[:result][:primitives]
+    assert_equal 1, report[:result][:warnings]
+    assert_equal 'not_a_pdf', report[:extra][:open_failure][:reason]
+  end
 end

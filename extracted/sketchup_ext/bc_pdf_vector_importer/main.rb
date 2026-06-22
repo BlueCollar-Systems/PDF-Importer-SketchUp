@@ -18,6 +18,7 @@ module BlueCollarSystems
     require File.join(dir, 'logger')
     require File.join(dir, 'command_runner')
     require File.join(dir, 'dependency_resolver')
+    require File.join(dir, 'pdf_open_gate')
     require File.join(dir, 'pdf_parser')
     require File.join(dir, 'content_stream_parser')
     require File.join(dir, 'text_parser')
@@ -1365,6 +1366,46 @@ module BlueCollarSystems
     end
 
     # ================================================================
+    # OPEN-TIME GATE — refuse malformed/unsupported PDFs cleanly
+    # ================================================================
+    # Mirrors the Python hosts' shared safe_open contract. Runs before
+    # the import dialog / pipeline so a bad file shows one actionable
+    # message (no Ruby traceback), logs a warning, and records the
+    # structured reason in import_report.json.
+    #
+    # Returns the failure result Hash when the import should be aborted,
+    # or nil when the file passed the gate. Pass show_ui: false for batch
+    # imports so the per-file refusal is logged/recorded without stacking
+    # message boxes (the batch summary reports the totals instead).
+    def self.handle_open_gate(path, opts = {}, show_ui: true)
+      result = PdfOpenGate.inspect_path(path)
+      return nil if result[:ok]
+
+      reason = result[:reason]
+      message = result[:message]
+      Logger.reset if Logger.log_path.nil?
+      Logger.warn("OpenGate",
+        "Refusing #{path ? File.basename(path.to_s) : 'file'}: #{reason} — #{message}")
+      record_open_failure_report(path, opts, reason, message)
+      Logger.flush_log
+      if show_ui && defined?(UI) && UI.respond_to?(:messagebox)
+        UI.messagebox(message)
+      end
+      result
+    rescue StandardError => e
+      Logger.warn("OpenGate", "gate check failed: #{e.message}")
+      nil
+    end
+
+    def self.record_open_failure_report(path, opts, reason, message)
+      report = QAReport.build_open_failure(path, opts, reason, message)
+      QAReport.write_json(report, QAReport.default_output_path(path))
+    rescue StandardError => e
+      Logger.warn("OpenGate", "open-failure report write failed: #{e.message}")
+      nil
+    end
+
+    # ================================================================
     # PUBLIC ENTRY POINTS
     # ================================================================
     def self.import_pdf
@@ -1372,6 +1413,7 @@ module BlueCollarSystems
       return UI.messagebox("No active model.") unless model
       path = UI.openpanel("Select PDF File", "", "PDF Files|*.pdf||")
       return unless path && File.exist?(path)
+      return if handle_open_gate(path)
       begin
         opts = ImportDialog.show(path)
         return unless opts
@@ -1394,6 +1436,7 @@ module BlueCollarSystems
       return UI.messagebox("No active model.") unless model
       path = UI.openpanel("Select PDF File (Safe Mode)", "", "PDF Files|*.pdf||")
       return unless path && File.exist?(path)
+      return if handle_open_gate(path)
 
       begin
         # BCS-ARCH-001: safe mode uses explicit Vector extraction
@@ -1438,6 +1481,11 @@ module BlueCollarSystems
         Sketchup.status_text = "Batch: #{idx+1}/#{pdfs.length} #{File.basename(pdf)}"
         begin
           opts = ImportDialog.send(:build_opts, sym_attrs.merge(pages: 'All'))
+          # Refuse bad PDFs quietly here; the summary box reports the count.
+          if handle_open_gate(pdf, opts, show_ui: false)
+            fail_c += 1
+            next
+          end
           ok += 1 if run_pipeline(model, pdf, opts)
         rescue StandardError => e
           fail_c += 1; Logger.error("Batch", File.basename(pdf), e)
@@ -1510,6 +1558,11 @@ module BlueCollarSystems
       def supports_options?; true; end
 
       def load_file(file_path, status)
+        # Open-time gate: a clear message was already shown for bad files,
+        # so report Canceled to suppress SketchUp's generic failure dialog.
+        if BlueCollarSystems::PDFVectorImporter.handle_open_gate(file_path)
+          return Sketchup::Importer::ImportCanceled
+        end
         opts = ImportDialog.show(file_path)
         return Sketchup::Importer::ImportCanceled unless opts
         model = Sketchup.active_model

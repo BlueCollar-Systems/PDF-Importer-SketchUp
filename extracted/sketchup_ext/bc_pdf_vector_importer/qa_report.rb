@@ -77,6 +77,28 @@ module BlueCollarSystems
         }
       end
 
+      # Build a schema-consistent report for an open-time gate refusal
+      # (malformed/encrypted/truncated PDF). The structured reason code is
+      # carried on fallback.reason to match the Python hosts' enum.
+      def build_open_failure(pdf_path, opts, reason, message)
+        stats = {
+          pages: 0, primitives: 0, edges: 0, text: 0, arcs: 0,
+          layers: [], text_renderers: [], elapsed_seconds: 0.0
+        }
+        report = build_from_stats(pdf_path, opts || {}, stats)
+        report[:result][:warnings] = 1
+        report[:fallback] = {
+          used: true,
+          reason: reason.to_s,
+          notes: message.to_s.empty? ? [] : [message.to_s]
+        }
+        report[:extra][:open_failure] = {
+          reason: reason.to_s,
+          message: message.to_s
+        }
+        report
+      end
+
       def write_json(report, output_path)
         path = output_path.to_s
         FileUtils.mkdir_p(File.dirname(path)) unless File.dirname(path).empty?
