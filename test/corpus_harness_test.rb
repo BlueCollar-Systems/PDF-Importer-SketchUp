@@ -15,15 +15,21 @@ class CorpusHarnessTest < Minitest::Test
       f.truncate((CorpusHarness::HEAVY_PDF_MB + 1).to_i * 1024 * 1024)
       f.flush
 
-      klass = class << CorpusHarness; self; end
-      original = CorpusHarness.method(:estimate_page_count)
-      klass.define_method(:estimate_page_count) do |_path|
-        raise 'estimate_page_count should not run for size-heavy PDFs'
-      end
+      klass = nil
+      original = nil
+      begin
+        klass = class << CorpusHarness; self; end
+        original = CorpusHarness.method(:estimate_page_count)
+        klass.define_method(:estimate_page_count) do |_path|
+          raise 'estimate_page_count should not run for size-heavy PDFs'
+        end
 
-      assert_nil CorpusHarness.page_count_hint_for(f.path)
-    ensure
-      klass.define_method(:estimate_page_count) { |path| original.call(path) } if klass && original
+        assert_nil CorpusHarness.page_count_hint_for(f.path)
+      ensure
+        if klass && original
+          klass.define_method(:estimate_page_count) { |path| original.call(path) }
+        end
+      end
     end
   end
 end
