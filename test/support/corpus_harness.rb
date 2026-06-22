@@ -285,7 +285,7 @@ module CorpusHarness
   def self.baseline_record(result)
     {
       'pdf_name' => result[:pdf_name],
-      'corpus_key' => result[:corpus_key],
+      'corpus_key' => canonical_baseline_key(result[:corpus_key]),
       'pages' => result[:pages],
       'paths' => result[:paths],
       'text_items' => result[:text_items],
@@ -296,14 +296,30 @@ module CorpusHarness
     }
   end
 
+  def self.canonical_baseline_key(corpus_key)
+    paths = BlueCollarSystems::PDFVectorImporter::CorpusPaths
+    if paths.respond_to?(:canonical_baseline_key)
+      paths.canonical_baseline_key(corpus_key)
+    else
+      corpus_key
+    end
+  end
+
   def self.baseline_path(corpus_key)
     slug = BlueCollarSystems::PDFVectorImporter::CorpusPaths.baseline_slug(corpus_key)
     File.join(BASELINE_DIR, slug)
   end
 
   def self.load_baseline(corpus_key)
-    path = baseline_path(corpus_key)
-    return nil unless File.file?(path)
+    paths = if BlueCollarSystems::PDFVectorImporter::CorpusPaths.respond_to?(:baseline_slug_candidates)
+              BlueCollarSystems::PDFVectorImporter::CorpusPaths
+                .baseline_slug_candidates(corpus_key)
+                .map { |slug| File.join(BASELINE_DIR, slug) }
+            else
+              [baseline_path(corpus_key)]
+            end
+    path = paths.find { |candidate| File.file?(candidate) }
+    return nil unless path
     JSON.parse(File.read(path))
   rescue StandardError
     nil

@@ -135,10 +135,37 @@ module BlueCollarSystems
       end
 
       def baseline_slug(corpus_key)
+        slug = baseline_key_to_slug(canonical_baseline_key(corpus_key))
+        slug[0, 120] + '.json'
+      end
+
+      def baseline_slug_candidates(corpus_key)
+        key = corpus_key.to_s
+        keys = [canonical_baseline_key(key)]
+        if key.start_with?('desktop_root/') || key.start_with?('desktop_pdftest/') ||
+           key.start_with?('env_corpus/')
+          rel = key.sub(%r{\A[^/]+/}, '')
+          keys << "corpus_new_folder/#{rel}"
+          keys << "corpus_new_folder/New folder/#{rel}"
+        end
+        keys.uniq.map do |candidate|
+          baseline_key_to_slug(candidate)[0, 120] + '.json'
+        end
+      end
+
+      def baseline_key_to_slug(corpus_key)
         slug = corpus_key.to_s.gsub(/[^a-zA-Z0-9]+/, '_')
         slug = slug.gsub(/^_|_$/,'')
-        slug = 'pdf' if slug.empty?
-        slug[0, 120] + '.json'
+        slug.empty? ? 'pdf' : slug
+      end
+
+      def canonical_baseline_key(corpus_key)
+        key = corpus_key.to_s
+        key = key.sub(%r{\Adesktop_root/}, 'corpus_pdftest/')
+        key = key.sub(%r{\Adesktop_pdftest/}, 'corpus_pdftest/')
+        key = key.sub(%r{\Aenv_corpus/}, 'corpus_pdftest/')
+        key = key.sub(%r{\Adesktop_new_folder/}, 'corpus_new_folder/')
+        key
       end
     end
   end
