@@ -1,0 +1,16 @@
+Bundled third-party tools for PDF Vector Importer (SketchUp)
+
+Poppler utilities and supporting DLLs (distributed under their upstream
+licenses; Poppler itself is GPL-family licensed, and the Windows bundle also
+contains LGPL/MIT/BSD-style support libraries):
+  pdftocairo.exe, pdftotext.exe, pdffonts.exe and required DLLs
+
+Fetched by tools/fetch_third_party_binaries.ps1 from:
+  https://github.com/oschwartz10612/poppler-windows/releases/latest
+
+For exact license files, source links, and component versions, preserve this
+notice plus the copied licenses/ folder with each published BlueCollar Systems
+release.
+
+MuPDF mutool is NOT bundled here (AGPL license review required).
+Ghostscript is NOT bundled here (large installer; user one-click install documented).

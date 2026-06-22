@@ -32,11 +32,12 @@ module BlueCollarSystems
         def build_report
           model = safe_call { Sketchup.active_model }
           entities = model ? safe_call { model.active_entities } : nil
-          pdftocairo = find_pdftocairo
-          mutool = find_mutool
-          pdftotext = find_pdftotext
-          pdffonts = find_pdffonts(pdftocairo)
-          ghostscript = find_ghostscript
+          status = dependency_status
+          pdftocairo = status[:pdftocairo]
+          mutool = status[:mutool]
+          pdftotext = status[:pdftotext]
+          pdffonts = status[:pdffonts]
+          ghostscript = status[:ghostscript]
 
           lines = []
           lines << "=== PDF Vector Importer Compatibility Report ==="
@@ -63,6 +64,7 @@ module BlueCollarSystems
           lines << capability_line("Entities#add_image available", entities_responds?(entities, :add_image))
           lines << capability_line("Entities#add_3d_text available", entities_responds?(entities, :add_3d_text))
           lines << capability_line("Model#line_styles available", line_styles_supported?(model))
+          lines << capability_line("Bundled bin folder ready", status[:bundled_bin], DependencyResolver.bundled_bin_dir)
           lines << capability_line("pdftocairo found", !pdftocairo.nil?, pdftocairo)
           lines << capability_line("mutool found", !mutool.nil?, mutool)
           lines << capability_line("pdftotext found", !pdftotext.nil?, pdftotext)
@@ -71,6 +73,12 @@ module BlueCollarSystems
           lines << ""
           lines << "[Feature Impact]"
           lines.concat(feature_impact_lines(model, entities, pdftocairo, mutool, pdftotext, pdffonts, ghostscript))
+          missing = DependencyResolver.missing_recommended(status)
+          unless missing.empty?
+            lines << ""
+            lines << "[Recommended Downloads]"
+            DependencyResolver.download_lines(missing).each { |line| lines << line }
+          end
           lines << ""
           lines << "[Notes]"
           lines << "- This report is safe to share for support diagnostics."
@@ -110,39 +118,10 @@ module BlueCollarSystems
           false
         end
 
-        def find_pdftocairo
-          return nil unless defined?(SvgTextRenderer)
-          SvgTextRenderer.find_pdftocairo
+        def dependency_status
+          DependencyResolver.scan
         rescue StandardError
-          nil
-        end
-
-        def find_mutool
-          return nil unless defined?(SvgTextRenderer)
-          SvgTextRenderer.find_mutool
-        rescue StandardError
-          nil
-        end
-
-        def find_pdftotext
-          return nil unless defined?(ExternalTextExtractor)
-          ExternalTextExtractor.send(:pdftotext_executable)
-        rescue StandardError
-          nil
-        end
-
-        def find_pdffonts(pdftocairo)
-          return nil unless defined?(SvgTextRenderer) && pdftocairo
-          SvgTextRenderer.find_pdffonts(pdftocairo)
-        rescue StandardError
-          nil
-        end
-
-        def find_ghostscript
-          return nil unless defined?(SvgTextRenderer)
-          SvgTextRenderer.find_ghostscript
-        rescue StandardError
-          nil
+          {}
         end
 
         def capability_line(label, ok, detail = nil)

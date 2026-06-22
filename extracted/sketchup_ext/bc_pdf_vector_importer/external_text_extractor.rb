@@ -7,6 +7,7 @@
 require 'cgi'
 require 'tmpdir'
 require File.join(File.dirname(__FILE__), 'command_runner')
+require File.join(File.dirname(__FILE__), 'dependency_resolver')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -83,39 +84,9 @@ module BlueCollarSystems
         private
 
         def pdftotext_executable
-          # 1) Explicit override
-          env = ENV['BC_PDFTOTEXT_PATH']
-          return env if env && !env.empty? && File.exist?(env)
-
-          # 2) Common Windows install path (MiKTeX)
-          candidates = []
-          candidates << 'C:\\Program Files\\poppler\\Library\\bin\\pdftotext.exe'
-          candidates << 'C:\\Program Files\\poppler\\bin\\pdftotext.exe'
-          if ENV['LOCALAPPDATA'] && !ENV['LOCALAPPDATA'].empty?
-            candidates << File.join(
-              ENV['LOCALAPPDATA'],
-              'Programs', 'MiKTeX', 'miktex', 'bin', 'x64', 'pdftotext.exe'
-            )
-          end
-          candidates << 'C:\\Program Files\\MiKTeX\\miktex\\bin\\x64\\pdftotext.exe'
-          # FreeCAD bundled (matches pdftocairo search)
-          candidates << File.join('C:', 'Program Files', 'FreeCAD 1.1', 'bin', 'pdftotext.exe')
-          # Glob patterns (matches pdftocairo search)
-          Dir.glob('C:/Program Files/FreeCAD*/bin/pdftotext.exe').each { |p| candidates << p }
-          Dir.glob('C:/poppler*/bin/pdftotext.exe').each { |p| candidates << p }
-          Dir.glob('C:/tools/poppler*/bin/pdftotext.exe').each { |p| candidates << p }
-          candidates.each { |p| return p if File.exist?(p) }
-
-          # 3) PATH
-          begin
-            probe = CommandRunner.run(['pdftotext', '-v'],
-              timeout_s: 10,
-              context: 'ExternalTextExtractor.pdftotext_probe')
-            return 'pdftotext' if probe[:ok]
-          rescue StandardError => e
-            Logger.warn('ExternalTextExtractor', "PATH probe failed: #{e.message}")
-          end
-
+          DependencyResolver.find_pdftotext
+        rescue StandardError => e
+          Logger.warn('ExternalTextExtractor', "pdftotext lookup failed: #{e.message}")
           nil
         end
 

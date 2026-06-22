@@ -17,6 +17,9 @@ Usage:
   python build_release.py
   python build_release.py --out /path/to/output_dir
 
+Optional (Windows release with bundled Poppler):
+  powershell -ExecutionPolicy Bypass -File tools/fetch_third_party_binaries.ps1
+
 Output:
   SketchUp-PDF-Importer_v<VERSION>.rbz
 """
@@ -34,6 +37,15 @@ SUPPORT_DIR = EXT_ROOT / "bc_pdf_vector_importer"
 EXCLUDE_DIRS  = {".git", ".github", "test", "__pycache__", ".ruff_cache"}
 EXCLUDE_FILES = {"build_release.py", ".gitignore", ".gitattributes"}
 EXCLUDE_SUFFIXES = {".bak", ".swp", ".pyo", ".pyc"}
+
+BUNDLED_HELPERS = {
+    "pdftocairo.exe",
+    "pdftotext.exe",
+    "pdffonts.exe",
+    "poppler.dll",
+    "THIRD_PARTY_NOTICES.txt",
+    "licenses/README.txt",
+}
 
 
 def _should_exclude(rel: Path) -> bool:
@@ -56,12 +68,30 @@ def _read_version() -> str:
     return "0.0.0"
 
 
-def build(out_dir: Path) -> Path:
+def _verify_bundled_helpers(required: bool = True) -> None:
+    """Fail release builds that accidentally omit bundled Windows helpers."""
+    bin_dir = SUPPORT_DIR / "bin"
+    missing = sorted(name for name in BUNDLED_HELPERS if not (bin_dir / name).is_file())
+    if not missing:
+        return
+
+    message = (
+        "Bundled Poppler helper files are missing from "
+        f"{bin_dir}: {', '.join(missing)}. "
+        "Run tools/fetch_third_party_binaries.ps1 before building the release RBZ."
+    )
+    if required:
+        raise RuntimeError(message)
+    print(f"WARNING: {message}")
+
+
+def build(out_dir: Path, *, require_helpers: bool = True) -> Path:
     version  = _read_version()
     rbz_name = f"SketchUp-PDF-Importer_v{version}.rbz"
     rbz_path = out_dir / rbz_name
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    _verify_bundled_helpers(required=require_helpers)
 
     file_count = 0
     skipped    = 0
@@ -92,9 +122,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build SU PDFVectorImporter .rbz")
     parser.add_argument("--out", default=str(REPO_ROOT),
                         help="Output directory (default: repo root)")
+    parser.add_argument("--allow-missing-bundled-poppler", action="store_true",
+                        help="Build without bundled Windows Poppler helpers (source/dev only).")
     args   = parser.parse_args()
     out    = Path(args.out).resolve()
-    rbz    = build(out)
+    rbz    = build(out, require_helpers=not args.allow_missing_bundled_poppler)
     print(f"\nRelease ready: {rbz}")
 
 

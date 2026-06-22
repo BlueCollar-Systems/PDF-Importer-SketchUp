@@ -9,6 +9,8 @@
 
 require 'tmpdir'
 require File.join(File.dirname(__FILE__), 'command_runner')
+require File.join(File.dirname(__FILE__), 'logger')
+require File.join(File.dirname(__FILE__), 'dependency_resolver')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -257,74 +259,16 @@ module BlueCollarSystems
       end
 
       def self.find_pdftocairo
-        env = ENV['BC_PDFTOCAIRO_PATH']
-        return env if env && !env.empty? && File.exist?(env)
-
-        begin
-          # Common local/system installs
-          candidates = []
-          candidates << 'C:\\Program Files\\poppler\\Library\\bin\\pdftocairo.exe'
-          candidates << 'C:\\Program Files\\poppler\\bin\\pdftocairo.exe'
-          if ENV['LOCALAPPDATA'] && !ENV['LOCALAPPDATA'].empty?
-            candidates << File.join(ENV['LOCALAPPDATA'],
-              'Programs', 'MiKTeX', 'miktex', 'bin', 'x64', 'pdftocairo.exe')
-          end
-          candidates << 'C:\\Program Files\\MiKTeX\\miktex\\bin\\x64\\pdftocairo.exe'
-          # FreeCAD bundles poppler utils in many installs.
-          candidates << 'C:\\Program Files\\FreeCAD 1.1\\bin\\pdftocairo.exe'
-          Dir.glob('C:/Program Files/FreeCAD*/bin/pdftocairo.exe').each { |p| candidates << p }
-          candidates.each { |p| return p if File.exist?(p) }
-        rescue StandardError => e
-          Logger.warn("SvgTextRenderer", "find_pdftocairo path search failed: #{e.message}")
-        end
-
-        if (RUBY_PLATFORM =~ /mswin|mingw|cygwin/)
-          ['C:/poppler*/bin/pdftocairo.exe',
-           'C:/tools/poppler*/bin/pdftocairo.exe'
-          ].each do |pat|
-            Dir.glob(pat).each { |p| return p if File.exist?(p) }
-          end
-        end
-
-        begin
-          if (RUBY_PLATFORM =~ /mswin|mingw|cygwin/)
-            r = `where pdftocairo.exe 2>NUL`.strip
-          else
-            r = `which pdftocairo 2>/dev/null`.strip
-          end
-          return r.split("\n").first.strip if !r.empty?
-        rescue StandardError => e
-          Logger.warn("SvgTextRenderer", "find_pdftocairo which/where failed: #{e.message}")
-        end
+        DependencyResolver.find_pdftocairo
+      rescue StandardError => e
+        Logger.warn("SvgTextRenderer", "find_pdftocairo failed: #{e.message}")
         nil
       end
 
       def self.find_mutool
-        env = ENV['BC_MUTOOL_PATH']
-        return env if env && !env.empty? && File.exist?(env)
-
-        begin
-          candidates = []
-          local = File.expand_path(File.join(File.dirname(__FILE__), '..', '..', '..', 'bin', 'mutool.exe'))
-          candidates << local
-          candidates << 'C:\\Program Files\\MuPDF\\mutool.exe'
-          Dir.glob('C:/Program Files/MuPDF*/mutool.exe').each { |p| candidates << p }
-          Dir.glob('C:/Program Files/mupdf*/mutool.exe').each { |p| candidates << p }
-          candidates.each { |p| return p if File.exist?(p) }
-        rescue StandardError => e
-          Logger.warn("SvgTextRenderer", "find_mutool path search failed: #{e.message}")
-        end
-
-        begin
-          if (RUBY_PLATFORM =~ /mswin|mingw|cygwin/)
-            r = `where mutool.exe 2>NUL`.strip
-          else
-            r = `which mutool 2>/dev/null`.strip
-          end
-          return r.split("\n").first.strip if !r.empty?
-        rescue StandardError => e
-          Logger.warn("SvgTextRenderer", "find_mutool which/where failed: #{e.message}")
-        end
+        DependencyResolver.find_mutool
+      rescue StandardError => e
+        Logger.warn("SvgTextRenderer", "find_mutool failed: #{e.message}")
         nil
       end
 
@@ -467,33 +411,16 @@ module BlueCollarSystems
       end
 
       def self.find_pdffonts(pdftocairo_exe)
-        return nil unless pdftocairo_exe
-        name = (RUBY_PLATFORM =~ /mswin|mingw|cygwin/) ? 'pdffonts.exe' : 'pdffonts'
-        cand = File.join(File.dirname(pdftocairo_exe.to_s), name)
-        File.exist?(cand) ? cand : nil
+        DependencyResolver.find_pdffonts(pdftocairo_exe)
+      rescue StandardError => e
+        warn_safe("find_pdffonts failed: #{e.message}")
+        nil
       end
 
       def self.find_ghostscript
-        env = ENV['BC_GHOSTSCRIPT_PATH']
-        return env if env && !env.empty? && File.exist?(env)
-        begin
-          if (RUBY_PLATFORM =~ /mswin|mingw|cygwin/)
-            matches = []
-            ['C:/Program Files/gs/gs*/bin/gswin64c.exe',
-             'C:/Program Files (x86)/gs/gs*/bin/gswin32c.exe'].each do |pat|
-              Dir.glob(pat).each { |p| matches << p }
-            end
-            return matches.sort.last unless matches.empty?
-            r = `where gswin64c.exe 2>NUL`.strip
-            r = `where gswin32c.exe 2>NUL`.strip if r.empty?
-            return r.split("\n").first.strip unless r.empty?
-          else
-            r = `which gs 2>/dev/null`.strip
-            return r.split("\n").first.strip unless r.empty?
-          end
-        rescue StandardError => e
-          warn_safe("find_ghostscript failed: #{e.message}")
-        end
+        DependencyResolver.find_ghostscript
+      rescue StandardError => e
+        warn_safe("find_ghostscript failed: #{e.message}")
         nil
       end
 

@@ -17,6 +17,7 @@ module BlueCollarSystems
     require File.join(dir, 'primitives')
     require File.join(dir, 'logger')
     require File.join(dir, 'command_runner')
+    require File.join(dir, 'dependency_resolver')
     require File.join(dir, 'pdf_parser')
     require File.join(dir, 'content_stream_parser')
     require File.join(dir, 'text_parser')
@@ -1481,6 +1482,7 @@ module BlueCollarSystems
       }
 
       @loaded = true
+      DependencyResolver.maybe_show_first_run_notice
     end
 
     # ================================================================

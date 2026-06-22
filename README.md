@@ -7,7 +7,7 @@
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
-Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support. Core vector import uses the built-in Ruby parser; optional MuPDF, Poppler, and Ghostscript helpers increase fidelity for text, raster, SVG, and non-embedded font cases.
+Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support. Core vector import uses the built-in Ruby parser; current Windows release RBZ files also bundle Poppler helpers for better text/raster/SVG fidelity. Ghostscript remains optional for non-embedded font repair.
 
 ---
 
@@ -70,11 +70,16 @@ The extension registers under **File > Import** and adds a PDF Vector Importer t
 For SketchUp 2025 users: native PDF import discoverability changed in SketchUp UI,
 but this extension still provides dedicated PDF import menu and toolbar commands.
 
-## Optional Helpers / Any-PC Behavior
+## Bundled Helpers / Any-PC Behavior
 
 The importer must run on a supported PC without hardcoded local paths. Optional
 helpers are detected at runtime and reported through **Extensions > PDF Vector
 Importer > Compatibility Report**.
+
+Current Windows release RBZ files include Poppler `pdftocairo`, `pdftotext`,
+`pdffonts`, and required DLLs under the extension `bin/` folder. Source builds
+must run `tools/fetch_third_party_binaries.ps1` before `python build_release.py`;
+the build fails if the bundled helper set is missing.
 
 | Helper | Used for | If missing |
 |--------|----------|------------|

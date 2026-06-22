@@ -20,7 +20,8 @@ module BlueCollarSystems
 
       DESKTOP_SCAN_PROFILES = [
         { subdir: 'PDFTest Files', recursive: false, tag: 'desktop_pdftest' },
-        { subdir: 'New folder (2)', recursive: true, tag: 'desktop_new_folder' }
+        { subdir: 'New folder (2)', recursive: true, tag: 'desktop_new_folder' },
+        { subdir: nil, recursive: false, tag: 'desktop_root' }
       ].freeze
 
       module_function
