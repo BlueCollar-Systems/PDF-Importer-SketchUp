@@ -79,14 +79,14 @@ module BlueCollarSystems
       MODES = {
         'Auto' => {
           'import_mode'        => 'auto',
-          'text_mode'          => 'Geometry',
+          'text_mode'          => '3D Text',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
         }.freeze,
         'Vector' => {
           'import_mode'        => 'vector',
-          'text_mode'          => 'Geometry',
+          'text_mode'          => '3D Text',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -100,7 +100,7 @@ module BlueCollarSystems
         }.freeze,
         'Hybrid' => {
           'import_mode'        => 'hybrid',
-          'text_mode'          => 'Geometry',
+          'text_mode'          => '3D Text',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -128,7 +128,7 @@ module BlueCollarSystems
         @scale            = attrs[:scale]            || '1.0'
         @pages            = attrs[:pages]            || 'All'
         @import_text      = attrs[:import_text]      || 'Yes'
-        @text_mode        = attrs[:text_mode]        || 'Geometry'
+        @text_mode        = attrs[:text_mode]        || '3D Text'
         @import_mode      = attrs[:import_mode]      || 'auto'
         @grouping_mode    = attrs[:grouping_mode]    || 'Group per page'
         @page_arrangement = attrs[:page_arrangement] || 'Spread (20% gap)'
