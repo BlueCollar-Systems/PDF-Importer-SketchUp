@@ -37,16 +37,18 @@ class DependencyResolverTest < Minitest::Test
 
   def test_bundled_bin_preferred_over_system_search
     Dir.mktmpdir('bc_dep_test') do |tmpdir|
-      bin_dir = File.join(tmpdir, 'bin')
-      FileUtils.mkdir_p(bin_dir)
-      fake = File.join(bin_dir, 'pdftocairo.exe')
-      File.write(fake, 'stub')
+      begin
+        bin_dir = File.join(tmpdir, 'bin')
+        FileUtils.mkdir_p(bin_dir)
+        fake = File.join(bin_dir, 'pdftocairo.exe')
+        File.write(fake, 'stub')
 
-      original = @resolver.method(:bundled_bin_dir)
-      @resolver.define_singleton_method(:bundled_bin_dir) { bin_dir }
-      assert_equal fake, @resolver.find_pdftocairo
-    ensure
-      @resolver.define_singleton_method(:bundled_bin_dir, original)
+        original = @resolver.method(:bundled_bin_dir)
+        @resolver.define_singleton_method(:bundled_bin_dir) { bin_dir }
+        assert_equal fake, @resolver.find_pdftocairo
+      ensure
+        @resolver.define_singleton_method(:bundled_bin_dir, original)
+      end
     end
   end
 
