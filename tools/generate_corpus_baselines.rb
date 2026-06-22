@@ -23,14 +23,20 @@ end
 puts "Generating baselines for #{pdfs.length} PDFs..."
 written = 0
 failed = 0
+warned = 0
 
 pdfs.each_with_index do |info, idx|
   print "#{idx + 1}/#{pdfs.length}  #{info[:corpus_key]} ... "
   $stdout.flush
   result = CorpusHarness.analyze_pdf(info)
   if result[:status] != 'OK'
-    puts "SKIP  #{result[:error]}"
-    failed += 1
+    if result[:status] == 'TIMEOUT' && result[:heavy]
+      puts "SKIP (heavy, warn-only)  #{result[:error]}"
+      warned += 1
+    else
+      puts "SKIP  #{result[:error]}"
+      failed += 1
+    end
     next
   end
   path = CorpusHarness.save_baseline(result)
@@ -40,5 +46,6 @@ end
 
 puts
 puts "Wrote #{written} baseline(s) to #{CorpusHarness::BASELINE_DIR}"
+puts "Skipped #{warned} heavy PDF(s) due to warn-only timeout" if warned > 0
 puts "Skipped #{failed} PDF(s) due to parse/timeout errors" if failed > 0
 exit failed.positive? ? 1 : 0

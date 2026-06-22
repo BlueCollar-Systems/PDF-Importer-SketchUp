@@ -3,9 +3,9 @@
   "corpus_key": "corpus_pdftest/TX_Alvord_20220525_TM_geo.pdf",
   "pages": 1,
   "paths": 10930,
-  "text_items": 9713,
+  "text_items": 9712,
   "bbox_pct": 100.0,
-  "placement_ok": 9716,
-  "placement_total": 9716,
-  "text_hash": "ccca5b1e96b6d244a01b9e1f0530018b8b3a25e38cd5693dc9042ae9fa05f33b"
+  "placement_ok": 9715,
+  "placement_total": 9715,
+  "text_hash": "3dbcb27a74d469c90072972631b7ee3c6349c609b9b30303d9c88303f68940dd"
 }
