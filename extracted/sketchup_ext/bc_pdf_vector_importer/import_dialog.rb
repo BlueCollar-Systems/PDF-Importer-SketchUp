@@ -26,14 +26,14 @@ module BlueCollarSystems
       MODES = {
         'Auto' => {
           'import_mode'        => 'auto',
-          'text_mode'          => 'Geometry',
+          'text_mode'          => '3D Text',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
         }.freeze,
         'Vector' => {
           'import_mode'        => 'vector',
-          'text_mode'          => 'Geometry',
+          'text_mode'          => '3D Text',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -47,7 +47,7 @@ module BlueCollarSystems
         }.freeze,
         'Hybrid' => {
           'import_mode'        => 'hybrid',
-          'text_mode'          => 'Geometry',
+          'text_mode'          => '3D Text',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -58,7 +58,7 @@ module BlueCollarSystems
       MODE_NAMES   = MODES.keys.join('|')
       TEXT_MODES   = 'Geometry|Glyphs|Labels|3D Text'
       TEXT_MODE_CHOICES = TEXT_MODES.split('|').freeze
-      FIRST_RUN_TEXT_MODE = 'Geometry'.freeze
+      FIRST_RUN_TEXT_MODE = '3D Text'.freeze
       FIRST_RUN_MATCH_PDF_LAYERS = 'Yes'.freeze
 
       # Workflow choices kept after the Rule 5 sweep
@@ -465,7 +465,7 @@ module BlueCollarSystems
         # BCS-ARCH-001 text resolver: Geometry|Glyphs|Labels|3D Text.
         # Import Text checkbox is the orthogonal on/off control.
         import_text_flag = (raw[:import_text] || 'Yes') == 'Yes'
-        text_mode_raw = (raw[:text_mode] || 'Geometry').to_s
+        text_mode_raw = (raw[:text_mode] || FIRST_RUN_TEXT_MODE).to_s
         text_mode = case text_mode_raw
                     when /No text/i           then :none
                     when /Labels/i            then :labels
