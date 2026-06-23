@@ -164,6 +164,18 @@ module BlueCollarSystems
           suffix = degraded ? " (degraded)#{note_suffix}." : "."
           lines << "#{text_renderer_label(renderer_key)}: #{page_word} #{format_page_list(pages)}#{suffix}"
         end
+        if dense_glyph_component_text?(entries)
+          lines << "Dense text used reusable glyph components for performance; outlines remain vector geometry."
+        end
+      end
+
+      def self.dense_glyph_component_text?(entries)
+        Array(entries).any? do |entry|
+          mode = entry[:text_performance_mode] || entry['text_performance_mode']
+          mode.to_s == 'glyph_components'
+        end
+      rescue StandardError
+        false
       end
 
       def self.text_renderer_label(renderer)

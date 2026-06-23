@@ -1120,7 +1120,10 @@ module BlueCollarSystems
               cropbox_fallback: svg_result[:cropbox_fallback],
               raw_edge_glyphs: svg_result[:raw_edge_glyphs],
               glyph_instances: svg_result[:glyph_instances],
-              flattened_glyph_instances: svg_result[:flattened_glyph_instances])
+              flattened_glyph_instances: svg_result[:flattened_glyph_instances],
+              estimated_glyph_edges: svg_result[:estimated_glyph_edges],
+              text_performance_mode: svg_result[:text_performance_mode],
+              component_container: svg_result[:component_container])
           else
             # SVG glyph text unavailable/disabled. Geometry/Glyphs fail closed to
             # labels so dense CAD text does not become inaccurate mesh text.

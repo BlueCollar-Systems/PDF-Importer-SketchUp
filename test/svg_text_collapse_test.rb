@@ -107,6 +107,7 @@ class SvgTextCollapseTest < Minitest::Test
     old = ENV['BC_SU_KEEP_GLYPH_COMPONENTS']
     ENV.delete('BC_SU_KEEP_GLYPH_COMPONENTS')
     assert R.flatten_glyph_instances?({})
+    refute R.flatten_glyph_instances?({}, 65_444)
 
     ENV['BC_SU_KEEP_GLYPH_COMPONENTS'] = '1'
     refute R.flatten_glyph_instances?({})
@@ -120,10 +121,117 @@ class SvgTextCollapseTest < Minitest::Test
     end
   end
 
+  def test_large_edge_counts_switch_to_component_strategy
+    old_raw = ENV['BC_SU_GLYPH_RAW_EDGE_BUDGET']
+    old_flatten = ENV['BC_SU_GLYPH_FLATTEN_EDGE_BUDGET']
+    ENV.delete('BC_SU_GLYPH_RAW_EDGE_BUDGET')
+    ENV.delete('BC_SU_GLYPH_FLATTEN_EDGE_BUDGET')
+
+    assert R.raw_edge_glyphs?({}, 1_919, 3_000)
+    refute R.raw_edge_glyphs?({}, 1_919, 10_000)
+    refute R.raw_edge_glyphs?({}, 1_919, 65_444)
+    assert R.flatten_glyph_instances?({}, 2_000)
+    refute R.flatten_glyph_instances?({}, 10_000)
+    refute R.flatten_glyph_instances?({}, 65_444)
+  ensure
+    if old_raw.nil?
+      ENV.delete('BC_SU_GLYPH_RAW_EDGE_BUDGET')
+    else
+      ENV['BC_SU_GLYPH_RAW_EDGE_BUDGET'] = old_raw
+    end
+    if old_flatten.nil?
+      ENV.delete('BC_SU_GLYPH_FLATTEN_EDGE_BUDGET')
+    else
+      ENV['BC_SU_GLYPH_FLATTEN_EDGE_BUDGET'] = old_flatten
+    end
+  end
+
+  def test_raw_edge_glyphs_use_estimated_edge_budget
+    old = ENV['BC_SU_GLYPH_RAW_EDGE_BUDGET']
+    ENV['BC_SU_GLYPH_RAW_EDGE_BUDGET'] = '20000'
+
+    assert R.raw_edge_glyphs?({}, 1_919, 12_000)
+    refute R.raw_edge_glyphs?({}, 1_919, 65_444)
+    refute R.raw_edge_glyphs?({}, 5_001, 12_000)
+    assert R.raw_edge_glyphs?({ raw_edge_glyphs: true }, 1_919, 65_444)
+    refute R.raw_edge_glyphs?({ raw_edge_glyphs: false }, 1_919, 12_000)
+  ensure
+    if old.nil?
+      ENV.delete('BC_SU_GLYPH_RAW_EDGE_BUDGET')
+    else
+      ENV['BC_SU_GLYPH_RAW_EDGE_BUDGET'] = old
+    end
+  end
+
+  def test_estimates_glyph_edges_from_reused_glyphs
+    placements = [
+      { glyph_id: 'glyph-a' },
+      { glyph_id: 'glyph-b' },
+      { glyph_id: 'glyph-a' },
+      { glyph_id: 'missing' }
+    ]
+    counts = { 'glyph-a' => 12, 'glyph-b' => 3 }
+
+    assert_equal 27, R.estimate_glyph_edge_count(placements, counts)
+  end
+
   class DummyEdge
     attr_accessor :layer
     def typename
       'Edge'
+    end
+  end
+
+  class DummyPoint
+    attr_reader :x, :y, :z
+
+    def initialize(x, y, z = 0.0)
+      @x = x
+      @y = y
+      @z = z
+    end
+
+    def transform(_tr)
+      self
+    end
+
+    def distance(other)
+      dx = x.to_f - other.x.to_f
+      dy = y.to_f - other.y.to_f
+      dz = z.to_f - other.z.to_f
+      Math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+    end
+  end
+
+  class DummyEntities
+    attr_reader :add_edges_calls, :add_line_calls, :edges
+
+    def initialize
+      @add_edges_calls = 0
+      @add_line_calls = 0
+      @edges = []
+    end
+
+    def add_edges(points)
+      @add_edges_calls += 1
+      made = []
+      points.each_cons(2) { made << DummyEdge.new }
+      @edges.concat(made)
+      made
+    end
+
+    def add_line(_a, _b)
+      @add_line_calls += 1
+      edge = DummyEdge.new
+      @edges << edge
+      edge
+    end
+  end
+
+  class FailingBatchEntities < DummyEntities
+    def add_edges(_points)
+      @add_edges_calls += 1
+      raise 'batch unavailable'
     end
   end
 
@@ -143,5 +251,32 @@ class SvgTextCollapseTest < Minitest::Test
 
     assert_equal 1, exploded_edges
     assert_equal 'PDF Text', edge.layer
+  end
+
+  def test_raw_glyph_edges_batch_each_subpath
+    entities = DummyEntities.new
+    paths = [
+      [DummyPoint.new(0, 0), DummyPoint.new(1, 0), DummyPoint.new(1, 1)],
+      [DummyPoint.new(2, 0), DummyPoint.new(2, 1)]
+    ]
+
+    count = R.add_transformed_glyph_edges(entities, paths, nil, 'PDF Text')
+
+    assert_equal 3, count
+    assert_equal 2, entities.add_edges_calls
+    assert_equal 0, entities.add_line_calls
+    assert_equal ['PDF Text'], entities.edges.map(&:layer).uniq
+  end
+
+  def test_raw_glyph_edges_fall_back_to_segments_when_batch_fails
+    entities = FailingBatchEntities.new
+    paths = [[DummyPoint.new(0, 0), DummyPoint.new(1, 0), DummyPoint.new(1, 1)]]
+
+    count = R.add_transformed_glyph_edges(entities, paths, nil, 'PDF Text')
+
+    assert_equal 2, count
+    assert_equal 1, entities.add_edges_calls
+    assert_equal 2, entities.add_line_calls
+    assert_equal ['PDF Text'], entities.edges.map(&:layer).uniq
   end
 end

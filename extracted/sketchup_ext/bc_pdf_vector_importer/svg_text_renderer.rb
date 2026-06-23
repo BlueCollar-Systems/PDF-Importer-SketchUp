@@ -19,6 +19,9 @@ module BlueCollarSystems
 
       PDF_PT_TO_INCH = 1.0 / 72.0
       DEFAULT_EDGE_GLYPH_THRESHOLD = 5_000
+      DEFAULT_RAW_GLYPH_EDGE_BUDGET = 6_000
+      DEFAULT_FLATTEN_GLYPH_EDGE_BUDGET = 3_000
+      GLYPH_POINT_TOLERANCE = 1.0e-7
 
       def self.render(entities, pdf_path, page_num, media_box, opts = {})
         renderer = find_svg_renderer
@@ -127,12 +130,10 @@ module BlueCollarSystems
         visible_glyph_instances = 0
         flattened_glyph_instances = 0
         placement_count = placements.length
-        raw_edge_glyphs = raw_edge_glyphs?(opts, placement_count)
-        flatten_glyph_instances = flatten_glyph_instances?(opts)
 
-        # Build each unique glyph once. Normal-size text imports keep point
-        # paths and stamp raw edges; huge imports use component definitions as
-        # a construction cache, then flatten the placed instances by default.
+        # Parse each unique glyph once. Small/medium edge budgets stamp raw
+        # edges. Dense pages use reusable glyph components to avoid SketchUp's
+        # per-edge insertion bottleneck while preserving the same outlines.
         Sketchup.status_text = "Building #{glyphs.length} glyph shapes..."
         glyph_defs = {}
         glyph_paths = {}
@@ -142,9 +143,20 @@ module BlueCollarSystems
           subpaths = svg_path_to_points(path_d, x_unit_to_in, y_unit_to_in)
           next if subpaths.empty?
 
-          if raw_edge_glyphs
-            glyph_paths[glyph_id] = subpaths
-          else
+          glyph_paths[glyph_id] = subpaths
+          glyph_edge_counts[glyph_id] = count_subpath_edges(subpaths)
+        end
+
+        estimated_glyph_edges = estimate_glyph_edge_count(placements, glyph_edge_counts)
+        raw_edge_glyphs = raw_edge_glyphs?(opts, placement_count, estimated_glyph_edges)
+        flatten_glyph_instances = flatten_glyph_instances?(opts, estimated_glyph_edges)
+        Logger.info("SvgTextRenderer",
+          "Page #{page_num}: glyph_strategy=#{raw_edge_glyphs ? 'raw_edges' : 'components'}, " \
+          "placements=#{placement_count}, estimated_edges=#{estimated_glyph_edges}, " \
+          "raw_edge_budget=#{raw_glyph_edge_budget}, flatten=#{flatten_glyph_instances}")
+
+        unless raw_edge_glyphs
+          glyph_paths.each do |glyph_id, subpaths|
             defn = model.definitions.add("_g_#{glyph_id}")
             defn_edge_count = 0
             subpaths.each do |pts|
@@ -160,6 +172,25 @@ module BlueCollarSystems
               glyph_defs[glyph_id] = defn
               glyph_edge_counts[glyph_id] = defn_edge_count
             end
+          end
+        end
+
+        text_entities = entities
+        component_container = false
+        unless raw_edge_glyphs
+          begin
+            group = entities.add_group
+            group.name = "Text Glyph Geometry"
+            begin
+              group.layer = text_layer if text_layer
+            rescue StandardError => e
+              Logger.warn("SvgTextRenderer", "set_layer on glyph container failed: #{e.message}")
+            end
+            text_entities = group.entities
+            component_container = true
+          rescue StandardError => e
+            Logger.warn("SvgTextRenderer", "glyph container group failed: #{e.message}")
+            text_entities = entities
           end
         end
 
@@ -210,11 +241,11 @@ module BlueCollarSystems
             end
 
             if raw_edge_glyphs
-              added = add_transformed_glyph_edges(entities, glyph_data, tr, text_layer)
+              added = add_transformed_glyph_edges(text_entities, glyph_data, tr, text_layer)
               edge_count += added
               next if added <= 0
             else
-              inst = entities.add_instance(glyph_data, tr)
+              inst = text_entities.add_instance(glyph_data, tr)
               begin
                 inst.layer = text_layer if inst && text_layer
               rescue StandardError => e
@@ -260,6 +291,9 @@ module BlueCollarSystems
           glyph_instances: visible_glyph_instances,
           raw_edge_glyphs: raw_edge_glyphs,
           flattened_glyph_instances: flattened_glyph_instances,
+          estimated_glyph_edges: estimated_glyph_edges,
+          text_performance_mode: raw_edge_glyphs ? :raw_edges : :glyph_components,
+          component_container: component_container,
           skipped_glyphs: skipped_collapsed, missing_fonts: missing_fonts }
       rescue StandardError => e
         begin
@@ -278,9 +312,13 @@ module BlueCollarSystems
 
       private
 
-      def self.raw_edge_glyphs?(opts, placement_count)
+      def self.raw_edge_glyphs?(opts, placement_count, estimated_edge_count = nil)
         return false if opts[:raw_edge_glyphs] == false
-        placement_count.to_i <= raw_edge_glyph_threshold
+        return true if opts[:raw_edge_glyphs] == true
+        return false if placement_count.to_i > raw_edge_glyph_threshold
+        edge_count = estimated_edge_count.to_i
+        return true if edge_count <= 0
+        edge_count <= raw_glyph_edge_budget
       end
 
       def self.raw_edge_glyph_threshold
@@ -291,38 +329,140 @@ module BlueCollarSystems
         DEFAULT_EDGE_GLYPH_THRESHOLD
       end
 
-      def self.flatten_glyph_instances?(opts)
+      def self.raw_glyph_edge_budget
+        raw = ENV['BC_SU_GLYPH_RAW_EDGE_BUDGET'].to_s.strip
+        value = raw.empty? ? DEFAULT_RAW_GLYPH_EDGE_BUDGET : raw.to_i
+        value > 0 ? value : DEFAULT_RAW_GLYPH_EDGE_BUDGET
+      rescue StandardError
+        DEFAULT_RAW_GLYPH_EDGE_BUDGET
+      end
+
+      def self.flatten_glyph_edge_budget
+        raw = ENV['BC_SU_GLYPH_FLATTEN_EDGE_BUDGET'].to_s.strip
+        value = raw.empty? ? DEFAULT_FLATTEN_GLYPH_EDGE_BUDGET : raw.to_i
+        value > 0 ? value : DEFAULT_FLATTEN_GLYPH_EDGE_BUDGET
+      rescue StandardError
+        DEFAULT_FLATTEN_GLYPH_EDGE_BUDGET
+      end
+
+      def self.flatten_glyph_instances?(opts, estimated_edge_count = nil)
         if opts && opts.key?(:flatten_glyph_instances)
           return opts[:flatten_glyph_instances] ? true : false
         end
         raw = ENV['BC_SU_KEEP_GLYPH_COMPONENTS'].to_s.strip.downcase
         return false if raw == '1' || raw == 'true' || raw == 'yes'
+        edge_count = estimated_edge_count.to_i
+        return false if edge_count > flatten_glyph_edge_budget
         true
       rescue StandardError
         true
+      end
+
+      def self.count_subpath_edges(subpaths)
+        total = 0
+        Array(subpaths).each do |pts|
+          next unless pts
+          total += [pts.length.to_i - 1, 0].max
+        end
+        total
+      end
+
+      def self.estimate_glyph_edge_count(placements, glyph_edge_counts)
+        total = 0
+        Array(placements).each do |p|
+          total += glyph_edge_counts[p[:glyph_id]].to_i
+        end
+        total
+      rescue StandardError
+        0
       end
 
       def self.add_transformed_glyph_edges(entities, subpaths, tr, text_layer)
         added = 0
         Array(subpaths).each do |pts|
           next unless pts && pts.length >= 2
-          pts.each_cons(2) do |a, b|
-            begin
-              pa = a.respond_to?(:transform) ? a.transform(tr) : tr * a
-              pb = b.respond_to?(:transform) ? b.transform(tr) : tr * b
-              edge = entities.add_line(pa, pb)
-              begin
-                edge.layer = text_layer if edge && text_layer
-              rescue StandardError => e
-                Logger.warn("SvgTextRenderer", "set_layer on glyph edge failed: #{e.message}")
-              end
-              added += 1 if edge
-            rescue StandardError => e
-              Logger.warn("SvgTextRenderer", "add_line for glyph edge failed: #{e.message}")
+          transformed = transformed_glyph_points(pts, tr)
+          next if transformed.length < 2
+
+          begin
+            edges = entities.add_edges(transformed)
+            edges = Array(edges)
+            if edges.empty?
+              added += add_glyph_segments_from_points(entities, transformed, text_layer)
+            else
+              edges.each { |edge| set_glyph_edge_layer(edge, text_layer) }
+              added += edges.length
             end
+          rescue StandardError => e
+            Logger.warn("SvgTextRenderer", "add_edges for glyph path failed, falling back: #{e.message}")
+            added += add_glyph_segments_from_points(entities, transformed, text_layer)
           end
         end
         added
+      end
+
+      def self.transformed_glyph_points(points, tr)
+        out = []
+        Array(points).each do |pt|
+          transformed = transform_glyph_point(pt, tr)
+          next unless transformed
+          out << transformed if out.empty? || !same_glyph_point?(out.last, transformed)
+        end
+        out
+      end
+
+      def self.transform_glyph_point(point, tr)
+        begin
+          return point.transform(tr) if point.respond_to?(:transform)
+        rescue StandardError
+          # Try Transformation#* below.
+        end
+        begin
+          return tr * point if tr
+        rescue StandardError
+          # Fall through to the original point for test doubles/minimal runtimes.
+        end
+        point
+      end
+
+      def self.add_glyph_segments_from_points(entities, points, text_layer)
+        added = 0
+        Array(points).each_cons(2) do |pa, pb|
+          next if same_glyph_point?(pa, pb)
+          begin
+            edge = entities.add_line(pa, pb)
+            set_glyph_edge_layer(edge, text_layer)
+            added += 1 if edge
+          rescue StandardError => e
+            Logger.warn("SvgTextRenderer", "add_line for glyph edge failed: #{e.message}")
+          end
+        end
+        added
+      end
+
+      def self.set_glyph_edge_layer(edge, text_layer)
+        return unless edge && text_layer
+        begin
+          edge.layer = text_layer
+        rescue StandardError => e
+          Logger.warn("SvgTextRenderer", "set_layer on glyph edge failed: #{e.message}")
+        end
+      end
+
+      def self.same_glyph_point?(a, b)
+        return false unless a && b
+        if a.respond_to?(:distance)
+          return a.distance(b).to_f <= GLYPH_POINT_TOLERANCE
+        end
+        if a.respond_to?(:x) && a.respond_to?(:y) && b.respond_to?(:x) && b.respond_to?(:y)
+          dx = a.x.to_f - b.x.to_f
+          dy = a.y.to_f - b.y.to_f
+          dz = (a.respond_to?(:z) && b.respond_to?(:z)) ? (a.z.to_f - b.z.to_f) : 0.0
+          return ((dx * dx) + (dy * dy) + (dz * dz)) <= (GLYPH_POINT_TOLERANCE * GLYPH_POINT_TOLERANCE)
+        end
+        false
+      rescue StandardError
+        false
       end
 
       def self.explode_glyph_instance(inst, text_layer)

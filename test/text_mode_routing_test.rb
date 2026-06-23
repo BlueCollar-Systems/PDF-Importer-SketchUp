@@ -55,10 +55,11 @@ class TextModeRoutingTest < Minitest::Test
     renderer_path = File.expand_path('../extracted/sketchup_ext/bc_pdf_vector_importer/svg_text_renderer.rb', __dir__)
     renderer = File.read(renderer_path)
 
-    assert_match(/raw_edge_glyphs = raw_edge_glyphs\?\(opts, placement_count\)/, renderer)
+    assert_match(/raw_edge_glyphs = raw_edge_glyphs\?\(opts, placement_count, estimated_glyph_edges\)/, renderer)
     assert_match(/glyph_instances: visible_glyph_instances/, renderer)
     assert_match(/def self\.add_transformed_glyph_edges/, renderer)
-    assert_match(/entities\.add_line\(pa, pb\)/, renderer)
+    assert_match(/entities\.add_edges\(transformed\)/, renderer)
+    assert_match(/add_glyph_segments_from_points/, renderer)
   end
 
   def test_svg_glyphs_flatten_large_import_component_fallback_by_default
@@ -66,9 +67,15 @@ class TextModeRoutingTest < Minitest::Test
     renderer = File.read(renderer_path)
 
     assert_match(/DEFAULT_EDGE_GLYPH_THRESHOLD = 5_000/, renderer)
-    assert_match(/placement_count\.to_i <= raw_edge_glyph_threshold/, renderer)
-    assert_match(/flatten_glyph_instances = flatten_glyph_instances\?\(opts\)/, renderer)
-    assert_match(/inst = entities\.add_instance\(glyph_data, tr\)/, renderer)
+    assert_match(/DEFAULT_RAW_GLYPH_EDGE_BUDGET = 6_000/, renderer)
+    assert_match(/DEFAULT_FLATTEN_GLYPH_EDGE_BUDGET = 3_000/, renderer)
+    assert_match(/estimated_glyph_edges = estimate_glyph_edge_count/, renderer)
+    assert_match(/placement_count\.to_i > raw_edge_glyph_threshold/, renderer)
+    assert_match(/edge_count <= raw_glyph_edge_budget/, renderer)
+    assert_match(/flatten_glyph_instances = flatten_glyph_instances\?\(opts, estimated_glyph_edges\)/, renderer)
+    assert_match(/group = entities\.add_group/, renderer)
+    assert_match(/component_container: component_container/, renderer)
+    assert_match(/inst = text_entities\.add_instance\(glyph_data, tr\)/, renderer)
     assert_match(/exploded_edges = explode_glyph_instance\(inst, text_layer\)/, renderer)
     assert_match(/flattened_glyph_instances: flattened_glyph_instances/, renderer)
   end
@@ -84,8 +91,9 @@ class TextModeRoutingTest < Minitest::Test
     renderer_path = File.expand_path('../extracted/sketchup_ext/bc_pdf_vector_importer/svg_text_renderer.rb', __dir__)
     renderer = File.read(renderer_path)
 
-    assert_match(/def self\.flatten_glyph_instances\?\(opts\)/, renderer)
+    assert_match(/def self\.flatten_glyph_instances\?\(opts, estimated_edge_count = nil\)/, renderer)
     assert_match(/BC_SU_KEEP_GLYPH_COMPONENTS/, renderer)
     assert_match(/return false if raw == '1' \|\| raw == 'true' \|\| raw == 'yes'/, renderer)
+    assert_match(/return false if edge_count > flatten_glyph_edge_budget/, renderer)
   end
 end

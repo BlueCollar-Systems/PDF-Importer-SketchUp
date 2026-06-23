@@ -34,4 +34,20 @@ class ReportDialogTest < Minitest::Test
   def test_format_page_list_compacts_ranges
     assert_equal "1-3, 7, 9-10", R.format_page_list([3, 2, 1, 10, 9, 7])
   end
+
+  def test_report_notes_dense_glyph_component_performance_mode
+    summary = R.build_summary(
+      pages: 1,
+      edges: 65_444,
+      text: 1_919,
+      text_mode: :geometry,
+      text_renderers: [
+        { page: 1, renderer: :pdftocairo, degraded: false,
+          text_performance_mode: :glyph_components }
+      ]
+    )
+
+    assert_includes summary,
+      "Dense text used reusable glyph components for performance; outlines remain vector geometry."
+  end
 end
