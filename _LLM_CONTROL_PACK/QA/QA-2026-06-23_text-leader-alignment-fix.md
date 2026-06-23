@@ -1,8 +1,8 @@
 # QA-2026-06-23 — Text & Leader Alignment Fix
 
 **Date:** 2026-06-23  
-**Version:** SketchUp **v3.7.57**  
-**Repo:** `C:\1PDF-Importer-SketchUp`
+**Version:** SketchUp **v3.7.58** published by auto-release  
+**Repos:** `C:\1PDF-Importer-SketchUp`, `C:\1PDF-Importer-Blender`
 
 ---
 
@@ -24,6 +24,11 @@
 
 4. **Architecture doc**
    - `BCS-ARCH-001.md` updated to document leader-vs-rotation behavior and shared anchor model.
+
+### Blender validation hardening
+
+- `bl_import_engine.write_import_report` now tolerates missing `bpy.app.version` in headless/stub contexts instead of crashing.
+- `tests/test_import_report_writer.py` now repairs partial `bpy` stubs created by earlier tests.
 
 ### Tests
 
@@ -67,18 +72,19 @@ All should exit 0. Golden 1017 assertions require `1017 - Rev 0.pdf` on Desktop 
 
 ---
 
-## Hosts not changed
+## Other hosts
 
 | Host | Reason |
 |------|--------|
 | FreeCAD | ShapeString/Draft text uses font alignment, not SketchUp leader API |
 | LibreCAD | DXF TEXT placement path differs |
-| Blender | `align_x` CENTER/LEFT already handles anchors |
+| Blender | Text anchors were not part of the SketchUp leader/vector bug; only headless import-report robustness changed |
 | pdfcadcore | No shared bug; extraction/bbox data was correct |
 
 ---
 
 ## Release
 
-- Version bumped: **3.7.56 → 3.7.57**
-- Commit + push to `origin/main` on SketchUp repo
+- SketchUp fix commit shipped through auto-release as **v3.7.58**.
+- Release asset: `SketchUp-PDF-Importer_v3.7.58.rbz`.
+- Website metadata dispatch completed and points at v3.7.58.
