@@ -78,13 +78,29 @@ module CorpusHarness
   HEAVY_PDF_MB = (ENV['CORPUS_HEAVY_PDF_MB'] || '8').to_f
   HEAVY_PAGE_COUNT = (ENV['CORPUS_HEAVY_PAGE_COUNT'] || '30').to_i
   HEAVY_PATH_BUDGET = (ENV['CORPUS_HEAVY_PATH_BUDGET'] || '750000').to_i
+  # CORPUS_STRESS_OPTOUT: pipe-separated PDF basenames skipped in CI (manual QA only).
+  # Document additions in test/CORPUS_STRESS_OPTOUT.md and note in PR description.
   STRESS_PDF_SLUGS = (ENV['CORPUS_STRESS_OPTOUT'] || '')
                      .split('|').map(&:strip).reject(&:empty?).freeze
+  # Soft cap — warn when the opt-out list grows (Round-2 action #6).
+  STRESS_OPTOUT_SOFT_CAP = (ENV['CORPUS_STRESS_OPTOUT_CAP'] || '5').to_i
   PLACEMENT_THRESHOLD_DEFAULT = 0.95
   PLACEMENT_THRESHOLD_VECTOR = 1.0
   BASELINE_DIR = File.join(REPO_ROOT, 'test', 'fixtures', 'corpus_baselines')
 
   @geometry_builder_loaded = false
+  @stress_optout_warned = false
+
+  def self.warn_stress_optout_cap!
+    return if @stress_optout_warned
+    return if STRESS_PDF_SLUGS.length <= STRESS_OPTOUT_SOFT_CAP
+    @stress_optout_warned = true
+    warn(
+      "CORPUS_STRESS_OPTOUT has #{STRESS_PDF_SLUGS.length} entries " \
+      "(soft cap #{STRESS_OPTOUT_SOFT_CAP}). Prefer manual QA for heavy PDFs; " \
+      "document additions in test/CORPUS_STRESS_OPTOUT.md and note in PR."
+    )
+  end
 
   def self.install_headless_stubs!
     return if @geometry_builder_loaded
@@ -154,6 +170,8 @@ module CorpusHarness
   end
 
   def self.analyze_pdf(pdf_info)
+    warn_stress_optout_cap!
+
     pdf_path = pdf_info[:path]
     result = {
       corpus_key: pdf_info[:corpus_key],

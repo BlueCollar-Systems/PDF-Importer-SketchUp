@@ -159,6 +159,23 @@ Every import logs timing and throughput data:
 - Bezier subdivision iterations
 - Arc fitting attempts and successes
 
+Headless runs also write `import_report.json` (`bcs.import_report/1.1`) beside the log path.
+See **Import report / scale trust** below.
+
+### Import report / scale trust
+
+When reading `extra.resolved_scale` from `import_report.json` (or the in-app report):
+
+- Use `factor` for scaling **only when** `confidence >= 0.70` **and** `fallback_reason` is not `no_scale_detected`.
+- Otherwise treat scale as unknown and apply Scale by Reference or a manual preset.
+
+### Bad-PDF open gate (SketchUp vs Python hosts)
+
+All hosts show the same actionable messages for encrypted, non-PDF, and truncated files.
+Python importers (**FreeCAD, LibreCAD, Blender**) **fail closed** at open time via `safe_open` / `PdfOpenError`.
+SketchUp runs the same checks but **fail open** if the gate itself errors — rare edge cases may reach the parser.
+Do not assume identical refusal behavior across hosts; compare `fallback.reason` in each host's import report.
+
 ---
 
 ## Document Profiling

@@ -72,6 +72,8 @@ Workflow: **corpus-placement** (`.github/workflows/corpus-placement.yml`)
 ## Related tests
 
 - `test/text_label_placement_test.rb` — golden 1017 coordinate assertions (not corpus-wide)
+- `test/corpus_strict_timing_test.rb` — opt-in strict timing on named PDF (`CORPUS_STRICT_TIMING=1`)
+- `test/CORPUS_STRESS_OPTOUT.md` — stress PDF opt-out inventory
 - `test_all_pdfs.rb` — legacy parser-only sweep (paths only)
 
 ## Status

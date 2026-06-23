@@ -67,10 +67,14 @@ module BlueCollarSystems
             bbox: nil,
             warnings: warnings
           },
-          performance: {
-            elapsed_ms: elapsed_ms,
-            peak_mb: stats[:peak_mb].to_f > 0.0 ? stats[:peak_mb].to_f.round(2) : sample_process_mb
-          },
+          performance: begin
+            perf = {
+              elapsed_ms: elapsed_ms,
+              peak_mb: stats[:peak_mb].to_f > 0.0 ? stats[:peak_mb].to_f.round(2) : sample_process_mb
+            }
+            perf[:phases] = { total_ms: elapsed_ms } if elapsed_ms > 0
+            perf
+          end,
           fallback: fallback_block(stats, degraded_renderers),
           mode: import_mode_label(opts),
           extra: extra_block(stats)

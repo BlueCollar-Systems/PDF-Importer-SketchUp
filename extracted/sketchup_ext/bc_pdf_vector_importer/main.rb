@@ -1535,9 +1535,14 @@ module BlueCollarSystems
       sub.add_separator
       sub.add_item('Compatibility Report...') { CompatibilityReport.show }
       sub.add_separator
-      sub.add_item('About') {
+      sub.add_item('About PDF Importer') {
+        version = begin
+          BlueCollarSystems::PDFVectorImporter::Metadata::VERSION
+        rescue NameError
+          PLUGIN_VERSION
+        end
         UI.messagebox(
-          "PDF Vector Importer v#{PLUGIN_VERSION}\n" \
+          "PDF Vector Importer v#{version}\n" \
           "by BlueCollar Systems\n\n" \
           "Import PDF drawings as editable SketchUp geometry.\n\n" \
           "BUILT. NOT BOUGHT.")
