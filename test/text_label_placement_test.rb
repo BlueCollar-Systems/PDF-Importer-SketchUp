@@ -20,6 +20,12 @@ PDF_1017 = pdf_1017
 PDF_TOL = 1.5
 TextAlignLeft = 0
 
+class Numeric
+  def degrees
+    self.to_f * Math::PI / 180.0
+  end
+end
+
 $failures = []
 $pass_count = 0
 
@@ -53,8 +59,16 @@ module Geom
   end
 
   class Transformation
-    def initialize(*args); end
-    def self.rotation(*args); new; end
+    attr_reader :args, :kind
+    def initialize(*args)
+      @args = args
+      @kind = :translation
+    end
+    def self.rotation(*args)
+      t = new(*args)
+      t.instance_variable_set(:@kind, :rotation)
+      t
+    end
   end
 end
 
@@ -62,7 +76,7 @@ ORIGIN = Geom::Point3d.new(0, 0, 0)
 Z_AXIS = Geom::Vector3d.new(0, 0, 1)
 
 class DummyTextEntity
-  attr_accessor :layer
+  attr_accessor :layer, :display_leader, :vector
 end
 
 class DummyMeshEntity
@@ -70,12 +84,13 @@ class DummyMeshEntity
 end
 
 class DummyEntities
-  attr_reader :texts, :mesh_calls, :entities
+  attr_reader :texts, :mesh_calls, :entities, :transforms
 
   def initialize
     @texts = []
     @mesh_calls = []
     @entities = []
+    @transforms = []
   end
 
   def to_a
@@ -95,7 +110,9 @@ class DummyEntities
     true
   end
 
-  def transform_entities(*args); end
+  def transform_entities(*args)
+    @transforms << args
+  end
 end
 
 module Sketchup
@@ -504,8 +521,9 @@ if File.exist?(PDF_1017)
     it.text.to_s.strip.split(/\s+/).length - 1
   end
   expected_placements = items.length + extra_placements
-  assert_true(placed_entities.texts.length == expected_placements,
-              "all 1017 bbox-backed labels should place (got #{placed_entities.texts.length} of #{expected_placements})")
+  placed_total = placed_entities.texts.length + placed_entities.mesh_calls.length
+  assert_true(placed_total == expected_placements,
+              "all 1017 bbox-backed labels should place (got #{placed_total} of #{expected_placements})")
   puts "  1017 PDF: #{items.length} text items, #{with_bbox} with bbox, #{headers.length} BOM headers"
 else
   puts "  SKIP: 1017 PDF not found at #{PDF_1017}"

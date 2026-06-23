@@ -296,14 +296,14 @@ Every future contributor — human or LLM — who sees an opportunity to "add a 
 | Slope triangle numerals (`12`, `10 3/8`) | Center X and Y inside triangle bbox when height > width × 1.15 |
 | Diagonal dims (`7/8`) | Respect PDF angle; flatten only when \|angle\| < 12° |
 | Weld / TYP | Left-anchor at bbox x0; force horizontal (angle 0°) |
-| Rotated labels (\|angle\| > 8°) | Try `add_text` direction vector; mesh fallback when API returns nil |
-| Labels rendering | Labels mode stays native `add_text`; never hide annotations behind SVG glyph geometry |
+| Rotated labels (\|angle\| > 8°) | Route to mesh text; native `add_text` vector is an arrow leader, not text rotation |
+| Labels rendering | Horizontal Labels mode text stays native `add_text`; rotated label-mode text uses mesh text; never hide annotations behind SVG glyph geometry |
 | Glyph/Geometry boxes | Normal-size SVG text imports stamp raw transformed edges; huge glyph runs may use component instances for performance |
-| Mesh left anchor | Centered label X converts to left anchor for `add_3d_text` via `mesh_label_anchor_pdf` |
+| Mesh left anchor | `label_insertion_pdf` performs bbox centering once; Labels and `add_3d_text` both consume that same left/baseline anchor |
 
 **Owner directive:** *"Part marks should match the PDF — horizontal on vertical members when the PDF says so, not rotated because pdftotext bbox is tall."*
 
-**Platform limits (SU 2017):** Native Labels are screen-space; Geometry/Glyphs use pdftocairo vector text. `add_3d_text` is Arial-only, left-aligned, extruded mesh — fallback when SVG unavailable. Rotated native label direction vectors are unreliable; mesh fallback preserves model-space fidelity.
+**Platform limits (SU 2017):** Native Labels are screen-space; Geometry/Glyphs use pdftocairo vector text. `add_3d_text` is Arial-only, left-aligned, extruded mesh — fallback when SVG unavailable. `Entities#add_text` uses its vector argument as an arrow leader, not rotation, so rotated label-mode text routes to mesh text to preserve model-space fidelity.
 
 ---
 

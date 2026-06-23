@@ -1,10 +1,23 @@
 # Q&A Index
 
-Updated: 2026-06-23 (Round 3 — **CLOSED**)
+Updated: 2026-06-23 (Text/leader alignment fix shipped in SU v3.7.57)
 
 ## Source Instructions
 
 - `Instructions 0607202613216.txt`
+
+---
+
+## Text & leader alignment (2026-06-23) — **FIXED**
+
+SketchUp Labels + 3D Text placement/leader alignment root cause and verification.
+
+| File | Role |
+|------|------|
+| `QA-2026-06-23_text-leader-alignment-rootcause.md` | What was wrong (leader vector vs rotation; double 3D anchor shift) |
+| `QA-2026-06-23_text-leader-alignment-fix.md` | What changed, how to verify, test commands |
+
+**Headline:** SU v3.7.57 — horizontal labels use zero leader vector; rotated labels route to mesh text; 3D Text shares single left/baseline anchor with Labels. Python hosts unchanged.
 
 ---
 

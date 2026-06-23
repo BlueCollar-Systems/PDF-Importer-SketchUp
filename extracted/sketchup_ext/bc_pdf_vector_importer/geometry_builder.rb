@@ -679,13 +679,39 @@ module BlueCollarSystems
         end
       end
 
+      def zero_label_leader_vector
+        Geom::Vector3d.new(0, 0, 0)
+      rescue StandardError
+        nil
+      end
+
+      def hide_annotation_leader(text)
+        return unless text
+        begin
+          text.display_leader = false if text.respond_to?(:display_leader=)
+        rescue StandardError => e
+          Logger.warn("GeometryBuilder", "hide label leader failed: #{e.message}")
+        end
+        begin
+          vec = zero_label_leader_vector
+          text.vector = vec if vec && text.respond_to?(:vector=)
+        rescue StandardError => e
+          Logger.warn("GeometryBuilder", "zero label vector failed: #{e.message}")
+        end
+      end
+
       def place_annotation_label(entities, item, origin_x, origin_y, layer)
         label_x, label_y, label_angle = label_insertion_pdf(item)
         display_angle = display_text_angle(item, label_angle)
+        if angle_needs_geometry_text?(display_angle, part_mark_label?(item.text) ? 8.0 : 12.0)
+          place_mesh_text(entities, item, origin_x, origin_y, layer)
+          return
+        end
         pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
-        dir_vec = label_direction_vector(display_angle, item)
+        dir_vec = zero_label_leader_vector
         text = try_add_annotation_text(entities, item.text, pt, dir_vec)
         if text
+          hide_annotation_leader(text)
           set_layer(text, layer)
           @text_count += 1
           return
@@ -1230,19 +1256,10 @@ module BlueCollarSystems
         false
       end
 
-      # Left anchor for add_3d_text when label_insertion_pdf returns a centered X.
+      # Left anchor for add_3d_text. label_insertion_pdf already returns the
+      # left/baseline anchor after any bbox centering heuristics.
       def mesh_label_anchor_pdf(item)
-        label_x, label_y, label_angle = text_insertion_pdf(item)
-        return [label_x, label_y, label_angle] unless label_has_bbox?(item)
-
-        bx0 = item.bbox_x0.to_f
-        return [label_x, label_y, label_angle] if (label_x - bx0).abs <= 0.25
-
-        fs = effective_font_size_pts(item)
-        bbox_w = (item.bbox_x1.to_f - bx0).abs
-        bbox_h = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
-        run_w = label_run_width_pts(item.text, fs, bbox_w, bbox_h)
-        [label_x - (run_w * 0.5), label_y, label_angle]
+        text_insertion_pdf(item)
       rescue StandardError
         text_insertion_pdf(item)
       end

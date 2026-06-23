@@ -33,6 +33,12 @@ end
 
 TextAlignLeft = 0
 
+class Numeric
+  def degrees
+    self.to_f * Math::PI / 180.0
+  end
+end
+
 module Geom
   class Point3d
     attr_accessor :x, :y, :z
@@ -53,8 +59,16 @@ module Geom
   end
 
   class Transformation
-    def initialize(*args); end
-    def self.rotation(*args); new; end
+    attr_reader :args, :kind
+    def initialize(*args)
+      @args = args
+      @kind = :translation
+    end
+    def self.rotation(*args)
+      t = new(*args)
+      t.instance_variable_set(:@kind, :rotation)
+      t
+    end
   end
 end
 
@@ -62,7 +76,7 @@ ORIGIN = Geom::Point3d.new(0, 0, 0)
 Z_AXIS = Geom::Vector3d.new(0, 0, 1)
 
 class DummyTextEntity
-  attr_accessor :layer
+  attr_accessor :layer, :display_leader, :vector
 end
 
 class DummyMeshEntity
@@ -70,12 +84,13 @@ class DummyMeshEntity
 end
 
 class DummyEntities
-  attr_reader :texts, :mesh_calls, :entities
+  attr_reader :texts, :mesh_calls, :entities, :transforms
 
   def initialize
     @texts = []
     @mesh_calls = []
     @entities = []
+    @transforms = []
     @fail_text = false
   end
 
@@ -103,7 +118,9 @@ class DummyEntities
     true
   end
 
-  def transform_entities(*args); end
+  def transform_entities(*args)
+    @transforms << args
+  end
 end
 
 module Sketchup
@@ -142,6 +159,45 @@ assert_near(lang, mang, 0.01, 'Labels and 3D Text share QUAN angle')
 label_h = label_builder.send(:mesh_text_height_inches, quan, lang, 792.0)
 mesh_h = mesh_builder.send(:mesh_text_height_inches, quan, mang, 792.0)
 assert_near(label_h, mesh_h, 0.0001, 'mesh_text_height_inches is mode-independent')
+
+def first_translation_point(entities)
+  entry = entities.transforms.find do |args|
+    args.first.respond_to?(:kind) && args.first.kind == :translation
+  end
+  return nil unless entry
+  tr = entry.first
+  tr.respond_to?(:args) ? tr.args.first : nil
+end
+
+sample_label_entities = DummyEntities.new
+sample_mesh_entities = DummyEntities.new
+label_builder.send(:place_text, sample_label_entities, quan, 0.0, 0.0, 792.0, 'TextLayer')
+mesh_builder.send(:place_text, sample_mesh_entities, quan, 0.0, 0.0, 792.0, 'TextLayer')
+label_call = sample_label_entities.texts.first
+mesh_point = first_translation_point(sample_mesh_entities)
+assert_true(label_call && mesh_point, 'sample label and 3D text should both place')
+if label_call && mesh_point
+  label_point = label_call[:point]
+  assert_near(label_point.x, mesh_point.x, 0.001,
+              '3D Text should use same SketchUp X anchor as label for centered bbox text')
+  assert_near(label_point.y, mesh_point.y, 0.001,
+              '3D Text should use same SketchUp Y anchor as label for centered bbox text')
+  label_vec = label_call[:vector]
+  assert_true(label_vec && label_vec.x.abs < 0.001 && label_vec.y.abs < 0.001,
+              'native Labels should use a zero leader vector')
+  assert_true(label_call[:entity].display_leader == false,
+              'native Labels should hide SketchUp leader lines when the API supports it')
+end
+
+rotated_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+  'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil, 140.0, 250.0, 148.0, 292.0
+)
+rotated_entities = DummyEntities.new
+label_builder.send(:place_text, rotated_entities, rotated_item, 0.0, 0.0, 792.0, 'TextLayer')
+assert_true(rotated_entities.texts.empty?,
+            'rotated label-mode text should not create a native leader label')
+assert_true(rotated_entities.mesh_calls.length == 1,
+            'rotated label-mode text should route to mesh text for model-space alignment')
 
 unless File.exist?(PDF_1017)
   puts "  SKIP: 1017 PDF not found at #{PDF_1017}"
@@ -230,8 +286,9 @@ else
     it.text.to_s.strip.split(/\s+/).length - 1
   end
   expected_labels = items.length + extra_placements
-  assert_true(label_entities.texts.length == expected_labels,
-              "Labels mode should place #{expected_labels} annotations (got #{label_entities.texts.length})")
+  label_total = label_entities.texts.length + label_entities.mesh_calls.length
+  assert_true(label_total == expected_labels,
+              "Labels mode should place #{expected_labels} annotations/mesh labels (got #{label_total})")
   assert_true(mesh_entities.mesh_calls.length == items.length,
               "3D Text mode should mesh every item (got #{mesh_entities.mesh_calls.length} of #{items.length})")
 

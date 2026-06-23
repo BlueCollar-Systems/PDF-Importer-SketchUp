@@ -138,9 +138,9 @@ assert_true(bx > 90.0 && bx < 115.0, 'BOM header X shifts toward bbox center')
 assert_true(builder.send(:angle_needs_geometry_text?, 45.0, 8.0),
             '45° label should prefer geometry mesh over screen-space vector')
 
-# --- Centered mesh anchor: BOM center X converts to left anchor for add_3d_text ---
+# --- Centered mesh anchor: bbox centering happens once, shared by Labels/3D Text ---
 bom_mesh_x, _, _ = builder.send(:mesh_label_anchor_pdf, bom)
-assert_true(bom_mesh_x < bx, 'mesh anchor is left of centered label insertion X')
+assert_near(bom_mesh_x, bx, 0.001, 'mesh anchor matches centered label insertion X')
 
 if $failures.empty?
   puts "PASS: #{$pass_count} category placement assertions"
