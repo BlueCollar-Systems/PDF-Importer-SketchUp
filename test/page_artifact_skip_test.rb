@@ -21,6 +21,23 @@ def assert_false(cond, msg)
   assert_true(!cond, msg)
 end
 
+class TestPoint
+  attr_reader :x, :y, :z
+
+  def initialize(x, y, z = 0.0)
+    @x = x.to_f
+    @y = y.to_f
+    @z = z.to_f
+  end
+
+  def distance(other)
+    dx = x - other.x
+    dy = y - other.y
+    dz = z - other.z
+    Math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+  end
+end
+
 P = BlueCollarSystems::PDFVectorImporter::ContentStreamParser
 Segment = P::Segment
 SubPath = P::SubPath
@@ -73,6 +90,26 @@ assert_true(
 assert_false(
   builder.send(:discardable_page_artifact?, filled_and_stroked_frame, [0, 0, 612, 792], page_area),
   'filled-and-stroked page frame must be preserved'
+)
+
+assert_false(
+  builder.send(:face_buildable?, [
+    TestPoint.new(0, 0), TestPoint.new(1, 0), TestPoint.new(2, 0)
+  ]),
+  'collinear face candidate should be skipped before add_face'
+)
+assert_false(
+  builder.send(:face_buildable?, [
+    TestPoint.new(0, 0), TestPoint.new(0, 0), TestPoint.new(0, 0)
+  ]),
+  'duplicate-only face candidate should be skipped before add_face'
+)
+assert_true(
+  builder.send(:face_buildable?, [
+    TestPoint.new(0, 0), TestPoint.new(1, 0),
+    TestPoint.new(1, 1), TestPoint.new(0, 1)
+  ]),
+  'non-degenerate face candidate should still be buildable'
 )
 
 if $failures.empty?

@@ -20,6 +20,7 @@ module BlueCollarSystems
       def self.reset
         @warnings = []
         @errors = []
+        @writes_since_flush = 0
         close_log
 
         # Open a log file for post-session diagnosis.
@@ -47,7 +48,11 @@ module BlueCollarSystems
             FileUtils.mkdir_p(dir)
             path = File.join(dir, 'last_import.log')
             file = File.open(path, 'w')
-            file.sync = true
+            # Buffered writes — per-line fsync (sync=true) forces one synchronous
+            # disk write per log line. Dense imports emit hundreds of WARNs,
+            # which is punishing on slow disks / older hardware. Flush in batches
+            # (see write_line) and unconditionally via flush_log at import end.
+            file.sync = false
             @log_file = file
             @log_path = path
             write_line("--- PDF Vector Importer log #{Time.now.strftime('%Y-%m-%d %H:%M:%S')} ---")
@@ -113,6 +118,11 @@ module BlueCollarSystems
       def self.write_line(entry)
         return unless @log_file
         @log_file.puts(entry)
+        @writes_since_flush = (@writes_since_flush || 0) + 1
+        if @writes_since_flush >= 64
+          @log_file.flush
+          @writes_since_flush = 0
+        end
       rescue StandardError
         @log_file = nil
       end
@@ -133,6 +143,7 @@ module BlueCollarSystems
       ensure
         @log_file = nil
         @log_path = nil
+        @writes_since_flush = 0
       end
       private_class_method :close_log
     end

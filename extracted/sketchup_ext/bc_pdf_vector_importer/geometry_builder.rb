@@ -83,10 +83,6 @@ module BlueCollarSystems
         @paths.each_with_index do |path, path_idx|
           if path_yield_every > 0 && (path_idx % path_yield_every).zero?
             Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)..."
-            begin
-              GC.start if path_idx > 0 && (path_idx % (path_yield_every * 5)).zero?
-            rescue StandardError
-            end
           end
 
           next unless path.subpaths && !path.subpaths.empty?
@@ -444,9 +440,35 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Face creation
       # ---------------------------------------------------------------
+      # Cheap pre-screen for draw_face: a loop with fewer than 3 distinct
+      # vertices or ~zero enclosed area can never become a SketchUp face.
+      # add_face would reject these with "Points are not planar" — but only
+      # after a C-side check + a raised exception we rescue and log, hundreds
+      # of times on dense fabrication fills. Screening here is accuracy-neutral
+      # (these never produced a face) and removes the exception + log cost.
+      def face_buildable?(points)
+        uniq = []
+        points.each do |p|
+          uniq << p if uniq.empty? || p.distance(uniq.last) >= @merge_tol
+        end
+        uniq.pop if uniq.length > 1 && uniq.first.distance(uniq.last) < @merge_tol
+        return false if uniq.length < 3
+        # Shoelace area in the XY plane (imported points are flattened to z=0).
+        area2 = 0.0
+        n = uniq.length
+        n.times do |i|
+          a = uniq[i]; b = uniq[(i + 1) % n]
+          area2 += (a.x.to_f * b.y.to_f) - (b.x.to_f * a.y.to_f)
+        end
+        (area2.abs * 0.5) > 1.0e-6
+      rescue StandardError
+        true
+      end
+
       def draw_face(entities, points, layer, fill_rgb = nil)
         return if points.length < 3
         begin
+          return unless face_buildable?(points)
           face = entities.add_face(points)
           if face
             # Keep imported sheet faces consistently front-facing in top view.
