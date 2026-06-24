@@ -41,7 +41,7 @@ module BlueCollarSystems
         warnings += degraded_renderers.length
         version = importer_version
 
-        {
+        report = {
           schema: SCHEMA,
           host: {
             app: 'sketchup',
@@ -77,8 +77,10 @@ module BlueCollarSystems
           end,
           fallback: fallback_block(stats, degraded_renderers),
           mode: import_mode_label(opts),
-          extra: extra_block(stats)
+          extra: extra_block(stats, warnings, degraded_renderers)
         }
+        report[:extra][:human_summary] = build_human_summary(report)
+        report
       end
 
       # Build a schema-consistent report for an open-time gate refusal
@@ -100,6 +102,7 @@ module BlueCollarSystems
           reason: reason.to_s,
           message: message.to_s
         }
+        report[:extra][:human_summary] = build_human_summary(report)
         report
       end
 
@@ -160,7 +163,7 @@ module BlueCollarSystems
         }
       end
 
-      def extra_block(stats)
+      def extra_block(stats, warning_count = 0, degraded_renderers = [])
         renderers = Array(stats[:text_renderers]).map do |entry|
           normalize_json(entry)
         end
@@ -170,8 +173,87 @@ module BlueCollarSystems
           arcs: stats[:arcs].to_i,
           text_mode: stats[:text_mode].to_s,
           svg_renderer_missing: !!stats[:svg_renderer_missing],
-          resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil
+          resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,
+          diagnostics: diagnostics_block(stats, warning_count, degraded_renderers)
         }
+      end
+
+      def diagnostics_block(stats, warning_count = 0, degraded_renderers = [])
+        primitives = stats[:primitives].to_i
+        text_entities = stats[:text].to_i
+        layer_count = Array(stats[:layers]).compact.length
+        text_mode = stats[:text_mode].to_s
+        source_spans = stats[:text_source_spans].to_i
+        glyph_estimate = stats[:text_glyph_estimate].to_i
+        signals = []
+        actions = []
+
+        quality_level =
+          if primitives >= 50
+            signals << 'good_vector_content'
+            'high'
+          elsif primitives >= 10
+            signals << 'limited_vector_content'
+            'moderate'
+          elsif primitives > 0
+            signals << 'very_limited_vector_content'
+            'low'
+          else
+            signals << 'no_vector_geometry_created'
+            'empty'
+          end
+
+        fallback = fallback_block(stats, degraded_renderers)
+        if fallback[:used] || fallback['used']
+          reason = (fallback[:reason] || fallback['reason']).to_s
+          signals << 'fallback_used'
+          if reason.downcase.include?('raster')
+            actions << 'If editable geometry is required, retry Vector or Hybrid mode and confirm the PDF contains vector data.'
+          else
+            actions << 'Review the fallback reason and attach the import report when requesting support.'
+          end
+        end
+
+        if warning_count.to_i > 0
+          signals << 'warnings_present'
+          actions << 'Review the warning count and last import log before trusting the drawing for production use.'
+        end
+
+        signals << (layer_count.zero? ? 'no_pdf_layers_detected' : 'pdf_layers_preserved')
+
+        unless text_mode.empty?
+          signals << "text_mode_#{text_mode}"
+          if %w[glyphs geometry].include?(text_mode)
+            actions << 'Use Labels or 3D Text mode when editable text is more important than exact glyph outlines.'
+          elsif %w[labels text3d 3d_text].include?(text_mode)
+            actions << 'Use Geometry or Glyphs mode when exact visual text outlines are more important than editability.'
+          end
+        end
+
+        if source_spans.positive? && text_entities.zero?
+          signals << 'source_text_seen_but_no_text_entities_created'
+          actions << 'Retest with another text mode and compare the text_source_spans count against visible text.'
+        end
+
+        if glyph_estimate >= 1000
+          signals << 'dense_text_glyph_workload'
+          actions << 'For heavy PDFs on older PCs, import one page first and compare Labels versus Glyphs/Geometry performance.'
+        end
+
+        {
+          quality_level: quality_level,
+          signals: unique_strings(signals),
+          recommended_actions: unique_strings(actions)
+        }
+      end
+
+      def unique_strings(values)
+        seen = {}
+        Array(values).map(&:to_s).map(&:strip).reject(&:empty?).each_with_object([]) do |value, out|
+          next if seen[value]
+          seen[value] = true
+          out << value
+        end
       end
 
       def normalize_json(value)
@@ -193,6 +275,87 @@ module BlueCollarSystems
         return 'raster' if opts[:force_raster]
         mode = (opts[:import_mode] || opts[:mode] || 'auto').to_s
         mode.empty? ? 'auto' : mode
+      end
+
+      def build_human_summary(report)
+        data = normalize_json(report)
+        host = 'SketchUp'
+        input = data['input'] || {}
+        result = data['result'] || {}
+        perf = data['performance'] || {}
+        fallback = data['fallback'] || {}
+        extra = data['extra'] || {}
+        diagnostics = extra['diagnostics'] || {}
+
+        pages = input['pages'].to_i
+        primitives = result['primitives'].to_i
+        text_count = result['text_entities'].to_i
+        layers = result['layers'].to_i
+        warnings = result['warnings'].to_i
+        elapsed_ms = perf['elapsed_ms'].to_f
+        elapsed_s = elapsed_ms > 0 ? (elapsed_ms / 1000.0) : 0.0
+        mode = data['mode'].to_s
+        text_mode = format_text_mode(extra['text_mode'])
+        pdf_name = File.basename(input['file'].to_s)
+        pdf_name = 'the PDF' if pdf_name.empty?
+
+        parts = []
+        page_phrase = pages.positive? ? "#{pages} page#{'s' if pages != 1}" : 'the PDF'
+        lead = "Imported #{page_phrase} from #{pdf_name} into #{host} using #{mode} mode"
+        lead += " with #{text_mode}" unless text_mode.empty?
+        parts << lead
+
+        outcome = []
+        outcome << "#{primitives} vector primitive#{'s' if primitives != 1}" if primitives.positive?
+        outcome << "#{text_count} text item#{'s' if text_count != 1}" if text_count.positive?
+        outcome << "#{layers} PDF layer#{'s' if layers != 1}" if layers.positive?
+        parts << if outcome.empty?
+                   'No editable geometry was created'
+                 else
+                   "Created #{outcome.join(', ')}"
+                 end
+        parts << "in #{format('%.1f', elapsed_s)}s" if elapsed_s.positive?
+
+        scale = extra['resolved_scale']
+        if scale.is_a?(Hash) && scale['factor']
+          scale_bit = "Scale resolved from #{scale['source'].to_s.tr('_', ' ')}"
+          notation = scale['notation'].to_s.strip
+          scale_bit += " (#{notation})" unless notation.empty?
+          if scale['confidence']
+            scale_bit += ", confidence #{(scale['confidence'].to_f * 100).round}%"
+          end
+          parts << scale_bit
+        end
+
+        if fallback['used']
+          reason = fallback['reason'].to_s.tr('_', ' ')
+          parts << "Raster or degraded fallback was used (#{reason})"
+        elsif primitives.positive?
+          parts << 'Vector extraction completed without raster fallback'
+        end
+
+        quality = diagnostics['quality_level'].to_s
+        parts << "Overall fidelity: #{quality}" unless quality.empty?
+
+        if warnings.positive?
+          parts << "#{warnings} warning#{'s' if warnings != 1} recorded — review the import log before production use"
+        end
+
+        paragraph = parts.map { |part| part.to_s.sub(/\.\z/, '') }.reject(&:empty?).join('. ')
+        paragraph += '.' unless paragraph.empty? || paragraph.end_with?('.')
+        paragraph
+      end
+
+      def format_text_mode(mode)
+        labels = {
+          'geometry' => 'geometry text',
+          'glyphs' => 'glyph geometry',
+          'text3d' => '3D text',
+          '3d_text' => '3D text',
+          'labels' => 'labels'
+        }
+        key = mode.to_s.strip
+        labels[key] || key.tr('_', ' ')
       end
 
       def importer_version

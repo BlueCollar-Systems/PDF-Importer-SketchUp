@@ -53,6 +53,7 @@ module BlueCollarSystems
     require File.join(dir, 'report_dialog')
     require File.join(dir, 'compatibility_report')
     require File.join(dir, 'qa_report')
+    require File.join(dir, 'import_health')
 
     # ================================================================
     # SHARED PIPELINE — single source of truth for all import paths
@@ -1213,8 +1214,10 @@ module BlueCollarSystems
       stats[:log_path] = Logger.log_path
       begin
         report = QAReport.build_from_stats(path, opts, stats)
+        stats[:human_summary] = report[:extra][:human_summary] if report[:extra]
         report_path = QAReport.write_json(report, QAReport.default_output_path(path))
         stats[:import_report_path] = report_path if report_path
+        ImportHealth.record!(stats, path)
       rescue StandardError => e
         Logger.warn("Pipeline", "import_report.json write failed: #{e.message}")
       end
@@ -1534,6 +1537,7 @@ module BlueCollarSystems
       sub.add_item('Quick Scale...') { self.quick_scale }
       sub.add_separator
       sub.add_item('Compatibility Report...') { CompatibilityReport.show }
+      sub.add_item('Import Health...') { ImportHealth.show }
       sub.add_separator
       sub.add_item('About PDF Importer') {
         version = begin

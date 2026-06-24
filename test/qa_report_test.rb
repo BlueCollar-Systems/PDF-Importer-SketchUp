@@ -37,6 +37,12 @@ class QAReportTest < Minitest::Test
     assert_equal 2, report[:extra][:text_renderers].length
     assert_equal 'pdftocairo', report[:extra][:text_renderers][0]['renderer']
     assert_in_delta 48.0, report[:extra][:resolved_scale]['factor'], 0.01
+    assert_equal 'high', report[:extra][:diagnostics][:quality_level]
+    assert_includes report[:extra][:diagnostics][:signals], 'good_vector_content'
+    assert_includes report[:extra][:diagnostics][:signals], 'pdf_layers_preserved'
+    assert_includes report[:extra][:diagnostics][:signals], 'text_mode_geometry'
+    assert report[:extra][:human_summary].to_s.include?('Imported')
+    assert report[:extra][:human_summary].to_s.include?('sample.pdf')
   end
 
   def test_records_text_degradation_in_fallback_block
@@ -71,6 +77,32 @@ class QAReportTest < Minitest::Test
     ensure
       File.delete(path) if File.exist?(path)
     end
+  end
+
+  def test_records_actionable_diagnostics_for_dense_degraded_text
+    stats = {
+      pages: 1,
+      primitives: 0,
+      edges: 0,
+      text: 0,
+      layers: [],
+      elapsed_seconds: 0.5,
+      text_mode: :glyphs,
+      text_source_spans: 14,
+      text_glyph_estimate: 1200,
+      raster_fallback_used: true,
+      text_renderers: [
+        { page: 1, renderer: :labels, degraded: true, note: 'Poppler/MuPDF not found' }
+      ]
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('scan.pdf', {}, stats)
+    diagnostics = report[:extra][:diagnostics]
+    assert_equal 'empty', diagnostics[:quality_level]
+    assert_includes diagnostics[:signals], 'fallback_used'
+    assert_includes diagnostics[:signals], 'source_text_seen_but_no_text_entities_created'
+    assert_includes diagnostics[:signals], 'dense_text_glyph_workload'
+    assert diagnostics[:recommended_actions].any? { |action| action.include?('Vector or Hybrid') }
   end
 
   def test_builds_open_failure_report
