@@ -1,0 +1,11 @@
+{
+  "pdf_name": "Simple PDF 2.0 file.pdf",
+  "corpus_key": "corpus_tier1_web/pdf20/Simple PDF 2.0 file.pdf",
+  "pages": 1,
+  "paths": 4,
+  "text_items": 1,
+  "bbox_pct": 100.0,
+  "placement_ok": 1,
+  "placement_total": 1,
+  "text_hash": "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e"
+}

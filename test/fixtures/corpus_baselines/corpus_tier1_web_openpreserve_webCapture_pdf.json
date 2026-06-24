@@ -1,0 +1,11 @@
+{
+  "pdf_name": "webCapture.pdf",
+  "corpus_key": "corpus_tier1_web/openpreserve/webCapture.pdf",
+  "pages": 3,
+  "paths": 165,
+  "text_items": 142,
+  "bbox_pct": 100.0,
+  "placement_ok": 142,
+  "placement_total": 142,
+  "text_hash": "9acb1961d5928ebc0893a4ab82c62760657a406724d0c41110ac3e69bd221051"
+}

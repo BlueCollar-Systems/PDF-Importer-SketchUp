@@ -1,0 +1,11 @@
+{
+  "pdf_name": "hello_world_rotated.pdf",
+  "corpus_key": "corpus_tier1_web/pdfjs/hello_world_rotated.pdf",
+  "pages": 5,
+  "paths": 0,
+  "text_items": 5,
+  "bbox_pct": 100.0,
+  "placement_ok": 5,
+  "placement_total": 5,
+  "text_hash": "7b1dd1cf54e3c630dbad9f8512cbc8c0039c344c32e9563e079e93a81ec81c34"
+}

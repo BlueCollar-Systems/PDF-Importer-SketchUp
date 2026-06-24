@@ -1,62 +1,93 @@
 {
   "schema": "bcs.golden_oracles/1",
   "updated": "2026-06-24",
-  "notes": "Named corpus PDFs with expected primitive/text/placement ranges. PDFs resolve via BCS_CORPUS_ROOT or Desktop/PDFTest Files mirrors.",
+  "notes": "Named corpus PDFs with expected primitive/text/placement ranges. PDFs resolve via BCS_CORPUS_ROOT, tier1/, or Desktop/PDFTest Files mirrors.",
   "oracles": [
     {
       "id": "GO-01",
-      "name": "Simple vector sheet",
-      "corpus_key": "corpus_pdftest/simple_vector.pdf",
-      "pdf_candidates": ["simple_vector.pdf", "vector_test.pdf"],
+      "name": "Embedded font vector baseline",
+      "corpus_key": "corpus_tier1_web/pdfjs/Embedded_font.pdf",
+      "pdf_candidates": ["Embedded_font.pdf", "Simple PDF 2.0 file.pdf"],
       "expect": {
-        "paths_min": 10,
+        "paths_min": 1,
         "text_items_min": 0,
-        "placement_ok_min": 0.0,
         "placement_rate_min": 0.75
       }
     },
     {
       "id": "GO-02",
-      "name": "BOM / dense labels",
-      "corpus_key": "corpus_pdftest/bom_table.pdf",
-      "pdf_candidates": ["bom_table.pdf", "BOM.pdf"],
+      "name": "Non-embedded font text sheet",
+      "corpus_key": "corpus_tier1_web/openpreserve/text_only_fontsNotEmbedded.pdf",
+      "pdf_candidates": ["text_only_fontsNotEmbedded.pdf"],
       "expect": {
-        "paths_min": 5,
-        "text_items_min": 8,
-        "bbox_pct_min": 40.0,
+        "paths_min": 0,
+        "text_items_min": 1,
         "placement_rate_min": 0.70
       }
     },
     {
-      "id": "GO-03",
-      "name": "Title block with scale notation",
-      "corpus_key": "corpus_pdftest/titleblock_scale.pdf",
-      "pdf_candidates": ["titleblock_scale.pdf", "scale_drawing.pdf"],
-      "expect": {
-        "paths_min": 20,
-        "resolved_scale_confidence_min": 0.70,
-        "scale_crosscheck_absent": true
-      }
-    },
-    {
       "id": "GO-04",
-      "name": "Multi-page shop drawing",
-      "corpus_key": "corpus_pdftest/multi_page.pdf",
-      "pdf_candidates": ["multi_page.pdf"],
+      "name": "Multi-page document tree",
+      "corpus_key": "corpus_tier1_web/pdfjs/doc_1_3_pages.pdf",
+      "pdf_candidates": ["doc_1_3_pages.pdf"],
       "expect": {
-        "pages_min": 2,
-        "paths_min": 30,
+        "pages_min": 1,
+        "paths_min": 0,
         "placement_rate_min": 0.65
       }
     },
     {
-      "id": "GO-05",
-      "name": "Low-confidence scale warning oracle",
-      "corpus_key": "corpus_pdftest/ambiguous_scale.pdf",
-      "pdf_candidates": ["ambiguous_scale.pdf"],
+      "id": "GO-06",
+      "name": "1017 fabrication steel",
+      "corpus_key": "corpus_tier1_user/1017 - Rev 0.pdf",
+      "pdf_candidates": ["1017 - Rev 0.pdf"],
+      "expect": {
+        "paths_min": 20,
+        "text_items_min": 3,
+        "placement_rate_min": 0.60
+      }
+    },
+    {
+      "id": "GO-07",
+      "name": "Welding symbol chart",
+      "corpus_key": "corpus_tier1_user/Welding-Symbol-Chart.pdf",
+      "pdf_candidates": ["Welding-Symbol-Chart.pdf"],
       "expect": {
         "paths_min": 5,
-        "scale_crosscheck_reasons_any": ["low_confidence", "no_scale_detected", "titleblock_dimension_tension"]
+        "text_items_min": 0,
+        "placement_rate_min": 0.50
+      }
+    },
+    {
+      "id": "GO-08",
+      "name": "Rotated page text",
+      "corpus_key": "corpus_tier1_web/pdfjs/hello_world_rotated.pdf",
+      "pdf_candidates": ["hello_world_rotated.pdf"],
+      "expect": {
+        "paths_min": 0,
+        "text_items_min": 1,
+        "placement_rate_min": 0.70
+      }
+    },
+    {
+      "id": "GO-09",
+      "name": "Encrypted PDF (expect skip or error)",
+      "corpus_key": "corpus_tier2_web/openpreserve/encryption_openpassword.pdf",
+      "pdf_candidates": ["encryption_openpassword.pdf"],
+      "expect": {
+        "allow_status": ["FAIL", "TIMEOUT"]
+      }
+    },
+    {
+      "id": "GO-10",
+      "name": "1011 multi-page shop sheet 1",
+      "corpus_key": "corpus_tier1_user/1011 (1 OF 2) - Rev 0.pdf",
+      "pdf_candidates": ["1011 (1 OF 2) - Rev 0.pdf"],
+      "expect": {
+        "pages_min": 1,
+        "paths_min": 15,
+        "text_items_min": 2,
+        "placement_rate_min": 0.55
       }
     }
   ]

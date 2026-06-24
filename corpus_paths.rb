@@ -13,7 +13,11 @@ module BlueCollarSystems
       # Scan profiles for corpus placement CI (phase 1). Earlier entries win on
       # duplicate corpus_key collisions.
       CORPUS_SCAN_PROFILES = [
+        { subdir: 'tier1/user', recursive: false, tag: 'corpus_tier1_user' },
+        { subdir: 'tier1/web', recursive: true, tag: 'corpus_tier1_web' },
+        { subdir: 'tier2/web', recursive: true, tag: 'corpus_tier2_web' },
         { subdir: 'PDFTest Files', recursive: false, tag: 'corpus_pdftest' },
+        { subdir: 'web-acquired', recursive: true, tag: 'corpus_web_acquired' },
         { subdir: 'New folder (2)', recursive: true, tag: 'corpus_new_folder' },
         { subdir: nil, recursive: false, tag: 'corpus_root' }
       ].freeze
@@ -43,9 +47,15 @@ module BlueCollarSystems
         corpus_scan_roots.each do |root|
           search_dirs = [root]
           search_dirs.unshift(File.join(root, subdir)) unless subdir.to_s.empty?
-          %w[PDFTest\ Files pdfs New\ folder\ (2)].each do |folder|
+          %w[tier1/user tier1/web tier2/web PDFTest\ Files web-acquired pdfs New\ folder\ (2)].each do |folder|
             candidate = File.join(root, folder)
             search_dirs << candidate if File.directory?(candidate)
+          end
+
+          # Allow manifest-style paths relative to corpus root (e.g. tier1/user/foo.pdf)
+          if rel.include?('/')
+            nested = File.join(root, rel.tr('/', File::SEPARATOR))
+            return File.expand_path(nested) if File.file?(nested)
           end
 
           search_dirs.each do |base|
