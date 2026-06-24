@@ -1,5 +1,7 @@
 # Human Confirmation — PDF Vector Importer (SketchUp)
 
+**Coordination:** see Desktop Q&A [COORDINATION-HUB](file:///C:/Users/Rowdy%20Payton/Desktop/PDFTest%20Files/Q&A/QA-2026-06-24_COORDINATION-HUB.md) or `_LLM_CONTROL_PACK/QA/QA-2026-06-24_COORDINATION-HUB.md`
+
 **Session prep:** 2026-06-24 · Tier-1 corpus · See also `Desktop/PDFTest Files/Q&A/QA-2026-06-24_human-confirmation-script.md`
 
 ## Before you start
