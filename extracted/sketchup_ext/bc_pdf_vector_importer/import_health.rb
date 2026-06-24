@@ -26,6 +26,7 @@ module BlueCollarSystems
           text: stats[:text].to_i,
           layers: Array(stats[:layers]).length,
           human_summary: stats[:human_summary].to_s,
+          scale_crosscheck: stats[:scale_crosscheck],
           recorded_at: Time.now
         }
       end
@@ -60,6 +61,15 @@ module BlueCollarSystems
           lines << "Scale: #{notation || factor} (#{scale[:source] || scale['source'] || 'resolved'})"
         else
           lines << 'Scale: not resolved (use Scale to Real Dimensions if needed)'
+        end
+
+        crosscheck = snap[:scale_crosscheck]
+        if crosscheck.is_a?(Hash)
+          banner = crosscheck[:banner] || crosscheck['banner']
+          unless banner.to_s.strip.empty?
+            lines << ''
+            lines << "Scale warning: #{banner}"
+          end
         end
 
         lines << ''

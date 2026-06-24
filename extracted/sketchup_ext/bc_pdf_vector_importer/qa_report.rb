@@ -12,6 +12,9 @@ module BlueCollarSystems
     module QAReport
 
       SCHEMA = 'bcs.import_report/1.1'.freeze
+      SCALE_TRUST_CONFIDENCE = 0.70
+      SCALE_DIMENSION_TENSION_CONFIDENCE = 0.85
+      SCALE_FACTOR_DISAGREE_RATIO = 0.15
 
       module_function
 
@@ -79,7 +82,7 @@ module BlueCollarSystems
           mode: import_mode_label(opts),
           extra: extra_block(stats, warnings, degraded_renderers)
         }
-        report[:extra][:human_summary] = build_human_summary(report)
+        enrich_report_extras!(report)
         report
       end
 
@@ -102,7 +105,7 @@ module BlueCollarSystems
           reason: reason.to_s,
           message: message.to_s
         }
-        report[:extra][:human_summary] = build_human_summary(report)
+        enrich_report_extras!(report)
         report
       end
 
@@ -174,7 +177,86 @@ module BlueCollarSystems
           text_mode: stats[:text_mode].to_s,
           svg_renderer_missing: !!stats[:svg_renderer_missing],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,
+          scale_hints: scale_hints_block(stats),
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers)
+        }
+      end
+
+      def scale_hints_block(stats)
+        generic = stats[:generic] || {}
+        hints = {
+          title_block_detected: !!generic[:title_block],
+          dimension_count: generic[:dimensions].to_i
+        }
+        alternate = stats[:alternate_scale_factors]
+        hints[:alternate_scale_factors] = Array(alternate).map(&:to_f) if alternate
+        hints
+      end
+
+      def enrich_report_extras!(report)
+        crosscheck = build_scale_crosscheck(report[:extra] || {})
+        report[:extra][:scale_crosscheck] = normalize_json(crosscheck) if crosscheck
+        report[:extra][:human_summary] = build_human_summary(report)
+      end
+
+      def build_scale_crosscheck(extra)
+        scale = extra[:resolved_scale] || extra['resolved_scale'] || {}
+        scale = {} unless scale.is_a?(Hash)
+
+        hints = extra[:scale_hints] || extra['scale_hints'] || {}
+        hints = {} unless hints.is_a?(Hash)
+
+        title_block = !!(hints[:title_block_detected] || hints['title_block_detected'])
+        dimension_count = (hints[:dimension_count] || hints['dimension_count']).to_i
+        alternate_factors = hints[:alternate_scale_factors] || hints['alternate_scale_factors'] || []
+
+        warnings = []
+        reasons = []
+
+        conf = scale[:confidence] || scale['confidence']
+        conf = conf.to_f if conf
+        factor = scale[:factor] || scale['factor']
+        fallback = (scale[:fallback_reason] || scale['fallback_reason']).to_s.strip
+        source = (scale[:source] || scale['source']).to_s.strip
+
+        if fallback == 'no_scale_detected' || factor.nil?
+          warnings << 'No drawing scale was detected in the title block or page text — verify manually before takeoff.'
+          reasons << 'no_scale_detected'
+        elsif conf && conf < SCALE_TRUST_CONFIDENCE
+          warnings << "Scale detection confidence is low (#{(conf * 100).round}%) — verify with manual scale tools before takeoff."
+          reasons << 'low_confidence'
+        end
+
+        if title_block && !source.empty? && source != 'titleblock' && factor
+          warnings << 'A title block was detected but scale came from other page text — compare the title-block notation.'
+          reasons << 'titleblock_source_mismatch'
+        end
+
+        if title_block && dimension_count >= 3 && conf && conf < SCALE_DIMENSION_TENSION_CONFIDENCE && factor
+          warnings << "Title-block scale may disagree with #{dimension_count} detected dimension strings — spot-check one known dimension."
+          reasons << 'titleblock_dimension_tension'
+        end
+
+        primary = factor.to_f if factor
+        if primary && primary.positive? && alternate_factors.is_a?(Array)
+          alternate_factors.each do |alt|
+            alt_factor = alt.to_f
+            next unless alt_factor.positive?
+            if (alt_factor - primary).abs / [primary, alt_factor].max > SCALE_FACTOR_DISAGREE_RATIO
+              warnings << 'Multiple scale notations on the sheet disagree — confirm which scale applies to this view.'
+              reasons << 'conflicting_scale_notations'
+              break
+            end
+          end
+        end
+
+        return nil if warnings.empty?
+
+        {
+          level: 'warn',
+          reasons: unique_strings(reasons),
+          messages: unique_strings(warnings),
+          banner: warnings.first
         }
       end
 
@@ -339,6 +421,12 @@ module BlueCollarSystems
 
         if warnings.positive?
           parts << "#{warnings} warning#{'s' if warnings != 1} recorded — review the import log before production use"
+        end
+
+        crosscheck = extra['scale_crosscheck']
+        if crosscheck.is_a?(Hash)
+          banner = crosscheck['banner'].to_s.strip
+          parts << "Scale note: #{banner.sub(/\.\z/, '')}" unless banner.empty?
         end
 
         paragraph = parts.map { |part| part.to_s.sub(/\.\z/, '') }.reject(&:empty?).join('. ')

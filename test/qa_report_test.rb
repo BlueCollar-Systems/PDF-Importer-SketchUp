@@ -105,6 +105,30 @@ class QAReportTest < Minitest::Test
     assert diagnostics[:recommended_actions].any? { |action| action.include?('Vector or Hybrid') }
   end
 
+  def test_scale_crosscheck_low_confidence
+    stats = {
+      pages: 1,
+      primitives: 40,
+      edges: 40,
+      text: 0,
+      layers: [],
+      elapsed_seconds: 0.5,
+      text_renderers: [],
+      resolved_scale: {
+        factor: 48.0,
+        notation: '1/4" = 1\'-0"',
+        source: 'titleblock',
+        confidence: 0.55
+      },
+      generic: { title_block: true, dimensions: 4 }
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('scale.pdf', {}, stats)
+    crosscheck = report[:extra][:scale_crosscheck]
+    refute_nil crosscheck
+    assert_includes crosscheck['reasons'], 'low_confidence'
+    assert report[:extra][:human_summary].to_s.include?('Scale note:')
+  end
+
   def test_builds_open_failure_report
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_open_failure(
       'bad.pdf',

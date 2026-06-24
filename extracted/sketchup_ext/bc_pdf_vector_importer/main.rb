@@ -1215,6 +1215,7 @@ module BlueCollarSystems
       begin
         report = QAReport.build_from_stats(path, opts, stats)
         stats[:human_summary] = report[:extra][:human_summary] if report[:extra]
+        stats[:scale_crosscheck] = report[:extra][:scale_crosscheck] if report[:extra]
         report_path = QAReport.write_json(report, QAReport.default_output_path(path))
         stats[:import_report_path] = report_path if report_path
         ImportHealth.record!(stats, path)
@@ -1417,6 +1418,15 @@ module BlueCollarSystems
     def self.import_pdf
       model = Sketchup.active_model
       return UI.messagebox("No active model.") unless model
+      unless ENV['BC_HEADLESS']
+        UI.messagebox(
+          "Before you import:\n\n" \
+          "• Labels = editable text; Outlines/Glyphs/Geometry = exact vector fidelity.\n" \
+          "• LibreCAD users: this is SketchUp — 3D Text is available here.\n" \
+          "• Scale is detected from title blocks when possible; verify if Import Health shows a scale warning.\n\n" \
+          "Choose your PDF next."
+        )
+      end
       path = UI.openpanel("Select PDF File", "", "PDF Files|*.pdf||")
       return unless path && File.exist?(path)
       return if handle_open_gate(path)

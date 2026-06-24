@@ -1,0 +1,63 @@
+{
+  "schema": "bcs.golden_oracles/1",
+  "updated": "2026-06-24",
+  "notes": "Named corpus PDFs with expected primitive/text/placement ranges. PDFs resolve via BCS_CORPUS_ROOT or Desktop/PDFTest Files mirrors.",
+  "oracles": [
+    {
+      "id": "GO-01",
+      "name": "Simple vector sheet",
+      "corpus_key": "corpus_pdftest/simple_vector.pdf",
+      "pdf_candidates": ["simple_vector.pdf", "vector_test.pdf"],
+      "expect": {
+        "paths_min": 10,
+        "text_items_min": 0,
+        "placement_ok_min": 0.0,
+        "placement_rate_min": 0.75
+      }
+    },
+    {
+      "id": "GO-02",
+      "name": "BOM / dense labels",
+      "corpus_key": "corpus_pdftest/bom_table.pdf",
+      "pdf_candidates": ["bom_table.pdf", "BOM.pdf"],
+      "expect": {
+        "paths_min": 5,
+        "text_items_min": 8,
+        "bbox_pct_min": 40.0,
+        "placement_rate_min": 0.70
+      }
+    },
+    {
+      "id": "GO-03",
+      "name": "Title block with scale notation",
+      "corpus_key": "corpus_pdftest/titleblock_scale.pdf",
+      "pdf_candidates": ["titleblock_scale.pdf", "scale_drawing.pdf"],
+      "expect": {
+        "paths_min": 20,
+        "resolved_scale_confidence_min": 0.70,
+        "scale_crosscheck_absent": true
+      }
+    },
+    {
+      "id": "GO-04",
+      "name": "Multi-page shop drawing",
+      "corpus_key": "corpus_pdftest/multi_page.pdf",
+      "pdf_candidates": ["multi_page.pdf"],
+      "expect": {
+        "pages_min": 2,
+        "paths_min": 30,
+        "placement_rate_min": 0.65
+      }
+    },
+    {
+      "id": "GO-05",
+      "name": "Low-confidence scale warning oracle",
+      "corpus_key": "corpus_pdftest/ambiguous_scale.pdf",
+      "pdf_candidates": ["ambiguous_scale.pdf"],
+      "expect": {
+        "paths_min": 5,
+        "scale_crosscheck_reasons_any": ["low_confidence", "no_scale_detected", "titleblock_dimension_tension"]
+      }
+    }
+  ]
+}

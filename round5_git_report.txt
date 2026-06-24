@@ -1,0 +1,22 @@
+
+=== TESTS ===
+Run options: --seed 16167
+
+# Running:
+
+......
+
+Finished in 7.487825s, 0.8013 runs/s, 5.4756 assertions/s.
+
+6 runs, 41 assertions, 0 failures, 0 errors, 0 skips
+RUBY_EXIT=0
+...                                                                      [100%]
+3 passed in 0.07s
+FC_PYTEST_EXIT=0
+..                                                                       [100%]
+2 passed in 0.33s
+LC_PYTEST_EXIT=0
+....                                                                     [100%]
+4 passed in 0.05s
+BL_PYTEST_EXIT=0
+=== REPO C:\1PDF-Importer-SketchUp ===
