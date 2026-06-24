@@ -513,6 +513,28 @@ module BlueCollarSystems
         label_insertion_pdf(item)
       end
 
+      def mesh_text_run_width_inches(text, height)
+        chars = [text.to_s.strip.length, 1].max
+        [[chars * height.to_f * 0.55, height.to_f * 0.55].max, height.to_f * chars * 1.25].min
+      rescue StandardError
+        height.to_f * 0.55
+      end
+
+      def mesh_text_post_rotation_offset(display_angle, run_w, height)
+        a = display_angle.to_f
+        return nil if a.abs <= 0.1
+        if a.abs > 80.0 && a.abs < 100.0
+          # add_3d_text is horizontal; ±90° rotation around bottom-left shifts the
+          # visual center unless we nudge by one run width along the pre-rotation axis.
+          dx = 0.0
+          dy = a > 0.0 ? -run_w.to_f : run_w.to_f
+          return Geom::Vector3d.new(dx, dy, 0.0)
+        end
+        nil
+      rescue StandardError
+        nil
+      end
+
       def mesh_text_height_inches(item, angle_deg, page_h)
         fs = effective_font_size_pts(item)
         raw = (item.respond_to?(:raw_font_size) && item.raw_font_size) ?
@@ -561,11 +583,16 @@ module BlueCollarSystems
         new_ents = entities.to_a[count_before..-1] || []
         return if new_ents.empty?
 
+        run_w = mesh_text_run_width_inches(item.text, height)
         move = Geom::Transformation.new(pt)
         entities.transform_entities(move, *new_ents)
         if display_angle.abs > 0.1
           rot = Geom::Transformation.rotation(pt, Z_AXIS, display_angle.degrees)
           entities.transform_entities(rot, *new_ents)
+          offset = mesh_text_post_rotation_offset(display_angle, run_w, height)
+          if offset
+            entities.transform_entities(Geom::Transformation.new(offset), *new_ents)
+          end
         end
         new_ents.each do |entity|
           begin
@@ -739,6 +766,32 @@ module BlueCollarSystems
       end
 
       BOM_TABLE_HEADER = /\A(?:QUAN|MARK|DESCRIPTION|LENGTH|QTY)\z/i
+      BOM_TABLE_QUANTITY = /\A\d{1,4}\z/
+
+      def bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts, angle_deg = 0.0)
+        t = text.to_s.strip
+        return false unless t =~ BOM_TABLE_QUANTITY
+        return false if slope_triangle_label?(t, bbox_w_pts, bbox_h_pts, angle_deg)
+        return false if part_mark_label?(t)
+        return false if weld_fraction_label?(t, bbox_w_pts, bbox_h_pts)
+        bw = bbox_w_pts.to_f
+        bh = bbox_h_pts.to_f
+        # QUAN table columns are much taller than wide; slope triangles are less extreme.
+        bw > 0.5 && bh > bw * 2.0
+      rescue StandardError
+        false
+      end
+
+      def should_center_bom_quantity?(text, bbox_w_pts, bbox_h_pts, font_size_pts, angle_deg)
+        return false unless bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts, angle_deg)
+        bw = bbox_w_pts.to_f
+        bh = bbox_h_pts.to_f
+        fs = [font_size_pts.to_f, 1.0].max
+        est_w = fs * 0.55
+        bh > bw * 1.15 && bw > est_w * 0.45
+      rescue StandardError
+        false
+      end
 
       def label_baseline_ratio(angle_deg)
         ratio = (angle_deg.to_f.abs > 10.0) ? 0.05 : 0.20
@@ -1076,10 +1129,17 @@ module BlueCollarSystems
           return angle if diagonal_part_mark_label?(item)
           return 0.0
         end
+        if bom_table_quantity_label?(item.text, bbox_w, bbox_h, angle)
+          raw = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+          return raw if raw.abs >= 45.0
+          return 90.0
+        end
         if dimension_like_label?(item.text)
           fs = effective_font_size_pts(item)
           if bbox_w && bbox_h && vertical_dimension_bbox?(item, bbox_w, bbox_h) &&
              !narrow_fraction_dimension_stays_horizontal?(item.text, bbox_w, bbox_h, fs, angle)
+            raw = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+            return raw if raw.abs >= 45.0
             return 90.0
           end
           return 0.0 if angle.abs < 12.0
@@ -1201,7 +1261,9 @@ module BlueCollarSystems
 
       def label_run_width_pts(text, font_size_pts, bbox_w_pts = nil, bbox_h_pts = nil)
         fs = [font_size_pts.to_f, 1.0].max
-        raw = if dimension_like_label?(text)
+        raw = if bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts)
+                [bbox_h_pts.to_f * 0.88, fs * 0.55].max
+              elsif dimension_like_label?(text)
                 dimension_label_raw_width_pts(text, fs)
               elsif chord_spec_label?(text)
                 feet_inch_label_width_pts(text, fs)
@@ -1247,6 +1309,9 @@ module BlueCollarSystems
 
       def rotated_bbox_text_origin?(item, bbox_w_pts, bbox_h_pts, angle_deg)
         return false if annotation_like_label?(item.text, bbox_w_pts, bbox_h_pts)
+        if bom_table_quantity_label?(item.text, bbox_w_pts, bbox_h_pts, angle_deg)
+          return angle_needs_geometry_text?(angle_deg, 3.0)
+        end
         if tall_single_text_bbox?(item, bbox_w_pts, bbox_h_pts)
           return angle_needs_geometry_text?(angle_deg, 3.0)
         end
@@ -1308,6 +1373,9 @@ module BlueCollarSystems
           elsif rotated_part_mark_label?(item) ||
                 (diagonal_part_mark_label?(item) && narrow_part_mark_bbox?(bbox_w, bbox_h))
             est_w = dimension_label_est_width_pts(item.text, fs, bbox_w)
+            x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
+          elsif should_center_bom_quantity?(item.text, bbox_w, bbox_h, fs, angle)
+            est_w = label_run_width_pts(item.text, fs, bbox_w, bbox_h)
             x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
           elsif should_center_label?(item.text, bbox_w, fs, angle)
             est_w = item.text.to_s.strip.length * fs * 0.55

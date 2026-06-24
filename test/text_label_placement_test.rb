@@ -144,6 +144,16 @@ assert_true((x - 101.2).abs < 1.0, "centered BOM header should shift X toward bb
 assert_true(y > center_item.bbox_y0, 'baseline should sit above bbox bottom')
 assert_true(angle.abs < 0.01, 'horizontal label keeps angle')
 
+quan_qty = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+  '2', 110.0, 180.0, 8.0, -90.0, 'pdftotext', nil, 108.0, 160.0, 118.0, 200.0
+)
+qx, qy, qang = builder.send(:label_insertion_pdf, quan_qty)
+assert_true(builder.send(:bom_table_quantity_label?, '2', 10.0, 42.0, -90.0),
+            'narrow vertical numeric cell should classify as BOM quantity')
+assert_true(qang.abs > 80.0, "BOM quantity should stay vertical (got #{qang})")
+assert_true(qang < 0.0, "negative PDF angle should preserve sign (got #{qang})")
+assert_true((qx - 109.0).abs < 2.0, "BOM quantity should center in narrow QUAN cell (got #{qx})")
+
 dim_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   '7 1/8', 50.0, 300.0, 6.0, 0.0, 'pdftotext', nil, 48.0, 298.0, 72.0, 306.0
 )
