@@ -40,7 +40,8 @@ class DependencyResolverTest < Minitest::Test
       begin
         bin_dir = File.join(tmpdir, 'bin')
         FileUtils.mkdir_p(bin_dir)
-        fake = File.join(bin_dir, 'pdftocairo.exe')
+        exe_name = RUBY_PLATFORM =~ /mswin|mingw|cygwin/ ? 'pdftocairo.exe' : 'pdftocairo'
+        fake = File.join(bin_dir, exe_name)
         File.write(fake, 'stub')
 
         original = @resolver.method(:bundled_bin_dir)

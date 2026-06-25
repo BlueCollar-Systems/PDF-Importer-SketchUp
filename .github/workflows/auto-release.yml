@@ -185,15 +185,11 @@ jobs:
           RBZ="SketchUp-PDF-Importer_v${{ steps.version.outputs.version }}.rbz"
 
           git fetch --tags --force
-          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            git tag "${TAG}"
-            git push origin "${TAG}"
-          fi
-
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$RBZ" --clobber
           else
             gh release create "$TAG" \
+              --target "$(git rev-parse HEAD)" \
               --title "$TAG — PDF Vector Importer for SketchUp" \
               --notes "Automated release from latest \`main\` commit.
 
