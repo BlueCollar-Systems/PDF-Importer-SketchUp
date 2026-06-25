@@ -54,6 +54,7 @@ module BlueCollarSystems
           lines << "Ruby Platform: #{RUBY_PLATFORM}"
           lines << "Host OS: #{safe_call { RbConfig::CONFIG['host_os'] } || 'unknown'}"
           lines << "Plugin Version: #{defined?(PLUGIN_VERSION) ? PLUGIN_VERSION : 'unknown'}"
+          lines << "Extension Directory: #{File.dirname(__FILE__)}"
           lines << ""
           lines << "[Capabilities]"
           lines << capability_line("UI::HtmlDialog available", html_dialog_supported?)

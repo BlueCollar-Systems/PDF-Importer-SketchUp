@@ -52,6 +52,7 @@ module BlueCollarSystems
     require File.join(dir, 'import_dialog')
     require File.join(dir, 'report_dialog')
     require File.join(dir, 'compatibility_report')
+    require File.join(dir, 'version_notice')
     require File.join(dir, 'qa_report')
     require File.join(dir, 'import_health')
 
@@ -1598,6 +1599,22 @@ module BlueCollarSystems
       end
     end
     end # if defined?(Sketchup::Importer)
+
+    if defined?(Sketchup) && Sketchup.respond_to?(:add_observer)
+      unless defined?(@@bc_pdf_version_observer) && @@bc_pdf_version_observer
+        class BCPDFVersionObserver < Sketchup::AppObserver
+          def expectsStartupModelNotifications
+            false
+          end
+
+          def onExtensionsLoaded
+            BlueCollarSystems::PDFVectorImporter::VersionNotice.check
+          end
+        end
+        Sketchup.add_observer(BCPDFVersionObserver.new)
+        @@bc_pdf_version_observer = true
+      end
+    end
 
   end
 end

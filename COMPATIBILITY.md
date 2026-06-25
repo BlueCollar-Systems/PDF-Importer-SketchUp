@@ -43,6 +43,14 @@ Release build fails if bundled Poppler helpers are missing.
 - Use **page ranges** for large shop sets on slow machines.
 - Import report `human_summary` notes fallbacks; open **Import Health** after import.
 
+## Offline install
+
+Windows **RBZ** from GitHub Releases works without internet after download (Poppler bundled). Ghostscript remains an optional separate download.
+
+## Enterprise / multi-user
+
+Install RBZ **per Windows user** per SketchUp year. Avoid roaming only the Plugins folder across mismatched SketchUp versions. **Compatibility Report** logs the extension directory.
+
 ## Preflight command
 
 | Audience | Command / action |

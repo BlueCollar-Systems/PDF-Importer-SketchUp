@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.69-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.70-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -67,8 +67,18 @@ assets, checksums, license, and notes.
 
 The extension registers under **File > Import** and adds a PDF Vector Importer toolbar.
 
+**Offline install:** The GitHub Release `.rbz` works without internet after download — Poppler helpers are bundled. Ghostscript is optional and may require a separate download for non-embedded font repair.
+
 For SketchUp 2025 users: native PDF import discoverability changed in SketchUp UI,
 but this extension still provides dedicated PDF import menu and toolbar commands.
+
+## Upgrading / skipping versions
+
+Install the latest `.rbz` from Releases via Extension Manager (overwrites the prior extension). When the version changes, SketchUp shows a **one-time update notice** on next launch — run **Compatibility Report** and retest a Tier-1 PDF before shop use. Skipping intermediate versions (e.g. 3.7.55 → 3.7.70) is supported; there is no incremental migration tool.
+
+## Enterprise / multi-user installs
+
+Install the RBZ **per Windows user** on each PC where SketchUp runs. Avoid roaming only the `Plugins` folder across PCs with different SketchUp years. **Compatibility Report** logs the extension directory for IT support tickets.
 
 ## Bundled Helpers / Any-PC Behavior
 
