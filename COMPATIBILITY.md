@@ -1,42 +1,99 @@
-# Ruby 2.2 Compatibility Guide
+# Compatibility — PDF Vector Importer (SketchUp)
 
-All Ruby code in this extension **must** run on Ruby 2.2.4, which ships with
-SketchUp Make 2017. This document lists constructs that are NOT available in
-Ruby 2.2 and the safe alternatives to use instead.
+**Canonical path:** `C:\1PDF-Importer-SketchUp`  
+Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality tiers.
 
 ---
 
-## Constructs to Avoid
+## Minimum host version
+
+**SketchUp Make / Pro 2017** (Ruby 2.2.4).
+
+## Oldest tested
+
+| Host | Status |
+|------|--------|
+| SketchUp Make 2017 | ⚠️ Expected — Ruby 2.2 CI gate; **field retest required** (use **v3.7.67+**, latest **v3.7.68**) |
+| SketchUp 2018–2023 | ⚠️ Expected |
+| Current SketchUp Pro | ⚠️ Expected |
+
+**Do not use v3.7.65 or earlier on SketchUp 2017** — extension may fail to load (Ruby syntax).
+
+## Ruby / Python ABI
+
+| Runtime | Notes |
+|---------|-------|
+| **Ruby 2.2.4** | SketchUp 2017 — hard syntax/API floor; see [Ruby 2.2 guide](#ruby-22-compatibility-guide) below |
+| Ruby 2.5–3.2.x | SketchUp 2018 through current Pro |
+| Python | **Not required** for core vector import |
+
+## Bundled dependencies
+
+| Dependency | Shipped in Windows RBZ? |
+|------------|-------------------------|
+| Poppler (`pdftocairo`, `pdftotext`, `pdffonts`) | ✅ Yes |
+| MuPDF `mutool` | Optional helper if on PATH |
+| Ghostscript | ❌ Not bundled — optional font repair |
+
+Release build fails if bundled Poppler helpers are missing.
+
+## Legacy hardware notes
+
+- Prefer **Labels** over **Glyphs/Geometry** on PCs with **&lt; 8 GB RAM** or pre-2015 CPUs — glyph modes create many edges.
+- Use **page ranges** for large shop sets on slow machines.
+- Import report `human_summary` notes fallbacks; open **Import Health** after import.
+
+## Preflight command
+
+| Audience | Command / action |
+|----------|------------------|
+| Shop user (GUI) | **Extensions → PDF Vector Importer → Compatibility Report** before first import |
+| After import | **Extensions → PDF Vector Importer → Import Health…** |
+| IT / scripting | Install RBZ → restart SketchUp → run Compatibility Report; CI: `ruby tools/ruby22_syntax_check.rb --include-tests` |
+
+SketchUp Make 2017 is **not redistributed** from bluecollar-systems.com — obtain from Trimble independently.
+
+---
+
+## Host version matrix
+
+| SketchUp | Ruby | Status |
+|----------|------|--------|
+| Current Pro | 3.2.x+ | ⚠️ Expected |
+| 2024 | 3.2.2 | ⚠️ Expected |
+| 2020–2023 | 2.7.x | ⚠️ Expected |
+| 2018–2019 | 2.5.x | ⚠️ Expected |
+| Make / Pro 2017 | 2.2.4 | ⚠️ Expected (CI syntax-checked) |
+| 2014–2016 | 2.0.x | ⚠️ Expected only after dedicated host verification |
+| 2013 and earlier | | ❌ Not supported |
+
+See also [HOST_COMPATIBILITY.md](HOST_COMPATIBILITY.md) for helper policy and text-mode matrix.
+
+## CI coverage
+
+GitHub Actions: `ruby -c` under Ruby **2.2, 2.7, 3.2**; `ruby22_syntax_check.rb`; smoke tests under **2.2, 2.7, 3.0, 3.2** (Docker for 2.2).
+
+---
+
+## Ruby 2.2 Compatibility Guide
+
+All Ruby code in this extension **must** run on Ruby 2.2.4, which ships with SketchUp Make 2017.
+
+### Constructs to Avoid
 
 | Construct | Introduced | Safe Alternative (Ruby 2.2) |
 |---|---|---|
+| Endless range `arr[n..]` | 2.6+ | Two-argument slice `arr[n, len]` |
+| `Integer#positive?` | 2.3+ | `n > 0` |
 | `Array#sum` | 2.4 | `array.inject(0, :+)` |
 | `Hash#transform_keys` | 2.5 | `Hash[hash.map { \|k, v\| [new_key(k), v] }]` |
-| `Hash#transform_values` | 2.4 | `Hash[hash.map { \|k, v\| [k, new_val(v)] }]` |
-| `&.` (safe navigation operator) | 2.3 | `obj && obj.method` |
-| `Object#then` / `Object#yield_self` | 2.5 / 2.6 | Use a local variable or explicit block |
+| `&.` (safe navigation) | 2.3 | `obj && obj.method` |
 | `Enumerable#filter` | 2.6 | `Enumerable#select` |
-| `Enumerable#filter_map` | 2.7 | `.select { ... }.map { ... }` |
-| `Enumerable#tally` | 2.7 | `each_with_object(Hash.new(0)) { \|v, h\| h[v] += 1 }` |
-| `Integer#digits` | 2.4 | `n.to_s.chars.map(&:to_i).reverse` |
 | `String#match?` | 2.4 | `!!(string =~ regex)` |
 | `Hash#dig` / `Array#dig` | 2.3 | Chain `[]` with nil checks |
-| `Kernel#pp` (auto-require) | 2.5 | `require 'pp'; pp obj` |
-| Keyword argument separation (hash/kwargs) | 2.7 warning, 3.0 enforced | Keep Ruby 2.2 calling conventions |
-| `rescue` inside blocks without `begin`/`end` | 2.5 | Wrap with explicit `begin`/`end` |
-| Heredoc with `<<~` (squiggly) | 2.3 | Use `<<-` and manually manage indentation |
-| `#frozen_string_literal: true` pragma | 2.3 | Works on 2.3+; do NOT rely on it for 2.2 |
 
-## Frozen String Literal Pragma
+### General Rules
 
-The `# frozen_string_literal: true` magic comment is **recognized starting in
-Ruby 2.3**. On Ruby 2.2 the comment is silently ignored, so it will not cause
-errors, but it also will not freeze strings. Do not write code that depends on
-string immutability enforced by this pragma.
-
-## General Rules
-
-1. Before merging, CI runs `ruby -c` on every `.rb` file under Ruby 2.2, 2.7,
-   and 3.2 to catch syntax issues early.
-2. Never use features listed above without a version guard or polyfill.
-3. When in doubt, test with `docker run --rm ruby:2.2 ruby -c yourfile.rb`.
+1. CI runs `ruby22_syntax_check.rb` on every shipped `.rb` file.
+2. Never use features listed above without a version guard.
+3. When in doubt: `docker run --rm ruby:2.2 ruby -c yourfile.rb`.
