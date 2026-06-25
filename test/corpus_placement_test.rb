@@ -54,7 +54,11 @@ pdfs.each_with_index do |info, idx|
   results << result
 
   if result[:status] != 'OK'
-    if result[:status] == 'TIMEOUT' && result[:heavy]
+    if CorpusHarness.expected_refusal?(info, result)
+      CorpusHarness.mark_expected_refusal!(result)
+      warn!("Expected refusal: #{info[:corpus_key]} — #{result[:error]}")
+      puts "EXPECTED REFUSAL  #{result[:error]}"
+    elsif result[:status] == 'TIMEOUT' && result[:heavy]
       warn!("Heavy PDF timeout (warn-only): #{info[:corpus_key]} — #{result[:error]}")
       puts "TIMEOUT (heavy, warn-only)  #{result[:error]}"
     else

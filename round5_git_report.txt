@@ -20,3 +20,104 @@ LC_PYTEST_EXIT=0
 4 passed in 0.05s
 BL_PYTEST_EXIT=0
 === REPO C:\1PDF-Importer-SketchUp ===
+warning: in the working copy of 'round5_git_report.txt', CRLF will be replaced by LF the next time Git touches it
+[main 2cf61c6] Round 5: scale cross-check, golden oracles, preflight copy (Round 4 Phase 2 P0 slice)
+ 16 files changed, 563 insertions(+), 55 deletions(-)
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round4-status-reopen.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-kickoff.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-resolution.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-reviewer-synthesis.md
+ create mode 100644 round5_commit.ps1
+ create mode 100644 round5_git_report.txt
+ create mode 100644 test/fixtures/golden_oracles.json
+COMMIT=2cf61c6cc214400c5258f77d14cfed8c277210a3
+remote: Bypassed rule violations for refs/heads/main:        
+remote: 
+remote: - 4 of 4 required status checks are expected.        
+remote: 
+To https://github.com/BlueCollar-Systems/PDF-Importer-SketchUp.git
+   6c7a9c8..2cf61c6  main -> main
+PUSH_EXIT=0
+=== REPO C:\1PDF-Importer-FreeCAD ===
+[main d92838d] Round 5: scale cross-check, golden oracles, preflight copy (Round 4 Phase 2 P0 slice)
+ 14 files changed, 487 insertions(+), 55 deletions(-)
+ create mode 100644 PDFVectorImporter/pdfcadcore/preflight_copy.py
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round4-status-reopen.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-kickoff.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-resolution.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-reviewer-synthesis.md
+COMMIT=d92838dc42432282ba0ef41f4ef4e5a33711c666
+remote: Bypassed rule violations for refs/heads/main:        
+remote: 
+remote: - 5 of 5 required status checks are expected.        
+remote: 
+To https://github.com/BlueCollar-Systems/PDF-Importer-FreeCAD.git
+   1823734..d92838d  main -> main
+PUSH_EXIT=0
+=== REPO C:\1PDF-Importer-LibreCAD ===
+[main d1aae19] Round 5: scale cross-check, golden oracles, preflight copy (Round 4 Phase 2 P0 slice)
+ 12 files changed, 467 insertions(+), 53 deletions(-)
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round4-status-reopen.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-kickoff.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-resolution.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-reviewer-synthesis.md
+ create mode 100644 pdfcadcore/preflight_copy.py
+COMMIT=d1aae19ff6027fabaed9028a77693413c7023d68
+remote: Bypassed rule violations for refs/heads/main:        
+remote: 
+remote: - 3 of 3 required status checks are expected.        
+remote: 
+To https://github.com/BlueCollar-Systems/PDF-Importer-LibreCAD.git
+   a18b729..d1aae19  main -> main
+PUSH_EXIT=0
+=== REPO C:\1PDF-Importer-Blender ===
+[main 0635919] Round 5: scale cross-check, golden oracles, preflight copy (Round 4 Phase 2 P0 slice)
+ 12 files changed, 494 insertions(+), 54 deletions(-)
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round4-status-reopen.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-kickoff.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-resolution.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-reviewer-synthesis.md
+ create mode 100644 pdf_vector_importer/pdfcadcore/preflight_copy.py
+COMMIT=0635919a779cc8bbfe4d1f0494fbc9bede1420b8
+remote: Bypassed rule violations for refs/heads/main:        
+remote: 
+remote: - 3 of 3 required status checks are expected.        
+remote: 
+To https://github.com/BlueCollar-Systems/PDF-Importer-Blender.git
+   d3d499f..0635919  main -> main
+PUSH_EXIT=0
+=== REPO C:\1BlueCollar-Website ===
+[main 89df4ef] Round 5: scale cross-check, golden oracles, preflight copy (Round 4 Phase 2 P0 slice)
+ 9 files changed, 266 insertions(+), 52 deletions(-)
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round4-status-reopen.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-kickoff.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-resolution.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-reviewer-synthesis.md
+COMMIT=89df4ef2db5c3505d88c3f423b298cd452b8eab3
+To https://github.com/BlueCollar-Systems/BlueCollar-Website.git
+ ! [rejected]        main -> main (non-fast-forward)
+error: failed to push some refs to 'https://github.com/BlueCollar-Systems/BlueCollar-Website.git'
+hint: Updates were rejected because the tip of your current branch is behind
+hint: its remote counterpart. If you want to integrate the remote changes,
+hint: use 'git pull' before pushing again.
+hint: See the 'Note about fast-forwards' in 'git push --help' for details.
+PUSH_EXIT=1
+=== REPO C:\1 Structural_Steel_Shapes_App ===
+warning: in the working copy of '_LLM_CONTROL_PACK/QA/Q&A_INDEX.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '_LLM_CONTROL_PACK/QA/QA-2026-06-24_round4-innovation-backlog.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '_LLM_CONTROL_PACK/QA/QA-2026-06-24_round4-resolution.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '_LLM_CONTROL_PACK/QA/QA-2026-06-24_round4-status-reopen.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '_LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-kickoff.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '_LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-resolution.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '_LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-reviewer-synthesis.md', LF will be replaced by CRLF the next time Git touches it
+[main 6edf4fe] Round 5: scale cross-check, golden oracles, preflight copy (Round 4 Phase 2 P0 slice)
+ 7 files changed, 280 insertions(+), 51 deletions(-)
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round4-status-reopen.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-kickoff.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-resolution.md
+ create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-reviewer-synthesis.md
+COMMIT=6edf4fe7d4bb6f4205283abde44ef7ad623fed15
+To https://github.com/BlueCollar-Systems/Steel-Shapes.git
+   153d192..6edf4fe  main -> main
+PUSH_EXIT=0
+DONE

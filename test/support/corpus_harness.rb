@@ -87,6 +87,9 @@ module CorpusHarness
   PLACEMENT_THRESHOLD_DEFAULT = 0.95
   PLACEMENT_THRESHOLD_VECTOR = 1.0
   BASELINE_DIR = File.join(REPO_ROOT, 'test', 'fixtures', 'corpus_baselines')
+  EXPECTED_REFUSALS = {
+    'encryption_openpassword.pdf' => /encrypted|password-protected/i
+  }.freeze
 
   @geometry_builder_loaded = false
   @stress_optout_warned = false
@@ -354,6 +357,18 @@ module CorpusHarness
     vector_sheet ? PLACEMENT_THRESHOLD_VECTOR : PLACEMENT_THRESHOLD_DEFAULT
   end
 
+  def self.expected_refusal?(pdf_info, result)
+    return false unless result[:status] == 'FAIL'
+    pattern = EXPECTED_REFUSALS[File.basename(pdf_info[:path])]
+    pattern && result[:error].to_s.match?(pattern)
+  end
+
+  def self.mark_expected_refusal!(result)
+    result[:status] = 'REFUSED'
+    result[:expected_refusal] = true
+    result
+  end
+
   def self.baseline_record(result)
     {
       'pdf_name' => result[:pdf_name],
@@ -444,10 +459,11 @@ module CorpusHarness
     end
 
     ok = results.count { |r| r[:status] == 'OK' }
+    refused_n = results.count { |r| r[:status] == 'REFUSED' }
     fail_n = results.count { |r| r[:status] == 'FAIL' }
     timeout_n = results.count { |r| r[:status] == 'TIMEOUT' }
     puts
-    puts "TOTALS: #{ok} OK / #{fail_n} FAIL / #{timeout_n} TIMEOUT of #{results.length} PDFs"
+    puts "TOTALS: #{ok} OK / #{refused_n} EXPECTED REFUSAL / #{fail_n} FAIL / #{timeout_n} TIMEOUT of #{results.length} PDFs"
     puts "pdftotext: #{pdftotext_available? ? 'available' : 'unavailable (internal TextParser fallback)'}"
     puts '=' * 120
   end

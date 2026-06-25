@@ -1,0 +1,11 @@
+{
+  "pdf_name": "home_recovery_sample_floor_plans.pdf",
+  "corpus_key": "corpus_web_acquired/construction/home_recovery_sample_floor_plans.pdf",
+  "pages": 39,
+  "paths": 216326,
+  "text_items": 14806,
+  "bbox_pct": 99.96,
+  "placement_ok": 14806,
+  "placement_total": 14806,
+  "text_hash": "e2332a1e5a433a81b945820a3e266d5842da145234f43cccb65cbd416f425193"
+}

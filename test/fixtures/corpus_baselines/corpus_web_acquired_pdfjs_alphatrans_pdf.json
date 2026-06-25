@@ -1,0 +1,11 @@
+{
+  "pdf_name": "alphatrans.pdf",
+  "corpus_key": "corpus_web_acquired/pdfjs/alphatrans.pdf",
+  "pages": 1,
+  "paths": 3,
+  "text_items": 6,
+  "bbox_pct": 100.0,
+  "placement_ok": 6,
+  "placement_total": 6,
+  "text_hash": "210568f38c6ad9d05c257533eefe8f58a3675430d90d6ef802db661be5a00253"
+}

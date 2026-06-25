@@ -25,6 +25,27 @@ $env:BCS_CORPUS_ROOT = 'C:\1pdf-test-corpus'
 ruby test/corpus_placement_test.rb
 ```
 
+## Public web-acquired corpus
+
+The repo includes a local-only manifest for public stress PDFs:
+
+- `tools/public_pdf_corpus_manifest.json` — source URLs, feature tags,
+  license notes, and local target paths.
+- `tools/download_public_pdf_corpus.py` — dependency-free downloader that writes
+  PDFs under `C:\1pdf-test-corpus\web-acquired\` by default.
+- `C:\1pdf-test-corpus\web-acquired\PUBLIC_PDF_CORPUS.lock.json` — local hash
+  and size inventory written after acquisition; intentionally not committed.
+
+Acquire the enabled public set:
+
+```powershell
+python tools/download_public_pdf_corpus.py --root C:\1pdf-test-corpus
+```
+
+These PDFs are not redistributed from this repository. The manifest records the
+upstream source and whether a file should remain local-only or manually
+acquired because of license or download restrictions.
+
 ## Update baselines (intentional changes)
 
 After reviewing placement or text-hash drift:
@@ -57,6 +78,8 @@ Baseline fields per PDF:
 - Placement rate &lt; 95% when text exists (general sheets)
 - Placement rate &lt; 100% for vector sheets (`bbox_pct` ≥ 50 and `text_items` ≥ 10)
 - Any baseline field mismatch → fail (unless updating baselines)
+- Expected bad-PDF refusals (currently encrypted open-password samples) → pass
+  only when the importer reports the matching refusal reason.
 
 ## CI workflow
 

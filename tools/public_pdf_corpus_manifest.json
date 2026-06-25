@@ -1,0 +1,274 @@
+{
+  "schema": "bcs.public_pdf_corpus/1.0",
+  "updated": "2026-06-24",
+  "default_root": "C:/1pdf-test-corpus",
+  "description": "Public, local-only PDF corpus entries for PDF importer stress testing. Downloaded files are intentionally not committed to git.",
+  "entries": [
+    {
+      "id": "home-recovery-sample-floor-plans",
+      "enabled": true,
+      "title": "Home Recovery Alabama Sample Floor Plans",
+      "url": "https://homerecoveryal.com/wp-content/uploads/2023/03/Exhibit-F-Sample-Floor-Plans.pdf",
+      "source_page": "https://homerecoveryal.com/",
+      "source_org": "Home Recovery Alabama",
+      "local_path": "web-acquired/construction/home_recovery_sample_floor_plans.pdf",
+      "license_note": "Public sample plan PDF. Keep local-only unless redistribution rights are confirmed.",
+      "features": [
+        "residential plan sheets",
+        "dimensions",
+        "title blocks",
+        "structural notes",
+        "39-page drawing set"
+      ],
+      "test_intent": "Multi-page real-world sample plan set with dense notes, dimensions, and page-to-page consistency checks."
+    },
+    {
+      "id": "chief-architect-grandview",
+      "enabled": true,
+      "title": "Chief Architect Grandview Residential Plan Set",
+      "url": "https://cloud.chiefarchitect.com/1/samples/projects/grandview/grandview.pdf",
+      "source_page": "https://www.chiefarchitect.com/products/samples.html",
+      "source_org": "Chief Architect",
+      "local_path": "web-acquired/construction/chief_architect_grandview.pdf",
+      "license_note": "Vendor sample plan PDF. Keep local-only unless redistribution rights are confirmed.",
+      "features": [
+        "residential construction documents",
+        "dense annotations",
+        "dimensions",
+        "schedules",
+        "multi-page drawing set"
+      ],
+      "test_intent": "Real-world residential CAD export coverage for labels, 3D text placement, and geometry density."
+    },
+    {
+      "id": "sacramento-adu-willow",
+      "enabled": true,
+      "title": "Sacramento County ADU Willow Plan Set",
+      "url": "https://development.saccounty.gov/content/dam/cd/building/docs/transition/adu-plan-full-set-a2-willow.pdf",
+      "source_page": "https://development.saccounty.gov/",
+      "source_org": "Sacramento County",
+      "local_path": "web-acquired/construction/sacramento_adu_willow.pdf",
+      "license_note": "Public county sample plan PDF. Keep local-only unless redistribution rights are confirmed.",
+      "features": [
+        "ADU plan sheets",
+        "architectural notes",
+        "dimensions",
+        "multi-page drawing set",
+        "moderate file size"
+      ],
+      "test_intent": "Accessible public ADU plan set for practical real-world import timing and geometry/text review."
+    },
+    {
+      "id": "pdfjs-a1-plans",
+      "enabled": true,
+      "title": "Mozilla pdf.js A1 Plans Regression PDF",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/22060_A1_01_Plans.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/22060_A1_01_Plans.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "large-format plan sheet",
+        "CAD-like vectors",
+        "dense linework",
+        "text extraction stress"
+      ],
+      "test_intent": "Plan-sheet regression case from a mature PDF renderer corpus."
+    },
+    {
+      "id": "pdfjs-alpha-transparency",
+      "enabled": true,
+      "title": "Mozilla pdf.js Alpha Transparency",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/alphatrans.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/alphatrans.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "alpha transparency",
+        "blend behavior",
+        "small targeted regression"
+      ],
+      "test_intent": "Checks transparent graphics do not crash or create misleading geometry."
+    },
+    {
+      "id": "pdfjs-shading-text",
+      "enabled": true,
+      "title": "Mozilla pdf.js ShowText Shading Pattern",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ShowText-ShadingPattern.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/ShowText-ShadingPattern.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "text operators",
+        "shading pattern",
+        "small targeted regression"
+      ],
+      "test_intent": "Text plus shading interaction smoke test for vector and text render paths."
+    },
+    {
+      "id": "pdfjs-type3-word-spacing",
+      "enabled": true,
+      "title": "Mozilla pdf.js Type3 Word Spacing",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/Type3WordSpacing.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/Type3WordSpacing.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "Type3 font",
+        "word spacing",
+        "glyph positioning"
+      ],
+      "test_intent": "Targets the text-mode boundary where glyphs, labels, and 3D text can diverge."
+    },
+    {
+      "id": "pdfjs-truetype-without-cmap",
+      "enabled": true,
+      "title": "Mozilla pdf.js TrueType Without cmap",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/TrueType_without_cmap.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/TrueType_without_cmap.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "TrueType font edge case",
+        "missing cmap",
+        "fallback text handling"
+      ],
+      "test_intent": "Ensures missing font maps degrade with an explicit report instead of silent mislabeling."
+    },
+    {
+      "id": "pdfjs-arabic-cid-truetype",
+      "enabled": true,
+      "title": "Mozilla pdf.js Arabic CID TrueType",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ArabicCIDTrueType.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/ArabicCIDTrueType.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "CID TrueType font",
+        "non-Latin glyphs",
+        "text encoding"
+      ],
+      "test_intent": "Encoding and glyph preservation check for non-basic text."
+    },
+    {
+      "id": "pdfjs-embedded-font",
+      "enabled": true,
+      "title": "Mozilla pdf.js Embedded Font",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/Embedded_font.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/Embedded_font.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "embedded font",
+        "text extraction",
+        "small targeted regression"
+      ],
+      "test_intent": "Baseline for normal embedded-font text before harder font cases."
+    },
+    {
+      "id": "pdfjs-nested-type3-content-stream",
+      "enabled": true,
+      "title": "Mozilla pdf.js No-Cycle Type3 inside Type3",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ContentStreamNoCycleType3insideType3.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/ContentStreamNoCycleType3insideType3.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "nested Type3 font",
+        "content stream recursion",
+        "glyph rendering"
+      ],
+      "test_intent": "Nested font/content stream safety check without intentionally cyclic content."
+    },
+    {
+      "id": "pdfjs-annotations-border-styles",
+      "enabled": true,
+      "title": "Mozilla pdf.js Annotation Border Styles",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/annotation-border-styles.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/annotation-border-styles.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "annotations",
+        "border styles",
+        "non-content-stream objects"
+      ],
+      "test_intent": "Confirms annotations do not pollute editable geometry unless explicitly supported."
+    },
+    {
+      "id": "pdfjs-pages-tree-refs",
+      "enabled": true,
+      "title": "Mozilla pdf.js Pages Tree Refs",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/Pages-tree-refs.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/Pages-tree-refs.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "page tree references",
+        "PDF object graph",
+        "small parser regression"
+      ],
+      "test_intent": "Parser page discovery regression case."
+    },
+    {
+      "id": "pdfjs-s2",
+      "enabled": true,
+      "title": "Mozilla pdf.js S2 Regression PDF",
+      "url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/S2.pdf",
+      "source_page": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs",
+      "source_org": "Mozilla pdf.js",
+      "local_path": "web-acquired/pdfjs/S2.pdf",
+      "license_note": "Mozilla pdf.js repository test asset. Keep acquired copy local; cite upstream.",
+      "features": [
+        "mixed PDF content",
+        "renderer regression",
+        "moderate file size"
+      ],
+      "test_intent": "General mixed-content renderer regression from pdf.js."
+    },
+    {
+      "id": "calpoly-pdfvt-cerebellum-10",
+      "enabled": false,
+      "title": "Cal Poly PDF/VT Cerebellum 10",
+      "url": "",
+      "source_page": "https://pdfa.org/resource/cal-poly-pdfvt-test-suite/",
+      "source_org": "PDF Association / Cal Poly Graphic Communications",
+      "local_path": "web-acquired/pdfvt/cerebellum_v1_0_2_10.pdf",
+      "license_note": "Use for local testing only. PDF Association states these files may not be publicly redistributed from any other venue and must not be altered.",
+      "features": [
+        "PDF/VT",
+        "graphically rich pages",
+        "standards-grade valid PDF",
+        "performance stress"
+      ],
+      "test_intent": "Manual acquisition candidate for standards-grade performance testing after reading PDF Association usage restrictions."
+    },
+    {
+      "id": "ghent-output-suite-v5",
+      "enabled": false,
+      "title": "Ghent Output Suite v5",
+      "url": "",
+      "source_page": "https://www.gwg.org/workflow-tools-downloads/test-suites/ghent-output-suite/",
+      "source_org": "Ghent Workgroup",
+      "local_path": "web-acquired/ghent-output-suite-v5/",
+      "license_note": "Manual acquisition candidate. Keep local-only unless redistribution rights are confirmed.",
+      "features": [
+        "PDF/X workflow behavior",
+        "transparency",
+        "overprint",
+        "spot colors",
+        "technical patches"
+      ],
+      "test_intent": "Manual standards test suite for graphics workflow edge cases not usually present in shop drawings."
+    }
+  ]
+}
