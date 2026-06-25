@@ -125,8 +125,56 @@ jobs:
             fi
           fi
 
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: false
+
+      - name: Run release gate tests
+        run: |
+          set -e
+          python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext
+          find extracted/sketchup_ext test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
+          ruby test/smoke_test.rb
+          ruby test/ruby22_compat_test.rb
+          ruby test/import_health_test.rb
+          ruby test/dependency_resolver_test.rb
+          ruby test/qa_report_test.rb
+          ruby test/text_mode_routing_test.rb
+          docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
+            set -e
+            find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
+            ruby test/smoke_test.rb
+            ruby test/ruby22_compat_test.rb
+            ruby test/import_health_test.rb
+          '
+
       - name: Build .rbz
         run: python build_release.py
+
+      - name: Smoke RBZ structure
+        run: |
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          rbzs = sorted(Path(".").glob("SketchUp-PDF-Importer_v*.rbz"))
+          if len(rbzs) != 1:
+              raise SystemExit(f"Expected one RBZ, found {len(rbzs)}: {rbzs}")
+          with zipfile.ZipFile(rbzs[0]) as zf:
+              names = set(zf.namelist())
+          required = {
+              "bc_pdf_vector_importer.rb",
+              "bc_pdf_vector_importer/main.rb",
+              "bc_pdf_vector_importer/metadata.rb",
+              "bc_pdf_vector_importer/bin/pdftocairo.exe",
+          }
+          missing = sorted(required - names)
+          if missing:
+              raise SystemExit(f"RBZ missing required files: {missing}")
+          print(f"PASS: {rbzs[0].name} contains required extension files")
+          PY
 
       - name: Create or update release
         env:
