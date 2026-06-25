@@ -41,6 +41,31 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: false
+
+      - name: Run release gate tests
+        run: |
+          set -e
+          python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext
+          find extracted/sketchup_ext test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
+          ruby test/smoke_test.rb
+          ruby test/ruby22_compat_test.rb
+          ruby test/import_health_test.rb
+          ruby test/dependency_resolver_test.rb
+          ruby test/qa_report_test.rb
+          ruby test/text_mode_routing_test.rb
+          docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
+            set -e
+            find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
+            ruby test/smoke_test.rb
+            ruby test/ruby22_compat_test.rb
+            ruby test/import_health_test.rb
+          '
+
       - name: Read and bump version
         id: version
         run: |
@@ -124,31 +149,6 @@ jobs:
               echo "::warning::Could not push version bump to '${GITHUB_REF_NAME}' (likely branch protection). Continuing to publish the release; tag-based versioning keeps releases unique."
             fi
           fi
-
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.2"
-          bundler-cache: false
-
-      - name: Run release gate tests
-        run: |
-          set -e
-          python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext
-          find extracted/sketchup_ext test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
-          ruby test/smoke_test.rb
-          ruby test/ruby22_compat_test.rb
-          ruby test/import_health_test.rb
-          ruby test/dependency_resolver_test.rb
-          ruby test/qa_report_test.rb
-          ruby test/text_mode_routing_test.rb
-          docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
-            set -e
-            find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
-            ruby test/smoke_test.rb
-            ruby test/ruby22_compat_test.rb
-            ruby test/import_health_test.rb
-          '
 
       - name: Build .rbz
         run: python build_release.py
