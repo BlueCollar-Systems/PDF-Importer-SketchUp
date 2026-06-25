@@ -150,8 +150,11 @@ puts
 puts "--- Check 4: SketchUp 2017 Ruby compatibility ---"
 core_rb_files = Dir.glob(File.join(SOURCE_DIR, '**', '*.rb'))
 modern_method_hits = []
+modern_range_hits = []
 modern_method_pattern =
   /&\.|\.(?:match\?|positive\?|negative\?|dig|sum|then|yield_self|filter_map)(?=[^A-Za-z0-9_]|$)/
+endless_range_pattern = /(^|[^.])\.\.(?!\.)\s*(?:[\]\)\}]|$)/
+beginless_range_pattern = /(?:\[|\()\s*\.\.(?!\.)/
 
 core_rb_files.each do |f|
   rel = f.sub("#{REPO_ROOT}/", '').sub("#{REPO_ROOT}\\", '')
@@ -162,19 +165,39 @@ core_rb_files.each do |f|
       if line =~ modern_method_pattern
         modern_method_hits << "#{rel}:#{idx + 1}: #{line.strip}"
       end
+
+      # Ruby 2.2 (SketchUp 2017) cannot parse beginless/endless ranges,
+      # e.g. text[-69..] or values[..10]. Modern Ruby syntax checks pass
+      # these, so keep an explicit source scan in the smoke gate.
+      scan_line = line.
+        gsub(/'([^'\\]|\\.)*'/, "''").
+        gsub(/"([^"\\]|\\.)*"/, '""').
+        sub(/\s+#.*$/, '')
+      if scan_line =~ endless_range_pattern || scan_line =~ beginless_range_pattern
+        modern_range_hits << "#{rel}:#{idx + 1}: #{line.strip}"
+      end
     end
   end
 end
 
-if modern_method_hits.empty?
-  puts "  PASS: no Ruby 2.3+ convenience methods found in core extension"
+if modern_method_hits.empty? && modern_range_hits.empty?
+  puts "  PASS: no Ruby 2.3+ convenience methods or Ruby 2.6+ ranges found in core extension"
   pass_count += 1
 else
-  failures << "Ruby 2.3+ method usage found in core extension (#{modern_method_hits.length} hit(s))."
-  puts "  FAIL: found SketchUp 2017-incompatible methods:"
-  modern_method_hits.first(20).each { |hit| puts "        #{hit}" }
-  if modern_method_hits.length > 20
-    puts "        ...and #{modern_method_hits.length - 20} more"
+  failures << "SketchUp 2017-incompatible Ruby syntax found in core extension (#{modern_method_hits.length + modern_range_hits.length} hit(s))."
+  unless modern_method_hits.empty?
+    puts "  FAIL: found SketchUp 2017-incompatible methods:"
+    modern_method_hits.first(20).each { |hit| puts "        #{hit}" }
+    if modern_method_hits.length > 20
+      puts "        ...and #{modern_method_hits.length - 20} more method hits"
+    end
+  end
+  unless modern_range_hits.empty?
+    puts "  FAIL: found SketchUp 2017-incompatible beginless/endless ranges:"
+    modern_range_hits.first(20).each { |hit| puts "        #{hit}" }
+    if modern_range_hits.length > 20
+      puts "        ...and #{modern_range_hits.length - 20} more range hits"
+    end
   end
 end
 

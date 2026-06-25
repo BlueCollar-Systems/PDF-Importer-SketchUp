@@ -92,7 +92,7 @@ module BlueCollarSystems
         text = path.to_s
         return 'n/a' if text.empty?
         return text if text.length <= 72
-        "...#{text[-69..]}"
+        "...#{text[-69, 69]}"
       end
 
     end
