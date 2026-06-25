@@ -360,7 +360,7 @@ module CorpusHarness
   def self.expected_refusal?(pdf_info, result)
     return false unless result[:status] == 'FAIL'
     pattern = EXPECTED_REFUSALS[File.basename(pdf_info[:path])]
-    pattern && result[:error].to_s.match?(pattern)
+    pattern && !result[:error].to_s.match(pattern).nil?
   end
 
   def self.mark_expected_refusal!(result)

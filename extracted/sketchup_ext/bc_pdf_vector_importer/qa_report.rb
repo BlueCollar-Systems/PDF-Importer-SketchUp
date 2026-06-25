@@ -238,10 +238,10 @@ module BlueCollarSystems
         end
 
         primary = factor.to_f if factor
-        if primary && primary.positive? && alternate_factors.is_a?(Array)
+        if primary && primary > 0 && alternate_factors.is_a?(Array)
           alternate_factors.each do |alt|
             alt_factor = alt.to_f
-            next unless alt_factor.positive?
+            next unless alt_factor > 0
             if (alt_factor - primary).abs / [primary, alt_factor].max > SCALE_FACTOR_DISAGREE_RATIO
               warnings << 'Multiple scale notations on the sheet disagree — confirm which scale applies to this view.'
               reasons << 'conflicting_scale_notations'
@@ -312,7 +312,7 @@ module BlueCollarSystems
           end
         end
 
-        if source_spans.positive? && text_entities.zero?
+        if source_spans > 0 && text_entities.zero?
           signals << 'source_text_seen_but_no_text_entities_created'
           actions << 'Retest with another text mode and compare the text_source_spans count against visible text.'
         end
@@ -382,21 +382,21 @@ module BlueCollarSystems
         pdf_name = 'the PDF' if pdf_name.empty?
 
         parts = []
-        page_phrase = pages.positive? ? "#{pages} page#{'s' if pages != 1}" : 'the PDF'
+        page_phrase = pages > 0 ? "#{pages} page#{'s' if pages != 1}" : 'the PDF'
         lead = "Imported #{page_phrase} from #{pdf_name} into #{host} using #{mode} mode"
         lead += " with #{text_mode}" unless text_mode.empty?
         parts << lead
 
         outcome = []
-        outcome << "#{primitives} vector primitive#{'s' if primitives != 1}" if primitives.positive?
-        outcome << "#{text_count} text item#{'s' if text_count != 1}" if text_count.positive?
-        outcome << "#{layers} PDF layer#{'s' if layers != 1}" if layers.positive?
+        outcome << "#{primitives} vector primitive#{'s' if primitives != 1}" if primitives > 0
+        outcome << "#{text_count} text item#{'s' if text_count != 1}" if text_count > 0
+        outcome << "#{layers} PDF layer#{'s' if layers != 1}" if layers > 0
         parts << if outcome.empty?
                    'No editable geometry was created'
                  else
                    "Created #{outcome.join(', ')}"
                  end
-        parts << "in #{format('%.1f', elapsed_s)}s" if elapsed_s.positive?
+        parts << "in #{format('%.1f', elapsed_s)}s" if elapsed_s > 0
 
         scale = extra['resolved_scale']
         if scale.is_a?(Hash) && scale['factor']
@@ -412,14 +412,14 @@ module BlueCollarSystems
         if fallback['used']
           reason = fallback['reason'].to_s.tr('_', ' ')
           parts << "Raster or degraded fallback was used (#{reason})"
-        elsif primitives.positive?
+        elsif primitives > 0
           parts << 'Vector extraction completed without raster fallback'
         end
 
         quality = diagnostics['quality_level'].to_s
         parts << "Overall fidelity: #{quality}" unless quality.empty?
 
-        if warnings.positive?
+        if warnings > 0
           parts << "#{warnings} warning#{'s' if warnings != 1} recorded — review the import log before production use"
         end
 

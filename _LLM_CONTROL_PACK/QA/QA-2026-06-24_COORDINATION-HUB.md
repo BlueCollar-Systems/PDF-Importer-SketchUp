@@ -29,6 +29,7 @@ Read this file **before** starting work. Update it when you **start**, **finish*
 | **WS-R6** | Corpus + app slate | Corpus + Steel Logic | **implemented** — corpus/app slice validated | 2026-06-25 | [Round 6 doc](QA-2026-06-24_round6-corpus-and-features.md) · public corpus gate 25 OK + 1 expected refusal; Steel Logic PDF Callout Lookup ready |
 | **WS-FIELD** | Field validation | SU / FC / LC / BL | **blocked** — awaiting user retest | 2026-06-24 | Eleven screenshot fixes patched locally; see Q&A_INDEX field section |
 | **WS-TEXT** | Text / leaders | SketchUp (+ hosts) | **active** — fixed, validating | 2026-06-23→24 | Round 3 text-leader alignment fixed SU v3.7.58+; BOM vertical qty SU v3.7.59+; human retest pending |
+| **WS-RUBY22** | P0 gate | SketchUp extension | **done** — gate shipped | 2026-06-25 | [Ruby 2.2 compat gate](QA-2026-06-24_ruby22-compat-gate.md) · v3.7.66 hotfix + CI scanner; Joe Campbell unblocked |
 | **WS-BL51** | Reviewer C | Blender | **done** — docs + preflight | 2026-06-24 | [Outside-box C](QA-2026-06-24_outside-box-reviewer-C-blender.md) · COMPATIBILITY.md cp310-abi3 v1.0.43; `preflight_check.py` |
 | **WS-LC** | Reviewer B | LibreCAD | **done** — canonical install doc | 2026-06-24 | Portable ZIP canonical; native plugin unsupported; `--preflight` CLI v1.0.40 |
 | **WS-OB** | Outside-box pass | Website (+ trust) | **done** — website slice | 2026-06-24 | [Outside-box resolution](QA-2026-06-24_outside-box-resolution-and-actions.md) · Report Doctor, metadata guard, privacy copy, corpus README link |
@@ -52,6 +53,7 @@ Read this file **before** starting work. Update it when you **start**, **finish*
 | From | Needs | From whom | Priority |
 |------|-------|-----------|----------|
 | **WS-R4P2** | User retest sign-off on eleven field screenshots | Human tester | **P0** |
+| **WS-RUBY22** | Joe Campbell / SU 2017 field confirm v3.7.66 loads | Human tester | **P0** — hotfix + gate shipped 2026-06-25 |
 | **WS-BL51** | `COMPATIBILITY.md` cp311→cp310-abi3 wording | Blender doc owner | ~~**P1**~~ **done** |
 | **WS-LC** | Single field-test install path (portable ZIP vs native plugin) | Product / Reviewer B + D | ~~**P1**~~ **done** — portable ZIP canonical |
 | **WS-R5** | R4-03 CLI stderr templates | LC/BL CLI owner | **P1** |
@@ -123,7 +125,7 @@ Read this file **before** starting work. Update it when you **start**, **finish*
 
 | Host | Version (script) |
 |------|------------------|
-| SketchUp | 3.7.64 |
+| SketchUp | 3.7.66 |
 | FreeCAD | 4.0.47 |
 | LibreCAD | 1.0.40 |
 | Blender | 1.0.43 |

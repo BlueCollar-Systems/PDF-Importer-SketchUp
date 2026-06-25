@@ -526,9 +526,9 @@ if File.exist?(PDF_1017)
   items.each do |item|
     builder.send(:place_text, placed_entities, item, 0.0, 0.0, 792.0, 'TextLayer')
   end
-  extra_placements = items.sum do |it|
-    next 0 unless builder.send(:stacked_vertical_dimension_labels?, it)
-    it.text.to_s.strip.split(/\s+/).length - 1
+  extra_placements = items.inject(0) do |acc, it|
+    acc + (builder.send(:stacked_vertical_dimension_labels?, it) ?
+             it.text.to_s.strip.split(/\s+/).length - 1 : 0)
   end
   expected_placements = items.length + extra_placements
   placed_total = placed_entities.texts.length + placed_entities.mesh_calls.length

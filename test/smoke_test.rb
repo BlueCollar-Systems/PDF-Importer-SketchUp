@@ -152,7 +152,7 @@ core_rb_files = Dir.glob(File.join(SOURCE_DIR, '**', '*.rb'))
 modern_method_hits = []
 modern_range_hits = []
 modern_method_pattern =
-  /&\.|\.(?:match\?|positive\?|negative\?|dig|sum|then|yield_self|filter_map)(?=[^A-Za-z0-9_]|$)/
+  /&\.|(?<!\.)\.(?:match\?|positive\?|negative\?|dig|sum|then|yield_self|filter|filter_map|tally|transform_values|delete_prefix|delete_suffix|fetch_values|chunk_while)(?=[^A-Za-z0-9_]|$)/
 endless_range_pattern = /(^|[^.])\.\.(?!\.)\s*(?:[\]\)\}]|$)/
 beginless_range_pattern = /(?:\[|\()\s*\.\.(?!\.)/
 

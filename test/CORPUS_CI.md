@@ -92,6 +92,22 @@ Workflow: **corpus-placement** (`.github/workflows/corpus-placement.yml`)
   (self-hosted runner or repository variable). GitHub-hosted runners without
   the corpus still pass baseline structure checks and emit a warning.
 
+## Ruby 2.2 compatibility gate (SketchUp 2017)
+
+Extension code under `extracted/sketchup_ext/` must parse and run on **Ruby 2.2**
+(SketchUp Make 2017). Modern `ruby -c` alone does not catch endless ranges or
+Ruby 2.3+ APIs such as `&.`, `.positive?`, or `.sum`.
+
+| Gate | Command |
+|------|---------|
+| Standalone scanner | `ruby tools/ruby22_syntax_check.rb` |
+| Include `test/` tree | `ruby tools/ruby22_syntax_check.rb --include-tests` |
+| CI unit gate | `ruby test/ruby22_compat_test.rb` |
+| Import Health slice | `ruby test/import_health_test.rb` |
+
+Workflow: **su-pdfimporter-ci** runs the compat gate on Ruby 2.2 (Docker) and
+on Ruby 2.7 / 3.0 / 3.2. Failures block merge.
+
 ## Related tests
 
 - `test/text_label_placement_test.rb` — golden 1017 coordinate assertions (not corpus-wide)

@@ -26,6 +26,8 @@ Output:
 
 import argparse
 import re
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -91,6 +93,14 @@ def build(out_dir: Path, *, require_helpers: bool = True) -> Path:
     rbz_path = out_dir / rbz_name
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "tools" / "check_su2017_ruby_compat.py"),
+            str(EXT_ROOT),
+        ],
+        check=True,
+    )
     _verify_bundled_helpers(required=require_helpers)
 
     file_count = 0

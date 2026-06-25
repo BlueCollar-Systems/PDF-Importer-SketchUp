@@ -281,9 +281,9 @@ else
     mesh_builder.send(:place_text, mesh_entities, item, 0.0, 0.0, 792.0, 'TextLayer')
   end
 
-  extra_placements = items.sum do |it|
-    next 0 unless label_builder.send(:stacked_vertical_dimension_labels?, it)
-    it.text.to_s.strip.split(/\s+/).length - 1
+  extra_placements = items.inject(0) do |acc, it|
+    acc + (label_builder.send(:stacked_vertical_dimension_labels?, it) ?
+             it.text.to_s.strip.split(/\s+/).length - 1 : 0)
   end
   expected_labels = items.length + extra_placements
   label_total = label_entities.texts.length + label_entities.mesh_calls.length
