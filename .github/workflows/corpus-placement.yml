@@ -15,7 +15,7 @@ jobs:
       CORPUS_CI_STRICT: '1'
     steps:
       - name: Checkout SU importer
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1

@@ -16,7 +16,7 @@ jobs:
       matrix:
         ruby: ['2.2', '2.7', '3.2']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: SketchUp 2017 Ruby compatibility guard
         run: python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext
       - uses: ruby/setup-ruby@v1
@@ -31,7 +31,7 @@ jobs:
   version-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Version consistency check
         run: |
           META_VER=$(grep -oP "VERSION = '\\K[^']+" extracted/sketchup_ext/bc_pdf_vector_importer/metadata.rb | head -n1)
@@ -54,7 +54,7 @@ jobs:
         ruby-version: ["2.2", "2.7", "3.0", "3.2"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Ruby ${{ matrix.ruby-version }}
         if: matrix.ruby-version != '2.2'
