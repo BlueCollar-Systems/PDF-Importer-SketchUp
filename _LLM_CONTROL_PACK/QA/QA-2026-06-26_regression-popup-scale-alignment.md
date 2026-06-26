@@ -70,7 +70,7 @@ Anonymous reviewer D - Cross-host validation:
 - LibreCAD: `python -m pytest tests --basetemp %TEMP%\pytest-lc-pdf-importer-20260626` - PASS, 45 tests.
 - Blender: `python -m pytest tests --basetemp %TEMP%\pytest-bl-pdf-importer-20260626-final` - PASS, 45 tests.
 - Release workflow/version recheck (2026-06-26): SketchUp targeted suite PASS; FreeCAD full suite PASS (81); LibreCAD full suite PASS (45); Blender full suite PASS (45). Version consistency checks pass locally for all four importers.
-- Release-candidate verification: SketchUp v3.7.75 source tests PASS locally; FreeCAD v4.0.54 setup EXE + ZIP, Blender v1.0.51 ZIP, LibreCAD v1.0.48 portable ZIP + source ZIP, and website metadata were previously verified on GitHub. SketchUp v3.7.75 publish remains the final gate for this no-popup follow-up.
+- Published release verification: SketchUp v3.7.75 RBZ, FreeCAD v4.0.54 setup EXE + ZIP, Blender v1.0.51 ZIP, LibreCAD v1.0.48 portable ZIP + source ZIP, and website metadata all verified on GitHub.
 
 ## Current Resolution State
 

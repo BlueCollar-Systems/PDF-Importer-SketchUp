@@ -97,8 +97,6 @@ YYYY-MM-DD HH:MM UTC | WS-ID | Owner | START|UPDATE|BLOCKED|DONE | one-line note
 
 2026-06-26 14:30 UTC | WS-REGRESS | Popup/BOM/FC text regression | SUPERSEDED | SU v3.7.74 show-once ImportGuidance was rejected by stricter field requirement: no pre-import interruption. BOM column-aware QUAN + native rotated labels and FC v4.0.54 span bbox-fit remain accepted.
 
-2026-06-26 19:25 UTC | WS-REGFIX | Codex release verifier | DONE | SU v3.7.75 no pre-import guidance; FC v4.0.54 installer+ZIP; BL v1.0.51; LC v1.0.48; website metadata aligned. Human host retest remains T-01.
-
-2026-06-26 19:45 UTC | WS-REGFIX2 | No-popup prevention follow-up | IN PROGRESS | Implemented SU v3.7.75 no-pre-import-prompt source fix: removed `import_guidance.rb`, removed `ImportGuidance.maybe_show` from normal and Safe Mode imports, added regression guard, and reran SU pre_import/ruby22/text_mode/text_label tests PASS. Publish/website verification pending.
-
 2026-06-26 19:25 UTC | WS-REGFIX 2026-06-26 SU v3.7.74 + FC v4.0.54 live
+
+2026-06-26 19:45 UTC | WS-REGFIX2 | No-popup prevention follow-up | DONE | SU v3.7.75 published and website metadata verified. Removed `import_guidance.rb`, removed `ImportGuidance.maybe_show` from normal and Safe Mode imports, added regression guard, verified RBZ contains no guidance module/prompt text, and reran SU pre_import/ruby22/text_mode/text_label/smoke/dependency/defaults/category tests PASS.
