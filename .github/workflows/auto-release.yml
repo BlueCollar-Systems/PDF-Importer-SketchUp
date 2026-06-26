@@ -71,94 +71,43 @@ jobs:
             ruby test/import_health_test.rb
           '
 
-      - name: Read and bump version
+      - name: Read committed version
         id: version
         run: |
           python - <<'PY'
           import os
           import pathlib
           import re
-          import subprocess
 
           loader = pathlib.Path("extracted/sketchup_ext/bc_pdf_vector_importer.rb")
           metadata = pathlib.Path("extracted/sketchup_ext/bc_pdf_vector_importer/metadata.rb")
           readme = pathlib.Path("README.md")
 
           loader_text = loader.read_text(encoding="utf-8")
-          match = re.search(r"PLUGIN_VERSION\s*=\s*'(\d+)\.(\d+)\.(\d+)'", loader_text)
-          if not match:
+          loader_match = re.search(r"PLUGIN_VERSION\s*=\s*'(\d+\.\d+\.\d+)'", loader_text)
+          metadata_match = re.search(
+              r"VERSION\s*=\s*'(\d+\.\d+\.\d+)'",
+              metadata.read_text(encoding="utf-8"),
+          )
+          readme_match = re.search(
+              r"Version-(\d+\.\d+\.\d+)-(?:green|blue)\.svg",
+              readme.read_text(encoding="utf-8"),
+          )
+          if not loader_match:
               raise SystemExit("Could not find PLUGIN_VERSION in extracted/sketchup_ext/bc_pdf_vector_importer.rb")
-
-          major, minor, patch = map(int, match.groups())
-          old_version = f"{major}.{minor}.{patch}"
-
-          tags = set(
-              t.strip()
-              for t in subprocess.check_output(
-                  ["git", "tag", "--list"],
-                  text=True,
-              ).splitlines()
-              if t.strip()
-          )
-          next_patch = patch + 1
-          while f"v{major}.{minor}.{next_patch}" in tags:
-              next_patch += 1
-          new_version = f"{major}.{minor}.{next_patch}"
-
-          loader_text = re.sub(
-              r"(PLUGIN_VERSION\s*=\s*')(\d+\.\d+\.\d+)(')",
-              rf"\g<1>{new_version}\3",
-              loader_text,
-              count=1,
-          )
-          loader.write_text(loader_text, encoding="utf-8")
-
-          metadata_text = metadata.read_text(encoding="utf-8")
-          metadata_text = re.sub(
-              r"(VERSION\s*=\s*')(\d+\.\d+\.\d+)(')",
-              rf"\g<1>{new_version}\3",
-              metadata_text,
-              count=1,
-          )
-          metadata.write_text(metadata_text, encoding="utf-8")
-
-          readme_text = readme.read_text(encoding="utf-8")
-          readme_text = re.sub(
-              r"(Version-)(\d+\.\d+\.\d+)(-(green|blue)\.svg)",
-              rf"\g<1>{new_version}\3",
-              readme_text,
-              count=1,
-          )
-          readme.write_text(readme_text, encoding="utf-8")
+          version = loader_match.group(1)
+          if not metadata_match or metadata_match.group(1) != version:
+              raise SystemExit(f"Version mismatch: loader={version} metadata={metadata_match.group(1) if metadata_match else 'missing'}")
+          if not readme_match or readme_match.group(1) != version:
+              raise SystemExit(f"Version mismatch: loader={version} readme={readme_match.group(1) if readme_match else 'missing'}")
 
           out = pathlib.Path(os.environ["GITHUB_OUTPUT"])
-          out.write_text(
-              f"old_version={old_version}\nversion={new_version}\n",
-              encoding="utf-8",
-          )
+          out.write_text(f"version={version}\n", encoding="utf-8")
           PY
 
-      - name: Commit and push version bump
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.RELEASE_BUMP_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Set release target
         run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git add extracted/sketchup_ext/bc_pdf_vector_importer.rb extracted/sketchup_ext/bc_pdf_vector_importer/metadata.rb README.md
-          if git diff --cached --quiet; then
-            echo "No version bump changes to commit."
-            echo "RELEASE_TARGET=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          else
-            git commit -m "chore: bump version to ${VERSION}"
-            if ! git push origin "HEAD:${GITHUB_REF_NAME}"; then
-              echo "::error::Could not push version bump to '${GITHUB_REF_NAME}'. Refusing to publish a release whose tag does not match committed version files."
-              exit 1
-            fi
-            echo "RELEASE_TARGET=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          fi
+          echo "RELEASE_TARGET=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Build .rbz
         run: python build_release.py
