@@ -144,6 +144,7 @@ module BlueCollarSystems
 
         # ── Text objects ──
         if @import_text && !@text_items.empty?
+          prepare_bom_table_context(@text_items)
           text_group = nil
           if @page_group
             text_group = @page_group.entities.add_group
@@ -730,12 +731,8 @@ module BlueCollarSystems
       def place_annotation_label(entities, item, origin_x, origin_y, layer)
         label_x, label_y, label_angle = label_insertion_pdf(item)
         display_angle = display_text_angle(item, label_angle)
-        if angle_needs_geometry_text?(display_angle, part_mark_label?(item.text) ? 8.0 : 12.0)
-          place_mesh_text(entities, item, origin_x, origin_y, layer)
-          return
-        end
         pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
-        dir_vec = zero_label_leader_vector
+        dir_vec = label_direction_vector(display_angle, item)
         text = try_add_annotation_text(entities, item.text, pt, dir_vec)
         if text
           hide_annotation_leader(text)
@@ -765,25 +762,81 @@ module BlueCollarSystems
         false
       end
 
-      BOM_TABLE_HEADER = /\A(?:QUAN|MARK|DESCRIPTION|LENGTH|QTY)\z/i
+      BOM_TABLE_HEADER = /\A(?:QUAN|MARK|DESCRIPTION|LENGTH|QTY|TOTAL\s+WT\.?|REMARKS)\z/i
       BOM_TABLE_QUANTITY = /\A\d{1,4}\z/
 
-      def bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts, angle_deg = 0.0)
-        t = text.to_s.strip
-        return false unless t =~ BOM_TABLE_QUANTITY
-        return false if slope_triangle_label?(t, bbox_w_pts, bbox_h_pts, angle_deg)
-        return false if part_mark_label?(t)
-        return false if weld_fraction_label?(t, bbox_w_pts, bbox_h_pts)
-        bw = bbox_w_pts.to_f
-        bh = bbox_h_pts.to_f
-        # QUAN table columns are much taller than wide; slope triangles are less extreme.
-        bw > 0.5 && bh > bw * 2.0
+      def prepare_bom_table_context(items)
+        @bom_quan_x = nil
+        @bom_mark_x = nil
+        @bom_table_y0 = nil
+        @bom_table_y1 = nil
+        quan = items.find { |it| it.text.to_s.strip =~ /\AQUAN\z/i && label_has_bbox?(it) }
+        mark = items.find { |it| it.text.to_s.strip =~ /\AMARK\z/i && label_has_bbox?(it) }
+        headers = items.select { |it| it.text.to_s.strip =~ BOM_TABLE_HEADER }
+        @bom_quan_x = quan.bbox_x0.to_f if quan
+        @bom_mark_x = mark.bbox_x0.to_f if mark
+        return if headers.empty?
+
+        header_y = headers.map { |h| h.bbox_y0.to_f }
+        anchor = header_y.min
+        @bom_table_y0 = anchor - 160.0
+        @bom_table_y1 = anchor + 12.0
+      rescue StandardError
+        @bom_quan_x = nil
+        @bom_mark_x = nil
+        @bom_table_y0 = nil
+        @bom_table_y1 = nil
+      end
+
+      def bom_table_row?(item)
+        return false unless label_has_bbox?(item)
+        return false unless @bom_table_y0 && @bom_table_y1
+
+        item.bbox_y0.to_f.between?(@bom_table_y0, @bom_table_y1)
       rescue StandardError
         false
       end
 
-      def should_center_bom_quantity?(text, bbox_w_pts, bbox_h_pts, font_size_pts, angle_deg)
-        return false unless bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts, angle_deg)
+      def bom_table_quan_column?(item)
+        return false unless bom_table_row?(item)
+        return false unless @bom_quan_x
+
+        (item.bbox_x0.to_f - @bom_quan_x).abs < 20.0
+      rescue StandardError
+        false
+      end
+
+      def bom_table_mark_column?(item)
+        return false unless bom_table_row?(item)
+        return false unless @bom_mark_x
+
+        (item.bbox_x0.to_f - @bom_mark_x).abs < 28.0
+      rescue StandardError
+        false
+      end
+
+      def bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts, angle_deg = 0.0, item = nil)
+        t = text.to_s.strip
+        return false unless t =~ BOM_TABLE_QUANTITY
+        in_quan_col = item && bom_table_quan_column?(item)
+        unless in_quan_col
+          return false if slope_triangle_label?(t, bbox_w_pts, bbox_h_pts, angle_deg)
+        end
+        return false if part_mark_label?(t)
+        return false if weld_fraction_label?(t, bbox_w_pts, bbox_h_pts)
+        bw = bbox_w_pts.to_f
+        bh = bbox_h_pts.to_f
+        ratio_ok = bw > 0.5 && bh > bw * 1.15
+        return false unless ratio_ok
+        return true if in_quan_col
+        # Without BOM context, keep the stricter tall-cell guard used since v3.7.59.
+        bh > bw * 2.0
+      rescue StandardError
+        false
+      end
+
+      def should_center_bom_quantity?(text, bbox_w_pts, bbox_h_pts, font_size_pts, angle_deg, item = nil)
+        return false unless bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts, angle_deg, item)
         bw = bbox_w_pts.to_f
         bh = bbox_h_pts.to_f
         fs = [font_size_pts.to_f, 1.0].max
@@ -1119,6 +1172,10 @@ module BlueCollarSystems
         bbox_w = label_has_bbox?(item) ? (item.bbox_x1.to_f - item.bbox_x0.to_f).abs : nil
         bbox_h = label_has_bbox?(item) ? (item.bbox_y1.to_f - item.bbox_y0.to_f).abs : nil
         return 0.0 if annotation_like_label?(item.text, bbox_w, bbox_h)
+        if bom_table_row?(item) &&
+           !bom_table_quantity_label?(item.text, bbox_w, bbox_h, angle, item)
+          return 0.0
+        end
         if part_mark_label?(item.text)
           inferred = inferred_part_mark_angle_pdf(item)
           return inferred if inferred
@@ -1129,7 +1186,7 @@ module BlueCollarSystems
           return angle if diagonal_part_mark_label?(item)
           return 0.0
         end
-        if bom_table_quantity_label?(item.text, bbox_w, bbox_h, angle)
+        if bom_table_quantity_label?(item.text, bbox_w, bbox_h, angle, item)
           raw = item.respond_to?(:angle) ? item.angle.to_f : 0.0
           return raw if raw.abs >= 45.0
           return 90.0
@@ -1259,9 +1316,9 @@ module BlueCollarSystems
         Float::INFINITY
       end
 
-      def label_run_width_pts(text, font_size_pts, bbox_w_pts = nil, bbox_h_pts = nil)
+      def label_run_width_pts(text, font_size_pts, bbox_w_pts = nil, bbox_h_pts = nil, item = nil)
         fs = [font_size_pts.to_f, 1.0].max
-        raw = if bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts)
+        raw = if bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts, 0.0, item)
                 [bbox_h_pts.to_f * 0.88, fs * 0.55].max
               elsif dimension_like_label?(text)
                 dimension_label_raw_width_pts(text, fs)
@@ -1309,7 +1366,7 @@ module BlueCollarSystems
 
       def rotated_bbox_text_origin?(item, bbox_w_pts, bbox_h_pts, angle_deg)
         return false if annotation_like_label?(item.text, bbox_w_pts, bbox_h_pts)
-        if bom_table_quantity_label?(item.text, bbox_w_pts, bbox_h_pts, angle_deg)
+        if bom_table_quantity_label?(item.text, bbox_w_pts, bbox_h_pts, angle_deg, item)
           return angle_needs_geometry_text?(angle_deg, 3.0)
         end
         if tall_single_text_bbox?(item, bbox_w_pts, bbox_h_pts)
@@ -1374,8 +1431,8 @@ module BlueCollarSystems
                 (diagonal_part_mark_label?(item) && narrow_part_mark_bbox?(bbox_w, bbox_h))
             est_w = dimension_label_est_width_pts(item.text, fs, bbox_w)
             x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
-          elsif should_center_bom_quantity?(item.text, bbox_w, bbox_h, fs, angle)
-            est_w = label_run_width_pts(item.text, fs, bbox_w, bbox_h)
+          elsif should_center_bom_quantity?(item.text, bbox_w, bbox_h, fs, angle, item)
+            est_w = label_run_width_pts(item.text, fs, bbox_w, bbox_h, item)
             x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
           elsif should_center_label?(item.text, bbox_w, fs, angle)
             est_w = item.text.to_s.strip.length * fs * 0.55

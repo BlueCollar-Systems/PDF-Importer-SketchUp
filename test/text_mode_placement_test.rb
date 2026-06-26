@@ -194,10 +194,17 @@ rotated_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
 )
 rotated_entities = DummyEntities.new
 label_builder.send(:place_text, rotated_entities, rotated_item, 0.0, 0.0, 792.0, 'TextLayer')
-assert_true(rotated_entities.texts.empty?,
-            'rotated label-mode text should not create a native leader label')
-assert_true(rotated_entities.mesh_calls.length == 1,
-            'rotated label-mode text should route to mesh text for model-space alignment')
+assert_true(rotated_entities.texts.length == 1,
+            'rotated label-mode text should remain a native label')
+assert_true(rotated_entities.mesh_calls.empty?,
+            'rotated label-mode text should not silently become 3D text')
+if rotated_entities.texts.first
+  rotated_vec = rotated_entities.texts.first[:vector]
+  assert_true(rotated_vec && rotated_vec.y.abs > 0.99,
+              'rotated label-mode text should use a rotated direction vector')
+  assert_true(rotated_entities.texts.first[:entity].display_leader == false,
+              'rotated native labels should hide SketchUp leader lines when possible')
+end
 
 unless File.exist?(PDF_1017)
   puts "  SKIP: 1017 PDF not found at #{PDF_1017}"
@@ -289,6 +296,8 @@ else
   label_total = label_entities.texts.length + label_entities.mesh_calls.length
   assert_true(label_total == expected_labels,
               "Labels mode should place #{expected_labels} annotations/mesh labels (got #{label_total})")
+  assert_true(label_entities.mesh_calls.empty?,
+              "Labels mode should not create 3D text while native labels succeed (got #{label_entities.mesh_calls.length})")
   assert_true(mesh_entities.mesh_calls.length == items.length,
               "3D Text mode should mesh every item (got #{mesh_entities.mesh_calls.length} of #{items.length})")
 

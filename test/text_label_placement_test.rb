@@ -147,6 +147,27 @@ assert_true(angle.abs < 0.01, 'horizontal label keeps angle')
 quan_qty = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   '2', 110.0, 180.0, 8.0, -90.0, 'pdftotext', nil, 108.0, 160.0, 118.0, 200.0
 )
+builder.send(:prepare_bom_table_context, [
+  BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+    'QUAN', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil, 98.0, 198.0, 130.0, 210.0
+  ),
+  BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+    'MARK', 140.0, 200.0, 8.0, 0.0, 'pdftotext', nil, 138.0, 198.0, 170.0, 210.0
+  ),
+  quan_qty
+])
+narrow_qty = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+  '1', 109.0, 175.0, 8.0, 0.0, 'pdftotext', nil, 108.0, 166.0, 113.4, 175.1
+)
+assert_true(builder.send(:bom_table_quantity_label?, '1', 5.4, 9.1, 0.0, narrow_qty),
+            'QUAN-column single-digit qty should classify in relaxed BOM cells')
+assert_true(builder.send(:label_angle_pdf, narrow_qty).abs > 45.0,
+            'QUAN-column qty should stay vertical in BOM table')
+mark_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+  '1017FR1', 145.0, 175.0, 8.0, -90.0, 'pdftotext', nil, 144.0, 166.0, 183.9, 175.1
+)
+assert_true(builder.send(:label_angle_pdf, mark_item).abs < 0.01,
+            'MARK-column labels must stay horizontal even with tall pdftotext bbox')
 qx, qy, qang = builder.send(:label_insertion_pdf, quan_qty)
 assert_true(builder.send(:bom_table_quantity_label?, '2', 10.0, 42.0, -90.0),
             'narrow vertical numeric cell should classify as BOM quantity')
@@ -190,6 +211,16 @@ assert_true(placed_point.respond_to?(:x) && placed_point.respond_to?(:y),
             'placed label should receive a SketchUp point, not a raw Float')
 assert_true(placed_vector.respond_to?(:x) && placed_vector.respond_to?(:y),
             'placed label should receive a direction vector')
+
+rotated_label = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+  'p1052', 150.0, 220.0, 8.0, 90.0, 'pdftotext', nil, 148.0, 210.0, 158.0, 246.0
+)
+rotated_entities = DummyEntities.new
+builder.send(:place_annotation_label, rotated_entities, rotated_label, 0.0, 0.0, 'TextLayer')
+assert_true(rotated_entities.texts.length == 1,
+            "Labels mode must create a native SketchUp label for rotated text (got #{rotated_entities.texts.length})")
+assert_true(rotated_entities.mesh_calls.empty?,
+            'Labels mode must not silently create 3D text/geometry for rotated text')
 
 if File.exist?(PDF_1017)
   # 342 = 346 raw pdftotext words minus 2 angle-mark stitch merges (a1+00+5 → a1005/a1006).
