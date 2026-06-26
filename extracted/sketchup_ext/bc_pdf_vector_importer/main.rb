@@ -53,6 +53,7 @@ module BlueCollarSystems
     require File.join(dir, 'report_dialog')
     require File.join(dir, 'compatibility_report')
     require File.join(dir, 'version_notice')
+    require File.join(dir, 'import_guidance')
     require File.join(dir, 'qa_report')
     require File.join(dir, 'import_health')
 
@@ -1419,6 +1420,7 @@ module BlueCollarSystems
     def self.import_pdf
       model = Sketchup.active_model
       return UI.messagebox("No active model.") unless model
+      ImportGuidance.maybe_show
       path = UI.openpanel("Select PDF File", "", "PDF Files|*.pdf||")
       return unless path && File.exist?(path)
       return if handle_open_gate(path)
@@ -1442,6 +1444,7 @@ module BlueCollarSystems
     def self.import_pdf_safe
       model = Sketchup.active_model
       return UI.messagebox("No active model.") unless model
+      ImportGuidance.maybe_show
       path = UI.openpanel("Select PDF File (Safe Mode)", "", "PDF Files|*.pdf||")
       return unless path && File.exist?(path)
       return if handle_open_gate(path)
