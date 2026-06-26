@@ -1,7 +1,7 @@
 # QA-2026-06-26 — Regression answers
 
 ## Q1 — SketchUp pre-import popup
-**Reviewer A:** Show once per SketchUp profile, not every import. Persist `import_guidance_dismissed` via `Sketchup.read_default` / `write_default`. Remove all LibreCAD copy from SketchUp UX; mention SketchUp-native 3D Text instead.
+**Reviewer A:** Do not show a pre-import guidance popup in SketchUp at all. The field report proved that even a well-meant prompt can become friction or stale cross-host copy. Remove `ImportGuidance`, keep SketchUp mode guidance in the import dialog / Import Health / documentation surfaces, and fail CI if `Before you import`, `ImportGuidance`, or LibreCAD-specific copy returns to the SketchUp import path.
 
 ## Q2 — Labels vs mesh for rotated BOM text
 **Reviewer B:** Yes. Labels mode must stay on `add_text` with `label_direction_vector` for rotated native labels. The regression came from routing |angle|>12° labels to `place_mesh_text` inside Labels mode. QUAN-column digits need BOM-table column context so they are not misclassified as vertical dimensions.

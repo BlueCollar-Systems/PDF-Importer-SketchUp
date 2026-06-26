@@ -34,7 +34,7 @@ Field report on 2026-06-26:
 - Added Blender legacy adapter routing so the selected text mode reaches the object builder: Labels/3D Text remain font curves with distinct extrusion behavior, while Glyphs/Geometry convert through mesh evaluation when Blender can do it.
 - Added SketchUp BOM table context so QUAN-column single digit quantities stay vertical without forcing MARK-column labels vertical.
 - Fixed the auto-release branch-protection failure across the importer repos by making release workflows publish the already-committed, CI-verified version instead of trying to push a bot-generated version bump to protected `main`.
-- Aligned committed version files that were blocking CI: SketchUp `metadata.rb`/README now match loader `3.7.74`; FreeCAD README badges now match package/pyproject `4.0.54`; Blender version files now match the intended adapter-fix release `1.0.51`.
+- Aligned committed version files that were blocking CI: SketchUp `metadata.rb`/README now match loader `3.7.75`; FreeCAD README badges now match package/pyproject `4.0.54`; Blender version files now match the intended adapter-fix release `1.0.51`.
 
 ## Active Questions
 
@@ -46,7 +46,7 @@ Field report on 2026-06-26:
 ## Discussion / Resolution
 
 Anonymous reviewer A - SketchUp UX:
-- The popup was a direct regression. A modal before every import is too much friction, and the LibreCAD sentence was a copy/paste leak into the SketchUp host. A show-once replacement was also rejected because the field requirement is no pre-import interruption. Resolution: remove the guidance module entirely and cover normal import plus Safe Mode with a source-level absence test.
+- The popup was a direct regression. A modal before every import is too much friction, and the LibreCAD sentence was a copy/paste leak into the SketchUp host. Resolution: remove the pre-import guidance module entirely from normal and Safe Mode import, keep mode guidance in the import dialog/report surfaces, and cover absence of the modal/LibreCAD copy with a source-level regression test.
 
 Anonymous reviewer B - SketchUp text entity contract:
 - A prior workaround routed rotated Labels-mode text into mesh text to avoid native leader behavior. That helped some alignment cases but violated the explicit contract that labels are labels. Resolution: keep Labels mode as native SketchUp labels, use zero vectors only for horizontal labels, use rotated direction vectors for rotated labels, and call `display_leader = false` / zero vectors where supported to reduce visible leader artifacts.
@@ -59,7 +59,7 @@ Anonymous reviewer D - Cross-host validation:
 
 ## Validation
 
-- SketchUp: `ruby test\pre_import_prompt_test.rb` - PASS, 1 run / 32 assertions.
+- SketchUp: `ruby test\pre_import_prompt_test.rb` - PASS, 1 run / 17 assertions.
 - SketchUp: `ruby test\text_mode_placement_test.rb` - PASS, 54 assertions.
 - SketchUp: `ruby test\text_label_placement_test.rb` - PASS, 127 assertions.
 - SketchUp: `ruby test\text_category_placement_test.rb` - PASS, 33 assertions.
@@ -70,7 +70,8 @@ Anonymous reviewer D - Cross-host validation:
 - LibreCAD: `python -m pytest tests --basetemp %TEMP%\pytest-lc-pdf-importer-20260626` - PASS, 45 tests.
 - Blender: `python -m pytest tests --basetemp %TEMP%\pytest-bl-pdf-importer-20260626-final` - PASS, 45 tests.
 - Release workflow/version recheck (2026-06-26): SketchUp targeted suite PASS; FreeCAD full suite PASS (81); LibreCAD full suite PASS (45); Blender full suite PASS (45). Version consistency checks pass locally for all four importers.
+- Release-candidate verification: SketchUp v3.7.75 source tests PASS locally; FreeCAD v4.0.54 setup EXE + ZIP, Blender v1.0.51 ZIP, LibreCAD v1.0.48 portable ZIP + source ZIP, and website metadata were previously verified on GitHub. SketchUp v3.7.75 publish remains the final gate for this no-popup follow-up.
 
 ## Current Resolution State
 
-Implementation and validation are complete for this round. Remaining work is commit/push/release verification and then human interactive confirmation on real PDFs inside the host applications.
+Implementation, validation, commits, pushes, GitHub releases, and website metadata are complete for this round. Remaining work is human interactive confirmation on real PDFs inside the host applications.
