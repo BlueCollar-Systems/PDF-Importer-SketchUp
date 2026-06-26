@@ -30,6 +30,9 @@ Field report on 2026-06-26:
   - Labels mode only falls back to mesh text when native `add_text` fails.
 - Added a conservative FreeCAD bbox-fit clamp for Draft Labels and ShapeString 3D Text. It only shrinks text when host font rendering would overflow the PDF span bbox; it does not move vector geometry or change resolved drawing scale.
 - Added FreeCAD tests proving normal text size is unchanged while oversized horizontal and vertical text runs shrink to their source span bbox.
+- Added FreeCAD raster background scaling parity so hybrid/raster placements use the effective import scale instead of raw page millimeters.
+- Added Blender legacy adapter routing so the selected text mode reaches the object builder: Labels/3D Text remain font curves with distinct extrusion behavior, while Glyphs/Geometry convert through mesh evaluation when Blender can do it.
+- Added SketchUp BOM table context so QUAN-column single digit quantities stay vertical without forcing MARK-column labels vertical.
 
 ## Active Questions
 
@@ -41,7 +44,7 @@ Field report on 2026-06-26:
 ## Discussion / Resolution
 
 Anonymous reviewer A - SketchUp UX:
-- The popup was a direct regression. A modal before every import is too much friction, and the LibreCAD sentence was a copy/paste leak into the SketchUp host. Resolution: show the popup once per SketchUp profile via ImportGuidance (not every import) and cover it with a source-level regression test.
+- The popup was a direct regression. A modal before every import is too much friction, and the LibreCAD sentence was a copy/paste leak into the SketchUp host. A show-once replacement was also rejected because the field requirement is no pre-import interruption. Resolution: remove the guidance module entirely and cover normal import plus Safe Mode with a source-level absence test.
 
 Anonymous reviewer B - SketchUp text entity contract:
 - A prior workaround routed rotated Labels-mode text into mesh text to avoid native leader behavior. That helped some alignment cases but violated the explicit contract that labels are labels. Resolution: keep Labels mode as native SketchUp labels, use zero vectors only for horizontal labels, use rotated direction vectors for rotated labels, and call `display_leader = false` / zero vectors where supported to reduce visible leader artifacts.
@@ -50,20 +53,20 @@ Anonymous reviewer C - FreeCAD text fit:
 - FreeCAD ShapeString was sized directly from PDF font size. Host font metrics can render wider than the PDF span bbox, especially on dense shop drawings, which causes overlapping labels/leaders even when the extracted bbox is correct. Resolution: fit Draft Text and ShapeString uniformly down to the PDF bbox only when needed. This protects accuracy by preserving insertion point, rotation, and geometry scale.
 
 Anonymous reviewer D - Cross-host validation:
-- LibreCAD and Blender had no code changes in this pass, but their suites were run to ensure shared/core assumptions were not broken. Resolution: keep them unchanged for this issue; both remain green.
+- LibreCAD had no code changes in this pass and stayed green. Blender did receive a legacy-adapter text-mode fix so the old adapter path no longer collapses all text modes into the same curve output. Resolution: keep LibreCAD unchanged, commit the Blender adapter fix with tests, and treat human UI retest as the next gate.
 
 ## Validation
 
-- SketchUp: `ruby test\pre_import_prompt_test.rb` - PASS, 1 run / 7 assertions.
+- SketchUp: `ruby test\pre_import_prompt_test.rb` - PASS, 1 run / 32 assertions.
 - SketchUp: `ruby test\text_mode_placement_test.rb` - PASS, 54 assertions.
-- SketchUp: `ruby test\text_label_placement_test.rb` - PASS, 124 assertions.
+- SketchUp: `ruby test\text_label_placement_test.rb` - PASS, 127 assertions.
 - SketchUp: `ruby test\text_category_placement_test.rb` - PASS, 33 assertions.
 - SketchUp: `ruby test\ruby22_compat_test.rb` - PASS, 3 runs / 5 assertions.
 - FreeCAD: `python -m pytest tests\test_pdf_importer_text_reconstruction.py tests\test_import_report_text_mode.py` - PASS, 16 tests.
 - FreeCAD: `python -m py_compile PDFVectorImporter\src\PDFImporterCore.py` - PASS.
-- FreeCAD: `python -m pytest tests --basetemp .pytest_tmp_run_20260626` - PASS, 79 tests / 1 deprecation warning. A previous run hit a Windows temp cleanup permission error after tests passed, so this isolated rerun is the validation source of truth.
+- FreeCAD: `python -m pytest tests --basetemp %TEMP%\pytest-fc-pdf-importer-20260626-final` - PASS, 81 tests / 1 deprecation warning.
 - LibreCAD: `python -m pytest tests --basetemp %TEMP%\pytest-lc-pdf-importer-20260626` - PASS, 45 tests.
-- Blender: `python -m pytest tests --basetemp %TEMP%\pytest-bl-pdf-importer-20260626` - PASS, 43 tests.
+- Blender: `python -m pytest tests --basetemp %TEMP%\pytest-bl-pdf-importer-20260626-final` - PASS, 45 tests.
 
 ## Current Resolution State
 
