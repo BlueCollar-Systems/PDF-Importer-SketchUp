@@ -1,0 +1,16 @@
+{
+  "schema": "bcs.sketchup_report_parity_floor/1.0",
+  "required_extra_fields": [
+    "human_summary",
+    "scale_crosscheck",
+    "font_substitution_note",
+    "performance_hint"
+  ],
+  "conditional_extra_fields": {
+    "actual_text_entity_types": "when SketchUp emits text entity verification"
+  },
+  "exempt_extra_fields": [
+    "dense_text_glyph_workload",
+    "helper_timings_ms"
+  ]
+}

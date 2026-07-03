@@ -15,6 +15,8 @@ module BlueCollarSystems
       SCALE_TRUST_CONFIDENCE = 0.70
       SCALE_DIMENSION_TENSION_CONFIDENCE = 0.85
       SCALE_FACTOR_DISAGREE_RATIO = 0.15
+      PERFORMANCE_HINT_ENTITY_THRESHOLD = 50_000
+      PERFORMANCE_HINT_PEAK_MB = 1024.0
 
       module_function
 
@@ -176,6 +178,7 @@ module BlueCollarSystems
           arcs: stats[:arcs].to_i,
           text_mode: stats[:text_mode].to_s,
           svg_renderer_missing: !!stats[:svg_renderer_missing],
+          font_substitution_note: stats[:font_substitution_note],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,
           scale_hints: scale_hints_block(stats),
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers)
@@ -196,6 +199,8 @@ module BlueCollarSystems
       def enrich_report_extras!(report)
         crosscheck = build_scale_crosscheck(report[:extra] || {})
         report[:extra][:scale_crosscheck] = normalize_json(crosscheck) if crosscheck
+        hint = build_performance_hint(report)
+        report[:extra][:performance_hint] = hint if hint
         report[:extra][:human_summary] = build_human_summary(report)
       end
 
@@ -258,6 +263,18 @@ module BlueCollarSystems
           messages: unique_strings(warnings),
           banner: warnings.first
         }
+      end
+
+      def build_performance_hint(report)
+        data = normalize_json(report)
+        result = data['result'] || {}
+        perf = data['performance'] || {}
+        entities = result['primitives'].to_i + result['text_entities'].to_i
+        peak = perf['peak_mb'].to_f
+        if entities >= PERFORMANCE_HINT_ENTITY_THRESHOLD || peak >= PERFORMANCE_HINT_PEAK_MB
+          return 'Large PDF - on PCs with less than 8 GB RAM, import one page at a time using the Pages field.'
+        end
+        nil
       end
 
       def diagnostics_block(stats, warning_count = 0, degraded_renderers = [])

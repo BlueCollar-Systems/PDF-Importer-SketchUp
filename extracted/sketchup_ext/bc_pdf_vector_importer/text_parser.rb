@@ -661,16 +661,7 @@ module BlueCollarSystems
       def fix_merged_fractions(items)
         items.map do |it|
           text = it.text.to_s
-          # Pattern: standalone "N DD" where DD is a valid denominator and N < DD
-          fixed = text.gsub(/\b(\d{1,2}) (\d{1,2})\b/) do |match|
-            num = $1.to_i
-            den = $2.to_i
-            if VALID_DENOMS.include?(den) && num > 0 && num < den
-              "#{$1}/#{$2}"
-            else
-              match
-            end
-          end
+          fixed = normalize_fraction_spacing(text)
           if fixed != text
             TextItem.new(fixed, it.x, it.y, it.font_size, it.angle, it.font_name, it.raw_font_size || it.font_size)
           else
@@ -680,6 +671,46 @@ module BlueCollarSystems
       rescue StandardError => e
         Logger.warn("TextParser", "fix_merged_fractions failed: #{e.message}")
         items
+      end
+
+      def normalize_fraction_spacing(text)
+        fixed = text.to_s.dup
+
+        # "716 /" -> "7/16" after reconstruct_fractions split the digits but
+        # a slash span survived from the source content stream.
+        fixed.gsub!(/\b(\d{3,4})\s*\/(?:\b|\z)/) do |match|
+          frac = try_split_fraction($1)
+          frac ? "#{frac[0]}/#{frac[1]}" : match
+        end
+
+        # Remove an orphan slash that sits immediately before/after an already
+        # reconstructed fraction.
+        fixed.gsub!(/\A\/\s*(\d{1,2}\/\d{1,2})\b/, '\1')
+        fixed.gsub!(/\b(\d{1,2}\/\d{1,2})\s*\/\z/, '\1')
+
+        # "7 / 16" -> "7/16"; leave invalid denominators untouched.
+        fixed.gsub!(/\b(\d{1,2})\s*\/\s*(\d{1,2})\b/) do |match|
+          num = $1.to_i
+          den = $2.to_i
+          if VALID_DENOMS.include?(den) && num > 0 && num < den
+            "#{$1}/#{$2}"
+          else
+            match
+          end
+        end
+
+        # Pattern: standalone "N DD" where DD is a valid denominator and N < DD.
+        fixed.gsub!(/\b(\d{1,2}) (\d{1,2})\b/) do |match|
+          num = $1.to_i
+          den = $2.to_i
+          if VALID_DENOMS.include?(den) && num > 0 && num < den
+            "#{$1}/#{$2}"
+          else
+            match
+          end
+        end
+
+        clean_text(fixed)
       end
 
       def merge_run(run)
@@ -809,6 +840,11 @@ module BlueCollarSystems
 
               # Stacked fractions: similar X, offset Y
               if dx < item.font_size * 3 && dy < item.font_size * 2.0 && dy > 0.3
+                item_size = item.font_size.to_f
+                other_size = other.font_size.to_f
+                if item_size > 0.0 && other_size > 0.0
+                  next if [item_size, other_size].max > [item_size, other_size].min * 1.25
+                end
                 num_val = item.text.to_i
                 den_val = other.text.to_i
 

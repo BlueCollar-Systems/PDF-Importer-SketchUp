@@ -129,6 +129,34 @@ class QAReportTest < Minitest::Test
     assert report[:extra][:human_summary].to_s.include?('Scale note:')
   end
 
+  def test_report_parity_floor_extras
+    stats = {
+      pages: 1,
+      primitives: 50_001,
+      edges: 50_001,
+      text: 10,
+      layers: [],
+      elapsed_seconds: 2.0,
+      text_renderers: [],
+      text_mode: :labels,
+      font_substitution_note: 'Non-embedded PDF fonts detected.',
+      resolved_scale: {
+        factor: 48.0,
+        notation: '1/4" = 1\'-0"',
+        source: 'titleblock',
+        confidence: 0.50
+      },
+      generic: { title_block: true, dimensions: 4 }
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('large.pdf', {}, stats)
+    extra = report[:extra]
+    assert extra[:human_summary].to_s.include?('large.pdf')
+    assert extra[:performance_hint].to_s.include?('one page at a time')
+    assert_equal 'Non-embedded PDF fonts detected.', extra[:font_substitution_note]
+    refute_nil extra[:scale_crosscheck]
+  end
+
   def test_builds_open_failure_report
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_open_failure(
       'bad.pdf',
