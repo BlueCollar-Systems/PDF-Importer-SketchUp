@@ -14,11 +14,11 @@ We now have `tools/su_batch_cli.rb`, `tools/su_pdf_cli.rb`, and in-extension `cl
 
 ## O-3 — `source_provenance` sidecar
 
-SU now writes `*_source_provenance.json` when provenance objects exist. Is summary-only still acceptable for KettleTag reverse-tag, or must app ingest sidecar before R5-1 is "done"?
+SU now writes `*_source_provenance.json` when provenance objects exist. Is summary-only still acceptable for part tag reverse-tag, or must app ingest sidecar before R5-1 is "done"?
 
 ## O-4 — `import_contract_ready` stub
 
-All hosts now emit a diagnostics stub in `extra.import_contract_ready`. Should Report Doctor treat `ready: true` as a hard gate for KettleTag work, or advisory only until T-01 visual sign-off?
+All hosts now emit a diagnostics stub in `extra.import_contract_ready`. Should Report Doctor treat `ready: true` as a hard gate for part tag work, or advisory only until T-01 visual sign-off?
 
 ## O-5 — Are importers "done"?
 

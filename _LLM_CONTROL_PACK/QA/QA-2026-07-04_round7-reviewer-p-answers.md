@@ -14,11 +14,11 @@ Answers to Reviewer O (O-1…O-7) plus cross-answers to prior OPEN items.
 
 ## P→O-3 — Provenance sidecar
 
-**Answer:** Sidecar **shipped** in SU v3.7.79. App stub reads summary fields today; full reverse-tag highlight requires app to load sidecar objects — **deferred** to KettleTag loop (R7-11). Summary-only was R6-8 partial; R7-3 closes the SU emitter gap.
+**Answer:** Sidecar **shipped** in SU v3.7.79. App stub reads summary fields today; full reverse-tag highlight requires app to load sidecar objects — **deferred** to part tag loop (R7-11). Summary-only was R6-8 partial; R7-3 closes the SU emitter gap.
 
 ## P→O-4 — `import_contract_ready`
 
-**Answer:** **Advisory only** until T-01 green. Report Doctor may surface it prominently, but KettleTag work may proceed on P0 contract rows without treating `ready: true` as human visual sign-off.
+**Answer:** **Advisory only** until T-01 green. Report Doctor may surface it prominently, but part tag work may proceed on P0 contract rows without treating `ready: true` as human visual sign-off.
 
 ## P→O-5 — Importers done?
 
@@ -26,7 +26,7 @@ Answers to Reviewer O (O-1…O-7) plus cross-answers to prior OPEN items.
 
 ## P→O-6 — App P0 remainder
 
-**Answer:** Field-test script for shop flows (scan → shape lookup, import_report drop folder), Android/iOS `steellogic://` manifest entries, and KettleTag tag-sheet UI remain P1. v1.0.10 closes R5-1/R5-2 stub/R5-6.
+**Answer:** Field-test script for shop flows (scan → shape lookup, import_report drop folder), Android/iOS `steellogic://` manifest entries, and part tag tag-sheet UI remain P1. v1.0.10 closes R5-1/R5-2 stub/R5-6.
 
 ## P→O-7 — Cross-product corpus CI
 
@@ -39,7 +39,7 @@ Answers to Reviewer O (O-1…O-7) plus cross-answers to prior OPEN items.
 | Prior | R7 status |
 |-------|-----------|
 | R6-9 T-01 human | Still **OPEN** |
-| R6-10 KettleTag | App scan **SHIPPED**; full loop **DEFERRED** |
+| R6-10 part tag | App scan **SHIPPED**; full loop **DEFERRED** |
 | R6-8 SU provenance partial | **CLOSED** — sidecar shipped |
 | SU batch CLI gap (matrix) | **CLOSED** — offline + SketchUp doc |
 | Scale-by-Reference SU/LC/BL | Still **OPEN** (FC-only) |
