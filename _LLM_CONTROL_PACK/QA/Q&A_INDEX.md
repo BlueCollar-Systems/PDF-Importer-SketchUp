@@ -1,13 +1,15 @@
 # Q&A Index
 
-Updated: 2026-07-04 (Round 9 — PDF→3D implementation closure + Q&A audit)
+Updated: 2026-07-04 (Round 9 — PDF-to-3D implementation closure + final verification sweep)
 
 ---
 
-## Active session — Round 8 PDF→3D (2026-07-04)
+## Active session — Round 9 PDF-to-3D closure (2026-07-04)
 
 | File | Role |
 |------|------|
+| **`QA-2026-07-04_final-verification-sweep.md`** | Final verification sweep: import_contract_ready gap closure, final test counts, current-vs-historical OPEN status |
+| **`QA-2026-07-04_round8-closure-addendum.md`** | Audit verification — gate table, BL WIP fix, Round 5 restore, STILL OPEN ranked list |
 | **`QA-2026-07-04_round9-pdf-3d-implementation-closure.md`** | Round 9 — implementation closure: SU/FC/BL v1 3D generation, LC honest 2D, app + Report Doctor consumption, verification |
 | **`QA-2026-07-04_round8-pdf-to-3d-questions.md`** | Round 8 — Reviewer W: host scope, 3D semantics, eligibility, UI, report contract, Z-order research |
 | **`QA-2026-07-04_round8-pdf-to-3d-answers.md`** | Round 8 — Reviewer X answers W1–W7 + prior OPEN cross-answers |

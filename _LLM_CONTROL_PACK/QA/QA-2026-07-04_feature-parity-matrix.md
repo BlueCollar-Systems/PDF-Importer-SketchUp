@@ -20,7 +20,7 @@ Evidence: grep + file reads on `C:\1PDF-Importer-*` repos.
 | `extra.model_3d_intent` | ✓ | ✓ | ✓ | ✓ | plate/member evidence scan; advisory eligibility gate |
 | `extra.source_provenance` | ✓ R7 | ✓ R6 | ✓ R6 | ✓ R6 | sidecar + summary |
 | `extra.parts_bootstrap` | ✗ | ✓ stub R8 | ✗ | ✗ | FC empty sidecar v4.0.59 |
-| `extra.import_contract_ready` | ✓ R7 | partial | partial | partial | SU stub |
+| `extra.import_contract_ready` | ✓ R7 | ✓ R9 | ✓ R9 | ✓ R9 | shared readiness aggregate; app/Report Doctor advisory |
 
 ---
 

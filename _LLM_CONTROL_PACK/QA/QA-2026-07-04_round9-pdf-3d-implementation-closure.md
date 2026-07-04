@@ -20,6 +20,7 @@
 | FreeCAD | Import options gained `model3d_mode` and `model3d_depth_mm`; Auto/Extrude modes create Part solids from closed regions and write `solids_created`. |
 | Blender | Operator exposes model-3D mode/depth; builder creates extruded mesh solids from eligible closed regions; report writes `solids_created`. |
 | LibreCAD | Writes honest 2D `model_3d` block plus intent evidence for routing users to 3D-capable hosts. |
+| Shared Python core | FreeCAD, Blender, and LibreCAD now emit `extra.import_contract_ready`, matching the contract-readiness field already present in SketchUp reports. |
 | Steel Logic app | `ImportReportIngestionResult` now parses supported/enabled/mode/depth/solids/skipped reason and plate/member intent counts. |
 | Website | Report Doctor now handles `faces_extruded` and `solids_created`, renders model intent evidence, and includes these lines in support summaries. |
 
@@ -28,7 +29,8 @@
 | Gate | Result |
 |---|---|
 | SketchUp all Ruby tests | Pass; smoke found 51/51 Ruby files syntax-clean and 57 smoke checks pass. Corpus placement: 29 OK / 1 warn-only heavy timeout. |
-| FreeCAD full pytest | 122 passed, 1 skipped, 1 warning. |
+| FreeCAD full pytest | 124 passed, 1 skipped, 1 warning. |
+| FreeCAD report/model focused pytest | 21 passed after adding `extra.import_contract_ready`. |
 | Blender full pytest | 61 passed, 1 pytest cache warning, 10 subtests passed. |
 | LibreCAD full pytest | 62 passed, 1 pytest cache warning, 11 subtests passed. |
 | pdfcadcore sync | `ALL IN SYNC`. |
