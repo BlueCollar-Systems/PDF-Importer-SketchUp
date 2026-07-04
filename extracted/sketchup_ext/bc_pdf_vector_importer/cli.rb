@@ -12,7 +12,7 @@ require 'json'
 require 'optparse'
 require 'time'
 
-dir = File.dirname(__FILE__)
+dir = File.expand_path(File.dirname(__FILE__))
 require File.join(dir, 'logger')
 require File.join(dir, 'command_runner')
 require File.join(dir, 'dependency_resolver')
@@ -89,6 +89,8 @@ module BlueCollarSystems
           o.on('--extract-images', 'Extract embedded Image XObjects') { opts[:extract_images] = true }
           o.on('--no-extract-images', 'Do not extract embedded images') { opts[:extract_images] = false }
           o.on('--no-primitives-json', 'Skip primitives.json output') { opts[:write_primitives] = false }
+          o.on('--extrude-to-3d', 'Extrude closed fill faces to 3D (optional)') { opts[:extrude_to_3d] = 'Yes' }
+          o.on('--extrude-depth-mm MM', 'Extrusion depth in millimeters (default 3.175 = 1/8" plate)') { |v| opts[:extrude_depth_mm] = v }
           o.on('--quiet', 'Only use exit code and files') { opts[:quiet] = true }
           o.on('-h', '--help', 'Show help') do
             puts o
@@ -116,7 +118,9 @@ module BlueCollarSystems
           page_arrangement: cli_opts[:page_arrangement],
           layer_name: 'PDF Import',
           group_per_page: 'Yes',
-          group_by_color: 'Yes'
+          group_by_color: 'Yes',
+          extrude_to_3d: cli_opts[:extrude_to_3d],
+          extrude_depth_mm: cli_opts[:extrude_depth_mm]
         }
         import_opts = ImportDialog.send(:build_opts, raw_opts)
         import_opts[:extract_embedded_images] = cli_opts[:extract_images]

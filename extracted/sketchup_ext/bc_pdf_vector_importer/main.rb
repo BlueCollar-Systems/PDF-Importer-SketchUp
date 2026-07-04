@@ -44,7 +44,9 @@ module BlueCollarSystems
     require File.join(dir, 'validator')
     # Host Builders
     require File.join(dir, 'embedded_image_extractor')
+    require File.join(dir, 'extrude_3d')
     require File.join(dir, 'geometry_builder')
+    require File.join(dir, 'model_3d_extruder')
     require File.join(dir, 'geometry_cleanup')
     require File.join(dir, 'hatch_detector')
     require File.join(dir, 'stroke_font')
@@ -797,7 +799,7 @@ module BlueCollarSystems
                 text: 0, components: 0, layers: [], cleanup: {},
                 generic: nil, mode_used: nil, xobjects: 0, embedded_images: 0,
                 embedded_images_placed: 0, embedded_image_paths: [],
-                embedded_image_dir: nil,
+                embedded_image_dir: nil, extruded_faces: 0,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
                 text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
                 recognition_skipped_pages: [],
@@ -1293,6 +1295,24 @@ module BlueCollarSystems
           )
         end
 
+        # ── 3D Extrude (SketchUp-only, opt-in) ──────────────────────────
+        # When the user supplies extrude_depth > 0 and the page has real
+        # vector geometry (not raster-only), push/pull every flat face by
+        # the requested depth to produce a rough 3D massing model.
+        if opts[:extrude_depth].to_f > 0.0 && builder.page_group &&
+           opts[:import_mode].to_s != 'raster'
+          begin
+            Sketchup.status_text = "PDF Import#{pct} \u2014 Page #{page_num} \u2014 Extruding 3D faces... [#{(Time.now - import_start).round(1)}s]"
+            ex = Extrude3D.apply(builder.page_group.entities, opts[:extrude_depth].to_f)
+            stats[:extruded_faces] = (stats[:extruded_faces] || 0) + ex[:faces_extruded]
+            Logger.info('Extrude3D',
+              "Page #{page_num}: #{ex[:faces_extruded]}/#{ex[:faces_found]} face(s) extruded " \
+              "#{opts[:extrude_depth].to_f.round(4)}in")
+          rescue StandardError => e
+            Logger.warn('Extrude3D', "Page #{page_num}: extrude failed: #{e.message}")
+          end
+        end
+
         add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
 
         # Advance the running page stack only after a successful import.
@@ -1306,6 +1326,10 @@ module BlueCollarSystems
         # Previously this called safe_abort_operation + raise, which
         # destroyed all geometry from successfully imported pages.
       end
+      end
+
+      if opts[:extrude_to_3d]
+        stats[:model_3d] = Model3DExtruder.extrude_imported(model, pre_import_entities, opts)
       end
 
       model.commit_operation

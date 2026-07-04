@@ -160,6 +160,8 @@ module BlueCollarSystems
           match_pdf_layers: effective_match_pdf_layers(saved),
           grouping_mode:    saved[:grouping_mode]                      || 'Group per page',
           page_arrangement: saved[:page_arrangement]                   || 'Spread (20% gap)',
+          extrude_to_3d:    saved[:extrude_to_3d]                      || 'No',
+          extrude_depth_mm: saved[:extrude_depth_mm]                   || ''
         }
 
         dlg.set_html(advanced_html(filename, d))
@@ -171,7 +173,9 @@ module BlueCollarSystems
             text_mode: p['text_mode'], import_text: p['import_text'],
             match_pdf_layers: p['match_pdf_layers'],
             grouping_mode: p['grouping_mode'],
-            page_arrangement: p['page_arrangement']
+            page_arrangement: p['page_arrangement'],
+            extrude_to_3d: p['extrude_to_3d'],
+            extrude_depth_mm: p['extrude_depth_mm']
           )
           mode_raw = MODES[p['mode'] || 'Auto'] || MODES['Auto']
           result = build_opts(
@@ -184,7 +188,9 @@ module BlueCollarSystems
             import_text: p['import_text'],
             match_pdf_layers: p['match_pdf_layers'],
             grouping_mode: p['grouping_mode'],
-            page_arrangement: p['page_arrangement']
+            page_arrangement: p['page_arrangement'],
+            extrude_to_3d: p['extrude_to_3d'],
+            extrude_depth_mm: p['extrude_depth_mm']
           )
           dlg.close
         end
@@ -352,6 +358,17 @@ module BlueCollarSystems
             <div><label>Page Arrangement</label>
               <select id="page_arrangement">#{page_arrangement_opts}</select></div>
           </div>
+          <div class="section">3D Model (optional)</div>
+          <div class="row2">
+            <div><label>Extrude to 3D</label>
+              <select id="extrude_to_3d">#{yn.call(:extrude_to_3d)}</select>
+              <p class="hint">Give thickness to closed PDF fill regions (shop plate / section views).</p>
+            </div>
+            <div><label>Extrusion depth (mm)</label>
+              <input type="text" id="extrude_depth_mm" value="#{esc(d[:extrude_depth_mm] || '')}" placeholder="3.175 (1/8&quot; plate)">
+              <p class="hint">Leave blank for default 1/8&quot; steel scaled to import factor.</p>
+            </div>
+          </div>
           <div class="actions">
             <button class="btn btn-secondary" onclick="cancel()">Cancel</button>
             <button class="btn btn-primary" onclick="doImport()">Import</button>
@@ -365,7 +382,9 @@ module BlueCollarSystems
             text_mode:document.getElementById('text_mode').value,
             match_pdf_layers:document.getElementById('match_pdf_layers').value,
             grouping_mode:document.getElementById('grouping_mode').value,
-            page_arrangement:document.getElementById('page_arrangement').value});}
+            page_arrangement:document.getElementById('page_arrangement').value,
+            extrude_to_3d:document.getElementById('extrude_to_3d').value,
+            extrude_depth_mm:document.getElementById('extrude_depth_mm').value.trim()});}
           function cancel(){sketchup.on_cancel({});}
           document.addEventListener('keydown',function(e){if(e.key==='Escape')cancel();});
           </script></body></html>
@@ -521,8 +540,18 @@ module BlueCollarSystems
           lineweight_mode:  is_raster ? 'Ignore' : 'Preserve visually',
           grouping_mode:    (raw[:grouping_mode] || 'Group per page').to_s,
           import_mode:      mode_str,
-          match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes'
+          match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes',
+          extrude_to_3d: (raw[:extrude_to_3d] || 'No') == 'Yes',
+          extrude_depth_mm: parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth])
         }
+      end
+
+      def self.parse_extrude_depth_mm(value)
+        return nil if value.nil?
+        str = value.to_s.strip
+        return nil if str.empty?
+        num = str.to_f
+        num > 0.0 ? num : nil
       end
 
       PREF_KEY = 'BlueCollarSystems_PDFVectorImporter'.freeze
@@ -549,7 +578,7 @@ module BlueCollarSystems
              group_per_page group_by_color
              import_text text_mode match_pdf_layers
              grouping_mode
-             page_arrangement import_mode
+             page_arrangement import_mode extrude_to_3d extrude_depth_mm
           ].each do |key|
             val = Sketchup.read_default(PREF_KEY, key, nil)
             prefs[key.to_sym] = val if val

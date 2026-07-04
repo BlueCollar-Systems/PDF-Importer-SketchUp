@@ -7,6 +7,7 @@ require 'json'
 require 'digest'
 require 'fileutils'
 require 'time'
+require File.join(File.dirname(__FILE__), 'model_3d_extruder')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -84,7 +85,7 @@ module BlueCollarSystems
           fallback: fallback_block(stats, degraded_renderers),
           mode: import_mode_label(opts),
           report_meta: build_report_meta(version),
-          extra: extra_block(stats, warnings, degraded_renderers)
+          extra: extra_block(stats, warnings, degraded_renderers, opts)
         }
         enrich_report_extras!(report)
         attach_source_provenance!(report, stats)
@@ -171,7 +172,7 @@ module BlueCollarSystems
         }
       end
 
-      def extra_block(stats, warning_count = 0, degraded_renderers = [])
+      def extra_block(stats, warning_count = 0, degraded_renderers = [], opts = {})
         renderers = Array(stats[:text_renderers]).map do |entry|
           normalize_json(entry)
         end
@@ -189,8 +190,29 @@ module BlueCollarSystems
           embedded_image_dir: stats[:embedded_image_dir],
           embedded_image_paths: Array(stats[:embedded_image_paths] || stats[:embedded_image_files]).map(&:to_s),
           scale_hints: scale_hints_block(stats),
-          diagnostics: diagnostics_block(stats, warning_count, degraded_renderers)
+          diagnostics: diagnostics_block(stats, warning_count, degraded_renderers),
+          model_3d: model_3d_block(stats, opts)
         }
+      end
+
+      def model_3d_block(stats, opts = {})
+        payload = stats[:model_3d] || stats['model_3d']
+        if payload.is_a?(Hash)
+          return normalize_json(payload)
+        end
+        if opts && opts[:extrude_to_3d]
+          depth_mm = Model3DExtruder.resolve_depth_inches(opts) / Model3DExtruder::MM_TO_INCH
+          return {
+            enabled: true,
+            supported: true,
+            depth_mm: depth_mm.round(4),
+            faces_extruded: 0,
+            skipped_reason: 'extrusion_not_run'
+          }
+        end
+        Model3DExtruder.disabled_payload('option_off')
+      rescue StandardError
+        { enabled: false, supported: true, skipped_reason: 'report_error' }
       end
 
       def scale_hints_block(stats)

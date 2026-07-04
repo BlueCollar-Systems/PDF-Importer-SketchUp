@@ -121,7 +121,9 @@ module BlueCollarSystems
                     :arc_mode, :cleanup_level, :lineweight_mode, :grouping_mode,
                     :page_arrangement, :page_gap_ratio,
                     # BCS-ARCH-001 additions
-                    :import_mode, :match_pdf_layers
+                    :import_mode, :match_pdf_layers,
+                    # 3D extrude (SketchUp-only, opt-in)
+                    :extrude_depth
 
       def initialize(attrs = {})
         # User-facing fields (settable from dialog/UI)
@@ -151,6 +153,9 @@ module BlueCollarSystems
         @units            = attrs[:units]            || 'Inches'
         @page_gap_ratio   = attrs[:page_gap_ratio]   || '0.20'
         @flatten_to_2d    = true
+
+        # 3D extrude: depth in inches; 0 = disabled (default)
+        @extrude_depth    = attrs[:extrude_depth].to_f
 
         # Mode-driven defaults (set conditionally by from_mode for raster).
         is_raster = (@import_mode.to_s == 'raster')
@@ -197,7 +202,8 @@ module BlueCollarSystems
           arc_mode: @arc_mode, cleanup_level: @cleanup_level,
           lineweight_mode: @lineweight_mode, grouping_mode: @grouping_mode,
           page_arrangement: @page_arrangement, page_gap_ratio: @page_gap_ratio,
-          import_mode: @import_mode, match_pdf_layers: @match_pdf_layers
+          import_mode: @import_mode, match_pdf_layers: @match_pdf_layers,
+          extrude_depth: @extrude_depth
         }
       end
 
