@@ -142,6 +142,49 @@ assert_true(builder.send(:angle_needs_geometry_text?, 45.0, 8.0),
 bom_mesh_x, _, _ = builder.send(:mesh_label_anchor_pdf, bom)
 assert_near(bom_mesh_x, bx, 0.001, 'mesh anchor matches centered label insertion X')
 
+# --- BOM table orientation regression (mirrors 1017 QUAN|MARK|DESCRIPTION) ---
+# QUAN single-digit quantities must render UPRIGHT (0deg), not rotated 90deg.
+# MARK/DESCRIPTION cells stay horizontal. Only genuinely PDF-rotated field
+# dimensions should rotate — see label_angle_pdf QUAN-column branch (R26).
+bom_quan_hdr = make_item('QUAN', 98.0, 698.0, 130.0, 710.0, font_size: 8.0)
+bom_mark_hdr = make_item('MARK', 140.0, 698.0, 176.0, 710.0, font_size: 8.0)
+bom_desc_hdr = make_item('DESCRIPTION', 200.0, 698.0, 290.0, 710.0, font_size: 8.0)
+# QUAN column digits: tall/narrow pdftotext glyph bbox, PDF angle 0.
+bom_q1 = make_item('1', 108.0, 684.0, 113.0, 694.0, font_size: 8.0)
+bom_q3 = make_item('3', 107.0, 668.0, 114.0, 678.0, font_size: 8.0)
+bom_q2 = make_item('2', 107.0, 636.0, 114.0, 646.0, font_size: 8.0)
+bom_mark_txt = make_item('1017FR1', 140.0, 684.0, 180.0, 694.0, font_size: 8.0)
+bom_mark_pm  = make_item('w1023', 140.0, 668.0, 170.0, 678.0, font_size: 8.0)
+bom_desc_txt = make_item('W12X30', 200.0, 684.0, 250.0, 694.0, font_size: 8.0)
+bom_items = [bom_quan_hdr, bom_mark_hdr, bom_desc_hdr,
+             bom_q1, bom_q3, bom_q2, bom_mark_txt, bom_mark_pm, bom_desc_txt]
+builder.send(:prepare_bom_table_context, bom_items)
+
+[bom_q1, bom_q3, bom_q2].each do |q|
+  assert_true(builder.send(:bom_table_quan_column?, q),
+              "BOM digit #{q.text} classified in QUAN column")
+  _, _, qang = builder.send(:label_insertion_pdf, q)
+  assert_true(qang.abs < 0.01,
+              "BOM QUAN digit #{q.text} renders upright, not rotated (got #{qang})")
+end
+
+q3x, = builder.send(:label_insertion_pdf, bom_q3)
+q3_center = (bom_q3.bbox_x0.to_f + bom_q3.bbox_x1.to_f) * 0.5
+assert_true((q3x - q3_center).abs < 5.0,
+            "BOM QUAN digit centers within its cell (got #{q3x}, cell center #{q3_center})")
+
+_, _, mtxt_ang = builder.send(:label_insertion_pdf, bom_mark_txt)
+assert_true(mtxt_ang.abs < 0.01, 'BOM MARK cell stays horizontal (not forced vertical)')
+_, _, mpm_ang = builder.send(:label_insertion_pdf, bom_mark_pm)
+assert_true(mpm_ang.abs < 0.01, 'BOM MARK part label w1023 stays horizontal at PDF angle 0')
+_, _, desc_ang = builder.send(:label_insertion_pdf, bom_desc_txt)
+assert_true(desc_ang.abs < 0.01, 'BOM DESCRIPTION cell stays horizontal')
+
+# Stacked-fraction dimension outside the BOM band still resolves horizontal.
+bom_frac = make_item('3 5/16', 400.0, 200.0, 412.0, 230.0, font_size: 6.0)
+assert_true(builder.send(:label_angle_pdf, bom_frac).abs < 0.01,
+            'stacked fraction dimension stays horizontal with BOM context active')
+
 if $failures.empty?
   puts "PASS: #{$pass_count} category placement assertions"
   exit 0

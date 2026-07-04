@@ -713,13 +713,15 @@ module BlueCollarSystems
         nil
       end
 
-      def hide_annotation_leader(text)
+      def hide_annotation_leader(text, preserve_vector = false)
         return unless text
         begin
           text.display_leader = false if text.respond_to?(:display_leader=)
         rescue StandardError => e
           Logger.warn("GeometryBuilder", "hide label leader failed: #{e.message}")
         end
+        return if preserve_vector
+
         begin
           vec = zero_label_leader_vector
           text.vector = vec if vec && text.respond_to?(:vector=)
@@ -735,7 +737,8 @@ module BlueCollarSystems
         dir_vec = label_direction_vector(display_angle, item)
         text = try_add_annotation_text(entities, item.text, pt, dir_vec)
         if text
-          hide_annotation_leader(text)
+          preserve_vector = angle_needs_geometry_text?(display_angle, part_mark_label?(item.text) ? 8.0 : 12.0)
+          hide_annotation_leader(text, preserve_vector)
           set_layer(text, layer)
           @text_count += 1
           return
@@ -778,8 +781,8 @@ module BlueCollarSystems
         return if headers.empty?
 
         header_y = headers.map { |h| h.bbox_y0.to_f }
-        anchor = header_y.min
-        @bom_table_y0 = anchor - 160.0
+        anchor = quan ? quan.bbox_y0.to_f : header_y.max
+        @bom_table_y0 = anchor - 320.0
         @bom_table_y1 = anchor + 12.0
       rescue StandardError
         @bom_quan_x = nil
@@ -840,7 +843,7 @@ module BlueCollarSystems
         bw = bbox_w_pts.to_f
         bh = bbox_h_pts.to_f
         fs = [font_size_pts.to_f, 1.0].max
-        est_w = fs * 0.55
+        est_w = text.to_s.strip.length * fs * 0.55
         bh > bw * 1.15 && bw > est_w * 0.45
       rescue StandardError
         false
@@ -1187,6 +1190,7 @@ module BlueCollarSystems
           return 0.0
         end
         if bom_table_quantity_label?(item.text, bbox_w, bbox_h, angle, item)
+          return 0.0 if bom_table_quan_column?(item)
           raw = item.respond_to?(:angle) ? item.angle.to_f : 0.0
           return raw if raw.abs >= 45.0
           return 90.0
@@ -1319,7 +1323,11 @@ module BlueCollarSystems
       def label_run_width_pts(text, font_size_pts, bbox_w_pts = nil, bbox_h_pts = nil, item = nil)
         fs = [font_size_pts.to_f, 1.0].max
         raw = if bom_table_quantity_label?(text, bbox_w_pts, bbox_h_pts, 0.0, item)
-                [bbox_h_pts.to_f * 0.88, fs * 0.55].max
+                if item && bom_table_quan_column?(item)
+                  text.to_s.strip.length * fs * 0.55
+                else
+                  [bbox_h_pts.to_f * 0.88, fs * 0.55].max
+                end
               elsif dimension_like_label?(text)
                 dimension_label_raw_width_pts(text, fs)
               elsif chord_spec_label?(text)

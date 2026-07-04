@@ -99,6 +99,7 @@ class DummyEntities
 
   def add_text(text, point, vector = nil)
     ent = DummyTextEntity.new
+    ent.vector = vector
     @texts << [text, point, vector, ent]
     ent
   end
@@ -161,8 +162,8 @@ narrow_qty = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
 )
 assert_true(builder.send(:bom_table_quantity_label?, '1', 5.4, 9.1, 0.0, narrow_qty),
             'QUAN-column single-digit qty should classify in relaxed BOM cells')
-assert_true(builder.send(:label_angle_pdf, narrow_qty).abs > 45.0,
-            'QUAN-column qty should stay vertical in BOM table')
+assert_true(builder.send(:label_angle_pdf, narrow_qty).abs < 0.01,
+            'QUAN-column qty should stay horizontal in BOM table')
 mark_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   '1017FR1', 145.0, 175.0, 8.0, -90.0, 'pdftotext', nil, 144.0, 166.0, 183.9, 175.1
 )
@@ -171,9 +172,8 @@ assert_true(builder.send(:label_angle_pdf, mark_item).abs < 0.01,
 qx, qy, qang = builder.send(:label_insertion_pdf, quan_qty)
 assert_true(builder.send(:bom_table_quantity_label?, '2', 10.0, 42.0, -90.0),
             'narrow vertical numeric cell should classify as BOM quantity')
-assert_true(qang.abs > 80.0, "BOM quantity should stay vertical (got #{qang})")
-assert_true(qang < 0.0, "negative PDF angle should preserve sign (got #{qang})")
-assert_true((qx - 109.0).abs < 2.0, "BOM quantity should center in narrow QUAN cell (got #{qx})")
+assert_true(qang.abs < 0.01, "BOM quantity should stay horizontal (got #{qang})")
+assert_true((qx - 111.25).abs < 2.0, "BOM quantity should center in narrow QUAN cell (got #{qx})")
 
 dim_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   '7 1/8', 50.0, 300.0, 6.0, 0.0, 'pdftotext', nil, 48.0, 298.0, 72.0, 306.0
@@ -216,16 +216,31 @@ rotated_label = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   'p1052', 150.0, 220.0, 8.0, 90.0, 'pdftotext', nil, 148.0, 210.0, 158.0, 246.0
 )
 rotated_entities = DummyEntities.new
-builder.send(:place_annotation_label, rotated_entities, rotated_label, 0.0, 0.0, 'TextLayer')
+rotated_builder = BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
+  Sketchup::Model.new,
+  [],
+  [],
+  [0, 0, 612, 792],
+  scale_factor: 1.0,
+  import_text: true,
+  use_3d_text: false
+)
+rotated_builder.send(:place_annotation_label, rotated_entities, rotated_label, 0.0, 0.0, 'TextLayer')
 assert_true(rotated_entities.texts.length == 1,
             "Labels mode must create a native SketchUp label for rotated text (got #{rotated_entities.texts.length})")
 assert_true(rotated_entities.mesh_calls.empty?,
             'Labels mode must not silently create 3D text/geometry for rotated text')
+if rotated_entities.texts.first
+  rotated_entity = rotated_entities.texts.first[3]
+  assert_true(rotated_entity.vector && rotated_entity.vector.y.abs > 0.99,
+              'rotated native label should preserve its direction vector while hiding the leader')
+end
 
 if File.exist?(PDF_1017)
   # 342 = 346 raw pdftotext words minus 2 angle-mark stitch merges (a1+00+5 → a1005/a1006).
   GOLDEN_1017_ITEM_COUNT = 342
   items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_1017, 1)
+  builder.send(:prepare_bom_table_context, items)
   assert_true(items && items.length == GOLDEN_1017_ITEM_COUNT,
               "1017 PDF regression guard: need exactly #{GOLDEN_1017_ITEM_COUNT} labels (got #{items ? items.length : 0})")
   with_bbox = items.count { |it| builder.send(:label_has_bbox?, it) }
@@ -254,6 +269,18 @@ if File.exist?(PDF_1017)
     assert_near(qx, 1948.62, PDF_TOL, "QUAN X should stay centered in BOM cell (got #{qx})")
     assert_near(qy, 1656.59, PDF_TOL, "QUAN Y baseline (got #{qy})")
     assert_true(qang.abs < 0.01, "QUAN angle should be horizontal (got #{qang})")
+  end
+
+  bom_qty_three = items.find do |it|
+    it.text.to_s.strip == '3' &&
+      (it.bbox_x0.to_f - 1955.06).abs < 1.0 &&
+      (it.bbox_y0.to_f - 1522.31).abs < 1.0
+  end
+  if bom_qty_three
+    bx, by, bang = builder.send(:label_insertion_pdf, bom_qty_three)
+    assert_near(bx, 1956.29, PDF_TOL, "BOM quantity 3 X should center in QUAN cell (got #{bx})")
+    assert_near(by, 1524.96, PDF_TOL, "BOM quantity 3 Y baseline (got #{by})")
+    assert_true(bang.abs < 0.01, "BOM quantity 3 should stay horizontal (got #{bang})")
   end
 
   p1052 = items.select { |it| it.text.to_s.strip == 'p1052' }
