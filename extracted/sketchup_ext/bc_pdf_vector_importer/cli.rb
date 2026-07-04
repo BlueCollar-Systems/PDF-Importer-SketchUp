@@ -53,6 +53,18 @@ module BlueCollarSystems
 
       def main(argv = ARGV)
         opts = parse_args(argv)
+
+        if opts[:version]
+          puts version_string
+          return 0
+        end
+
+        if opts[:preflight]
+          doc = run_preflight(opts[:input])
+          puts JSON.pretty_generate(doc) unless opts[:quiet]
+          return doc['status'] == 'fail' ? 1 : 0
+        end
+
         unless opts[:input] && File.file?(opts[:input])
           warn 'Missing --input PDF path.'
           return 2
@@ -91,6 +103,8 @@ module BlueCollarSystems
           o.on('--no-primitives-json', 'Skip primitives.json output') { opts[:write_primitives] = false }
           o.on('--extrude-to-3d', 'Extrude closed fill faces to 3D (optional)') { opts[:extrude_to_3d] = 'Yes' }
           o.on('--extrude-depth-mm MM', 'Extrusion depth in millimeters (default 3.175 = 1/8" plate)') { |v| opts[:extrude_depth_mm] = v }
+          o.on('--preflight', 'Run preflight checks and emit ready_check JSON') { opts[:preflight] = true }
+          o.on('--version', 'Print plugin version and exit') { opts[:version] = true }
           o.on('--quiet', 'Only use exit code and files') { opts[:quiet] = true }
           o.on('-h', '--help', 'Show help') do
             puts o
@@ -312,6 +326,39 @@ module BlueCollarSystems
         end
         pages = pages.uniq.sort.select { |p| p >= 1 && p <= page_count }
         pages.empty? ? (1..page_count).to_a : pages
+      end
+
+      def version_string
+        loader = File.join(File.expand_path('..', File.dirname(__FILE__)), 'bc_pdf_vector_importer.rb')
+        if File.file?(loader)
+          m = File.read(loader, encoding: 'utf-8')[/PLUGIN_VERSION\s*=\s*'([^']+)'/, 1]
+          return m if m
+        end
+        'unknown'
+      end
+
+      def run_preflight(pdf_path)
+        checks = []
+        add = ->(id, ok, msg) { checks << { 'id' => id, 'status' => ok ? 'pass' : 'fail', 'message' => msg } }
+        add.call('input_exists', pdf_path && File.file?(pdf_path),
+                 pdf_path ? "input: #{pdf_path}" : 'no input PDF given')
+        if pdf_path && File.file?(pdf_path)
+          header = File.binread(pdf_path, 8).to_s
+          add.call('pdf_header', header.start_with?('%PDF-'),
+                   header.start_with?('%PDF-') ? 'valid %PDF- header' : 'not a PDF (bad header)')
+        end
+        bin_dir = File.join(File.dirname(__FILE__), 'bin')
+        %w[pdftotext.exe pdftocairo.exe pdffonts.exe].each do |exe|
+          present = File.file?(File.join(bin_dir, exe))
+          checks << { 'id' => "poppler_#{exe.sub('.exe', '')}",
+                      'status' => present ? 'pass' : 'warn',
+                      'message' => present ? "bundled #{exe} present" : "#{exe} missing (text falls back to internal extractor)" }
+        end
+        status = checks.any? { |c| c['status'] == 'fail' } ? 'fail' :
+                 checks.any? { |c| c['status'] == 'warn' } ? 'warn' : 'pass'
+        { 'schema' => 'bcs.ready_check/1.0', 'status' => status,
+          'product' => 'SketchUp PDF Importer CLI', 'version' => version_string,
+          'host' => { 'name' => 'sketchup' }, 'checks' => checks, 'repair_hints' => [] }
       end
 
       def normalized_mode(mode)
