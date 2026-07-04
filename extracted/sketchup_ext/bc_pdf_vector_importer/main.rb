@@ -28,6 +28,9 @@ module BlueCollarSystems
     require File.join(dir, 'ocg_parser')
     require File.join(dir, 'layer_manager')
     require File.join(dir, 'xobject_parser')
+    require File.join(dir, 'embedded_image_extractor')
+    require File.join(dir, 'source_provenance')
+    require File.join(dir, 'batch_pipeline')
     require File.join(dir, 'primitive_extractor')
     require File.join(dir, 'unit_parser')
     require File.join(dir, 'dimension_parser')
@@ -40,6 +43,7 @@ module BlueCollarSystems
     require File.join(dir, 'recognizer')
     require File.join(dir, 'validator')
     # Host Builders
+    require File.join(dir, 'embedded_image_extractor')
     require File.join(dir, 'geometry_builder')
     require File.join(dir, 'geometry_cleanup')
     require File.join(dir, 'hatch_detector')
@@ -137,6 +141,17 @@ module BlueCollarSystems
       SecureRandom.uuid
     rescue StandardError
       "su-import-#{Process.pid}-#{Time.now.to_i}"
+    end
+
+    def self.embedded_image_output_dir(pdf_path, opts, session_id)
+      configured = opts[:embedded_image_dir].to_s.strip
+      return configured unless configured.empty?
+
+      base = File.basename(pdf_path.to_s, '.pdf')
+      base = 'pdf' if base.empty?
+      File.join(Dir.tmpdir, "bc_pdf_embedded_images_#{base}_#{session_id}")
+    rescue StandardError
+      File.join(Dir.tmpdir, "bc_pdf_embedded_images_#{Process.pid}")
     end
 
     def self.apply_internal_text_angle_hints(text_items, angle_items)
@@ -780,12 +795,20 @@ module BlueCollarSystems
 
       stats = { pages: 0, primitives: 0, edges: 0, faces: 0, arcs: 0,
                 text: 0, components: 0, layers: [], cleanup: {},
-                generic: nil, mode_used: nil, xobjects: 0,
+                generic: nil, mode_used: nil, xobjects: 0, embedded_images: 0,
+                embedded_images_placed: 0, embedded_image_paths: [],
+                embedded_image_dir: nil,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
                 text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
                 recognition_skipped_pages: [],
                 import_session_id: new_import_session_id,
                 source_provenance_objects: [] }
+
+      image_extractor = nil
+      if opts[:extract_embedded_images] != false && opts[:import_mode].to_s != 'vector'
+        stats[:embedded_image_dir] = embedded_image_output_dir(path, opts, stats[:import_session_id])
+        image_extractor = EmbeddedImageExtractor.new(parser, stats[:embedded_image_dir])
+      end
 
       svg_text_mode = [:geometry, :glyphs].include?(requested_text_mode)
       if svg_text_mode && opts[:import_text] && !SvgTextRenderer.svg_renderer_available?
@@ -908,6 +931,19 @@ module BlueCollarSystems
             "Page #{page_num}: merged #{xobj_paths.length} transformed XObject path group(s).")
         end
 
+        embedded_assets = []
+        if image_extractor
+          embedded_assets = image_extractor.extract_page(page_num)
+          unless embedded_assets.empty?
+            stats[:embedded_images] += embedded_assets.length
+            stats[:embedded_image_paths].concat(embedded_assets.map { |asset| asset.file_path }.compact)
+            Logger.info(
+              "EmbeddedImages",
+              "Page #{page_num}: extracted #{embedded_assets.length} embedded image placement(s)."
+            )
+          end
+        end
+
         stream_bytes = streams.inject(0) { |sum, s| sum + s.length }
         text_items = []
         if opts[:import_text]
@@ -1005,7 +1041,7 @@ module BlueCollarSystems
           Logger.warn("Pipeline", "Page #{page_num}: text-dominant raster fallback failed; continuing with vectors/text.")
         end
 
-        if paths.empty? && text_items.empty?
+        if paths.empty? && text_items.empty? && embedded_assets.empty?
           if opts[:raster_fallback]
             Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering raster image... [#{(Time.now - import_start).round(1)}s]"
             raster_ok = import_page_as_raster(
@@ -1240,6 +1276,23 @@ module BlueCollarSystems
           cl.each { |k, v| stats[:cleanup][k] = (stats[:cleanup][k] || 0) + v }
         end
 
+        if !embedded_assets.empty? && builder.page_group
+          placed = place_embedded_images(
+            model,
+            embedded_assets,
+            media_box,
+            opts,
+            page_y_offset,
+            page_rotation,
+            builder.page_group.entities
+          )
+          stats[:embedded_images_placed] += placed
+          Logger.info(
+            "EmbeddedImages",
+            "Page #{page_num}: placed #{placed}/#{embedded_assets.length} supported embedded image(s)."
+          )
+        end
+
         add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
 
         # Advance the running page stack only after a successful import.
@@ -1291,6 +1344,8 @@ module BlueCollarSystems
         stats[:actual_text_entity_types] = report[:extra][:actual_text_entity_types] if report[:extra]
         report_path = QAReport.write_json(report, QAReport.default_output_path(path))
         stats[:import_report_path] = report_path if report_path
+        sidecar_path = write_source_provenance_sidecar(path, opts, stats)
+        stats[:source_provenance_sidecar_path] = sidecar_path if sidecar_path
         ImportHealth.record!(stats, path)
       rescue StandardError => e
         Logger.warn("Pipeline", "import_report.json write failed: #{e.message}")
@@ -1298,6 +1353,81 @@ module BlueCollarSystems
       stats
     ensure
       Logger.flush_log
+    end
+
+    def self.place_embedded_images(model, assets, media_box, opts, y_offset, page_rotation, target_entities = nil)
+      return 0 unless model && assets && !assets.empty?
+      entities = target_entities || model.active_entities
+      return 0 unless entities && entities.respond_to?(:add_image)
+
+      layer = begin
+        model.layers['PDF Import: Images'] || model.layers.add('PDF Import: Images')
+      rescue StandardError
+        nil
+      end
+
+      placed = 0
+      assets.each do |asset|
+        next unless asset && asset.file_path && File.file?(asset.file_path)
+        unless EmbeddedImageExtractor.supported_sketchup_image?(asset.file_path)
+          Logger.warn(
+            'EmbeddedImages',
+            "Skipping SketchUp placement for #{asset.name}: exported #{File.extname(asset.file_path)} is not a SketchUp image format."
+          )
+          next
+        end
+
+        bbox = embedded_image_su_bbox(asset, media_box, opts[:scale], y_offset, page_rotation)
+        next unless bbox
+        x0, y0, x1, y1 = bbox
+        width = (x1 - x0).abs
+        height = (y1 - y0).abs
+        next if width <= 0.0 || height <= 0.0
+
+        begin
+          image = entities.add_image(asset.file_path, Geom::Point3d.new(x0, y0, 0.0), width, height)
+          if image
+            begin
+              image.layer = layer if layer
+            rescue StandardError => e
+              Logger.warn('EmbeddedImages', "Image layer assignment failed: #{e.message}")
+            end
+            placed += 1
+          end
+        rescue StandardError => e
+          Logger.warn('EmbeddedImages', "add_image failed for #{asset.name}: #{e.message}")
+        end
+      end
+      placed
+    end
+
+    def self.embedded_image_su_bbox(asset, media_box, scale, y_offset, page_rotation)
+      corners = asset.respond_to?(:corners_pts) ? asset.corners_pts : nil
+      return nil unless corners && corners.length >= 2
+
+      s = scale.to_f
+      s = 1.0 if s <= 0.0
+      ox = media_box[0].to_f
+      oy = media_box[1].to_f
+      rot = PageTransform.normalize_rotation(page_rotation)
+      pts = corners.map do |corner|
+        if rot != 0
+          x_pts, y_pts = PageTransform.transform_point(corner[0], corner[1], media_box, rot)
+        else
+          x_pts = corner[0].to_f - ox
+          y_pts = corner[1].to_f - oy
+        end
+        [
+          x_pts * (1.0 / 72.0) * s,
+          y_pts * (1.0 / 72.0) * s + y_offset.to_f
+        ]
+      end
+      xs = pts.map { |pt| pt[0] }
+      ys = pts.map { |pt| pt[1] }
+      [xs.min, ys.min, xs.max, ys.max]
+    rescue StandardError => e
+      Logger.warn('EmbeddedImages', "placement bbox failed: #{e.message}")
+      nil
     end
 
     # ================================================================
@@ -1474,6 +1604,25 @@ module BlueCollarSystems
       result
     rescue StandardError => e
       Logger.warn("OpenGate", "gate check failed: #{e.message}")
+      nil
+    end
+
+    def self.write_source_provenance_sidecar(pdf_path, opts, stats)
+      objects = Array(stats[:source_provenance_objects])
+      return nil if objects.empty?
+
+      session_id = (stats[:import_session_id] || SourceProvenance.new_import_session_id).to_s
+      sidecar_path = SourceProvenance.default_sidecar_path(pdf_path)
+      SourceProvenance.write_sidecar(
+        output_path: sidecar_path,
+        import_session_id: session_id,
+        pdf_path: pdf_path,
+        objects: objects,
+        version: Metadata::VERSION,
+        page_count: stats[:pages]
+      )
+    rescue StandardError => e
+      Logger.warn('Pipeline', "source_provenance sidecar failed: #{e.message}")
       nil
     end
 

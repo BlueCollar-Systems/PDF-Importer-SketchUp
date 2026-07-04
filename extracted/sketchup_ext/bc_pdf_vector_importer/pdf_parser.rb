@@ -253,6 +253,8 @@ module BlueCollarSystems
                 "stream content may be incomplete. Re-save the PDF " \
                 "with a modern tool to use FlateDecode instead.")
               decoded = run_length_decode(decoded)
+            when '/DCTDecode'
+              # JPEG image streams — no further decode; keep current bytes.
             when '/LZWDecode'
               Logger.warn("PdfParser",
                 "LZWDecode compression is not supported — skipping stream. " \

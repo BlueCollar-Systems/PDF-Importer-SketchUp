@@ -184,6 +184,10 @@ module BlueCollarSystems
           font_substitution_note: stats[:font_substitution_note],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,
           recognition_skipped_pages: Array(stats[:recognition_skipped_pages]).map { |entry| normalize_json(entry) },
+          embedded_images: stats[:embedded_images].to_i,
+          embedded_images_placed: stats[:embedded_images_placed].to_i,
+          embedded_image_dir: stats[:embedded_image_dir],
+          embedded_image_paths: Array(stats[:embedded_image_paths] || stats[:embedded_image_files]).map(&:to_s),
           scale_hints: scale_hints_block(stats),
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers)
         }
@@ -208,6 +212,30 @@ module BlueCollarSystems
         entity_info = build_actual_text_entity_types(report)
         report[:extra][:actual_text_entity_types] = normalize_json(entity_info) if entity_info
         report[:extra][:human_summary] = build_human_summary(report)
+        contract = build_import_contract_ready(report)
+        report[:extra][:import_contract_ready] = contract if contract
+      end
+
+      def build_import_contract_ready(report)
+        extra = report[:extra] || {}
+        meta = report[:report_meta] || {}
+        open_failure = extra[:open_failure] || extra['open_failure']
+        has_stamp = !meta[:build_stamp].to_s.strip.empty?
+        has_crosscheck = extra.key?(:scale_crosscheck) || extra.key?('scale_crosscheck')
+        text_count = (report[:result] || {})[:text_entities].to_i
+        has_entity_types = extra.key?(:actual_text_entity_types) || extra.key?('actual_text_entity_types')
+        text_ok = text_count <= 0 || has_entity_types
+        ready = has_stamp && has_crosscheck && text_ok && open_failure.nil?
+        {
+          ready: ready,
+          checks: {
+            build_stamp: has_stamp,
+            scale_crosscheck: has_crosscheck,
+            actual_text_entity_types: text_ok,
+            no_open_failure: open_failure.nil?
+          },
+          note: 'diagnostics stub — Report Doctor may recompute client-side'
+        }
       end
 
       def attach_source_provenance!(report, stats)
@@ -229,6 +257,8 @@ module BlueCollarSystems
           import_session_id: session_id,
           object_count: objects.length
         }
+        sidecar = stats[:source_provenance_sidecar_path] || stats['source_provenance_sidecar_path']
+        report[:extra][:source_provenance][:sidecar_path] = sidecar.to_s unless sidecar.to_s.empty?
       end
 
       def build_report_meta(version)
@@ -348,6 +378,7 @@ module BlueCollarSystems
       def diagnostics_block(stats, warning_count = 0, degraded_renderers = [])
         primitives = stats[:primitives].to_i
         text_entities = stats[:text].to_i
+        embedded_images = stats[:embedded_images].to_i
         layer_count = Array(stats[:layers]).compact.length
         text_mode = stats[:text_mode].to_s
         source_spans = stats[:text_source_spans].to_i
@@ -365,10 +396,14 @@ module BlueCollarSystems
           elsif primitives > 0
             signals << 'very_limited_vector_content'
             'low'
+          elsif embedded_images > 0
+            signals << 'embedded_images_extracted'
+            'image_only'
           else
             signals << 'no_vector_geometry_created'
             'empty'
           end
+        signals << 'embedded_images_extracted' if embedded_images > 0
 
         fallback = fallback_block(stats, degraded_renderers)
         if fallback[:used] || fallback['used']
