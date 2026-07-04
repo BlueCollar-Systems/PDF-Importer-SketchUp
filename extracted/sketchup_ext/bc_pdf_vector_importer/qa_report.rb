@@ -9,6 +9,7 @@ require 'fileutils'
 require 'time'
 require File.join(File.dirname(__FILE__), 'model_3d_extruder')
 require File.join(File.dirname(__FILE__), 'model_3d_intent')
+require File.join(File.dirname(__FILE__), 'parts_bootstrap')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -193,7 +194,8 @@ module BlueCollarSystems
           scale_hints: scale_hints_block(stats),
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers),
           model_3d_intent: model_3d_intent_block(stats),
-          model_3d: model_3d_block(stats, opts)
+          model_3d: model_3d_block(stats, opts),
+          parts_bootstrap: parts_bootstrap_block(stats)
         }
       end
 
@@ -231,6 +233,18 @@ module BlueCollarSystems
         Model3DExtruder.disabled_payload('option_off')
       rescue StandardError
         { enabled: false, supported: true, skipped_reason: 'report_error' }
+      end
+
+      def parts_bootstrap_block(stats)
+        payload = stats[:parts_bootstrap] || stats['parts_bootstrap']
+        return normalize_json(payload) if payload.is_a?(Hash)
+
+        pages_map = stats[:page_text_map] || stats['page_text_map'] || {}
+        return { schema: PartsBootstrap::SCHEMA, table_count: 0, row_count: 0, tables: [] } if pages_map.empty?
+
+        normalize_json(PartsBootstrap.build(pages_map, session_id: stats[:import_session_id]))
+      rescue StandardError
+        { schema: PartsBootstrap::SCHEMA, table_count: 0, row_count: 0, tables: [], error: 'extraction_error' }
       end
 
       def scale_hints_block(stats)

@@ -66,6 +66,8 @@ Dir.mktmpdir('su_cli_test_') do |tmp|
     meta = report['report_meta'] || {}
     check.call('report_meta.host is sketchup or sketchup-cli', %w[sketchup sketchup-cli].include?(meta['host']))
     check.call('report_meta.semver present', meta['semver'].to_s =~ /\A(\d+\.\d+\.\d+|unknown)\z/)
+    check.call('unified CLI emits actual_text_entity_types',
+               (report['extra'] || {})['actual_text_entity_types'].is_a?(Hash))
     check.call('model_3d intent present',
                (report['extra'] || {})['model_3d_intent'].is_a?(Hash))
     check.call('model_3d block present', (report['extra'] || {})['model_3d'].is_a?(Hash))
