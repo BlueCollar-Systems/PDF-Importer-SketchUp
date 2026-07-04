@@ -1,5 +1,6 @@
 # bc_pdf_vector_importer/version_notice.rb
 # One-time notice when the extension version changes after install/update.
+# Release marker: v3.7.79 (2026-07-04).
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
