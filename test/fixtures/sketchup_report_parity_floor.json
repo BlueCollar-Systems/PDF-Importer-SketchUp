@@ -4,7 +4,8 @@
     "human_summary",
     "scale_crosscheck",
     "font_substitution_note",
-    "performance_hint"
+    "performance_hint",
+    "model_3d_intent"
   ],
   "conditional_extra_fields": {
     "actual_text_entity_types": "when SketchUp emits text entity verification"

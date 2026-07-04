@@ -250,4 +250,56 @@ class QAReportTest < Minitest::Test
     assert_equal 'session-su-1', prov[:import_session_id]
     assert_equal 1, prov[:object_count]
   end
+
+  def test_model_3d_payload_is_reported
+    stats = {
+      pages: 1,
+      primitives: 8,
+      edges: 12,
+      text: 0,
+      layers: [],
+      text_renderers: [],
+      model_3d: {
+        enabled: true,
+        supported: true,
+        depth_mm: 6.35,
+        faces_extruded: 3
+      }
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'solid.pdf',
+      { import_mode: 'auto', extrude_to_3d: true, extrude_depth_mm: 6.35 },
+      stats
+    )
+
+    assert_equal true, report[:extra][:model_3d]['enabled']
+    assert_equal 3, report[:extra][:model_3d]['faces_extruded']
+    assert_in_delta 6.35, report[:extra][:model_3d]['depth_mm'], 0.001
+  end
+
+  def test_model_3d_intent_is_reported_from_text_evidence
+    stats = {
+      pages: 1,
+      primitives: 8,
+      edges: 12,
+      text: 3,
+      layers: [],
+      text_renderers: [],
+      text_mode: :labels,
+      model_3d_texts: ['p1052 PL3/4"X7"', 'w1025 W12X30']
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'intent.pdf',
+      { import_mode: 'auto', import_text: true, text_mode: :labels },
+      stats
+    )
+
+    intent = report[:extra][:model_3d_intent]
+    assert_equal true, intent['feasible']
+    assert_equal 1, intent['plates'].length
+    assert_equal 1, intent['members'].length
+    assert_equal 'W12X30', intent['members'][0]['designation']
+  end
 end

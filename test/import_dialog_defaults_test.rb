@@ -188,6 +188,32 @@ class ImportDialogDefaultsTest < Minitest::Test
     %w[Auto Vector Raster Hybrid].each { |m| assert_includes html, m }
   end
 
+  def test_advanced_html_includes_3d_model_controls
+    d = {
+      mode: 'Auto', pages: 'All', scale: '1.0', text_mode: 'Geometry',
+      import_text: 'Yes', match_pdf_layers: 'Yes',
+      grouping_mode: 'Group per page',
+      page_arrangement: 'Spread (20% gap)',
+      extrude_to_3d: 'No',
+      extrude_depth_mm: ''
+    }
+    html = BID.send(:advanced_html, 'sample.pdf', d)
+
+    assert_includes html, '3D Model'
+    assert_includes html, 'id="extrude_to_3d"'
+    assert_includes html, 'id="extrude_depth_mm"'
+  end
+
+  def test_build_opts_maps_3d_model_controls
+    opts = BID.send(:build_opts,
+                    import_mode: 'auto',
+                    extrude_to_3d: 'Yes',
+                    extrude_depth_mm: '10.5')
+
+    assert_equal true, opts[:extrude_to_3d]
+    assert_in_delta 10.5, opts[:extrude_depth_mm], 0.001
+  end
+
   def test_basic_import_callback_uses_auto_mode
     mode_raw = BID::MODES['Auto']
     opts = BID.send(:build_opts, mode_raw.merge(

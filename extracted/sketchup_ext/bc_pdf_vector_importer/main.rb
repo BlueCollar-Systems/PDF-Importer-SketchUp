@@ -802,6 +802,7 @@ module BlueCollarSystems
                 embedded_image_dir: nil, extruded_faces: 0,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
                 text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
+                model_3d_texts: [],
                 recognition_skipped_pages: [],
                 import_session_id: new_import_session_id,
                 source_provenance_objects: [] }
@@ -1021,6 +1022,17 @@ module BlueCollarSystems
           end
           Logger.info("Pipeline", "Page #{page_num}: text extractor=#{text_source}, items=#{text_items ? text_items.length : 0}")
           stats[:page_text_sources][page_num] = text_source if text_source
+          Array(text_items).each do |item|
+            raw_text = if item.respond_to?(:text)
+                         item.text
+                       elsif item.is_a?(Hash)
+                         item[:text] || item['text']
+                       else
+                         item
+                       end
+            raw_text = raw_text.to_s.strip
+            stats[:model_3d_texts] << raw_text unless raw_text.empty?
+          end
         end
 
         # If the page is text-dominant with little/no vector geometry, importing
@@ -1366,6 +1378,7 @@ module BlueCollarSystems
         stats[:scale_crosscheck] = report[:extra][:scale_crosscheck] if report[:extra]
         stats[:performance_hint] = report[:extra][:performance_hint] if report[:extra]
         stats[:actual_text_entity_types] = report[:extra][:actual_text_entity_types] if report[:extra]
+        stats[:model_3d_intent] = report[:extra][:model_3d_intent] if report[:extra]
         report_path = QAReport.write_json(report, QAReport.default_output_path(path))
         stats[:import_report_path] = report_path if report_path
         sidecar_path = write_source_provenance_sidecar(path, opts, stats)

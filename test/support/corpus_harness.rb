@@ -265,6 +265,7 @@ module CorpusHarness
         result[:placement_total] = placement[:total]
         result[:placement_rate] = placement[:rate]
         result[:text_hash] = placement[:text_hash]
+        result[:texts] = all_text_items.map { |it| it.respond_to?(:text) ? it.text.to_s : it.to_s }
         result[:status] = 'OK'
         parser.release
       end

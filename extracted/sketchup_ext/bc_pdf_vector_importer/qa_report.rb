@@ -8,6 +8,7 @@ require 'digest'
 require 'fileutils'
 require 'time'
 require File.join(File.dirname(__FILE__), 'model_3d_extruder')
+require File.join(File.dirname(__FILE__), 'model_3d_intent')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -191,7 +192,24 @@ module BlueCollarSystems
           embedded_image_paths: Array(stats[:embedded_image_paths] || stats[:embedded_image_files]).map(&:to_s),
           scale_hints: scale_hints_block(stats),
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers),
+          model_3d_intent: model_3d_intent_block(stats),
           model_3d: model_3d_block(stats, opts)
+        }
+      end
+
+      def model_3d_intent_block(stats)
+        payload = stats[:model_3d_intent] || stats['model_3d_intent']
+        return normalize_json(payload) if payload.is_a?(Hash)
+
+        texts = stats[:model_3d_texts] || stats['model_3d_texts'] ||
+                stats[:text_items] || stats['text_items'] || []
+        normalize_json(Model3DIntent.analyze(texts, host_supports_3d: true))
+      rescue StandardError => e
+        {
+          feasible: false,
+          plates: [],
+          members: [],
+          skipped_reason: "3D intent analysis failed: #{e.message}"
         }
       end
 

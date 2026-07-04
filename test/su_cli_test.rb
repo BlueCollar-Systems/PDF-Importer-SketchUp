@@ -68,6 +68,10 @@ Dir.mktmpdir('su_cli_test_') do |tmp|
     check.call('report_meta.semver present', meta['semver'].to_s =~ /\A\d+\.\d+\.\d+\z/)
     check.call('honesty: no actual_text_entity_types from headless CLI',
                !(report['extra'] || {}).key?('actual_text_entity_types'))
+    check.call('model_3d intent present',
+               (report['extra'] || {})['model_3d_intent'].is_a?(Hash))
+    check.call('honesty: headless CLI does not claim solid generation',
+               ((report['extra'] || {})['model_3d'] || {})['supported'] == false)
     check.call('human_summary present', (report['extra'] || {})['human_summary'].to_s.length > 10)
   end
 
