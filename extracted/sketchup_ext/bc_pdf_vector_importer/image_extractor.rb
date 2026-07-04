@@ -444,9 +444,9 @@ module BlueCollarSystems
       def self.get_raw_stream_bytes_by_num(pdf_parser, obj_num)
         raw = pdf_parser.send(:get_raw_object, obj_num)
         return nil unless raw && raw.include?('stream')
-        start = raw.index(/stream\r?\n/)
-        return nil unless start
-        start += raw[start..].match(/stream\r?\n/)[0].length
+        marker = /stream\r?\n/.match(raw)
+        return nil unless marker
+        start = marker.end(0)
         len = pdf_parser.send(:parse_stream_length, raw)
         if len && len > 0 && start + len <= raw.bytesize
           raw.byteslice(start, len)
