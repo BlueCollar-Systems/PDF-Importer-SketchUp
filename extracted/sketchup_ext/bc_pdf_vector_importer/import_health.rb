@@ -19,6 +19,8 @@ module BlueCollarSystems
           import_report_path: stats[:import_report_path].to_s,
           log_path: stats[:log_path].to_s,
           text_mode: stats[:text_mode].to_s,
+          actual_text_entity_types: stats[:actual_text_entity_types],
+          performance_hint: stats[:performance_hint].to_s,
           resolved_scale: stats[:resolved_scale],
           elapsed_seconds: stats[:elapsed_seconds],
           pages: stats[:pages].to_i,
@@ -53,6 +55,18 @@ module BlueCollarSystems
         lines << "Pages: #{snap[:pages]}  |  Time: #{snap[:elapsed_seconds]}s"
         lines << "Edges: #{snap[:edges]}  |  Text: #{snap[:text]}  |  Layers: #{snap[:layers]}"
         lines << "Text mode: #{snap[:text_mode].empty? ? 'n/a' : snap[:text_mode]}"
+
+        entity_info = snap[:actual_text_entity_types]
+        if entity_info.is_a?(Hash) && entity_info[:count].to_i > 0
+          bucket = entity_info[:entity_type] || entity_info['entity_type'] || snap[:text_mode]
+          lines << "Text entities: #{entity_info[:count] || entity_info['count']} as #{bucket}"
+        end
+
+        perf_hint = snap[:performance_hint].to_s.strip
+        unless perf_hint.empty?
+          lines << ''
+          lines << "Performance: #{perf_hint}"
+        end
 
         scale = snap[:resolved_scale]
         if scale.is_a?(Hash) && scale[:factor]

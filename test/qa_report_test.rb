@@ -157,6 +157,50 @@ class QAReportTest < Minitest::Test
     refute_nil extra[:scale_crosscheck]
   end
 
+  def test_records_heavy_page_recognition_skip
+    stats = {
+      pages: 1,
+      primitives: 25_000,
+      edges: 25_000,
+      text: 4,
+      layers: [],
+      elapsed_seconds: 3.0,
+      text_renderers: [],
+      recognition_skipped_pages: [
+        { page: 1, reason: 'heavy_page', primitives: 25_000, paths: 13_000, stream_mb: 31.2 }
+      ]
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('heavy.pdf', {}, stats)
+    extra = report[:extra]
+    assert_equal 1, extra[:recognition_skipped_pages].length
+    assert_equal 'heavy_page', extra[:recognition_skipped_pages][0]['reason']
+    assert_includes extra[:diagnostics][:signals], 'semantic_recognition_skipped_for_speed'
+  end
+
+  def test_emits_actual_text_entity_types_for_labels
+    stats = {
+      pages: 1,
+      primitives: 40,
+      edges: 40,
+      text: 12,
+      layers: [],
+      elapsed_seconds: 0.8,
+      text_renderers: [],
+      text_mode: :labels
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('text.pdf', {}, stats)
+    extra = report[:extra]
+    entity = extra[:actual_text_entity_types]
+    refute_nil entity
+    assert_equal 'labels', entity['entity_type']
+    assert_equal 12, entity['count']
+    assert_equal 12, entity['native_label']
+    refute_nil report[:report_meta]
+    assert_includes report[:report_meta][:build_stamp].to_s, 'sketchup'
+  end
+
   def test_builds_open_failure_report
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_open_failure(
       'bad.pdf',

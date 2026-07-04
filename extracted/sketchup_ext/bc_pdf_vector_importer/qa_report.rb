@@ -6,6 +6,7 @@
 require 'json'
 require 'digest'
 require 'fileutils'
+require 'time'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -82,6 +83,7 @@ module BlueCollarSystems
           end,
           fallback: fallback_block(stats, degraded_renderers),
           mode: import_mode_label(opts),
+          report_meta: build_report_meta(version),
           extra: extra_block(stats, warnings, degraded_renderers)
         }
         enrich_report_extras!(report)
@@ -180,6 +182,7 @@ module BlueCollarSystems
           svg_renderer_missing: !!stats[:svg_renderer_missing],
           font_substitution_note: stats[:font_substitution_note],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,
+          recognition_skipped_pages: Array(stats[:recognition_skipped_pages]).map { |entry| normalize_json(entry) },
           scale_hints: scale_hints_block(stats),
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers)
         }
@@ -201,7 +204,50 @@ module BlueCollarSystems
         report[:extra][:scale_crosscheck] = normalize_json(crosscheck) if crosscheck
         hint = build_performance_hint(report)
         report[:extra][:performance_hint] = hint if hint
+        entity_info = build_actual_text_entity_types(report)
+        report[:extra][:actual_text_entity_types] = normalize_json(entity_info) if entity_info
         report[:extra][:human_summary] = build_human_summary(report)
+      end
+
+      def build_report_meta(version)
+        semver = version.to_s.strip
+        {
+          build_stamp: ['sketchup', semver].reject(&:empty?).join(' '),
+          host: 'sketchup',
+          semver: semver,
+          report_sha256: '',
+          imported_at: Time.now.utc.iso8601
+        }
+      end
+
+      def build_actual_text_entity_types(report)
+        extra = report[:extra] || {}
+        stats_mode = extra[:text_mode] || extra['text_mode']
+        mode = stats_mode.to_s.strip.downcase
+        return nil if mode.empty? || mode == 'none'
+
+        result = report[:result] || {}
+        total = result[:text_entities].to_i
+        return nil if total <= 0
+
+        rendered = %w[labels label 3d_text text3d].include?(mode)
+        info = {
+          entity_type: mode,
+          count: total,
+          font_rendered: rendered,
+          examples: []
+        }
+        case mode
+        when 'labels', 'label'
+          info[:native_label] = total
+        when '3d_text', 'text3d'
+          info[:native_3d_text] = total
+        when 'glyphs', 'geometry', 'outlines'
+          info[:outline_curve_or_mesh] = total
+        else
+          info[:fallback_geometry] = total
+        end
+        info
       end
 
       def build_scale_crosscheck(extra)
@@ -337,6 +383,11 @@ module BlueCollarSystems
         if glyph_estimate >= 1000
           signals << 'dense_text_glyph_workload'
           actions << 'For heavy PDFs on older PCs, import one page first and compare Labels versus Glyphs/Geometry performance.'
+        end
+
+        if !Array(stats[:recognition_skipped_pages]).empty?
+          signals << 'semantic_recognition_skipped_for_speed'
+          actions << 'Geometry was imported, but heavy-page semantic recognition was skipped; use a smaller page range if you need semantic report details.'
         end
 
         {

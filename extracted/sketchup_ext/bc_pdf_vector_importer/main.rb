@@ -60,6 +60,44 @@ module BlueCollarSystems
     # SHARED PIPELINE — single source of truth for all import paths
     # ================================================================
     @last_import_layer_names = []
+    DEFAULT_AUTO_RECOGNITION_PRIMITIVE_LIMIT = 20_000
+    DEFAULT_AUTO_RECOGNITION_PATH_LIMIT = 12_000
+    DEFAULT_AUTO_RECOGNITION_STREAM_MB_LIMIT = 24.0
+
+    def self.env_numeric(name, fallback)
+      raw = ENV[name.to_s]
+      return fallback if raw.nil? || raw.to_s.strip.empty?
+      value = raw.to_f
+      value > 0.0 ? value : fallback
+    rescue StandardError
+      fallback
+    end
+
+    def self.heavy_auto_recognition_skip?(page_data, paths, stream_bytes)
+      return false if ENV['BC_SU_FORCE_AUTO_RECOGNITION'].to_s.strip.downcase =~ /\A(?:1|true|yes)\z/
+
+      primitive_limit = env_numeric(
+        'BC_SU_AUTO_RECOGNITION_MAX_PRIMITIVES',
+        DEFAULT_AUTO_RECOGNITION_PRIMITIVE_LIMIT
+      ).to_i
+      path_limit = env_numeric(
+        'BC_SU_AUTO_RECOGNITION_MAX_PATHS',
+        DEFAULT_AUTO_RECOGNITION_PATH_LIMIT
+      ).to_i
+      stream_mb_limit = env_numeric(
+        'BC_SU_AUTO_RECOGNITION_MAX_STREAM_MB',
+        DEFAULT_AUTO_RECOGNITION_STREAM_MB_LIMIT
+      )
+
+      primitive_count = page_data && page_data.primitives ? page_data.primitives.length : 0
+      path_count = Array(paths).length
+      stream_mb = stream_bytes.to_f / 1_000_000.0
+      primitive_count > primitive_limit ||
+        path_count > path_limit ||
+        stream_mb > stream_mb_limit
+    rescue StandardError
+      false
+    end
 
     def self.register_import_layer_names(names)
       @last_import_layer_names = Array(names).map(&:to_s)
@@ -737,7 +775,8 @@ module BlueCollarSystems
                 text: 0, components: 0, layers: [], cleanup: {},
                 generic: nil, mode_used: nil, xobjects: 0,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
-                text_renderers: [], page_text_sources: {}, peak_mb: 0.0 }
+                text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
+                recognition_skipped_pages: [] }
 
       svg_text_mode = [:geometry, :glyphs].include?(requested_text_mode)
       if svg_text_mode && opts[:import_text] && !SvgTextRenderer.svg_renderer_available?
@@ -860,6 +899,7 @@ module BlueCollarSystems
             "Page #{page_num}: merged #{xobj_paths.length} transformed XObject path group(s).")
         end
 
+        stream_bytes = streams.inject(0) { |sum, s| sum + s.length }
         text_items = []
         if opts[:import_text]
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Extracting text... [#{(Time.now - import_start).round(1)}s]"
@@ -873,7 +913,6 @@ module BlueCollarSystems
           # Guard: skip internal parsing for very large streams (>5MB total).
           # The internal Ruby parser is too slow for monster PDFs like GIS maps.
           # Fall through to external pdftotext which handles them efficiently.
-          stream_bytes = streams.inject(0) { |sum, s| sum + s.length }
           stream_limit_mb = text3d_mode ? 24.0 : 5.0
           env_limit = ENV['BC_SU_INTERNAL_TEXT_MAX_MB']
           if env_limit && !env_limit.to_s.strip.empty?
@@ -993,7 +1032,21 @@ module BlueCollarSystems
 
         recog_mode = opts[:recognition_mode] || :auto
         recognition = nil
-        if recog_mode != :none
+        if recog_mode == :auto && heavy_auto_recognition_skip?(page_data, paths, stream_bytes)
+          stats[:mode_used] = :none
+          skip = {
+            page: page_num,
+            reason: 'heavy_page',
+            primitives: page_data.primitives.length,
+            paths: paths.length,
+            stream_mb: (stream_bytes.to_f / 1_000_000.0).round(1)
+          }
+          stats[:recognition_skipped_pages] << skip
+          Logger.warn("Pipeline",
+            "Page #{page_num}: skipped auto recognition for heavy page " \
+            "(#{skip[:primitives]} primitives, #{skip[:paths]} paths, #{skip[:stream_mb]}MB streams); " \
+            "vector/text import continues.")
+        elsif recog_mode != :none
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Analyzing document... [#{(Time.now - import_start).round(1)}s]"
           recognition = Recognizer.run(page_data, mode: recog_mode, config: config)
           stats[:mode_used] = recognition[:mode_used]
@@ -1217,6 +1270,8 @@ module BlueCollarSystems
         report = QAReport.build_from_stats(path, opts, stats)
         stats[:human_summary] = report[:extra][:human_summary] if report[:extra]
         stats[:scale_crosscheck] = report[:extra][:scale_crosscheck] if report[:extra]
+        stats[:performance_hint] = report[:extra][:performance_hint] if report[:extra]
+        stats[:actual_text_entity_types] = report[:extra][:actual_text_entity_types] if report[:extra]
         report_path = QAReport.write_json(report, QAReport.default_output_path(path))
         stats[:import_report_path] = report_path if report_path
         ImportHealth.record!(stats, path)

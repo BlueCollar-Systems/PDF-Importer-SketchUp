@@ -105,6 +105,7 @@ class DummyEntities
   def add_text(text, point, vector = nil)
     raise 'add_text forced failure' if @fail_text
     ent = DummyTextEntity.new
+    ent.vector = vector
     @texts << { text: text, point: point, vector: vector, entity: ent }
     ent
   end
@@ -202,6 +203,9 @@ if rotated_entities.texts.first
   rotated_vec = rotated_entities.texts.first[:vector]
   assert_true(rotated_vec && rotated_vec.y.abs > 0.99,
               'rotated label-mode text should use a rotated direction vector')
+  assert_true(rotated_entities.texts.first[:entity].vector &&
+              rotated_entities.texts.first[:entity].vector.y.abs > 0.99,
+              'rotated native labels should preserve their direction vector')
   assert_true(rotated_entities.texts.first[:entity].display_leader == false,
               'rotated native labels should hide SketchUp leader lines when possible')
 end
