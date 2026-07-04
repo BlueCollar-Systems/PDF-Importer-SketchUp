@@ -32,7 +32,10 @@ class MockFace
     @pushpull_calls = []
   end
 
-  def normal   = @normal
+  def normal
+    @normal
+  end
+
   def pushpull(depth)
     raise 'mock pushpull error' if @fail_pushpull
     @pushpull_calls << depth
@@ -44,15 +47,25 @@ class MockFace
   end
 end
 
+class MockGroupClass
+  def name
+    'MockGroup'
+  end
+end
+
 class MockGroup
   def initialize(faces)
     @faces = faces
   end
-  def each(&block)  = @faces.each(&block)
-  def class = MockGroupClass
-end
 
-MockGroupClass = Struct.new(:name) { def name = 'MockGroup' }
+  def each(&block)
+    @faces.each(&block)
+  end
+
+  def class
+    MockGroupClass
+  end
+end
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
