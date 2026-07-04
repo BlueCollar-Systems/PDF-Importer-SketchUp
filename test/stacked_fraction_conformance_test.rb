@@ -52,6 +52,9 @@ class StackedFractionConformanceTest < Minitest::Test
       elsif expected['merged_text']
         refute_includes texts, expected['merged_text'], vector['id']
       end
+      Array(expected['forbidden_texts'] || []).each do |forbidden|
+        refute_includes texts, forbidden, vector['id']
+      end
     end
   end
 end
