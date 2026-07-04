@@ -44,6 +44,8 @@ module BlueCollarSystems
         @target_entities = opts[:target_entities] || nil
         @y_offset        = opts[:y_offset] || 0.0
         @page_rotation   = PageTransform.normalize_rotation(opts[:page_rotation])
+        @provenance_bucket = opts[:provenance_bucket]
+        @import_session_id = opts[:import_session_id].to_s
 
         @edge_count = 0
         @face_count = 0
@@ -603,6 +605,7 @@ module BlueCollarSystems
           end
         end
         @text_count += 1
+        record_text_span_provenance(item)
       rescue StandardError => e
         Logger.warn("GeometryBuilder", "add_3d_text failed: #{e.message}")
         begin
@@ -610,6 +613,7 @@ module BlueCollarSystems
           if text
             set_layer(text, layer)
             @text_count += 1
+            record_text_span_provenance(item)
           end
         rescue StandardError => e2
           Logger.warn("GeometryBuilder", "add_text fallback failed: #{e2.message}")
@@ -741,12 +745,39 @@ module BlueCollarSystems
           hide_annotation_leader(text, preserve_vector)
           set_layer(text, layer)
           @text_count += 1
+          record_text_span_provenance(item)
           return
         end
 
         Logger.warn("GeometryBuilder",
           "add_text unavailable for #{item.text.inspect} — falling back to mesh text")
         place_mesh_text(entities, item, origin_x, origin_y, layer)
+      end
+
+      def record_text_span_provenance(item)
+        return unless @provenance_bucket.is_a?(Array)
+
+        entity_type = @use_3d_text ? 'native_3d_text' : 'native_label'
+        idx = @provenance_bucket.length
+        entry = {
+          object_id: "text_span:#{@page_number}:#{idx}",
+          page: @page_number,
+          source_kind: 'text_span',
+          created_entity_type: entity_type
+        }
+        bbox = item_source_bbox_pdf(item)
+        entry[:source_bbox_pdf] = bbox if bbox
+        @provenance_bucket << entry
+      rescue StandardError => e
+        Logger.warn("GeometryBuilder", "provenance record failed: #{e.message}")
+      end
+
+      def item_source_bbox_pdf(item)
+        return nil unless label_has_bbox?(item)
+
+        [item.bbox_x0.to_f, item.bbox_y0.to_f, item.bbox_x1.to_f, item.bbox_y1.to_f]
+      rescue StandardError
+        nil
       end
 
       def label_has_bbox?(item)

@@ -87,6 +87,7 @@ module BlueCollarSystems
           extra: extra_block(stats, warnings, degraded_renderers)
         }
         enrich_report_extras!(report)
+        attach_source_provenance!(report, stats)
         report
       end
 
@@ -207,6 +208,27 @@ module BlueCollarSystems
         entity_info = build_actual_text_entity_types(report)
         report[:extra][:actual_text_entity_types] = normalize_json(entity_info) if entity_info
         report[:extra][:human_summary] = build_human_summary(report)
+      end
+
+      def attach_source_provenance!(report, stats)
+        objects = Array(stats[:source_provenance_objects] || stats['source_provenance_objects'])
+        return if objects.empty?
+
+        session_id = (stats[:import_session_id] || stats['import_session_id']).to_s.strip
+        if session_id.empty?
+          begin
+            require 'securerandom'
+            session_id = SecureRandom.uuid
+          rescue StandardError
+            session_id = ''
+          end
+        end
+
+        report[:extra][:source_provenance] = {
+          schema: 'bcs.source_provenance/1.0',
+          import_session_id: session_id,
+          object_count: objects.length
+        }
       end
 
       def build_report_meta(version)

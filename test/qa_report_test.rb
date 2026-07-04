@@ -217,4 +217,37 @@ class QAReportTest < Minitest::Test
     assert_equal 1, report[:result][:warnings]
     assert_equal 'not_a_pdf', report[:extra][:open_failure][:reason]
   end
+
+  def test_source_provenance_summary_when_spans_recorded
+    stats = {
+      pages: 1,
+      primitives: 10,
+      edges: 20,
+      text: 2,
+      arcs: 0,
+      layers: ['PDF Import'],
+      text_renderers: [],
+      elapsed_seconds: 1.0,
+      text_mode: :labels,
+      import_session_id: 'session-su-1',
+      source_provenance_objects: [
+        {
+          object_id: 'text_span:1:0',
+          page: 1,
+          source_kind: 'text_span',
+          created_entity_type: 'native_label'
+        }
+      ]
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'sample.pdf',
+      { import_mode: 'auto', import_text: true, text_mode: :labels },
+      stats
+    )
+    prov = report[:extra][:source_provenance]
+    refute_nil prov
+    assert_equal 'bcs.source_provenance/1.0', prov[:schema]
+    assert_equal 'session-su-1', prov[:import_session_id]
+    assert_equal 1, prov[:object_count]
+  end
 end

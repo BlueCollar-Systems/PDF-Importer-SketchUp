@@ -132,6 +132,13 @@ module BlueCollarSystems
       stats[:text_renderers] << entry
     end
 
+    def self.new_import_session_id
+      require 'securerandom'
+      SecureRandom.uuid
+    rescue StandardError
+      "su-import-#{Process.pid}-#{Time.now.to_i}"
+    end
+
     def self.apply_internal_text_angle_hints(text_items, angle_items)
       return text_items unless text_items && angle_items && !angle_items.empty?
 
@@ -776,7 +783,9 @@ module BlueCollarSystems
                 generic: nil, mode_used: nil, xobjects: 0,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
                 text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
-                recognition_skipped_pages: [] }
+                recognition_skipped_pages: [],
+                import_session_id: new_import_session_id,
+                source_provenance_objects: [] }
 
       svg_text_mode = [:geometry, :glyphs].include?(requested_text_mode)
       if svg_text_mode && opts[:import_text] && !SvgTextRenderer.svg_renderer_available?
@@ -1099,6 +1108,10 @@ module BlueCollarSystems
         end
         builder_use_3d_text = (requested_text_mode == :text3d)
         builder_text_items = use_svg_text ? [] : text_items
+        provenance_opts = {
+          provenance_bucket: stats[:source_provenance_objects],
+          import_session_id: stats[:import_session_id]
+        }
 
         builder = GeometryBuilder.new(model, paths, builder_text_items, media_box,
           scale_factor: opts[:scale], bezier_segments: opts[:bezier_segments],
@@ -1112,7 +1125,9 @@ module BlueCollarSystems
           strict_text_fidelity: opts[:strict_text_fidelity],
           layer_manager: layer_mgr,
           y_offset: page_y_offset,
-          page_rotation: page_rotation)
+          page_rotation: page_rotation,
+          provenance_bucket: provenance_opts[:provenance_bucket],
+          import_session_id: provenance_opts[:import_session_id])
         result = builder.build
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
@@ -1203,7 +1218,9 @@ module BlueCollarSystems
               layer_manager: layer_mgr,
               y_offset: page_y_offset,
               page_rotation: page_rotation,
-              target_entities: builder.page_group.entities)
+              target_entities: builder.page_group.entities,
+              provenance_bucket: provenance_opts[:provenance_bucket],
+              import_session_id: provenance_opts[:import_session_id])
             fb_result = fallback_builder.build
             stats[:text] += fb_result[:text_objects]
             stats[:text_mode] = fallback_use_3d ? :text3d : :labels
