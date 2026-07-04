@@ -1,0 +1,11 @@
+{
+  "pdf_name": "alvord-2013.pdf",
+  "corpus_key": "corpus_pdftest/alvord-2013.pdf",
+  "pages": 1,
+  "paths": 0,
+  "text_items": 790,
+  "bbox_pct": 100.0,
+  "placement_ok": 791,
+  "placement_total": 791,
+  "text_hash": "bf7d73627354fe70a5862bef9ccf1ab3831e49371162cb3eb108d45d6d77fa0f"
+}

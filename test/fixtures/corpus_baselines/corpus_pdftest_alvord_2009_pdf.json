@@ -1,0 +1,11 @@
+{
+  "pdf_name": "alvord-2009.pdf",
+  "corpus_key": "corpus_pdftest/alvord-2009.pdf",
+  "pages": 1,
+  "paths": 0,
+  "text_items": 826,
+  "bbox_pct": 100.0,
+  "placement_ok": 846,
+  "placement_total": 846,
+  "text_hash": "6a28d784d973baff2542744aeaaac2ed532848bc786f6e3ff93c337938454520"
+}
