@@ -54,7 +54,7 @@ module BlueCollarSystems
           generated_at: Time.now.utc.iso8601,
           import_session_id: session_id,
           table_count: tables.length,
-          row_count: tables.sum { |t| t[:rows].length },
+          row_count: tables.map { |t| t[:rows].length }.inject(0, :+),
           tables: tables
         }
       end
