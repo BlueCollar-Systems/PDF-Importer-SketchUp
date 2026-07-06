@@ -74,7 +74,7 @@ but this extension still provides dedicated PDF import menu and toolbar commands
 
 ## Upgrading / skipping versions
 
-Install the latest `.rbz` from Releases via Extension Manager (overwrites the prior extension). When the version changes, SketchUp shows a **one-time update notice** on next launch — run **Compatibility Report** and retest a Tier-1 PDF before shop use. Skipping intermediate versions (e.g. 3.7.55 → 3.7.70) is supported; there is no incremental migration tool.
+Install the latest `.rbz` from Releases via Extension Manager (overwrites the prior extension). When the version changes, SketchUp shows a **one-time update notice** on next launch — run **Compatibility Report** and retest one of your own representative PDFs before shop use. Skipping intermediate versions (e.g. 3.7.55 → 3.7.70) is supported; there is no incremental migration tool.
 
 ## Enterprise / multi-user installs
 

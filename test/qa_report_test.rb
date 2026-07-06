@@ -253,7 +253,7 @@ class QAReportTest < Minitest::Test
     assert_equal 1, prov[:object_count]
   end
 
-  def test_model_3d_payload_is_reported
+  def test_model_3d_payload_reports_shelved_state
     stats = {
       pages: 1,
       primitives: 8,
@@ -275,9 +275,10 @@ class QAReportTest < Minitest::Test
       stats
     )
 
-    assert_equal true, report[:extra][:model_3d]['enabled']
-    assert_equal 3, report[:extra][:model_3d]['faces_extruded']
-    assert_in_delta 6.35, report[:extra][:model_3d]['depth_mm'], 0.001
+    assert_equal false, report[:extra][:model_3d]['enabled']
+    assert_equal false, report[:extra][:model_3d]['supported']
+    assert_equal 0, report[:extra][:model_3d]['faces_extruded']
+    assert_equal 'shelved_by_owner', report[:extra][:model_3d]['skipped_reason']
   end
 
   def test_model_3d_intent_is_reported_from_text_evidence
