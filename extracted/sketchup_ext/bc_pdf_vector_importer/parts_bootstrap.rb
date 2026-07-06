@@ -109,8 +109,8 @@ module BlueCollarSystems
         headers   = items.select { |it| it.text.to_s.strip =~ BOM_HEADER_RE }
         return ctx if headers.empty?
 
-        ctx[:quan_x] = quan_item&.bbox_x0.to_f
-        ctx[:mark_x] = mark_item&.bbox_x0.to_f
+        ctx[:quan_x] = (quan_item ? quan_item.bbox_x0 : nil).to_f
+        ctx[:mark_x] = (mark_item ? mark_item.bbox_x0 : nil).to_f
         anchor = quan_item ? quan_item.bbox_y0.to_f : headers.map { |h| h.bbox_y0.to_f }.max
         ctx[:y0] = anchor - 320.0
         ctx[:y1] = anchor + 12.0
