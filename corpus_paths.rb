@@ -1,13 +1,11 @@
-# corpus_paths.rb — Resolve PDF test corpus paths without Desktop-specific absolutes.
+# corpus_paths.rb — Resolve PDF test corpus paths via BCS_CORPUS_ROOT.
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
 module BlueCollarSystems
   module PDFVectorImporter
     module CorpusPaths
       DEFAULT_CORPUS_ROOTS = [
-        'C:/1pdf-test-corpus',
-        File.join(Dir.home, 'Desktop', 'PDFTest Files'),
-        'C:/Users/Rowdy Payton/Desktop/PDFTest Files'
+        'C:/1pdf-test-corpus'
       ].freeze
 
       # Scan profiles for corpus placement CI (phase 1). Earlier entries win on
@@ -16,16 +14,8 @@ module BlueCollarSystems
         { subdir: 'tier1/user', recursive: false, tag: 'corpus_tier1_user' },
         { subdir: 'tier1/web', recursive: true, tag: 'corpus_tier1_web' },
         { subdir: 'tier2/web', recursive: true, tag: 'corpus_tier2_web' },
-        { subdir: 'PDFTest Files', recursive: false, tag: 'corpus_pdftest' },
         { subdir: 'web-acquired', recursive: true, tag: 'corpus_web_acquired' },
-        { subdir: 'New folder (2)', recursive: true, tag: 'corpus_new_folder' },
         { subdir: nil, recursive: false, tag: 'corpus_root' }
-      ].freeze
-
-      DESKTOP_SCAN_PROFILES = [
-        { subdir: 'PDFTest Files', recursive: false, tag: 'desktop_pdftest' },
-        { subdir: 'New folder (2)', recursive: true, tag: 'desktop_new_folder' },
-        { subdir: nil, recursive: false, tag: 'desktop_root' }
       ].freeze
 
       module_function
@@ -47,7 +37,7 @@ module BlueCollarSystems
         corpus_scan_roots.each do |root|
           search_dirs = [root]
           search_dirs.unshift(File.join(root, subdir)) unless subdir.to_s.empty?
-          %w[tier1/user tier1/web tier2/web PDFTest\ Files web-acquired pdfs New\ folder\ (2)].each do |folder|
+          %w[tier1/user tier1/web tier2/web web-acquired pdfs].each do |folder|
             candidate = File.join(root, folder)
             search_dirs << candidate if File.directory?(candidate)
           end
@@ -78,25 +68,14 @@ module BlueCollarSystems
 
       # Ordered roots used by corpus placement CI. An explicit BCS_CORPUS_ROOT
       # or PDF_TEST_CORPUS restricts the scan to that root; otherwise the local
-      # canonical corpus and Desktop mirrors are scanned.
+      # canonical corpus checkout is scanned.
       def corpus_scan_roots
-        roots = []
         env_root = ENV['BCS_CORPUS_ROOT'] || ENV['PDF_TEST_CORPUS']
         if env_root && !env_root.to_s.strip.empty?
           path = File.expand_path(env_root)
           return File.directory?(path) ? [path] : []
         end
-        roots.concat(DEFAULT_CORPUS_ROOTS)
-        roots << File.join(Dir.home, 'Desktop', 'New folder (2)')
-        roots << 'C:/Users/Rowdy Payton/Desktop/New folder (2)'
-        seen = {}
-        roots.each do |root|
-          path = File.expand_path(root.to_s)
-          next unless File.directory?(path)
-          next if seen[path]
-          seen[path] = true
-        end
-        seen.keys
+        DEFAULT_CORPUS_ROOTS.map { |root| File.expand_path(root) }.select { |path| File.directory?(path) }.uniq
       end
 
       # Collect unique PDFs from all configured corpus locations.
@@ -108,9 +87,7 @@ module BlueCollarSystems
                         File.expand_path(root) == File.expand_path(
                           (ENV['BCS_CORPUS_ROOT'] || ENV['PDF_TEST_CORPUS']).to_s
                         )
-          profiles = CORPUS_SCAN_PROFILES
-          profiles = DESKTOP_SCAN_PROFILES if desktop_mirror_root?(root)
-          profiles.each do |profile|
+          CORPUS_SCAN_PROFILES.each do |profile|
             scan_dir = profile[:subdir] ? File.join(root, profile[:subdir]) : root
             next unless File.directory?(scan_dir)
             glob = profile[:recursive] ? '**/*.{pdf,Pdf,PDF}' : '*.{pdf,Pdf,PDF}'
@@ -137,27 +114,13 @@ module BlueCollarSystems
         dedup.values.sort_by { |info| info[:corpus_key].downcase }
       end
 
-      def desktop_mirror_root?(root)
-        home = Dir.home.to_s.downcase
-        path = File.expand_path(root).downcase
-        path.include?('/desktop/') || path.include?('\\desktop\\') ||
-          path.start_with?(home) && path.include?('desktop')
-      end
-
       def baseline_slug(corpus_key)
-        slug = baseline_key_to_slug(canonical_baseline_key(corpus_key))
-        slug[0, 120] + '.json'
+        slug = baseline_key_to_slug(canonical_baseline_key(corpus_key))[0, 120] + '.json'
       end
 
       def baseline_slug_candidates(corpus_key)
         key = corpus_key.to_s
         keys = [canonical_baseline_key(key)]
-        if key.start_with?('desktop_root/') || key.start_with?('desktop_pdftest/') ||
-           key.start_with?('env_corpus/')
-          rel = key.sub(%r{\A[^/]+/}, '')
-          keys << "corpus_new_folder/#{rel}"
-          keys << "corpus_new_folder/New folder/#{rel}"
-        end
         keys.uniq.map do |candidate|
           baseline_key_to_slug(candidate)[0, 120] + '.json'
         end
@@ -171,10 +134,7 @@ module BlueCollarSystems
 
       def canonical_baseline_key(corpus_key)
         key = corpus_key.to_s
-        key = key.sub(%r{\Adesktop_root/}, 'corpus_pdftest/')
-        key = key.sub(%r{\Adesktop_pdftest/}, 'corpus_pdftest/')
-        key = key.sub(%r{\Aenv_corpus/}, 'corpus_pdftest/')
-        key = key.sub(%r{\Adesktop_new_folder/}, 'corpus_new_folder/')
+        key = key.sub(%r{\Aenv_corpus/}, 'corpus_root/')
         key
       end
     end
