@@ -802,7 +802,7 @@ module BlueCollarSystems
                 embedded_image_dir: nil, extruded_faces: 0,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
                 text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
-                model_3d_texts: [],
+                model_3d_texts: [], page_text_map: {},
                 recognition_skipped_pages: [],
                 import_session_id: new_import_session_id,
                 source_provenance_objects: [] }
@@ -1022,6 +1022,7 @@ module BlueCollarSystems
           end
           Logger.info("Pipeline", "Page #{page_num}: text extractor=#{text_source}, items=#{text_items ? text_items.length : 0}")
           stats[:page_text_sources][page_num] = text_source if text_source
+          stats[:page_text_map][page_num] = text_items if text_items && !text_items.empty?
           Array(text_items).each do |item|
             raw_text = if item.respond_to?(:text)
                          item.text
@@ -1374,6 +1375,17 @@ module BlueCollarSystems
       stats[:log_path] = Logger.log_path
       begin
         report = QAReport.build_from_stats(path, opts, stats)
+        parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
+        if parts_payload && parts_payload[:row_count].to_i > 0
+          report_target = QAReport.default_output_path(path)
+          sidecar_base = File.join(File.dirname(report_target), File.basename(path.to_s, File.extname(path.to_s)))
+          parts_path = PartsBootstrap.write_sidecar(parts_payload, sidecar_base)
+          if parts_path
+            parts_payload[:sidecar_path] = parts_path
+            report[:extra][:parts_bootstrap] = parts_payload
+            stats[:parts_bootstrap_sidecar_path] = parts_path
+          end
+        end
         stats[:human_summary] = report[:extra][:human_summary] if report[:extra]
         stats[:scale_crosscheck] = report[:extra][:scale_crosscheck] if report[:extra]
         stats[:performance_hint] = report[:extra][:performance_hint] if report[:extra]

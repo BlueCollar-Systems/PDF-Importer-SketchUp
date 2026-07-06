@@ -358,17 +358,7 @@ module BlueCollarSystems
             <div><label>Page Arrangement</label>
               <select id="page_arrangement">#{page_arrangement_opts}</select></div>
           </div>
-          <div class="section">3D Model (optional)</div>
-          <div class="row2">
-            <div><label>Extrude to 3D</label>
-              <select id="extrude_to_3d">#{yn.call(:extrude_to_3d)}</select>
-              <p class="hint">Give thickness to closed PDF fill regions (shop plate / section views).</p>
-            </div>
-            <div><label>Extrusion depth (mm)</label>
-              <input type="text" id="extrude_depth_mm" value="#{esc(d[:extrude_depth_mm] || '')}" placeholder="3.175 (1/8&quot; plate)">
-              <p class="hint">Leave blank for default 1/8&quot; steel scaled to import factor.</p>
-            </div>
-          </div>
+          <!-- 3D Model section shelved — revisit after 3D text scaling resolved -->
           <div class="actions">
             <button class="btn btn-secondary" onclick="cancel()">Cancel</button>
             <button class="btn btn-primary" onclick="doImport()">Import</button>
@@ -383,8 +373,8 @@ module BlueCollarSystems
             match_pdf_layers:document.getElementById('match_pdf_layers').value,
             grouping_mode:document.getElementById('grouping_mode').value,
             page_arrangement:document.getElementById('page_arrangement').value,
-            extrude_to_3d:document.getElementById('extrude_to_3d').value,
-            extrude_depth_mm:document.getElementById('extrude_depth_mm').value.trim()});}
+            extrude_to_3d:'No',
+            extrude_depth_mm:''});}
           function cancel(){sketchup.on_cancel({});}
           document.addEventListener('keydown',function(e){if(e.key==='Escape')cancel();});
           </script></body></html>

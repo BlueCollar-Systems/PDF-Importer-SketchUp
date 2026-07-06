@@ -276,19 +276,6 @@ Evidence levels:
 
 ---
 
-## Corpus placement CI
-
-Headless regression gate over the shared PDF corpus: parser metrics, pdftotext
-extraction, and simulated label placement vs committed baselines. See
-[`test/CORPUS_CI.md`](test/CORPUS_CI.md).
-
-```powershell
-ruby test/corpus_placement_test.rb
-ruby tools/generate_corpus_baselines.rb --update   # after reviewed changes
-```
-
----
-
 ## Free Structural Steel Shapes (CC0)
 
 This repository also hosts the public-domain AISC v16.0 SketchUp shape packs

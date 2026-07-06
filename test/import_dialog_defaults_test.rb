@@ -188,7 +188,7 @@ class ImportDialogDefaultsTest < Minitest::Test
     %w[Auto Vector Raster Hybrid].each { |m| assert_includes html, m }
   end
 
-  def test_advanced_html_includes_3d_model_controls
+  def test_advanced_html_3d_model_shelved
     d = {
       mode: 'Auto', pages: 'All', scale: '1.0', text_mode: 'Geometry',
       import_text: 'Yes', match_pdf_layers: 'Yes',
@@ -199,9 +199,10 @@ class ImportDialogDefaultsTest < Minitest::Test
     }
     html = BID.send(:advanced_html, 'sample.pdf', d)
 
-    assert_includes html, '3D Model'
-    assert_includes html, 'id="extrude_to_3d"'
-    assert_includes html, 'id="extrude_depth_mm"'
+    # 3D extrusion UI is shelved — controls must NOT appear
+    refute_includes html, 'id="extrude_to_3d"'
+    refute_includes html, 'id="extrude_depth_mm"'
+    assert_includes html, '3D Model section shelved'
   end
 
   def test_build_opts_maps_3d_model_controls

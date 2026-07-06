@@ -1,43 +1,29 @@
-# Human Confirmation — PDF Vector Importer (SketchUp)
+# Human Verification — PDF Vector Importer (SketchUp)
 
-**Coordination:** see Desktop Q&A [COORDINATION-HUB](file:///C:/Users/Rowdy%20Payton/Desktop/PDFTest%20Files/Q&A/QA-2026-06-24_COORDINATION-HUB.md) or `_LLM_CONTROL_PACK/QA/QA-2026-06-24_COORDINATION-HUB.md`
-
-**Session prep:** 2026-06-24 · Tier-1 corpus · See also `Desktop/PDFTest Files/Q&A/QA-2026-06-24_human-confirmation-script.md`
+Use **your own shop PDFs** for sign-off. There is no fixed public test matrix.
 
 ## Before you start
 
-1. Install/build **v3.7.63+** RBZ from this repo or latest release.
-2. Set corpus root (optional): `$env:BCS_CORPUS_ROOT = 'C:\1pdf-test-corpus'`
-3. Run `python C:\1pdf-test-corpus\tools\list_tier1.py --host SU --resolved`
-4. Open **Extensions → PDF Vector Importer → Compatibility Report** — note Poppler/MuPDF status.
+1. Install the latest release from this repo or GitHub Releases.
+2. Open **Extensions → PDF Vector Importer → Compatibility Report** — note Poppler/MuPDF status.
 
-## Tier-1 checklist (pass/fail)
+## Checklist
 
-| PDF | Labels | Glyphs/Outlines | 3D Text | Pass criteria |
-|-----|--------|-----------------|---------|---------------|
-| 1017 - Rev 0 | ☐ | ☐ | ☐ | Vector geometry visible; scale plausible; BOM qty readable |
-| Welding-Symbol-Chart | ☐ | ☐ | n/a | Symbols import or clear raster fallback message |
-| 1011 (1 OF 2) | ☐ | ☐ | ☐ | Page 1 title block; no crash |
-| hello_world_rotated | ☐ | ☐ | ☐ | Text upright in model space (rotation handled) |
-| helloworld | ☐ | ☐ | ☐ | Baseline smoke |
-| doc_1_3_pages | ☐ | — | — | Page picker imports correct page |
-| Simple PDF 2.0 | ☐ | ☐ | ☐ | Vector paths > 0 |
-| text_only_fontsNotEmbedded | ☐ | ☐ | ☐ | Text items extracted |
-| webCapture | ☐ | ☐ | ☐ | Hybrid: vectors + raster image entity |
+For each representative shop drawing you import:
+
+| Check | Pass |
+|-------|------|
+| **Labels** — BOM, dimensions, and notes readable | ☐ |
+| **Outlines/Glyphs** — linework and symbols faithful to the PDF | ☐ |
+| **3D Text** (if used) — letterforms present and roughly scaled | ☐ |
+| Scale plausible vs the source drawing | ☐ |
+| Multi-page import behaves as expected | ☐ |
 
 ## After each import
 
-- [ ] Save `import_report.json` from import folder
-- [ ] Check **Import Health…** menu for scale cross-check warnings
-- [ ] Screenshot anomalies → `Desktop/PDFTest Files/PDF Importers Screenshots/`
-
-## Automated preflight (developer)
-
-```powershell
-$env:BCS_CORPUS_ROOT = 'C:\1pdf-test-corpus'
-ruby test/golden_oracle_test.rb
-ruby test/qa_report_test.rb
-```
+- Save `import_report.json` from the import folder
+- Check **Import Health…** for scale cross-check warnings
+- If something looks wrong: use [Report Doctor](https://bluecollarsystems.com/report-doctor) or **Send Feedback** with screenshots and your report JSON
 
 ## Sign-off
 

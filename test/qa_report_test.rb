@@ -4,6 +4,8 @@ require 'minitest/autorun'
 require 'json'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/qa_report'
 
+QAReportTextItem = Struct.new(:text, :page_number, :bbox_x0, :bbox_y0, :id)
+
 class QAReportTest < Minitest::Test
   def test_builds_import_report_schema
     stats = {
@@ -301,5 +303,42 @@ class QAReportTest < Minitest::Test
     assert_equal 1, intent['plates'].length
     assert_equal 1, intent['members'].length
     assert_equal 'W12X30', intent['members'][0]['designation']
+  end
+
+  def test_parts_bootstrap_is_reported_from_page_text_map
+    stats = {
+      pages: 1,
+      primitives: 8,
+      edges: 12,
+      text: 6,
+      layers: [],
+      text_renderers: [],
+      text_mode: :labels,
+      import_session_id: 'session-su-parts',
+      page_text_map: {
+        1 => [
+          QAReportTextItem.new('QUAN', 1, 50.0, 500.0, 'h1'),
+          QAReportTextItem.new('MARK', 1, 120.0, 500.0, 'h2'),
+          QAReportTextItem.new('DESCRIPTION', 1, 220.0, 500.0, 'h3'),
+          QAReportTextItem.new('2', 1, 50.0, 460.0, 'r1a'),
+          QAReportTextItem.new('p1052', 1, 120.0, 460.0, 'r1b'),
+          QAReportTextItem.new('PL3/4X7"', 1, 220.0, 460.0, 'r1c')
+        ]
+      }
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'parts.pdf',
+      { import_mode: 'auto', import_text: true, text_mode: :labels },
+      stats
+    )
+
+    bootstrap = report[:extra][:parts_bootstrap]
+    assert_equal 'bcs.parts_bootstrap/1.0', bootstrap['schema']
+    assert_equal 1, bootstrap['row_count']
+    row = bootstrap['tables'][0]['rows'][0]
+    assert_equal 'p1052', row['piece_mark']
+    assert_equal 2, row['quantity']
+    assert_equal 'PL', row['profile_hint']
   end
 end

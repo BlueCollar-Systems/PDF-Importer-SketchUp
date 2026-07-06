@@ -101,8 +101,9 @@ module BlueCollarSystems
           o.on('--extract-images', 'Extract embedded Image XObjects') { opts[:extract_images] = true }
           o.on('--no-extract-images', 'Do not extract embedded images') { opts[:extract_images] = false }
           o.on('--no-primitives-json', 'Skip primitives.json output') { opts[:write_primitives] = false }
-          o.on('--extrude-to-3d', 'Extrude closed fill faces to 3D (optional)') { opts[:extrude_to_3d] = 'Yes' }
-          o.on('--extrude-depth-mm MM', 'Extrusion depth in millimeters (default 3.175 = 1/8" plate)') { |v| opts[:extrude_depth_mm] = v }
+          # 3D extrusion shelved — revisit after 3D text scaling resolved
+          # o.on('--extrude-to-3d', 'Extrude closed fill faces to 3D (optional)') { opts[:extrude_to_3d] = 'Yes' }
+          # o.on('--extrude-depth-mm MM', 'Extrusion depth in millimeters (default 3.175 = 1/8" plate)') { |v| opts[:extrude_depth_mm] = v }
           o.on('--preflight', 'Run preflight checks and emit ready_check JSON') { opts[:preflight] = true }
           o.on('--version', 'Print plugin version and exit') { opts[:version] = true }
           o.on('--quiet', 'Only use exit code and files') { opts[:quiet] = true }
@@ -157,6 +158,7 @@ module BlueCollarSystems
 
         stats, payload = extract_pdf(pdf_path, import_opts, cli_opts)
         report = QAReport.build_from_stats(pdf_path, import_opts, stats)
+        attach_parts_sidecar(report, pdf_path, output_dir)
         report_path = write_report(report, pdf_path, output_dir, cli_opts[:report])
         primitive_path = nil
         if cli_opts[:write_primitives]
@@ -216,6 +218,8 @@ module BlueCollarSystems
           embedded_image_files: [],
           text_renderers: [],
           page_text_sources: {},
+          page_text_map: {},
+          model_3d_texts: [],
           text_mode: opts[:text_mode],
           elapsed_seconds: 0.0
         }
@@ -265,6 +269,12 @@ module BlueCollarSystems
           stats[:embedded_images] += images.length
           stats[:embedded_image_files].concat(images.map { |img| img.file_path }.compact)
           stats[:page_text_sources][page_num] = text_source if text_source
+          stats[:page_text_map][page_num] = text_items if text_items && !text_items.empty?
+          Array(text_items).each do |item|
+            raw_text = item.respond_to?(:text) ? item.text : item.to_s
+            raw_text = raw_text.to_s.strip
+            stats[:model_3d_texts] << raw_text unless raw_text.empty?
+          end
           if text_source
             stats[:text_renderers] << {
               page: page_num,
@@ -376,6 +386,20 @@ module BlueCollarSystems
         path = requested
         path = File.join(output_dir, "#{File.basename(pdf_path, '.pdf')}_import_report.json") if path.to_s.strip.empty?
         QAReport.write_json(report, path)
+      end
+
+      def attach_parts_sidecar(report, pdf_path, output_dir)
+        payload = report[:extra] && report[:extra][:parts_bootstrap]
+        return unless payload && payload[:row_count].to_i > 0
+
+        base = File.join(output_dir, File.basename(pdf_path.to_s, File.extname(pdf_path.to_s)))
+        sidecar_path = PartsBootstrap.write_sidecar(payload, base)
+        return unless sidecar_path
+
+        payload[:sidecar_path] = sidecar_path
+        report[:extra][:parts_bootstrap] = payload
+      rescue StandardError => e
+        Logger.warn('CLI', "parts_bootstrap sidecar failed: #{e.message}")
       end
 
       def primitive_to_h(prim)
