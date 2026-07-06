@@ -65,6 +65,9 @@ module BlueCollarSystems
       GROUPING_CHOICES         = 'Single group|Group per page|Group per layer|Group per color|Nested: page > layer|Nested: page > lineweight'
       PAGE_ARRANGEMENT_CHOICES = 'Spread (20% gap)|Compact gap|Touching pages|Overlay pages'
 
+      # Shelved 2026-07-06: closed-region shape extrusion deferred; code retained.
+      SHAPE_EXTRUSION_UI_ENABLED = false
+
       def self.show(filepath)
         filename = File.basename(filepath)
         saved    = load_prefs
@@ -531,8 +534,8 @@ module BlueCollarSystems
           grouping_mode:    (raw[:grouping_mode] || 'Group per page').to_s,
           import_mode:      mode_str,
           match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes',
-          extrude_to_3d: (raw[:extrude_to_3d] || 'No') == 'Yes',
-          extrude_depth_mm: parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth])
+          extrude_to_3d: SHAPE_EXTRUSION_UI_ENABLED && (raw[:extrude_to_3d] || 'No') == 'Yes',
+          extrude_depth_mm: SHAPE_EXTRUSION_UI_ENABLED ? parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth]) : nil
         }
       end
 

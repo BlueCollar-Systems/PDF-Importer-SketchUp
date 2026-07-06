@@ -44,18 +44,18 @@ class ImportDialogDefaultsTest < Minitest::Test
     )
   end
 
-  def test_vector_quality_modes_default_to_native_3d_text
+  def test_vector_quality_modes_default_to_labels
     %w[Auto Vector Hybrid].each do |mode|
-      assert_equal '3D Text', BID::MODES[mode]['text_mode']
-      assert_equal '3D Text', BIC::MODES[mode]['text_mode']
+      assert_equal 'Labels', BID::MODES[mode]['text_mode']
+      assert_equal 'Labels', BIC::MODES[mode]['text_mode']
     end
   end
 
-  def test_missing_text_mode_builds_as_native_3d_text
+  def test_missing_text_mode_builds_as_labels
     opts = BID.send(:build_opts, import_mode: 'auto', import_text: 'Yes')
 
-    assert_equal :text3d, opts[:text_mode]
-    assert_equal true, opts[:use_3d_text]
+    assert_equal :labels, opts[:text_mode]
+    assert_equal false, opts[:use_3d_text]
     assert_equal true, opts[:import_text]
   end
 
@@ -68,13 +68,13 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_equal 'Labels', BID.effective_text_mode(prefs)
   end
 
-  def test_first_run_text_mode_defaults_to_native_3d_text
+  def test_first_run_text_mode_defaults_to_labels
     Sketchup.reset_defaults({})
 
     prefs = BID.send(:load_prefs)
 
     assert_nil prefs[:text_mode]
-    assert_equal '3D Text', BID.effective_text_mode(prefs)
+    assert_equal 'Labels', BID.effective_text_mode(prefs)
   end
 
   def test_saved_3d_text_preference_is_preserved
@@ -113,8 +113,8 @@ class ImportDialogDefaultsTest < Minitest::Test
     BID.send(:save_prefs, text_mode: 'Bogus')
     prefs = BID.send(:load_prefs)
 
-    assert_equal '3D Text', prefs[:text_mode]
-    assert_equal '3D Text', Sketchup.default_value(PREF_KEY, 'text_mode')
+    assert_equal 'Labels', prefs[:text_mode]
+    assert_equal 'Labels', Sketchup.default_value(PREF_KEY, 'text_mode')
   end
 
   def test_labels_option_builds_as_labels
@@ -211,8 +211,13 @@ class ImportDialogDefaultsTest < Minitest::Test
                     extrude_to_3d: 'Yes',
                     extrude_depth_mm: '10.5')
 
-    assert_equal true, opts[:extrude_to_3d]
-    assert_in_delta 10.5, opts[:extrude_depth_mm], 0.001
+    if BID::SHAPE_EXTRUSION_UI_ENABLED
+      assert_equal true, opts[:extrude_to_3d]
+      assert_in_delta 10.5, opts[:extrude_depth_mm], 0.001
+    else
+      assert_equal false, opts[:extrude_to_3d]
+      assert_nil opts[:extrude_depth_mm]
+    end
   end
 
   def test_basic_import_callback_uses_auto_mode

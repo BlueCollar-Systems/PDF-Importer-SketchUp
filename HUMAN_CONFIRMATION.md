@@ -1,6 +1,6 @@
 # Human Verification — PDF Vector Importer (SketchUp)
 
-Use **your own shop PDFs** for sign-off. There is no fixed public test matrix.
+Use **your own shop PDFs** for sign-off. There is no fixed public test matrix, and internal validation files are not published in this repo.
 
 ## Before you start
 
@@ -15,7 +15,7 @@ For each representative shop drawing you import:
 |-------|------|
 | **Labels** — BOM, dimensions, and notes readable | ☐ |
 | **Outlines/Glyphs** — linework and symbols faithful to the PDF | ☐ |
-| **3D Text** (if used) — letterforms present and roughly scaled | ☐ |
+| **3D Text** (experimental, if used) — letterforms present and scale checked against Labels/Glyphs | ☐ |
 | Scale plausible vs the source drawing | ☐ |
 | Multi-page import behaves as expected | ☐ |
 

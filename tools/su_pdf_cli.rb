@@ -187,7 +187,7 @@ def main(argv)
   end
 
   unless opts[:input] && File.file?(opts[:input])
-    warn 'Give me a PDF to inspect, e.g.: ruby tools/su_pdf_cli.rb "C:\\drawings\\1017 - Rev 0.pdf" --json out.json'
+    warn 'Give me a PDF to inspect, e.g.: ruby tools/su_pdf_cli.rb "C:\\drawings\\my-shop-drawing.pdf" --json out.json'
     warn 'The file was not found.' if opts[:input]
     return 2
   end
