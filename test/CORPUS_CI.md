@@ -6,19 +6,26 @@ committed baselines.
 
 ## Corpus scan paths
 
-Resolved via `corpus_paths.rb` / `BCS_CORPUS_ROOT` (fallback `PDF_TEST_CORPUS`):
+Resolved via `corpus_paths.rb` and environment variable `BCS_CORPUS_ROOT`
+(fallback `PDF_TEST_CORPUS`, default checkout `C:\1pdf-test-corpus`):
 
-1. `C:\1pdf-test-corpus\PDFTest Files\` — non-recursive
-2. `C:\1pdf-test-corpus\New folder (2)\` — recursive
-3. `%USERPROFILE%\Desktop\PDFTest Files\` — non-recursive (legacy mirror)
-4. `%USERPROFILE%\Desktop\New folder (2)\` — recursive (legacy mirror)
+| Subdir | Tag | Scan |
+|--------|-----|------|
+| `tier1/user/` | `corpus_tier1_user` | non-recursive |
+| `tier1/web/` | `corpus_tier1_web` | recursive |
+| `tier2/web/` | `corpus_tier2_web` | recursive |
+| `web-acquired/` | `corpus_web_acquired` | recursive |
+
+User-tier PDFs use manifest IDs (`T1-01.pdf`, `T1-02.pdf`, …) per
+`manifest.json`. Proprietary user PDFs live under `tier1/user/` and are
+gitignored in the corpus repo.
 
 Duplicate `corpus_key` collisions keep the first match.
 
 ## Local run
 
 ```powershell
-# Optional: point at canonical corpus
+# Point at canonical corpus checkout
 $env:BCS_CORPUS_ROOT = 'C:\1pdf-test-corpus'
 
 # Requires pdftotext on PATH (Poppler / MiKTeX / FreeCAD bundle)
@@ -32,14 +39,15 @@ The repo includes a local-only manifest for public stress PDFs:
 - `tools/public_pdf_corpus_manifest.json` — source URLs, feature tags,
   license notes, and local target paths.
 - `tools/download_public_pdf_corpus.py` — dependency-free downloader that writes
-  PDFs under `C:\1pdf-test-corpus\web-acquired\` by default.
-- `C:\1pdf-test-corpus\web-acquired\PUBLIC_PDF_CORPUS.lock.json` — local hash
-  and size inventory written after acquisition; intentionally not committed.
+  PDFs under `$env:BCS_CORPUS_ROOT\web-acquired\` by default.
+- `web-acquired/PUBLIC_PDF_CORPUS.lock.json` — local hash and size inventory
+  written after acquisition; intentionally not committed.
 
 Acquire the enabled public set:
 
 ```powershell
-python tools/download_public_pdf_corpus.py --root C:\1pdf-test-corpus
+$env:BCS_CORPUS_ROOT = 'C:\1pdf-test-corpus'
+python tools/download_public_pdf_corpus.py
 ```
 
 These PDFs are not redistributed from this repository. The manifest records the
@@ -63,7 +71,7 @@ Baseline fields per PDF:
 
 | Field | Meaning |
 |-------|---------|
-| `pdf_name` | File basename |
+| `pdf_name` | File basename (manifest ID, e.g. `T1-01.pdf`) |
 | `corpus_key` | Stable scan key (`tag/relative/path.pdf`) |
 | `pages` | Page count |
 | `paths` | Vector path count |
@@ -110,7 +118,7 @@ on Ruby 2.7 / 3.0 / 3.2. Failures block merge.
 
 ## Related tests
 
-- `test/text_label_placement_test.rb` — golden 1017 coordinate assertions (not corpus-wide)
+- `test/text_label_placement_test.rb` — golden T1-01 coordinate assertions (not corpus-wide)
 - `test/corpus_strict_timing_test.rb` — opt-in strict timing on named PDF (`CORPUS_STRICT_TIMING=1`)
 - `test/CORPUS_STRESS_OPTOUT.md` — stress PDF opt-out inventory
 - `test_all_pdfs.rb` — legacy parser-only sweep (paths only)

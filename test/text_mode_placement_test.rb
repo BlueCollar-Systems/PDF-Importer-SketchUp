@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # test/text_mode_placement_test.rb
-# Per-mode placement checks for 1017 key labels (Labels + 3D Text).
+# Per-mode placement checks for T1-01 key labels (Labels + 3D Text).
 # Golden tier regression — see text_category_placement_test.rb for pattern rules.
 
 require 'fileutils'
@@ -14,9 +14,12 @@ require 'bc_pdf_vector_importer/text_parser'
 require 'bc_pdf_vector_importer/external_text_extractor'
 require_relative '../corpus_paths'
 
-pdf_1017 = ENV['BCS_1017_PDF'].to_s
-pdf_1017 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('1017 - Rev 0.pdf').to_s if pdf_1017.empty?
-PDF_1017 = pdf_1017
+pdf_tier1 = ENV['BCS_TIER1_USER_PDF'].to_s
+if pdf_tier1.empty?
+  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf('T1-01').to_s
+  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('tier1/user/T1-01.pdf').to_s if pdf_tier1.empty?
+end
+PDF_TIER1_USER = pdf_tier1
 PDF_TOL = 1.5
 
 $failures = []
@@ -210,13 +213,13 @@ if rotated_entities.texts.first
               'rotated native labels should hide SketchUp leader lines when possible')
 end
 
-unless File.exist?(PDF_1017)
-  puts "  SKIP: 1017 PDF not found at #{PDF_1017}"
+unless File.exist?(PDF_TIER1_USER)
+  puts "  SKIP: T1-01 PDF not found at #{PDF_TIER1_USER}"
 else
-  items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_1017, 1)
-  GOLDEN_1017_ITEM_COUNT = 342
-  assert_true(items && items.length == GOLDEN_1017_ITEM_COUNT,
-              "1017 coverage guard: need #{GOLDEN_1017_ITEM_COUNT} text items (got #{items ? items.length : 0})")
+  items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_TIER1_USER, 1)
+  GOLDEN_TIER1_ITEM_COUNT = 342
+  assert_true(items && items.length == GOLDEN_TIER1_ITEM_COUNT,
+              "T1-01 coverage guard: need #{GOLDEN_TIER1_ITEM_COUNT} text items (got #{items ? items.length : 0})")
 
   def find_label(items, text, bbox_x0, bbox_y0 = nil)
     items.find do |it|
@@ -226,14 +229,14 @@ else
     end
   end
 
-  quan1017 = items.find { |it| it.text.to_s.strip == 'QUAN' }
+  quan_bom = items.find { |it| it.text.to_s.strip == 'QUAN' }
   p1052 = items.select { |it| it.text.to_s.strip == 'p1052' }
                .min_by { |it| (it.bbox_y0.to_f - 684.21).abs }
   w1023 = find_label(items, 'w1023', 822.74, 760.18)
   aa_a1006 = find_label(items, 'a1006', 782.16, 297.45)
   aa_a1005 = find_label(items, 'a1005', 901.55, 296.38)
 
-  [quan1017, p1052, w1023, aa_a1006, aa_a1005].compact.each do |item|
+  [quan_bom, p1052, w1023, aa_a1006, aa_a1005].compact.each do |item|
     next unless item
     lpt = label_builder.send(:text_insertion_pdf, item)
     mpt = mesh_builder.send(:text_insertion_pdf, item)
@@ -242,47 +245,47 @@ else
     assert_near(lpt[2], mpt[2], 0.01, "#{item.text} angle must match across modes")
   end
 
-  if quan1017
-    qx, qy, _ = label_builder.send(:text_insertion_pdf, quan1017)
-    assert_near(qx, 1948.62, PDF_TOL, "1017 QUAN label X (got #{qx})")
-    assert_near(qy, 1656.59, PDF_TOL, "1017 QUAN label Y (got #{qy})")
+  if quan_bom
+    qx, qy, _ = label_builder.send(:text_insertion_pdf, quan_bom)
+    assert_near(qx, 1948.62, PDF_TOL, "T1-01 QUAN label X (got #{qx})")
+    assert_near(qy, 1656.59, PDF_TOL, "T1-01 QUAN label Y (got #{qy})")
   end
 
   if p1052
     px, py, _ = label_builder.send(:text_insertion_pdf, p1052)
-    assert_near(px, p1052.bbox_x0.to_f, 0.05, "1017 p1052 label X (got #{px})")
-    assert_near(py, 686.15, PDF_TOL, "1017 p1052 label Y (got #{py})")
+    assert_near(px, p1052.bbox_x0.to_f, 0.05, "T1-01 p1052 label X (got #{px})")
+    assert_near(py, 686.15, PDF_TOL, "T1-01 p1052 label Y (got #{py})")
   end
 
   if w1023
     wx, wy, wang = mesh_builder.send(:text_insertion_pdf, w1023)
-    assert_near(wx, 822.74, PDF_TOL, "1017 connection w1023 X left-anchored (got #{wx})")
-    assert_near(wy, 762.12, PDF_TOL, "1017 connection w1023 Y baseline (got #{wy})")
-    assert_near(wang, 0.0, PDF_TOL, "1017 connection w1023 stays horizontal per PDF angle (got #{wang})")
+    assert_near(wx, 822.74, PDF_TOL, "T1-01 connection w1023 X left-anchored (got #{wx})")
+    assert_near(wy, 762.12, PDF_TOL, "T1-01 connection w1023 Y baseline (got #{wy})")
+    assert_near(wang, 0.0, PDF_TOL, "T1-01 connection w1023 stays horizontal per PDF angle (got #{wang})")
     mesh_h = mesh_builder.send(:mesh_text_height_inches, w1023, wang, 792.0)
-    assert_true(mesh_h < 0.12, "1017 connection w1023 mesh height must not blow up (got #{mesh_h})")
+    assert_true(mesh_h < 0.12, "T1-01 connection w1023 mesh height must not blow up (got #{mesh_h})")
   end
 
   if aa_a1006
     ax, ay, aang = label_builder.send(:text_insertion_pdf, aa_a1006)
     mx, my, mang = mesh_builder.send(:text_insertion_pdf, aa_a1006)
-    assert_near(ax, 782.16, PDF_TOL, "1017 SECTION A-A a1006 label X (got #{ax})")
-    assert_near(ay, 299.39, PDF_TOL, "1017 SECTION A-A a1006 label Y (got #{ay})")
-    assert_near(aang, 0.0, PDF_TOL, "1017 SECTION A-A a1006 label angle (got #{aang})")
-    assert_near(mx, ax, 0.01, "1017 a1006 X must match across modes")
-    assert_near(my, ay, 0.01, "1017 a1006 Y must match across modes")
-    assert_near(mang, aang, 0.01, "1017 a1006 angle must match across modes")
+    assert_near(ax, 782.16, PDF_TOL, "T1-01 SECTION A-A a1006 label X (got #{ax})")
+    assert_near(ay, 299.39, PDF_TOL, "T1-01 SECTION A-A a1006 label Y (got #{ay})")
+    assert_near(aang, 0.0, PDF_TOL, "T1-01 SECTION A-A a1006 label angle (got #{aang})")
+    assert_near(mx, ax, 0.01, "T1-01 a1006 X must match across modes")
+    assert_near(my, ay, 0.01, "T1-01 a1006 Y must match across modes")
+    assert_near(mang, aang, 0.01, "T1-01 a1006 angle must match across modes")
   end
 
   if aa_a1005
     ax, ay, aang = label_builder.send(:text_insertion_pdf, aa_a1005)
     mx, my, mang = mesh_builder.send(:text_insertion_pdf, aa_a1005)
-    assert_near(ax, 901.55, PDF_TOL, "1017 SECTION A-A a1005 label X (got #{ax})")
-    assert_near(ay, 298.32, PDF_TOL, "1017 SECTION A-A a1005 label Y (got #{ay})")
-    assert_near(aang, 0.0, PDF_TOL, "1017 SECTION A-A a1005 label angle (got #{aang})")
-    assert_near(mx, ax, 0.01, "1017 a1005 X must match across modes")
-    assert_near(my, ay, 0.01, "1017 a1005 Y must match across modes")
-    assert_near(mang, aang, 0.01, "1017 a1005 angle must match across modes")
+    assert_near(ax, 901.55, PDF_TOL, "T1-01 SECTION A-A a1005 label X (got #{ax})")
+    assert_near(ay, 298.32, PDF_TOL, "T1-01 SECTION A-A a1005 label Y (got #{ay})")
+    assert_near(aang, 0.0, PDF_TOL, "T1-01 SECTION A-A a1005 label angle (got #{aang})")
+    assert_near(mx, ax, 0.01, "T1-01 a1005 X must match across modes")
+    assert_near(my, ay, 0.01, "T1-01 a1005 Y must match across modes")
+    assert_near(mang, aang, 0.01, "T1-01 a1005 angle must match across modes")
   end
 
   label_entities = DummyEntities.new
@@ -313,12 +316,12 @@ else
   failing_entities.fail_add_text!
   mesh_fallback_builder = make_builder(use_3d_text: false)
   before_mesh = failing_entities.mesh_calls.length
-  mesh_fallback_builder.send(:place_annotation_label, failing_entities, quan1017 || quan,
+  mesh_fallback_builder.send(:place_annotation_label, failing_entities, quan_bom || quan,
                              0.0, 0.0, 'TextLayer')
   assert_true(failing_entities.mesh_calls.length == before_mesh + 1,
               'Labels should fall back to mesh text only when add_text fails')
 
-  puts "  1017 PDF: labels=#{label_entities.texts.length}, mesh=#{mesh_entities.mesh_calls.length}, items=#{items.length}"
+  puts "  T1-01 PDF: labels=#{label_entities.texts.length}, mesh=#{mesh_entities.mesh_calls.length}, items=#{items.length}"
 end
 
 puts

@@ -1,13 +1,14 @@
 {
   "schema": "bcs.golden_oracles/1",
-  "updated": "2026-06-24",
-  "notes": "Named corpus PDFs with expected primitive/text/placement ranges. PDFs resolve via BCS_CORPUS_ROOT, tier1/, or Desktop/PDFTest Files mirrors.",
+  "updated": "2026-07-06",
+  "notes": "Named corpus PDFs with expected primitive/text/placement ranges. PDFs resolve via BCS_CORPUS_ROOT and manifest.json entry IDs (T1-01.pdf, etc.).",
   "oracles": [
     {
       "id": "GO-01",
       "name": "Embedded font vector baseline",
+      "manifest_entry_id": "T1-05",
       "corpus_key": "corpus_tier1_web/pdfjs/Embedded_font.pdf",
-      "pdf_candidates": ["Embedded_font.pdf", "Simple PDF 2.0 file.pdf"],
+      "pdf_candidates": ["Embedded_font.pdf", "tier1/web/pdfjs/Embedded_font.pdf"],
       "expect": {
         "paths_min": 1,
         "text_items_min": 0,
@@ -17,8 +18,9 @@
     {
       "id": "GO-02",
       "name": "Non-embedded font text sheet",
+      "manifest_entry_id": "T1-08",
       "corpus_key": "corpus_tier1_web/openpreserve/text_only_fontsNotEmbedded.pdf",
-      "pdf_candidates": ["text_only_fontsNotEmbedded.pdf"],
+      "pdf_candidates": ["text_only_fontsNotEmbedded.pdf", "tier1/web/openpreserve/text_only_fontsNotEmbedded.pdf"],
       "expect": {
         "paths_min": 0,
         "text_items_min": 1,
@@ -28,8 +30,9 @@
     {
       "id": "GO-04",
       "name": "Multi-page document tree",
+      "manifest_entry_id": "T1-06",
       "corpus_key": "corpus_tier1_web/pdfjs/doc_1_3_pages.pdf",
-      "pdf_candidates": ["doc_1_3_pages.pdf"],
+      "pdf_candidates": ["doc_1_3_pages.pdf", "tier1/web/pdfjs/doc_1_3_pages.pdf"],
       "expect": {
         "pages_min": 1,
         "paths_min": 0,
@@ -38,9 +41,10 @@
     },
     {
       "id": "GO-06",
-      "name": "1017 fabrication steel",
-      "corpus_key": "corpus_tier1_user/1017 - Rev 0.pdf",
-      "pdf_candidates": ["1017 - Rev 0.pdf"],
+      "name": "Tier-1 user fabrication drawing",
+      "manifest_entry_id": "T1-01",
+      "corpus_key": "corpus_tier1_user/T1-01.pdf",
+      "pdf_candidates": ["T1-01.pdf", "tier1/user/T1-01.pdf"],
       "expect": {
         "paths_min": 20,
         "text_items_min": 3,
@@ -49,9 +53,10 @@
     },
     {
       "id": "GO-07",
-      "name": "Welding symbol chart",
-      "corpus_key": "corpus_tier1_user/Welding-Symbol-Chart.pdf",
-      "pdf_candidates": ["Welding-Symbol-Chart.pdf"],
+      "name": "Tier-1 user welding symbol chart",
+      "manifest_entry_id": "T1-02",
+      "corpus_key": "corpus_tier1_user/T1-02.pdf",
+      "pdf_candidates": ["T1-02.pdf", "tier1/user/T1-02.pdf"],
       "expect": {
         "paths_min": 5,
         "text_items_min": 0,
@@ -61,8 +66,9 @@
     {
       "id": "GO-08",
       "name": "Rotated page text",
+      "manifest_entry_id": "T1-04",
       "corpus_key": "corpus_tier1_web/pdfjs/hello_world_rotated.pdf",
-      "pdf_candidates": ["hello_world_rotated.pdf"],
+      "pdf_candidates": ["hello_world_rotated.pdf", "tier1/web/pdfjs/hello_world_rotated.pdf"],
       "expect": {
         "paths_min": 0,
         "text_items_min": 1,
@@ -72,17 +78,19 @@
     {
       "id": "GO-09",
       "name": "Encrypted PDF (expect skip or error)",
+      "manifest_entry_id": "T2-01",
       "corpus_key": "corpus_tier2_web/openpreserve/encryption_openpassword.pdf",
-      "pdf_candidates": ["encryption_openpassword.pdf"],
+      "pdf_candidates": ["encryption_openpassword.pdf", "tier2/web/openpreserve/encryption_openpassword.pdf"],
       "expect": {
         "allow_status": ["FAIL", "TIMEOUT"]
       }
     },
     {
       "id": "GO-10",
-      "name": "1011 multi-page shop sheet 1",
-      "corpus_key": "corpus_tier1_user/1011 (1 OF 2) - Rev 0.pdf",
-      "pdf_candidates": ["1011 (1 OF 2) - Rev 0.pdf"],
+      "name": "Tier-1 user multi-page drawing (sheet 1)",
+      "manifest_entry_id": "T1-03",
+      "corpus_key": "corpus_tier1_user/T1-03.pdf",
+      "pdf_candidates": ["T1-03.pdf", "tier1/user/T1-03.pdf"],
       "expect": {
         "pages_min": 1,
         "paths_min": 15,

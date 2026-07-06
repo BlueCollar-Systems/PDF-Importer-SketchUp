@@ -1,6 +1,8 @@
 # corpus_paths.rb — Resolve PDF test corpus paths via BCS_CORPUS_ROOT.
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
+require 'json'
+
 module BlueCollarSystems
   module PDFVectorImporter
     module CorpusPaths
@@ -136,6 +138,32 @@ module BlueCollarSystems
         key = corpus_key.to_s
         key = key.sub(%r{\Aenv_corpus/}, 'corpus_root/')
         key
+      end
+
+      def load_manifest(root = nil)
+        corpus_root = root || resolve_corpus_root
+        return nil unless corpus_root
+
+        manifest_path = File.join(corpus_root, 'manifest.json')
+        return nil unless File.file?(manifest_path)
+
+        JSON.parse(File.read(manifest_path))
+      end
+
+      def resolve_manifest_pdf(entry_id, root = nil)
+        manifest = load_manifest(root)
+        return nil unless manifest
+
+        manifest.fetch('entries', []).each do |entry|
+          next unless entry['id'].to_s == entry_id.to_s
+
+          rel = entry['local_path']
+          next if rel.to_s.empty?
+
+          found = resolve_corpus_pdf(rel.to_s)
+          return found if found
+        end
+        nil
       end
     end
   end

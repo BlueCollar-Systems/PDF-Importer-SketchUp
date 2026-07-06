@@ -895,7 +895,7 @@ module BlueCollarSystems
       end
 
       ANNOTATION_LABEL = /\A(?:TYP\.?|U\.N\.O\.)\z/i
-      # Weld callouts: any inch fraction (not a fixed 1017 fraction list).
+      # Weld callouts: any inch fraction (not a fixed drawing-specific fraction list).
       WELD_FRACTION_LABEL = /\A\d+\/\d+"?\z/i
       # Steel part marks: w/p/a prefix + digits (shop-drawing convention).
       PART_MARK_LABEL = /\A[wap]\d+\z/i

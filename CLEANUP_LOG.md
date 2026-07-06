@@ -55,7 +55,7 @@ Paths use canonical `C:\1PDF-Importer-*` naming.
 ## pdf-test-corpus
 
 - `New folder (2)/Structural_Steel_SVG_Blueprints_v43_FIXED/venv_project/` (~5k files)
-- **Not removed:** corpus PDFs, Q&A folder, scripts, `PDFTest Files/`
+- **Not removed:** corpus PDFs, Q&A folder, scripts
 
 ## Steel repos (before merge)
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # test/text_category_placement_test.rb
-# Category-based label placement rules — synthetic TextItem fixtures (no 1017 strings).
+# Category-based label placement rules — synthetic TextItem fixtures (no corpus PDF strings).
 
 require 'fileutils'
 
@@ -126,7 +126,7 @@ assert_true(builder.send(:should_center_label?, 'QTY', 45.0, 8.0, 0.0),
 assert_true(!builder.send(:should_center_label?, 'DESCRIPTION', 30.0, 8.0, 0.0),
             'tight BOM cell does not center')
 
-# --- Chord spec: general feet-inch + parenthesis pattern (not 1017 literal) ---
+# --- Chord spec: general feet-inch + parenthesis pattern (not a job-number literal) ---
 assert_true(builder.send(:chord_spec_label?, "18'-2 ("), 'chord spec pattern recognized')
 assert_true(!builder.send(:chord_spec_label?, "4'-0\""), 'plain feet-inch is not chord spec')
 
@@ -142,7 +142,7 @@ assert_true(builder.send(:angle_needs_geometry_text?, 45.0, 8.0),
 bom_mesh_x, _, _ = builder.send(:mesh_label_anchor_pdf, bom)
 assert_near(bom_mesh_x, bx, 0.001, 'mesh anchor matches centered label insertion X')
 
-# --- BOM table orientation regression (mirrors 1017 QUAN|MARK|DESCRIPTION) ---
+# --- BOM table orientation regression (mirrors T1-01 QUAN|MARK|DESCRIPTION) ---
 # QUAN single-digit quantities must render UPRIGHT (0deg), not rotated 90deg.
 # MARK/DESCRIPTION cells stay horizontal. Only genuinely PDF-rotated field
 # dimensions should rotate — see label_angle_pdf QUAN-column branch (R26).

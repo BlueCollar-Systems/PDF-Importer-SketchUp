@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # test/text_label_placement_test.rb
-# Headless checks for label anchor heuristics and 1017 PDF text extraction.
-# Golden tier: 1017 coordinate assertions below. Unit tier: text_category_placement_test.rb
+# Headless checks for label anchor heuristics and T1-01 golden PDF text extraction.
+# Golden tier: T1-01 coordinate assertions below. Unit tier: text_category_placement_test.rb
 
 require 'fileutils'
 
@@ -14,9 +14,12 @@ require 'bc_pdf_vector_importer/text_parser'
 require 'bc_pdf_vector_importer/external_text_extractor'
 require_relative '../corpus_paths'
 
-pdf_1017 = ENV['BCS_1017_PDF'].to_s
-pdf_1017 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('1017 - Rev 0.pdf').to_s if pdf_1017.empty?
-PDF_1017 = pdf_1017
+pdf_tier1 = ENV['BCS_TIER1_USER_PDF'].to_s
+if pdf_tier1.empty?
+  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf('T1-01').to_s
+  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('tier1/user/T1-01.pdf').to_s if pdf_tier1.empty?
+end
+PDF_TIER1_USER = pdf_tier1
 PDF_TOL = 1.5
 TextAlignLeft = 0
 
@@ -236,17 +239,17 @@ if rotated_entities.texts.first
               'rotated native label should preserve its direction vector while hiding the leader')
 end
 
-if File.exist?(PDF_1017)
+if File.exist?(PDF_TIER1_USER)
   # 342 = 346 raw pdftotext words minus 2 angle-mark stitch merges (a1+00+5 → a1005/a1006).
-  GOLDEN_1017_ITEM_COUNT = 342
-  items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_1017, 1)
+  GOLDEN_TIER1_ITEM_COUNT = 342
+  items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_TIER1_USER, 1)
   builder.send(:prepare_bom_table_context, items)
-  assert_true(items && items.length == GOLDEN_1017_ITEM_COUNT,
-              "1017 PDF regression guard: need exactly #{GOLDEN_1017_ITEM_COUNT} labels (got #{items ? items.length : 0})")
+  assert_true(items && items.length == GOLDEN_TIER1_ITEM_COUNT,
+              "T1-01 golden PDF regression guard: need exactly #{GOLDEN_TIER1_ITEM_COUNT} labels (got #{items ? items.length : 0})")
   with_bbox = items.count { |it| builder.send(:label_has_bbox?, it) }
-  assert_true(with_bbox > 100, "1017 text items should carry bbox metadata (got #{with_bbox})")
+  assert_true(with_bbox > 100, "T1-01 text items should carry bbox metadata (got #{with_bbox})")
   headers = items.select { |it| it.text.to_s.strip =~ /\A(QUAN|MARK|DESCRIPTION)\z/i }
-  assert_true(!headers.empty?, '1017 PDF should include BOM header labels')
+  assert_true(!headers.empty?, 'T1-01 PDF should include BOM header labels')
   headers.each do |h|
     bw = (h.bbox_x1 - h.bbox_x0).abs
     est_w = h.text.to_s.strip.length * h.font_size.to_f * 0.55
@@ -355,7 +358,7 @@ if File.exist?(PDF_1017)
                 'SECTION F-F 2 2 should use stacked vertical dimension placement')
   end
 
-  # SECTION C-C (1017 page 1) — horizontal beam w1023 between w1025 and 1017FR1
+  # SECTION C-C (T1-01 page 1) — horizontal beam w1023 between w1025 and 1017FR1
   def find_cc_label(items, text, bbox_x0)
     items.find do |it|
       it.text.to_s.strip == text && (it.bbox_x0.to_f - bbox_x0).abs < 1.5
@@ -426,7 +429,7 @@ if File.exist?(PDF_1017)
     assert_near(sy, 1420.08, PDF_TOL, "SECTION C-C title Y baseline (got #{sy})")
   end
 
-  # Main elevation / truss view (1017 page 1)
+  # Main elevation / truss view (T1-01 page 1)
   def find_main_label(items, text, bbox_x0, bbox_y0 = nil)
     items.find do |it|
       it.text.to_s.strip == text &&
@@ -500,7 +503,7 @@ if File.exist?(PDF_1017)
     assert_true(wang.abs < 0.01, "connection w1023 stays horizontal — tall bbox is not 90° (got #{wang})")
   end
 
-  # Connection detail region (1017 page 1, brace/member cluster)
+  # Connection detail region (T1-01 page 1, brace/member cluster)
   conn_p1016 = find_main_label(items, 'p1016', 868.8, 703.41)
   if conn_p1016
     px, py, _ = builder.send(:label_insertion_pdf, conn_p1016)
@@ -515,7 +518,7 @@ if File.exist?(PDF_1017)
     assert_near(py, 784.91, PDF_TOL, "connection p1017 Y baseline (got #{py})")
   end
 
-  # SECTION A-A diagonal brace part marks (1017 page 1)
+  # SECTION A-A diagonal brace part marks (T1-01 page 1)
   aa_a1006 = find_main_label(items, 'a1006', 782.16, 297.45)
   if aa_a1006
     ax, ay, aang = builder.send(:label_insertion_pdf, aa_a1006)
@@ -591,10 +594,10 @@ if File.exist?(PDF_1017)
   expected_placements = items.length + extra_placements
   placed_total = placed_entities.texts.length + placed_entities.mesh_calls.length
   assert_true(placed_total == expected_placements,
-              "all 1017 bbox-backed labels should place (got #{placed_total} of #{expected_placements})")
-  puts "  1017 PDF: #{items.length} text items, #{with_bbox} with bbox, #{headers.length} BOM headers"
+              "all T1-01 bbox-backed labels should place (got #{placed_total} of #{expected_placements})")
+  puts "  T1-01 PDF: #{items.length} text items, #{with_bbox} with bbox, #{headers.length} BOM headers"
 else
-  puts "  SKIP: 1017 PDF not found at #{PDF_1017}"
+  puts "  SKIP: T1-01 PDF not found at #{PDF_TIER1_USER}"
 end
 
 puts

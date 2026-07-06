@@ -47,6 +47,12 @@ class GoldenOracleTest < Minitest::Test
   private
 
   def resolve_oracle_pdf(oracle)
+    entry_id = oracle['manifest_entry_id']
+    if entry_id && !entry_id.to_s.empty?
+      found = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf(entry_id)
+      return found if found
+    end
+
     key = oracle['corpus_key']
     if key && !key.to_s.empty?
       rel = key.sub(%r{\A[^/]+/}, '')

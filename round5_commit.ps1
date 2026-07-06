@@ -1,5 +1,9 @@
 $ErrorActionPreference = 'Continue'
-$qaSrc = 'C:\Users\Rowdy Payton\Desktop\PDFTest Files\Q&A'
+$qaSrc = $env:BCS_QA_DOCS_ROOT
+if (-not $qaSrc) {
+  Write-Warning 'Set BCS_QA_DOCS_ROOT to the local Q&A docs folder before running this script.'
+  exit 1
+}
 $repos = @(
   'C:\1PDF-Importer-SketchUp',
   'C:\1PDF-Importer-FreeCAD',

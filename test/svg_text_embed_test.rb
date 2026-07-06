@@ -47,8 +47,8 @@ class SvgTextEmbedTest < Minitest::Test
   end
 
   def test_ghostscript_args_keep_spaced_paths_intact
-    inp = 'C:/Users/Rowdy Payton/Desktop/a b.pdf'
-    out = 'C:/Users/Rowdy Payton/AppData/Local/Temp/x y.pdf'
+    inp = 'C:/Users/example/Desktop/a b.pdf'
+    out = 'C:/Users/example/AppData/Local/Temp/x y.pdf'
     args = R.ghostscript_embed_args('gs', inp, out)
     assert_includes args, inp   # single argv element; no shell splitting
     assert_includes args, out

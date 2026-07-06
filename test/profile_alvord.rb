@@ -23,8 +23,8 @@ end
 default_pdf = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(
   'Alvord TX — Garden Map · Final.pdf'
 )
-pdf = ARGV[0] || default_pdf || 'C:/Users/Rowdy Payton/Desktop/PDFTest Files/Alvord TX — Garden Map · Final.pdf'
-unless File.exist?(pdf)
+pdf = ARGV[0] || default_pdf
+unless pdf && File.exist?(pdf)
   warn "PDF not found: #{pdf}"
   exit 1
 end
