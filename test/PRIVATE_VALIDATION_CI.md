@@ -61,11 +61,11 @@ Baseline fields per PDF:
 
 ## CI Workflow
 
-Workflow: **corpus-placement** (`.github/workflows/corpus-placement.yml`)
+Workflow: **private-validation-placement** (`.github/workflows/private-validation-placement.yml`)
 
 - Runs on push/PR to `main` / `master`.
 - Installs Ruby and `pdftotext`.
-- Always validates committed sanitized baseline JSON structure.
+- Validates committed sanitized baseline JSON structure when baselines exist.
 - Runs the full private validation gate only when
   `BCS_PRIVATE_VALIDATION_ROOT` points at mounted private assets.
 - GitHub-hosted runners without private assets still pass structure checks and

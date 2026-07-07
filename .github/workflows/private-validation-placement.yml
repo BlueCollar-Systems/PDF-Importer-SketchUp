@@ -1,0 +1,76 @@
+name: private-validation-placement
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  private-validation-placement:
+    runs-on: ubuntu-latest
+    env:
+      PRIVATE_VALIDATION_CI_STRICT: '1'
+    steps:
+      - name: Checkout SU importer
+        uses: actions/checkout@v7
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: false
+
+      - name: Install pdftotext (Poppler)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
+          pdftotext -v
+
+      - name: Resolve private validation root
+        id: private_validation
+        run: |
+          set -e
+          ROOT="${BCS_PRIVATE_VALIDATION_ROOT:-}"
+          if [ -z "$ROOT" ]; then
+            echo "No BCS_PRIVATE_VALIDATION_ROOT set - using committed baselines for structure check only."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ ! -d "$ROOT" ]; then
+            echo "BCS_PRIVATE_VALIDATION_ROOT path does not exist: $ROOT"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Validate optional baseline JSON files
+        run: |
+          ruby -e "
+          require 'json'
+          dir = 'test/fixtures/corpus_baselines'
+          files = Dir.glob(File.join(dir, '*.json'))
+          if files.empty?
+            puts 'No sanitized baseline JSON files committed.'
+            exit 0
+          end
+          files.each do |f|
+            JSON.parse(File.read(f))
+          end
+          puts \"Validated #{files.length} baseline file(s)\"
+          "
+
+      - name: Run private validation placement gate
+        if: steps.private_validation.outputs.available == 'true'
+        env:
+          BCS_PRIVATE_VALIDATION_ROOT: ${{ steps.private_validation.outputs.root }}
+        run: ruby test/corpus_placement_test.rb
+
+      - name: Private validation unavailable notice
+        if: steps.private_validation.outputs.available != 'true'
+        run: |
+          echo "::warning::Full private validation placement gate skipped - set repository variable BCS_PRIVATE_VALIDATION_ROOT on a self-hosted runner."
+          echo "Baseline JSON structure check passed. Run locally: ruby test/corpus_placement_test.rb"
