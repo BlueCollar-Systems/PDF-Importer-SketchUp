@@ -13,7 +13,7 @@ Paths use canonical `C:\1PDF-Importer-*` naming.
 | PDF-Importer-Blender | 14 | caches, egg-info, 2 superseded dist ZIPs |
 | pdfcadcore | 4 | caches |
 | BlueCollar-Website | 2 | `__pycache__` only (conservative) |
-| pdf-test-corpus | 1 | obsolete venv under `New folder (2)` |
+| private validation assets | 1 | obsolete local venv under a scratch folder |
 | Steel-Shapes-SU | 1 | superseded release ZIP (pre-merge) |
 | Steel-Shapes-DXF-DWG | 2 | `__pycache__`, superseded release ZIP |
 
@@ -52,10 +52,10 @@ Paths use canonical `C:\1PDF-Importer-*` naming.
 
 - `__pycache__/`, `tools/__pycache__/`
 
-## pdf-test-corpus
+## Private validation assets
 
-- `New folder (2)/Structural_Steel_SVG_Blueprints_v43_FIXED/venv_project/` (~5k files)
-- **Not removed:** corpus PDFs, Q&A folder, scripts
+- Obsolete local virtual environment under a scratch folder (~5k files)
+- **Not removed:** private validation PDFs, Q&A folder, scripts
 
 ## Steel repos (before merge)
 

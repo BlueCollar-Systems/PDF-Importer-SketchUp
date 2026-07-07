@@ -24,8 +24,8 @@ The bundled binaries (~29 files) live under
 ## Authoritative manifest
 
 The machine-readable inventory of every shipped binary (path, version,
-license, SHA-256) is produced by `tools/dependency_audit.py` in the
-`pdf-test-corpus` repository (`bcs.dependency_manifest/1.0`).
+license, SHA-256) is produced by the private dependency-audit tooling used
+for release validation.
 
 ## Source availability
 

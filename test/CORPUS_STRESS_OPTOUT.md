@@ -1,4 +1,4 @@
-# Corpus stress opt-out inventory
+# Private validation stress opt-out inventory
 
 Round-2 action #6: document PDFs excluded from CI timing via `CORPUS_STRESS_OPTOUT`.
 
@@ -22,9 +22,9 @@ Update this table when adding entries. **Require a PR note** explaining why the 
 
 ## Soft cap
 
-Harness warns once when the list exceeds **5** basenames (`CORPUS_STRESS_OPTOUT_CAP` overrides). Prefer manual Tier-1 QA over growing the opt-out list.
+Harness warns once when the list exceeds **5** basenames (`CORPUS_STRESS_OPTOUT_CAP` overrides). Prefer manual private validation over growing the opt-out list.
 
 ## Related
 
-- `test/CORPUS_CI.md` — full corpus gate
+- `test/CORPUS_CI.md` — full private validation gate
 - `test/corpus_strict_timing_test.rb` — strict timing on named PDF (`CORPUS_STRICT_TIMING=1`)

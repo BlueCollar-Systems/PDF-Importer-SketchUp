@@ -1,60 +1,29 @@
-# Corpus Placement CI (SketchUp)
+# Private Validation CI (SketchUp)
 
-Phase 1 headless gate: parse corpus PDFs, extract text (pdftotext when
-available), simulate `GeometryBuilder` label placement, and compare against
-committed baselines.
+Phase 1 headless gate: parse private validation PDFs, extract text when a
+local extractor is available, simulate `GeometryBuilder` label placement, and
+compare against committed non-sensitive baselines.
 
-## Corpus scan paths
+## Validation Asset Paths
 
-Resolved via `corpus_paths.rb` and environment variable `BCS_CORPUS_ROOT`
-(fallback `PDF_TEST_CORPUS`, default checkout `C:\1pdf-test-corpus`):
+Private validation assets are never committed to this repository. Local and CI
+runs resolve them with `BCS_PRIVATE_VALIDATION_ROOT`.
 
-| Subdir | Tag | Scan |
-|--------|-----|------|
-| `tier1/user/` | `corpus_tier1_user` | non-recursive |
-| `tier1/web/` | `corpus_tier1_web` | recursive |
-| `tier2/web/` | `corpus_tier2_web` | recursive |
-| `web-acquired/` | `corpus_web_acquired` | recursive |
+The root is expected to contain a private manifest with opaque fixture IDs and
+relative paths. Do not document client filenames, local mirror paths, or PDF
+basenames in this repository.
 
-User-tier PDFs use manifest IDs (`T1-01.pdf`, `T1-02.pdf`, …) per
-`manifest.json`. Proprietary user PDFs live under `tier1/user/` and are
-gitignored in the corpus repo.
-
-Duplicate `corpus_key` collisions keep the first match.
-
-## Local run
+## Local Run
 
 ```powershell
-# Point at canonical corpus checkout
-$env:BCS_CORPUS_ROOT = 'C:\1pdf-test-corpus'
-
-# Requires pdftotext on PATH (Poppler / MiKTeX / FreeCAD bundle)
+$env:BCS_PRIVATE_VALIDATION_ROOT = '<private-validation-root>'
 ruby test/corpus_placement_test.rb
 ```
 
-## Public web-acquired corpus
+`pdftotext` must be available on `PATH` when bbox-backed text validation is
+needed.
 
-The repo includes a local-only manifest for public stress PDFs:
-
-- `tools/public_pdf_corpus_manifest.json` — source URLs, feature tags,
-  license notes, and local target paths.
-- `tools/download_public_pdf_corpus.py` — dependency-free downloader that writes
-  PDFs under `$env:BCS_CORPUS_ROOT\web-acquired\` by default.
-- `web-acquired/PUBLIC_PDF_CORPUS.lock.json` — local hash and size inventory
-  written after acquisition; intentionally not committed.
-
-Acquire the enabled public set:
-
-```powershell
-$env:BCS_CORPUS_ROOT = 'C:\1pdf-test-corpus'
-python tools/download_public_pdf_corpus.py
-```
-
-These PDFs are not redistributed from this repository. The manifest records the
-upstream source and whether a file should remain local-only or manually
-acquired because of license or download restrictions.
-
-## Update baselines (intentional changes)
+## Baseline Updates
 
 After reviewing placement or text-hash drift:
 
@@ -65,14 +34,15 @@ $env:CORPUS_UPDATE_BASELINES = '1'
 ruby test/corpus_placement_test.rb
 ```
 
-Commit updated JSON under `test/fixtures/corpus_baselines/`.
+Only commit sanitized JSON under `test/fixtures/corpus_baselines/`; do not
+commit private PDFs, client names, local paths, screenshots, or source URLs.
 
 Baseline fields per PDF:
 
 | Field | Meaning |
 |-------|---------|
-| `pdf_name` | File basename (manifest ID, e.g. `T1-01.pdf`) |
-| `corpus_key` | Stable scan key (`tag/relative/path.pdf`) |
+| `pdf_name` | Opaque fixture ID or redacted basename |
+| `corpus_key` | Stable private validation key |
 | `pages` | Page count |
 | `paths` | Vector path count |
 | `text_items` | Extracted text item count |
@@ -82,25 +52,26 @@ Baseline fields per PDF:
 
 ## Thresholds
 
-- Parser failure or timeout → fail
-- Placement rate &lt; 95% when text exists (general sheets)
-- Placement rate &lt; 100% for vector sheets (`bbox_pct` ≥ 50 and `text_items` ≥ 10)
-- Any baseline field mismatch → fail (unless updating baselines)
-- Expected bad-PDF refusals (currently encrypted open-password samples) → pass
-  only when the importer reports the matching refusal reason.
+- Parser failure or timeout fails the private validation gate.
+- Placement rate below 95% fails when text exists.
+- Vector sheets with strong bbox coverage require 100% simulated placement.
+- Baseline field mismatches fail unless baseline update mode is explicit.
+- Expected bad-PDF refusals pass only when the importer reports the matching
+  refusal reason.
 
-## CI workflow
+## CI Workflow
 
 Workflow: **corpus-placement** (`.github/workflows/corpus-placement.yml`)
 
-- Runs on push/PR to `main` / `master`
-- Installs Ruby 3.2 and `poppler-utils` (`pdftotext` on PATH)
-- Always validates committed baseline JSON structure
-- Full corpus gate runs when `BCS_CORPUS_ROOT` points at a mounted corpus
-  (self-hosted runner or repository variable). GitHub-hosted runners without
-  the corpus still pass baseline structure checks and emit a warning.
+- Runs on push/PR to `main` / `master`.
+- Installs Ruby and `pdftotext`.
+- Always validates committed sanitized baseline JSON structure.
+- Runs the full private validation gate only when
+  `BCS_PRIVATE_VALIDATION_ROOT` points at mounted private assets.
+- GitHub-hosted runners without private assets still pass structure checks and
+  emit a warning.
 
-## Ruby 2.2 compatibility gate (SketchUp 2017)
+## Ruby 2.2 Compatibility Gate (SketchUp 2017)
 
 Extension code under `extracted/sketchup_ext/` must parse and run on **Ruby 2.2**
 (SketchUp Make 2017). Modern `ruby -c` alone does not catch endless ranges or
@@ -116,20 +87,25 @@ Ruby 2.3+ APIs such as `&.`, `.positive?`, or `.sum`.
 Workflow: **su-pdfimporter-ci** runs the compat gate on Ruby 2.2 (Docker) and
 on Ruby 2.7 / 3.0 / 3.2. Failures block merge.
 
-## Related tests
+## Related Tests
 
-- `test/text_label_placement_test.rb` — golden T1-01 coordinate assertions (not corpus-wide)
-- `test/corpus_strict_timing_test.rb` — opt-in strict timing on named PDF (`CORPUS_STRICT_TIMING=1`)
-- `test/CORPUS_STRESS_OPTOUT.md` — stress PDF opt-out inventory
-- `test_all_pdfs.rb` — legacy parser-only sweep (paths only)
+- `test/text_label_placement_test.rb` - private coordinate assertions when
+  validation assets are mounted
+- `test/corpus_strict_timing_test.rb` - opt-in strict timing on a private
+  fixture ID (`CORPUS_STRICT_TIMING=1`)
+- `test/CORPUS_STRESS_OPTOUT.md` - stress PDF opt-out inventory
+- `test_all_pdfs.rb` - legacy parser-only sweep
 
 ## Status
 
-**Phase 1 complete** — headless corpus placement CI with baseline regression (36 PDFs locally; heavy PDFs warn-only on timeout).
+Phase 1 is complete: headless private validation placement CI with sanitized
+baseline regression. Heavy PDFs are warn-only on timeout unless strict timing
+is enabled.
 
-Heavy-lane knobs (defaults: 8 MB, 30+ pages, 300 s timeout):
+Heavy-lane knobs:
 
 - `CORPUS_HEAVY_PDF_MB`
 - `CORPUS_HEAVY_PAGE_COUNT`
 - `CORPUS_HEAVY_PDF_TIMEOUT`
-Phase 2 (future): SketchUp GUI visual acceptance on Tier-1 subset.
+
+Future visual acceptance should use private fixture IDs only.

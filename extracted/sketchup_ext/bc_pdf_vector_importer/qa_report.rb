@@ -215,24 +215,15 @@ module BlueCollarSystems
         }
       end
 
-      def model_3d_block(stats, opts = {})
-        payload = stats[:model_3d] || stats['model_3d']
-        if payload.is_a?(Hash)
-          return normalize_json(payload)
-        end
-        if opts && opts[:extrude_to_3d]
-          depth_mm = Model3DExtruder.resolve_depth_inches(opts) / Model3DExtruder::MM_TO_INCH
-          return {
-            enabled: true,
-            supported: true,
-            depth_mm: depth_mm.round(4),
-            faces_extruded: 0,
-            skipped_reason: 'extrusion_not_run'
-          }
-        end
-        Model3DExtruder.disabled_payload('option_off')
+      def model_3d_block(_stats, _opts = {})
+        # 3D shape extrusion is shelved pending 3D-text scaling resolution.
+        # The UI and CLI both hardcode extrude_to_3d=false; always report disabled
+        # regardless of any legacy stats payload that may have been populated.
+        normalize_json(
+          enabled: false, supported: false, faces_extruded: 0, skipped_reason: 'shelved_by_owner'
+        )
       rescue StandardError
-        { enabled: false, supported: true, skipped_reason: 'report_error' }
+        { 'enabled' => false, 'supported' => false, 'skipped_reason' => 'report_error' }
       end
 
       def parts_bootstrap_block(stats)

@@ -29,7 +29,7 @@ warning: in the working copy of 'round5_git_report.txt', CRLF will be replaced b
  create mode 100644 _LLM_CONTROL_PACK/QA/QA-2026-06-24_round5-reviewer-synthesis.md
  create mode 100644 round5_commit.ps1
  create mode 100644 round5_git_report.txt
- create mode 100644 test/fixtures/golden_oracles.json
+ create mode 100644 test/fixtures/validation_oracles.json
 COMMIT=2cf61c6cc214400c5258f77d14cfed8c277210a3
 remote: Bypassed rule violations for refs/heads/main:        
 remote: 

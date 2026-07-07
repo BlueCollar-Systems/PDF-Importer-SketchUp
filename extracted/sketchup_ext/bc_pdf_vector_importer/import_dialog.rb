@@ -26,14 +26,14 @@ module BlueCollarSystems
       MODES = {
         'Auto' => {
           'import_mode'        => 'auto',
-          'text_mode'          => '3D Text',
+          'text_mode'          => 'Labels',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
         }.freeze,
         'Vector' => {
           'import_mode'        => 'vector',
-          'text_mode'          => '3D Text',
+          'text_mode'          => 'Labels',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -47,7 +47,7 @@ module BlueCollarSystems
         }.freeze,
         'Hybrid' => {
           'import_mode'        => 'hybrid',
-          'text_mode'          => '3D Text',
+          'text_mode'          => 'Labels',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -58,7 +58,7 @@ module BlueCollarSystems
       MODE_NAMES   = MODES.keys.join('|')
       TEXT_MODES   = 'Geometry|Glyphs|Labels|3D Text'
       TEXT_MODE_CHOICES = TEXT_MODES.split('|').freeze
-      FIRST_RUN_TEXT_MODE = '3D Text'.freeze
+      FIRST_RUN_TEXT_MODE = 'Labels'.freeze
       FIRST_RUN_MATCH_PDF_LAYERS = 'Yes'.freeze
 
       # Workflow choices kept after the Rule 5 sweep
