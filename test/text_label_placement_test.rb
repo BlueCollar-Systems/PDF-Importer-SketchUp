@@ -144,7 +144,10 @@ center_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
 x, y, angle = builder.send(:label_insertion_pdf, center_item)
 assert_true(builder.send(:should_center_label?, 'QUAN', 40.0, 8.0, 0.0),
             'BOM header QUAN should center in wide table cell')
-assert_true((x - 101.2).abs < 1.0, "centered BOM header should shift X toward bbox center (got #{x})")
+# Calibrated mesh width table (v3.7.82 grow-path fix) models wide caps
+# like Q/U/A/N at realistic Helvetica widths (~0.79em avg), shifting the
+# centered start left of the old crude 0.55em estimate (101.2 -> 97.3).
+assert_true((x - 97.3).abs < 1.0, "centered BOM header should shift X toward bbox center (got #{x})")
 assert_true(y > center_item.bbox_y0, 'baseline should sit above bbox bottom')
 assert_true(angle.abs < 0.01, 'horizontal label keeps angle')
 
