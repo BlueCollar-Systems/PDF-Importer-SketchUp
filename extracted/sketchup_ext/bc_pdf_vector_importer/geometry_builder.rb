@@ -634,22 +634,24 @@ module BlueCollarSystems
         widths = []
         heights = []
         Array(new_ents).each do |entity|
-          next unless entity.respond_to?(:bounds)
+          begin
+            next unless entity.respond_to?(:bounds)
 
-          bounds = entity.bounds
-          next unless bounds
+            bounds = entity.bounds
+            next unless bounds
 
-          if bounds.respond_to?(:min) && bounds.respond_to?(:max)
-            bmin = bounds.min
-            bmax = bounds.max
-            xs << bmin.x.to_f << bmax.x.to_f
-            ys << bmin.y.to_f << bmax.y.to_f
-          else
-            widths << bounds.width.to_f if bounds.respond_to?(:width)
-            heights << bounds.height.to_f if bounds.respond_to?(:height)
+            if bounds.respond_to?(:min) && bounds.respond_to?(:max)
+              bmin = bounds.min
+              bmax = bounds.max
+              xs << bmin.x.to_f << bmax.x.to_f
+              ys << bmin.y.to_f << bmax.y.to_f
+            else
+              widths << bounds.width.to_f if bounds.respond_to?(:width)
+              heights << bounds.height.to_f if bounds.respond_to?(:height)
+            end
+          rescue StandardError
+            next
           end
-        rescue StandardError
-          next
         end
 
         if xs.length >= 2 && ys.length >= 2
