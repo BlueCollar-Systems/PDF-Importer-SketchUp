@@ -79,7 +79,7 @@ module CorpusHarness
   HEAVY_PAGE_COUNT = (ENV['CORPUS_HEAVY_PAGE_COUNT'] || '30').to_i
   HEAVY_PATH_BUDGET = (ENV['CORPUS_HEAVY_PATH_BUDGET'] || '750000').to_i
   # CORPUS_STRESS_OPTOUT: pipe-separated PDF basenames skipped in CI (manual QA only).
-  # Document additions in test/CORPUS_STRESS_OPTOUT.md and note in PR description.
+  # Document additions in test/PRIVATE_VALIDATION_STRESS_OPTOUT.md and note in PR description.
   STRESS_PDF_SLUGS = (ENV['CORPUS_STRESS_OPTOUT'] || '')
                      .split('|').map(&:strip).reject(&:empty?).freeze
   # Soft cap — warn when the opt-out list grows (Round-2 action #6).
@@ -101,7 +101,7 @@ module CorpusHarness
     warn(
       "CORPUS_STRESS_OPTOUT has #{STRESS_PDF_SLUGS.length} entries " \
       "(soft cap #{STRESS_OPTOUT_SOFT_CAP}). Prefer manual QA for heavy PDFs; " \
-      "document additions in test/CORPUS_STRESS_OPTOUT.md and note in PR."
+      "document additions in test/PRIVATE_VALIDATION_STRESS_OPTOUT.md and note in PR."
     )
   end
 

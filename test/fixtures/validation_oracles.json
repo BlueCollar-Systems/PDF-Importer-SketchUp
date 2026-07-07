@@ -1,0 +1,102 @@
+{
+  "schema": "bcs.validation_oracles/1",
+  "updated": "2026-07-06",
+  "notes": "Named private validation PDFs with expected primitive/text/placement ranges. PDFs resolve via BCS_PRIVATE_VALIDATION_ROOT and manifest.json entry IDs (PRIVATE-01.pdf, etc.).",
+  "oracles": [
+    {
+      "id": "GO-01",
+      "name": "Embedded font vector baseline",
+      "manifest_entry_id": "PRIVATE-05",
+      "corpus_key": "private_validation_web/pdfjs/Embedded_font.pdf",
+      "pdf_candidates": ["Embedded_font.pdf", "private/web/pdfjs/Embedded_font.pdf"],
+      "expect": {
+        "paths_min": 1,
+        "text_items_min": 0,
+        "placement_rate_min": 0.75
+      }
+    },
+    {
+      "id": "GO-02",
+      "name": "Non-embedded font text sheet",
+      "manifest_entry_id": "PRIVATE-08",
+      "corpus_key": "private_validation_web/openpreserve/text_only_fontsNotEmbedded.pdf",
+      "pdf_candidates": ["text_only_fontsNotEmbedded.pdf", "private/web/openpreserve/text_only_fontsNotEmbedded.pdf"],
+      "expect": {
+        "paths_min": 0,
+        "text_items_min": 1,
+        "placement_rate_min": 0.70
+      }
+    },
+    {
+      "id": "GO-04",
+      "name": "Multi-page document tree",
+      "manifest_entry_id": "PRIVATE-06",
+      "corpus_key": "private_validation_web/pdfjs/sample_multi_page.pdf",
+      "pdf_candidates": ["sample_multi_page.pdf", "private/web/pdfjs/sample_multi_page.pdf"],
+      "expect": {
+        "pages_min": 1,
+        "paths_min": 0,
+        "placement_rate_min": 0.65
+      }
+    },
+    {
+      "id": "GO-06",
+      "name": "private validation user fabrication drawing",
+      "manifest_entry_id": "PRIVATE-01",
+      "corpus_key": "private_validation_user/PRIVATE-01.pdf",
+      "pdf_candidates": ["PRIVATE-01.pdf", "private/user/PRIVATE-01.pdf"],
+      "expect": {
+        "paths_min": 20,
+        "text_items_min": 3,
+        "placement_rate_min": 0.60
+      }
+    },
+    {
+      "id": "GO-07",
+      "name": "private validation user welding symbol chart",
+      "manifest_entry_id": "PRIVATE-02",
+      "corpus_key": "private_validation_user/PRIVATE-02.pdf",
+      "pdf_candidates": ["PRIVATE-02.pdf", "private/user/PRIVATE-02.pdf"],
+      "expect": {
+        "paths_min": 5,
+        "text_items_min": 0,
+        "placement_rate_min": 0.50
+      }
+    },
+    {
+      "id": "GO-08",
+      "name": "Rotated page text",
+      "manifest_entry_id": "PRIVATE-04",
+      "corpus_key": "private_validation_web/pdfjs/sample_rotated_text_rotated.pdf",
+      "pdf_candidates": ["sample_rotated_text_rotated.pdf", "private/web/pdfjs/sample_rotated_text_rotated.pdf"],
+      "expect": {
+        "paths_min": 0,
+        "text_items_min": 1,
+        "placement_rate_min": 0.70
+      }
+    },
+    {
+      "id": "GO-09",
+      "name": "Encrypted PDF (expect skip or error)",
+      "manifest_entry_id": "T2-01",
+      "corpus_key": "private_validation_secondary_web/openpreserve/encryption_openpassword.pdf",
+      "pdf_candidates": ["encryption_openpassword.pdf", "private-secondary/web/openpreserve/encryption_openpassword.pdf"],
+      "expect": {
+        "allow_status": ["FAIL", "TIMEOUT"]
+      }
+    },
+    {
+      "id": "GO-10",
+      "name": "private validation user multi-page drawing (sheet 1)",
+      "manifest_entry_id": "PRIVATE-03",
+      "corpus_key": "private_validation_user/PRIVATE-03.pdf",
+      "pdf_candidates": ["PRIVATE-03.pdf", "private/user/PRIVATE-03.pdf"],
+      "expect": {
+        "pages_min": 1,
+        "paths_min": 15,
+        "text_items_min": 2,
+        "placement_rate_min": 0.55
+      }
+    }
+  ]
+}

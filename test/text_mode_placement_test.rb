@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # test/text_mode_placement_test.rb
-# Per-mode placement checks for T1-01 key labels (Labels + 3D Text).
+# Per-mode placement checks for PRIVATE-01 key labels (Labels + 3D Text).
 # Golden tier regression — see text_category_placement_test.rb for pattern rules.
 
 require 'fileutils'
@@ -16,8 +16,8 @@ require_relative '../corpus_paths'
 
 pdf_tier1 = ENV['BCS_TIER1_USER_PDF'].to_s
 if pdf_tier1.empty?
-  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf('T1-01').to_s
-  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('tier1/user/T1-01.pdf').to_s if pdf_tier1.empty?
+  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf('PRIVATE-01').to_s
+  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('private/user/PRIVATE-01.pdf').to_s if pdf_tier1.empty?
 end
 PDF_TIER1_USER = pdf_tier1
 PDF_TOL = 1.5
@@ -214,12 +214,12 @@ if rotated_entities.texts.first
 end
 
 unless File.exist?(PDF_TIER1_USER)
-  puts "  SKIP: T1-01 PDF not found at #{PDF_TIER1_USER}"
+  puts "  SKIP: PRIVATE-01 PDF not found at #{PDF_TIER1_USER}"
 else
   items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_TIER1_USER, 1)
   GOLDEN_TIER1_ITEM_COUNT = 342
   assert_true(items && items.length == GOLDEN_TIER1_ITEM_COUNT,
-              "T1-01 coverage guard: need #{GOLDEN_TIER1_ITEM_COUNT} text items (got #{items ? items.length : 0})")
+              "PRIVATE-01 coverage guard: need #{GOLDEN_TIER1_ITEM_COUNT} text items (got #{items ? items.length : 0})")
 
   def find_label(items, text, bbox_x0, bbox_y0 = nil)
     items.find do |it|
@@ -247,45 +247,45 @@ else
 
   if quan_bom
     qx, qy, _ = label_builder.send(:text_insertion_pdf, quan_bom)
-    assert_near(qx, 1948.62, PDF_TOL, "T1-01 QUAN label X (got #{qx})")
-    assert_near(qy, 1656.59, PDF_TOL, "T1-01 QUAN label Y (got #{qy})")
+    assert_near(qx, 1948.62, PDF_TOL, "PRIVATE-01 QUAN label X (got #{qx})")
+    assert_near(qy, 1656.59, PDF_TOL, "PRIVATE-01 QUAN label Y (got #{qy})")
   end
 
   if p1052
     px, py, _ = label_builder.send(:text_insertion_pdf, p1052)
-    assert_near(px, p1052.bbox_x0.to_f, 0.05, "T1-01 p1052 label X (got #{px})")
-    assert_near(py, 686.15, PDF_TOL, "T1-01 p1052 label Y (got #{py})")
+    assert_near(px, p1052.bbox_x0.to_f, 0.05, "PRIVATE-01 p1052 label X (got #{px})")
+    assert_near(py, 686.15, PDF_TOL, "PRIVATE-01 p1052 label Y (got #{py})")
   end
 
   if w1023
     wx, wy, wang = mesh_builder.send(:text_insertion_pdf, w1023)
-    assert_near(wx, 822.74, PDF_TOL, "T1-01 connection w1023 X left-anchored (got #{wx})")
-    assert_near(wy, 762.12, PDF_TOL, "T1-01 connection w1023 Y baseline (got #{wy})")
-    assert_near(wang, 0.0, PDF_TOL, "T1-01 connection w1023 stays horizontal per PDF angle (got #{wang})")
+    assert_near(wx, 822.74, PDF_TOL, "PRIVATE-01 connection w1023 X left-anchored (got #{wx})")
+    assert_near(wy, 762.12, PDF_TOL, "PRIVATE-01 connection w1023 Y baseline (got #{wy})")
+    assert_near(wang, 0.0, PDF_TOL, "PRIVATE-01 connection w1023 stays horizontal per PDF angle (got #{wang})")
     mesh_h = mesh_builder.send(:mesh_text_height_inches, w1023, wang, 792.0)
-    assert_true(mesh_h < 0.12, "T1-01 connection w1023 mesh height must not blow up (got #{mesh_h})")
+    assert_true(mesh_h < 0.12, "PRIVATE-01 connection w1023 mesh height must not blow up (got #{mesh_h})")
   end
 
   if aa_a1006
     ax, ay, aang = label_builder.send(:text_insertion_pdf, aa_a1006)
     mx, my, mang = mesh_builder.send(:text_insertion_pdf, aa_a1006)
-    assert_near(ax, 782.16, PDF_TOL, "T1-01 SECTION A-A a1006 label X (got #{ax})")
-    assert_near(ay, 299.39, PDF_TOL, "T1-01 SECTION A-A a1006 label Y (got #{ay})")
-    assert_near(aang, 0.0, PDF_TOL, "T1-01 SECTION A-A a1006 label angle (got #{aang})")
-    assert_near(mx, ax, 0.01, "T1-01 a1006 X must match across modes")
-    assert_near(my, ay, 0.01, "T1-01 a1006 Y must match across modes")
-    assert_near(mang, aang, 0.01, "T1-01 a1006 angle must match across modes")
+    assert_near(ax, 782.16, PDF_TOL, "PRIVATE-01 SECTION A-A a1006 label X (got #{ax})")
+    assert_near(ay, 299.39, PDF_TOL, "PRIVATE-01 SECTION A-A a1006 label Y (got #{ay})")
+    assert_near(aang, 0.0, PDF_TOL, "PRIVATE-01 SECTION A-A a1006 label angle (got #{aang})")
+    assert_near(mx, ax, 0.01, "PRIVATE-01 a1006 X must match across modes")
+    assert_near(my, ay, 0.01, "PRIVATE-01 a1006 Y must match across modes")
+    assert_near(mang, aang, 0.01, "PRIVATE-01 a1006 angle must match across modes")
   end
 
   if aa_a1005
     ax, ay, aang = label_builder.send(:text_insertion_pdf, aa_a1005)
     mx, my, mang = mesh_builder.send(:text_insertion_pdf, aa_a1005)
-    assert_near(ax, 901.55, PDF_TOL, "T1-01 SECTION A-A a1005 label X (got #{ax})")
-    assert_near(ay, 298.32, PDF_TOL, "T1-01 SECTION A-A a1005 label Y (got #{ay})")
-    assert_near(aang, 0.0, PDF_TOL, "T1-01 SECTION A-A a1005 label angle (got #{aang})")
-    assert_near(mx, ax, 0.01, "T1-01 a1005 X must match across modes")
-    assert_near(my, ay, 0.01, "T1-01 a1005 Y must match across modes")
-    assert_near(mang, aang, 0.01, "T1-01 a1005 angle must match across modes")
+    assert_near(ax, 901.55, PDF_TOL, "PRIVATE-01 SECTION A-A a1005 label X (got #{ax})")
+    assert_near(ay, 298.32, PDF_TOL, "PRIVATE-01 SECTION A-A a1005 label Y (got #{ay})")
+    assert_near(aang, 0.0, PDF_TOL, "PRIVATE-01 SECTION A-A a1005 label angle (got #{aang})")
+    assert_near(mx, ax, 0.01, "PRIVATE-01 a1005 X must match across modes")
+    assert_near(my, ay, 0.01, "PRIVATE-01 a1005 Y must match across modes")
+    assert_near(mang, aang, 0.01, "PRIVATE-01 a1005 angle must match across modes")
   end
 
   label_entities = DummyEntities.new
@@ -321,7 +321,7 @@ else
   assert_true(failing_entities.mesh_calls.length == before_mesh + 1,
               'Labels should fall back to mesh text only when add_text fails')
 
-  puts "  T1-01 PDF: labels=#{label_entities.texts.length}, mesh=#{mesh_entities.mesh_calls.length}, items=#{items.length}"
+  puts "  PRIVATE-01 PDF: labels=#{label_entities.texts.length}, mesh=#{mesh_entities.mesh_calls.length}, items=#{items.length}"
 end
 
 puts

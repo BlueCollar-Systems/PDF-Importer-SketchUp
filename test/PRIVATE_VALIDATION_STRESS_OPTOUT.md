@@ -26,5 +26,5 @@ Harness warns once when the list exceeds **5** basenames (`CORPUS_STRESS_OPTOUT_
 
 ## Related
 
-- `test/CORPUS_CI.md` — full private validation gate
+- `test/PRIVATE_VALIDATION_CI.md` — full private validation gate
 - `test/corpus_strict_timing_test.rb` — strict timing on named PDF (`CORPUS_STRICT_TIMING=1`)

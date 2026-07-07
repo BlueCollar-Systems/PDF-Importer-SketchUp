@@ -3,7 +3,7 @@
 #
 # Runs tools/su_pdf_cli.rb as a subprocess against the redistributable
 # corpus synthetic PDF and asserts the summary + report contracts.
-# Skips VISIBLY (not silently) when the corpus PDF is absent, per the
+# Skips VISIBLY (not silently) when the private validation PDF is absent, per the
 # R4-2 skip-visibility rule.
 
 require 'json'
@@ -12,7 +12,7 @@ require 'tmpdir'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 CLI = File.join(REPO_ROOT, 'tools', 'su_pdf_cli.rb')
-CORPUS_ROOT = ENV['BCS_CORPUS_ROOT'] || 'C:/1pdf-test-corpus'
+CORPUS_ROOT = ENV['BCS_PRIVATE_VALIDATION_ROOT'] || '__private_validation_assets_not_configured__'
 TEST_PDF = File.join(CORPUS_ROOT, 'tier1', 'web', 'stacked_fraction_spacing.pdf')
 
 failures = []
@@ -38,8 +38,8 @@ check.call('--preflight without input reports fail', pf && pf['status'] == 'fail
 
 unless File.file?(TEST_PDF)
   puts "SKIP (visible): corpus synthetic PDF not found at #{TEST_PDF} -- " \
-       'extraction assertions not run. Set BCS_CORPUS_ROOT or regenerate via ' \
-       'pdf-test-corpus tools/generate_stacked_fraction_pdf.py.'
+       'extraction assertions not run. Set BCS_PRIVATE_VALIDATION_ROOT or regenerate via ' \
+       'private-validation-assets tools/generate_stacked_fraction_pdf.py.'
   puts "PASS: #{pass_count} assertions (CLI plumbing only)"
   exit(failures.empty? ? 0 : 1)
 end

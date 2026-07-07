@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# Test script: parse all corpus PDFs through the PDF-Importer-SketchUp pipeline
+# Test script: parse all private validation PDFs through the PDF-Importer-SketchUp pipeline
 # Tests PDF structure parsing + content stream extraction (no SketchUp needed)
 
 require 'timeout'
@@ -18,7 +18,7 @@ require_relative 'corpus_paths'
 # Enable debug output from Logger
 BlueCollarSystems::PDFVectorImporter::Logger.debug = false
 
-PDF_DIR = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_root.to_s
+PDF_DIR = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_private_validation_root.to_s
 TIMEOUT_SECONDS = (ENV['PDF_IMPORTER_TEST_TIMEOUT'] || '60').to_i
 HEAVY_TIMEOUT_SECONDS = (ENV['PDF_IMPORTER_HEAVY_TIMEOUT'] || '240').to_i
 HEAVY_MB = (ENV['PDF_IMPORTER_HEAVY_MB'] || '8').to_f

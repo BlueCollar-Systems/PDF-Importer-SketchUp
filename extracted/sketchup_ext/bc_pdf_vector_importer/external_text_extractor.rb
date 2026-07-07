@@ -62,6 +62,22 @@ module BlueCollarSystems
             end
 
             html = File.read(out_html, encoding: 'UTF-8')
+            # Round 13: nominal text sizes from the content stream
+            # (Tf * vertical_scale(Tm . CTM)) so size never depends on the
+            # producer's encoding or on bbox extents. bbox stays fallback.
+            unless opts.key?(:nominal_anchors)
+              anchors = begin
+                require_relative 'nominal_text_scanner'
+                parser = PDFParser.new(pdf_path)
+                parser.parse
+                info = parser.page_data(page_number)
+                streams = info ? (info[:content_streams] || []) : []
+                NominalTextScanner.scan(streams)
+              rescue StandardError
+                []
+              end
+              opts = opts.merge(nominal_anchors: anchors)
+            end
             return parse_bbox_html(html, opts)
           end
 
@@ -127,16 +143,34 @@ module BlueCollarSystems
             angle = 0.0 if line_text =~ /\A\d{1,2}\/\d{1,2}"?\z/
             angle = 0.0 if line_text =~ /\ATYP\.?\z/i
 
-            # For rotated text, the bbox is rotated too.
-            # The SHORTER dimension of the bbox is the character height;
-            # the LONGER dimension is the string length.
-            # For horizontal text (angle near 0/180), height = bbox_h.
-            # For vertical text (angle near 90/270), height = bbox_w.
-            if angle.abs > 20 && angle.abs < 160
-              # Significantly rotated — use shorter bbox dimension
+            # Round 13: prefer the nominal size/rotation recorded from the
+            # content stream (encoding-independent, exact). Match this line
+            # to the nearest text-show anchor at its start/baseline point.
+            anchor = nil
+            anchors = opts[:nominal_anchors]
+            if anchors && !anchors.empty?
+              ax = x_min
+              ay = page_h - y_max # pdftotext top-down -> PDF y-up (box bottom)
+              max_d = [bbox_w, bbox_h, 12.0].max
+              anchor = NominalTextScanner.nearest(anchors, ax, ay, max_d)
+              if anchor.nil?
+                ay2 = page_h - y_min
+                anchor = NominalTextScanner.nearest(anchors, ax, ay2, max_d)
+              end
+            end
+
+            if anchor && anchor.size_pt > 0.05
+              font_size = anchor.size_pt
+              angle = anchor.angle_deg
+              # Keep the CAD callout horizontal overrides authoritative.
+              angle = 0.0 if line_text =~ /\A\d{1,2}\/\d{1,2}"?\z/
+              angle = 0.0 if line_text =~ /\ATYP\.?\z/i
+            elsif angle.abs > 20 && angle.abs < 160
+              # Fallback (no anchor): rotated bbox — the SHORTER dimension is
+              # the character height; the LONGER is the string length.
               font_size = [bbox_w, bbox_h].min
             else
-              # Horizontal-ish — use bbox height
+              # Fallback (no anchor): horizontal-ish — use bbox height.
               font_size = bbox_h
             end
             font_size = [font_size, 1.0].max

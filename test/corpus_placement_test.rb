@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # test/corpus_placement_test.rb
-# Headless corpus gate: parser + text extraction + label placement simulation.
+# Headless private validation gate: parser + text extraction + label placement simulation.
 #
 # Usage:
 #   ruby test/corpus_placement_test.rb
@@ -12,7 +12,7 @@ require 'fileutils'
 require_relative 'support/corpus_harness'
 
 UPDATE_BASELINES = ENV['CORPUS_UPDATE_BASELINES'] == '1' || ARGV.include?('--update-baselines')
-STRICT_EMPTY = ENV['CORPUS_CI_STRICT'] != '0'
+STRICT_EMPTY = ENV['PRIVATE_VALIDATION_CI_STRICT'] != '0'
 
 $failures = []
 $warnings = []
@@ -28,7 +28,7 @@ end
 pdfs = BlueCollarSystems::PDFVectorImporter::CorpusPaths.collect_corpus_pdfs
 
 if pdfs.empty?
-  msg = 'No corpus PDFs found. Set BCS_CORPUS_ROOT or mirror PDFs under Desktop/corpus paths.'
+  msg = 'No private validation PDFs found. Set BCS_PRIVATE_VALIDATION_ROOT or mirror PDFs under Desktop/corpus paths.'
   if STRICT_EMPTY
     fail!(msg)
     puts "FAIL: #{msg}"
@@ -41,7 +41,7 @@ if pdfs.empty?
 end
 
 puts '=' * 100
-puts "Corpus Placement CI — #{pdfs.length} PDFs"
+puts "Private Validation CI — #{pdfs.length} PDFs"
 puts "Baselines: #{CorpusHarness::BASELINE_DIR}"
 puts "Update baselines: #{UPDATE_BASELINES}"
 puts '=' * 100
@@ -104,7 +104,7 @@ end
 
 if $failures.empty?
   puts
-  puts "PASS: corpus placement gate (#{results.length} PDFs)"
+  puts "PASS: private validation gate (#{results.length} PDFs)"
   exit 0
 else
   puts

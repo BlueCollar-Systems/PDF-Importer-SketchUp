@@ -8,7 +8,7 @@ class StackedFractionConformanceTest < Minitest::Test
   TP = BlueCollarSystems::PDFVectorImporter::TextParser
 
   def vector_file
-    corpus_root = ENV['BCS_CORPUS_ROOT'] || 'C:/1pdf-test-corpus'
+    corpus_root = ENV['BCS_PRIVATE_VALIDATION_ROOT'] || '__private_validation_assets_not_configured__'
     File.join(corpus_root, 'conformance-vectors', 'stacked-fraction-merge-vectors.json')
   end
 

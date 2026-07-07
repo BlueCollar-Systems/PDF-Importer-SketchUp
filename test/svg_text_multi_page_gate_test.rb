@@ -9,8 +9,8 @@ require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/svg_text_rend
 class SvgTextMultiPageGateTest < Minitest::Test
   R = BlueCollarSystems::PDFVectorImporter::SvgTextRenderer
   Runner = BlueCollarSystems::PDFVectorImporter::CommandRunner
-  TARGET_PDF = 'T1-10.pdf'.freeze
-  FALLBACK_PDF = 'tier1/user/T1-10.pdf'.freeze
+  TARGET_PDF = 'PRIVATE-10.pdf'.freeze
+  FALLBACK_PDF = 'private/user/PRIVATE-10.pdf'.freeze
 
   def test_available_svg_renderers_handle_non_page_one_text
     pdf_path = ENV['BCS_SVG_TEXT_GATE_PDF'].to_s

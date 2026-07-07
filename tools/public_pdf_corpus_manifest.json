@@ -1,7 +1,7 @@
 {
   "schema": "bcs.public_pdf_corpus/1.0",
   "updated": "2026-06-24",
-  "default_root": "C:/1pdf-test-corpus",
+  "default_root": "__private_validation_assets_not_configured__",
   "description": "Public, local-only PDF corpus entries for PDF importer stress testing. Downloaded files are intentionally not committed to git.",
   "entries": [
     {

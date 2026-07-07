@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # tools/generate_corpus_baselines.rb
-# Regenerate corpus placement baselines for headless SU CI.
+# Regenerate private validation baselines for headless SU CI.
 #
 # Usage:
 #   ruby tools/generate_corpus_baselines.rb
@@ -16,7 +16,7 @@ end
 
 pdfs = BlueCollarSystems::PDFVectorImporter::CorpusPaths.collect_corpus_pdfs
 if pdfs.empty?
-  warn 'No corpus PDFs found.'
+  warn 'No private validation PDFs found.'
   exit 1
 end
 

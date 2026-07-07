@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Headless golden-oracle gate: named Tier-1 PDFs vs numeric ranges in golden_oracles.json.
+# Headless golden-oracle gate: named private validation PDFs vs numeric ranges in validation_oracles.json.
 # Skips oracles whose PDF is not on disk (manifest-only / user-desktop).
 
 require 'json'
@@ -11,7 +11,7 @@ require_relative 'support/corpus_harness'
 require_relative '../corpus_paths'
 
 class GoldenOracleTest < Minitest::Test
-  ORACLE_PATH = File.join(__dir__, 'fixtures', 'golden_oracles.json')
+  ORACLE_PATH = File.join(__dir__, 'fixtures', 'validation_oracles.json')
 
   def setup
     @doc = JSON.parse(File.read(ORACLE_PATH))
@@ -19,7 +19,7 @@ class GoldenOracleTest < Minitest::Test
   end
 
   def test_oracle_schema
-    assert_equal 'bcs.golden_oracles/1', @doc['schema']
+    assert_equal 'bcs.validation_oracles/1', @doc['schema']
     assert @oracles.length >= 5
   end
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # test/text_category_placement_test.rb
-# Category-based label placement rules — synthetic TextItem fixtures (no corpus PDF strings).
+# Category-based label placement rules — synthetic TextItem fixtures (no private validation PDF strings).
 
 require 'fileutils'
 
@@ -142,7 +142,7 @@ assert_true(builder.send(:angle_needs_geometry_text?, 45.0, 8.0),
 bom_mesh_x, _, _ = builder.send(:mesh_label_anchor_pdf, bom)
 assert_near(bom_mesh_x, bx, 0.001, 'mesh anchor matches centered label insertion X')
 
-# --- BOM table orientation regression (mirrors T1-01 QUAN|MARK|DESCRIPTION) ---
+# --- BOM table orientation regression (mirrors PRIVATE-01 QUAN|MARK|DESCRIPTION) ---
 # QUAN single-digit quantities must render UPRIGHT (0deg), not rotated 90deg.
 # MARK/DESCRIPTION cells stay horizontal. Only genuinely PDF-rotated field
 # dimensions should rotate — see label_angle_pdf QUAN-column branch (R26).

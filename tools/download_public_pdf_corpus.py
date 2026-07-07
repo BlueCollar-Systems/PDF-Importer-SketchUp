@@ -43,10 +43,10 @@ def load_manifest(path: Path) -> dict:
 def resolve_root(manifest: dict, explicit_root: str | None) -> Path:
     root = (
         explicit_root
-        or os.environ.get("BCS_CORPUS_ROOT")
-        or os.environ.get("PDF_TEST_CORPUS")
+        or os.environ.get("BCS_PRIVATE_VALIDATION_ROOT")
+        or os.environ.get("PDF_PRIVATE_VALIDATION_ROOT")
         or manifest.get("default_root")
-        or "C:/1pdf-test-corpus"
+        or "__private_validation_assets_not_configured__"
     )
     return Path(root).expanduser().resolve()
 
@@ -68,7 +68,7 @@ def download(url: str, target: Path, timeout: int) -> None:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
-    parser.add_argument("--root", help="Corpus root. Defaults to BCS_CORPUS_ROOT or C:/1pdf-test-corpus.")
+    parser.add_argument("--root", help="Corpus root. Defaults to BCS_PRIVATE_VALIDATION_ROOT or __private_validation_assets_not_configured__.")
     parser.add_argument("--id", action="append", dest="ids", help="Download only the named manifest id. Repeatable.")
     parser.add_argument("--include-disabled", action="store_true", help="Attempt entries marked enabled=false when they have a URL.")
     parser.add_argument("--timeout", type=int, default=120, help="Per-file HTTP timeout in seconds.")

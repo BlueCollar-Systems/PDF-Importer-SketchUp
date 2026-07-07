@@ -1,4 +1,4 @@
-# corpus_paths.rb — Resolve PDF test corpus paths via BCS_CORPUS_ROOT.
+# corpus_paths.rb - Resolve private validation PDF paths via BCS_PRIVATE_VALIDATION_ROOT.
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
 require 'json'
@@ -6,24 +6,22 @@ require 'json'
 module BlueCollarSystems
   module PDFVectorImporter
     module CorpusPaths
-      DEFAULT_CORPUS_ROOTS = [
-        'C:/1pdf-test-corpus'
-      ].freeze
+      DEFAULT_CORPUS_ROOTS = [].freeze
 
-      # Scan profiles for corpus placement CI (phase 1). Earlier entries win on
+      # Scan profiles for private validation CI (phase 1). Earlier entries win on
       # duplicate corpus_key collisions.
       CORPUS_SCAN_PROFILES = [
-        { subdir: 'tier1/user', recursive: false, tag: 'corpus_tier1_user' },
-        { subdir: 'tier1/web', recursive: true, tag: 'corpus_tier1_web' },
-        { subdir: 'tier2/web', recursive: true, tag: 'corpus_tier2_web' },
-        { subdir: 'web-acquired', recursive: true, tag: 'corpus_web_acquired' },
-        { subdir: nil, recursive: false, tag: 'corpus_root' }
+        { subdir: 'private/user', recursive: false, tag: 'private_validation_user' },
+        { subdir: 'private/web', recursive: true, tag: 'private_validation_web' },
+        { subdir: 'private-secondary/web', recursive: true, tag: 'private_validation_secondary_web' },
+        { subdir: 'web-acquired', recursive: true, tag: 'private_validation_external' },
+        { subdir: nil, recursive: false, tag: 'private_validation_root' }
       ].freeze
 
       module_function
 
-      def resolve_corpus_root(candidates = nil)
-        env_root = ENV['BCS_CORPUS_ROOT'] || ENV['PDF_TEST_CORPUS']
+      def resolve_private_validation_root(candidates = nil)
+        env_root = ENV['BCS_PRIVATE_VALIDATION_ROOT'] || ENV['PDF_PRIVATE_VALIDATION_ROOT']
         ordered = []
         ordered << env_root if env_root && !env_root.to_s.strip.empty?
         ordered.concat(Array(candidates || DEFAULT_CORPUS_ROOTS))
@@ -39,12 +37,12 @@ module BlueCollarSystems
         corpus_scan_roots.each do |root|
           search_dirs = [root]
           search_dirs.unshift(File.join(root, subdir)) unless subdir.to_s.empty?
-          %w[tier1/user tier1/web tier2/web web-acquired pdfs].each do |folder|
+          %w[private/user private/web private-secondary/web web-acquired pdfs].each do |folder|
             candidate = File.join(root, folder)
             search_dirs << candidate if File.directory?(candidate)
           end
 
-          # Allow manifest-style paths relative to corpus root (e.g. tier1/user/foo.pdf)
+          # Allow manifest-style paths relative to private validation root (e.g. private/user/foo.pdf)
           if rel.include?('/')
             nested = File.join(root, rel.tr('/', File::SEPARATOR))
             return File.expand_path(nested) if File.file?(nested)
@@ -62,17 +60,16 @@ module BlueCollarSystems
         nil
       end
 
-      def require_corpus_root
-        root = resolve_corpus_root
-        raise "PDF corpus not found. Set BCS_CORPUS_ROOT or place files under C:/1pdf-test-corpus." unless root
+      def require_private_validation_root
+        root = resolve_private_validation_root
+        raise "Private validation PDFs not found. Set BCS_PRIVATE_VALIDATION_ROOT." unless root
         root
       end
 
-      # Ordered roots used by corpus placement CI. An explicit BCS_CORPUS_ROOT
-      # or PDF_TEST_CORPUS restricts the scan to that root; otherwise the local
-      # canonical corpus checkout is scanned.
+      # Ordered roots used by private validation CI. An explicit private
+      # validation root restricts the scan to that root.
       def corpus_scan_roots
-        env_root = ENV['BCS_CORPUS_ROOT'] || ENV['PDF_TEST_CORPUS']
+        env_root = ENV['BCS_PRIVATE_VALIDATION_ROOT'] || ENV['PDF_PRIVATE_VALIDATION_ROOT']
         if env_root && !env_root.to_s.strip.empty?
           path = File.expand_path(env_root)
           return File.directory?(path) ? [path] : []
@@ -85,9 +82,9 @@ module BlueCollarSystems
       def collect_corpus_pdfs
         pdfs = []
         corpus_scan_roots.each do |root|
-          is_env_root = !!(ENV['BCS_CORPUS_ROOT'] || ENV['PDF_TEST_CORPUS']) &&
+          is_env_root = !!(ENV['BCS_PRIVATE_VALIDATION_ROOT'] || ENV['PDF_PRIVATE_VALIDATION_ROOT']) &&
                         File.expand_path(root) == File.expand_path(
-                          (ENV['BCS_CORPUS_ROOT'] || ENV['PDF_TEST_CORPUS']).to_s
+                          (ENV['BCS_PRIVATE_VALIDATION_ROOT'] || ENV['PDF_PRIVATE_VALIDATION_ROOT']).to_s
                         )
           CORPUS_SCAN_PROFILES.each do |profile|
             scan_dir = profile[:subdir] ? File.join(root, profile[:subdir]) : root
@@ -97,7 +94,7 @@ module BlueCollarSystems
               next unless File.file?(pdf_path)
               rel = pdf_path.sub("#{scan_dir}/", '').sub("#{scan_dir}\\", '')
               tag = profile[:tag]
-              tag = 'env_corpus' if is_env_root && profile[:subdir].nil?
+              tag = 'env_private_validation' if is_env_root && profile[:subdir].nil?
               corpus_key = "#{tag}/#{rel}"
               pdfs << {
                 path: File.expand_path(pdf_path),
@@ -136,15 +133,15 @@ module BlueCollarSystems
 
       def canonical_baseline_key(corpus_key)
         key = corpus_key.to_s
-        key = key.sub(%r{\Aenv_corpus/}, 'corpus_root/')
+        key = key.sub(%r{\Aenv_private_validation/}, 'private_validation_root/')
         key
       end
 
       def load_manifest(root = nil)
-        corpus_root = root || resolve_corpus_root
-        return nil unless corpus_root
+        private_validation_root = root || resolve_private_validation_root
+        return nil unless private_validation_root
 
-        manifest_path = File.join(corpus_root, 'manifest.json')
+        manifest_path = File.join(private_validation_root, 'manifest.json')
         return nil unless File.file?(manifest_path)
 
         JSON.parse(File.read(manifest_path))

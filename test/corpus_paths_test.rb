@@ -8,12 +8,12 @@ class CorpusPathsTest < Minitest::Test
     corpus = BlueCollarSystems::PDFVectorImporter::CorpusPaths
 
     assert_equal(
-      'corpus_tier1_user_T1_01_pdf.json',
-      corpus.baseline_slug('corpus_tier1_user/T1-01.pdf')
+      'private_validation_user_PRIVATE_01_pdf.json',
+      corpus.baseline_slug('private_validation_user/PRIVATE-01.pdf')
     )
     assert_equal(
-      'corpus_tier1_user_T1_02_pdf.json',
-      corpus.baseline_slug('corpus_tier1_user/T1-02.pdf')
+      'private_validation_user_PRIVATE_02_pdf.json',
+      corpus.baseline_slug('private_validation_user/PRIVATE-02.pdf')
     )
   end
 
@@ -21,8 +21,8 @@ class CorpusPathsTest < Minitest::Test
     corpus = BlueCollarSystems::PDFVectorImporter::CorpusPaths
 
     assert_includes(
-      corpus.baseline_slug_candidates('corpus_tier1_user/T1-03.pdf'),
-      'corpus_tier1_user_T1_03_pdf.json'
+      corpus.baseline_slug_candidates('private_validation_user/PRIVATE-03.pdf'),
+      'private_validation_user_PRIVATE_03_pdf.json'
     )
   end
 
@@ -30,12 +30,12 @@ class CorpusPathsTest < Minitest::Test
     corpus = BlueCollarSystems::PDFVectorImporter::CorpusPaths
 
     assert_equal(
-      'corpus_tier1_user/T1-01.pdf',
-      corpus.canonical_baseline_key('corpus_tier1_user/T1-01.pdf')
+      'private_validation_user/PRIVATE-01.pdf',
+      corpus.canonical_baseline_key('private_validation_user/PRIVATE-01.pdf')
     )
     assert_equal(
-      'corpus_root/T1-10.pdf',
-      corpus.canonical_baseline_key('env_corpus/T1-10.pdf')
+      'private_validation_root/PRIVATE-10.pdf',
+      corpus.canonical_baseline_key('env_private_validation/PRIVATE-10.pdf')
     )
   end
 end

@@ -22,7 +22,7 @@ module BlueCollarSystems
             UI.messagebox(
               "PDF Vector Importer updated from v#{previous} to v#{current}.\n\n" \
               "If you skipped versions, run Extensions → PDF Vector Importer → " \
-              "Compatibility Report once and retest a Tier-1 PDF before shop use."
+              "Compatibility Report once and retest a private validation PDF before shop use."
             )
           end
           Sketchup.write_default(PREF_KEY, PREF_INSTALLED, current)

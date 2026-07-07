@@ -93,7 +93,7 @@ on Ruby 2.7 / 3.0 / 3.2. Failures block merge.
   validation assets are mounted
 - `test/corpus_strict_timing_test.rb` - opt-in strict timing on a private
   fixture ID (`CORPUS_STRICT_TIMING=1`)
-- `test/CORPUS_STRESS_OPTOUT.md` - stress PDF opt-out inventory
+- `test/PRIVATE_VALIDATION_STRESS_OPTOUT.md` - stress PDF opt-out inventory
 - `test_all_pdfs.rb` - legacy parser-only sweep
 
 ## Status
