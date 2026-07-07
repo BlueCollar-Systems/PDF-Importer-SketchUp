@@ -230,9 +230,13 @@ module BlueCollarSystems
         # Extract position and rotation from text matrix
         x = text_matrix[4]
         y = text_matrix[5]
-        # Font size is scaled by the text matrix (for text processing/dedup)
-        effective_size = font_size * Math.sqrt(text_matrix[0]**2 + text_matrix[1]**2)
-        effective_size = font_size if effective_size.abs < 0.001
+        # Font size is scaled by both text-matrix axes; non-uniform CTMs must
+        # use the larger magnitude or 3D text/labels undershoot the PDF bbox.
+        along = Math.hypot(text_matrix[0].to_f, text_matrix[1].to_f)
+        normal = Math.hypot(text_matrix[2].to_f, text_matrix[3].to_f)
+        scale_factor = [along, normal].max
+        effective_size = font_size * scale_factor
+        effective_size = font_size if scale_factor.abs < 0.001
         # Rotation angle
         angle = -Math.atan2(text_matrix[1], text_matrix[0]) * 180.0 / Math::PI
 

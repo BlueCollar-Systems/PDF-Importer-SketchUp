@@ -538,23 +538,150 @@ module BlueCollarSystems
         nil
       end
 
-      def mesh_text_height_inches(item, angle_deg, page_h)
-        fs = effective_font_size_pts(item)
-        raw = (item.respond_to?(:raw_font_size) && item.raw_font_size) ?
-              item.raw_font_size.to_f : nil
+      # Fraction of bbox height that represents cap-height for the typical
+      # structural drawing font (Arial/Helvetica-like condensed sans).
+      # This is applied only when we derive size from the rendered bbox, which
+      # already includes leading above the cap-line.
+      MESH_TEXT_BBOX_CAP_RATIO = 0.72
 
-        if raw && raw > 0
-          fs = fs > (page_h * 0.04) ? raw : fs
-        else
-          fs *= 0.55
+      # Hard limits in inches, independent of page size.
+      MESH_TEXT_HEIGHT_MIN_IN = 0.01   # never smaller than 0.01" (~0.72pt)
+      MESH_TEXT_HEIGHT_MAX_IN = 1.5    # never larger than 1.5" (~108pt)
+
+      def mesh_text_height_inches(item, angle_deg, _page_h)
+        fs_pts = effective_font_size_pts(item)
+        if external_text_item?(item) && label_has_bbox?(item)
+          angle = item.respond_to?(:angle) ? item.angle.to_f : angle_deg.to_f
+          bw = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
+          bh = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
+          bbox_h = bbox_glyph_height_pts(bw, bh, angle)
+          fs_pts = [bbox_h * MESH_TEXT_BBOX_CAP_RATIO, 1.0].max if bbox_h > 0.0
         end
 
-        fs = [fs, page_h * 0.03].min if fs > page_h * 0.03
-        fs = [fs, 1.0].max
-        height = fs * PDF_POINT_TO_INCH * @scale
-        [[height, 0.015].max, 1.5].min
+        fs_pts = mesh_text_fit_font_size_pts(item, fs_pts, angle_deg)
+        height = fs_pts * PDF_POINT_TO_INCH * @scale
+        height.clamp(MESH_TEXT_HEIGHT_MIN_IN, MESH_TEXT_HEIGHT_MAX_IN)
       rescue StandardError
-        0.015
+        MESH_TEXT_HEIGHT_MIN_IN
+      end
+
+      def mesh_text_fit_font_size_pts(item, font_size_pts, angle_deg)
+        fs = [font_size_pts.to_f, 1.0].max
+        return fs unless label_has_bbox?(item)
+
+        axes = mesh_text_bbox_axes_pts(item, angle_deg)
+        return fs unless axes
+
+        along_pts, normal_pts = axes
+        fs = normal_pts * 0.96 if normal_pts > 1.0 && fs > normal_pts * 1.08
+
+        estimated_run_pts = mesh_text_width_units(item.text) * fs
+        if along_pts > 1.0 && estimated_run_pts > along_pts * 1.08
+          ratio = (along_pts * 0.98) / estimated_run_pts
+          fs *= [[ratio, 0.25].max, 1.0].min
+        end
+
+        [fs, 1.0].max
+      rescue StandardError
+        [font_size_pts.to_f, 1.0].max
+      end
+
+      def mesh_text_width_units(text)
+        units = 0.0
+        text.to_s.each_char do |ch|
+          units += if ch =~ /\d/
+                     0.55
+                   elsif " /'-\".".include?(ch)
+                     0.30
+                   elsif "MW@#%".include?(ch)
+                     0.95
+                   else
+                     0.65
+                   end
+        end
+        [units, 0.55].max
+      rescue StandardError
+        0.55
+      end
+
+      def mesh_text_bbox_axes_pts(item, angle_deg)
+        return nil unless label_has_bbox?(item)
+
+        axis_w = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
+        axis_h = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
+        return nil if axis_w <= 1.0e-9 || axis_h <= 1.0e-9
+
+        norm = normalize_text_angle_deg(angle_deg).abs
+        norm >= 45.0 ? [[axis_w, axis_h].max, [axis_w, axis_h].min] : [axis_w, axis_h]
+      rescue StandardError
+        nil
+      end
+
+      def mesh_text_bbox_axis_limits_inches(item)
+        return nil unless label_has_bbox?(item)
+
+        axis_w = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs * PDF_POINT_TO_INCH * @scale
+        axis_h = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs * PDF_POINT_TO_INCH * @scale
+        return nil if axis_w <= 1.0e-9 || axis_h <= 1.0e-9
+        [axis_w, axis_h]
+      rescue StandardError
+        nil
+      end
+
+      def mesh_text_entities_axis_bounds(new_ents)
+        xs = []
+        ys = []
+        widths = []
+        heights = []
+        Array(new_ents).each do |entity|
+          next unless entity.respond_to?(:bounds)
+
+          bounds = entity.bounds
+          next unless bounds
+
+          if bounds.respond_to?(:min) && bounds.respond_to?(:max)
+            bmin = bounds.min
+            bmax = bounds.max
+            xs << bmin.x.to_f << bmax.x.to_f
+            ys << bmin.y.to_f << bmax.y.to_f
+          else
+            widths << bounds.width.to_f if bounds.respond_to?(:width)
+            heights << bounds.height.to_f if bounds.respond_to?(:height)
+          end
+        rescue StandardError
+          next
+        end
+
+        if xs.length >= 2 && ys.length >= 2
+          [(xs.max - xs.min).abs, (ys.max - ys.min).abs]
+        elsif !widths.empty? && !heights.empty?
+          [widths.max.to_f, heights.max.to_f]
+        end
+      rescue StandardError
+        nil
+      end
+
+      def calibrate_mesh_text_entities_to_bbox(entities, new_ents, item, anchor_pt)
+        limits = mesh_text_bbox_axis_limits_inches(item)
+        return unless limits
+
+        current = mesh_text_entities_axis_bounds(new_ents)
+        return unless current
+
+        limit_x, limit_y = limits
+        current_x, current_y = current
+        factors = []
+        factors << (limit_x * 1.08 / current_x) if current_x > limit_x * 1.12 && current_x > 1.0e-9
+        factors << (limit_y * 1.12 / current_y) if current_y > limit_y * 1.16 && current_y > 1.0e-9
+        return if factors.empty?
+
+        factor = [[factors.min.to_f, 0.05].max, 1.0].min
+        return if factor >= 0.999
+
+        scale = Geom::Transformation.scaling(anchor_pt, factor)
+        entities.transform_entities(scale, *new_ents)
+      rescue StandardError => e
+        Logger.warn("GeometryBuilder", "3D text bbox calibration skipped: #{e.message}")
       end
 
       def place_mesh_text(entities, item, origin_x, origin_y, layer)
@@ -597,6 +724,7 @@ module BlueCollarSystems
             entities.transform_entities(Geom::Transformation.new(offset), *new_ents)
           end
         end
+        calibrate_mesh_text_entities_to_bbox(entities, new_ents, item, pt)
         new_ents.each do |entity|
           begin
             set_layer(entity, layer)
@@ -1085,6 +1213,40 @@ module BlueCollarSystems
         false
       end
 
+      def bbox_glyph_height_pts(bbox_w_pts, bbox_h_pts, angle_deg)
+        bw = [bbox_w_pts.to_f, 0.0].max
+        bh = [bbox_h_pts.to_f, 0.0].max
+        return 0.0 if bw <= 1.0e-6 && bh <= 1.0e-6
+        norm = normalize_text_angle_deg(angle_deg).abs
+        if norm >= 45.0
+          return [bw, bh].min if bw > 1.0e-6 && bh > 1.0e-6
+          return [bw, bh].max
+        end
+        bh.positive? ? bh : bw
+      rescue StandardError
+        0.0
+      end
+
+      def reconcile_font_size_with_bbox(fs, item)
+        fs = [fs.to_f, 1.0].max
+        return fs unless label_has_bbox?(item)
+        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+        bw = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
+        bh = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
+        bbox_h = bbox_glyph_height_pts(bw, bh, angle)
+        return fs if bbox_h <= 1.0e-6
+        ratio = bbox_h / fs
+        if ratio >= 1.35
+          bbox_h * 0.96
+        elsif ratio <= 0.75
+          bbox_h * 0.96
+        else
+          fs
+        end
+      rescue StandardError
+        fs
+      end
+
       def effective_font_size_pts(item)
         fs = [item.font_size.to_f, 1.0].max
         return fs unless label_has_bbox?(item)
@@ -1100,7 +1262,7 @@ module BlueCollarSystems
         elsif rotated_part_mark_label?(item)
           [bw, bh].min
         else
-          fs
+          reconcile_font_size_with_bbox(fs, item)
         end
       rescue StandardError
         [item.font_size.to_f, 1.0].max
