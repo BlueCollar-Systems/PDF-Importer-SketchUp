@@ -1222,7 +1222,7 @@ module BlueCollarSystems
           return [bw, bh].min if bw > 1.0e-6 && bh > 1.0e-6
           return [bw, bh].max
         end
-        bh.positive? ? bh : bw
+        bh > 0 ? bh : bw
       rescue StandardError
         0.0
       end
