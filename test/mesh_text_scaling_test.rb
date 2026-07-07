@@ -29,8 +29,17 @@ module Geom
     def initialize(x=0,y=0,z=0); @x=x.to_f; @y=y.to_f; @z=z.to_f; end
   end
   class Transformation
-    def initialize(*); end
+    attr_reader :args, :kind
+    def initialize(*args)
+      @args = args
+      @kind = :translation
+    end
     def self.rotation(*); new; end
+    def self.scaling(*args)
+      t = new(*args)
+      t.instance_variable_set(:@kind, :scaling)
+      t
+    end
   end
 end
 ORIGIN  = Geom::Point3d.new(0,0,0)
@@ -75,6 +84,36 @@ end
 def no_bbox_item(text, matrix_scaled_fs_pts, raw_fs: nil)
   TI.new(text, 50.0, 100.0, matrix_scaled_fs_pts.to_f, 0.0, 'Helvetica',
          raw_fs, nil, nil, nil, nil)
+end
+
+class DummyBounds
+  attr_reader :min, :max
+  def initialize(width, height)
+    @min = Geom::Point3d.new(0, 0, 0)
+    @max = Geom::Point3d.new(width, height, 0)
+  end
+end
+
+class DummyRenderedTextEntity
+  def initialize(width, height)
+    @bounds = DummyBounds.new(width, height)
+  end
+
+  def bounds
+    @bounds
+  end
+end
+
+class DummyTransformEntities
+  attr_reader :transforms
+
+  def initialize
+    @transforms = []
+  end
+
+  def transform_entities(*args)
+    @transforms << args
+  end
 end
 
 # ── Constants from geometry_builder.rb ───────────────────────────────────────
@@ -182,6 +221,15 @@ class MeshTextScalingTest < Minitest::Test
     assert_in_delta MAX_IN, h, 0.0001
   end
 
+  def test_long_text_is_fit_to_narrow_bbox_before_mesh_creation
+    b = make_builder(LETTER)
+    item = bbox_item('LONG CALLOUT TEXT', 24.0, 20.0, bbox_w: 30.0)
+
+    h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
+
+    assert h < 0.09, "Long text should shrink to bbox width before mesh creation (got #{h.round(5)})"
+  end
+
   # ── import scale factor applied once ──────────────────────────────────────
   def test_import_scale_applied_once
     b1 = make_builder(LETTER, scale: 1.0)
@@ -253,6 +301,35 @@ class MeshTextScalingTest < Minitest::Test
     assert h <= MAX_IN
   end
 
+  # ── Vertical part mark: tall bbox + pdftotext angle 0 must use narrow axis ─
+  def test_vertical_part_mark_infers_bbox_angle_when_raw_angle_zero
+    b = make_builder(LETTER)
+    item0 = TI.new('a1001', 50.0, 100.0, 8.0, 0.0, 'pdftotext',
+                    nil, 50.0, 100.0, 58.0, 142.0)
+    item90 = TI.new('a1001', 50.0, 100.0, 8.0, 90.0, 'pdftotext',
+                     nil, 50.0, 100.0, 58.0, 142.0)
+    h0  = b.send(:mesh_text_height_inches, item0, 0.0, LETTER[3])
+    h90 = b.send(:mesh_text_height_inches, item90, 90.0, LETTER[3])
+    assert_in_delta h0, h90, 0.0001,
+                    'upright part mark in tall bbox must match explicit 90° height'
+    assert h0 < 0.10,
+           "vertical part mark must not scale to full bbox height (got #{h0.round(4)}\")"
+  end
+
+  # ── Rotated page: mesh height must match unrotated page for same bbox ─────
+  def test_rotated_page_same_mesh_height_as_portrait
+    item = bbox_item('p1052', 8.0, 10.0)
+    b_portrait = make_builder(LETTER, scale: 1.0)
+    b_rotated = GB.new(
+      Object.new, [], [], LETTER, scale_factor: 1.0,
+      import_text: true, use_3d_text: true, page_rotation: 270
+    )
+    h_portrait = b_portrait.send(:mesh_text_height_inches, item, 0.0, LETTER[3])
+    h_rotated  = b_rotated.send(:mesh_text_height_inches, item, 0.0, LETTER[3])
+    assert_in_delta h_portrait, h_rotated, 0.0001,
+                    'page /Rotate must not change 3D text height for identical bbox'
+  end
+
   # ── Existing golden: w1023 height must not blow up ────────────────────────
   def test_w1023_like_item_height
     b = make_builder(LETTER)
@@ -261,6 +338,62 @@ class MeshTextScalingTest < Minitest::Test
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
     assert h < 0.12, "w1023-like height must not blow up (got #{h.round(5)})"
     assert h > 0.05, "w1023-like height must not be too small (got #{h.round(5)})"
+  end
+
+  def test_rendered_mesh_text_is_shrunk_to_source_bbox
+    b = make_builder(LETTER)
+    item = bbox_item('W12X30', 8.0, 10.0, bbox_w: 48.0)
+    ents = DummyTransformEntities.new
+    rendered = DummyRenderedTextEntity.new(10.0, 10.0)
+    anchor = Geom::Point3d.new(0, 0, 0)
+
+    b.send(:calibrate_mesh_text_entities_to_bbox, ents, [rendered], item, anchor)
+
+    scale_call = ents.transforms.find { |args| args.first.respond_to?(:kind) && args.first.kind == :scaling }
+    refute_nil scale_call, 'Oversized rendered 3D text must get a scaling transform'
+    factor = scale_call.first.args.last
+    assert factor < 1.0, "Expected shrink factor below 1.0, got #{factor.inspect}"
+  end
+
+  # ── calibrate grow path: undersized rendered text should be scaled up ──────
+  # When mesh_text_fit_font_size_pts shrinks a font too aggressively (e.g.
+  # short label in a wide bbox), the rendered geometry is much shorter than
+  # the PDF bbox height. calibrate must grow it back up, capped at 1.3×.
+  def test_calibrate_grows_undersized_rendered_text
+    b = make_builder(LETTER)
+    # bbox: 10pt high, 200pt wide (much wider than text needs → fit shrank font)
+    item = bbox_item('A', 8.0, 10.0, bbox_w: 200.0)
+    # Simulate: rendered text came out at 4pt height (in inches = 4/72)
+    # bbox_y limit_in = 10 * (1/72) = 0.1389". 4/72 ≈ 0.0556" < 0.70 * 0.1389" → grow fires
+    rendered_h_in = 4.0 / 72.0
+    rendered_w_in = 3.0 / 72.0
+    ents = DummyTransformEntities.new
+    rendered = DummyRenderedTextEntity.new(rendered_w_in, rendered_h_in)
+    anchor = Geom::Point3d.new(0, 0, 0)
+
+    b.send(:calibrate_mesh_text_entities_to_bbox, ents, [rendered], item, anchor)
+
+    scale_call = ents.transforms.find { |args| args.first.respond_to?(:kind) && args.first.kind == :scaling }
+    refute_nil scale_call, 'Undersized rendered 3D text must be grown by calibrate'
+    factor = scale_call.first.args.last
+    assert factor > 1.0, "Expected grow factor > 1.0 for undersized text, got #{factor.inspect}"
+    assert factor <= 1.3, "Grow factor must not exceed 1.3 cap (got #{factor.inspect})"
+  end
+
+  # ── calibrate: near-correct size should not fire any transform ─────────────
+  def test_calibrate_no_transform_for_correct_size
+    b = make_builder(LETTER)
+    # bbox 10pt high → limit_y ≈ 0.1389". rendered at 0.9× limit → within tolerance.
+    item = bbox_item('p1', 8.0, 10.0, bbox_w: 50.0)
+    limit_y_in = 10.0 / 72.0
+    ents = DummyTransformEntities.new
+    rendered = DummyRenderedTextEntity.new(20.0 / 72.0, limit_y_in * 0.92)
+    anchor = Geom::Point3d.new(0, 0, 0)
+
+    b.send(:calibrate_mesh_text_entities_to_bbox, ents, [rendered], item, anchor)
+
+    scale_call = ents.transforms.find { |args| args.first.respond_to?(:kind) && args.first.kind == :scaling }
+    assert_nil scale_call, 'Near-correct size must not trigger any calibration transform'
   end
 
 end

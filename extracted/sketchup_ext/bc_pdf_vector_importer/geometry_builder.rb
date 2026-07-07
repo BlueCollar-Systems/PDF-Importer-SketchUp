@@ -548,17 +548,33 @@ module BlueCollarSystems
       MESH_TEXT_HEIGHT_MIN_IN = 0.01   # never smaller than 0.01" (~0.72pt)
       MESH_TEXT_HEIGHT_MAX_IN = 1.5    # never larger than 1.5" (~108pt)
 
-      def mesh_text_height_inches(item, angle_deg, _page_h)
+      def mesh_bbox_angle_for_scaling(item)
+        angle = label_angle_pdf(item)
+        return angle if angle.abs >= 12.0
+        return angle unless label_has_bbox?(item)
+
+        bw = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
+        bh = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
+        if narrow_vertical_dimension_bbox?(bw, bh) && part_mark_label?(item.text)
+          return 90.0
+        end
+        angle
+      rescue StandardError
+        0.0
+      end
+
+      def mesh_text_height_inches(item, _angle_deg, _page_h)
+        # Bbox axes live in PDF/MediaBox space; use PDF-space angle (not display_angle).
+        bbox_angle = mesh_bbox_angle_for_scaling(item)
         fs_pts = effective_font_size_pts(item)
         if external_text_item?(item) && label_has_bbox?(item)
-          angle = item.respond_to?(:angle) ? item.angle.to_f : angle_deg.to_f
           bw = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
           bh = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
-          bbox_h = bbox_glyph_height_pts(bw, bh, angle)
+          bbox_h = bbox_glyph_height_pts(bw, bh, bbox_angle)
           fs_pts = [bbox_h * MESH_TEXT_BBOX_CAP_RATIO, 1.0].max if bbox_h > 0.0
         end
 
-        fs_pts = mesh_text_fit_font_size_pts(item, fs_pts, angle_deg)
+        fs_pts = mesh_text_fit_font_size_pts(item, fs_pts, bbox_angle)
         height = fs_pts * PDF_POINT_TO_INCH * @scale
         height.clamp(MESH_TEXT_HEIGHT_MIN_IN, MESH_TEXT_HEIGHT_MAX_IN)
       rescue StandardError
@@ -673,12 +689,23 @@ module BlueCollarSystems
         limit_x, limit_y = limits
         current_x, current_y = current
         factors = []
+
+        # Shrink: rendered geometry overflows the PDF bbox.
         factors << (limit_x * 1.08 / current_x) if current_x > limit_x * 1.12 && current_x > 1.0e-9
         factors << (limit_y * 1.12 / current_y) if current_y > limit_y * 1.16 && current_y > 1.0e-9
+
+        # Grow: rendered geometry is significantly smaller than the PDF bbox.
+        # This corrects over-shrinking by mesh_text_fit_font_size_pts on wide bboxes.
+        # Cap at 1.3× to avoid runaway growth from spurious bounds readings.
+        if current_y < limit_y * 0.70 && current_y > 1.0e-9
+          grow_y = limit_y * 0.88 / current_y
+          factors << [[grow_y, 1.3].min, 1.0].max
+        end
+
         return if factors.empty?
 
-        factor = [[factors.min.to_f, 0.05].max, 1.0].min
-        return if factor >= 0.999
+        factor = [[factors.min.to_f, 0.05].max, 1.3].min
+        return if (factor - 1.0).abs < 0.015
 
         scale = Geom::Transformation.scaling(anchor_pt, factor)
         entities.transform_entities(scale, *new_ents)
