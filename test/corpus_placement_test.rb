@@ -6,13 +6,14 @@
 #   ruby test/corpus_placement_test.rb
 #   CORPUS_UPDATE_BASELINES=1 ruby test/corpus_placement_test.rb
 #
-# Exit 0 = pass, non-zero = failure.
+# Exit 0 = pass or skipped because private assets are not configured.
+# Set PRIVATE_VALIDATION_CI_STRICT=1 to fail when the private corpus is absent.
 
 require 'fileutils'
 require_relative 'support/corpus_harness'
 
 UPDATE_BASELINES = ENV['CORPUS_UPDATE_BASELINES'] == '1' || ARGV.include?('--update-baselines')
-STRICT_EMPTY = ENV['PRIVATE_VALIDATION_CI_STRICT'] != '0'
+STRICT_EMPTY = ENV['PRIVATE_VALIDATION_CI_STRICT'] == '1'
 
 $failures = []
 $warnings = []
@@ -28,7 +29,7 @@ end
 pdfs = BlueCollarSystems::PDFVectorImporter::CorpusPaths.collect_corpus_pdfs
 
 if pdfs.empty?
-  msg = 'No private validation PDFs found. Set BCS_PRIVATE_VALIDATION_ROOT or mirror PDFs under Desktop/corpus paths.'
+  msg = 'No private validation PDFs found. Set BCS_PRIVATE_VALIDATION_ROOT to run this gate.'
   if STRICT_EMPTY
     fail!(msg)
     puts "FAIL: #{msg}"

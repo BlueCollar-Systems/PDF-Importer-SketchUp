@@ -58,6 +58,7 @@ __pycache__/
 # Dev artifacts
 dev_logs/
 _rbz_compare/
+*_sketchup_cli/
 
 # Local debug scratch files
 tmp_*

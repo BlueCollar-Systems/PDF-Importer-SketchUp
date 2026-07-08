@@ -46,10 +46,30 @@ assert_near(merged[0].x, 831.0, 0.01,
             'angle enrichment should adopt internal text-matrix X origin')
 assert_near(merged[0].y, 760.0, 0.01,
             'angle enrichment should adopt internal text-matrix Y origin')
+assert_near(merged[0].font_size, 11.0, 0.01,
+            'angle enrichment should adopt internal nominal text size')
 assert_near(merged[0].bbox_x0, external[0].bbox_x0, 0.01,
             'angle enrichment must preserve external bbox placement')
 assert_near(merged[1].angle, 41.0, 0.01,
             'matching rotated part marks should accept source text-matrix angle')
+assert_near(merged[1].font_size, 11.0, 0.01,
+            'matching rotated part marks should keep internal nominal size')
+
+horizontal = [
+  ti.new('HORIZ', 400.0, 500.0, 2.0, 0.0, 'pdftotext', nil,
+         400.0, 496.0, 420.0, 502.0, nil)
+]
+horizontal_hints = [
+  ti.new('HORIZ', 402.0, 498.0, 8.0, 0.0, 'F1', 8.0,
+         nil, nil, nil, nil, nil)
+]
+horizontal_merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hints(
+  horizontal, horizontal_hints
+)
+assert_near(horizontal_merged[0].font_size, 8.0, 0.01,
+            'horizontal external bbox text should adopt internal nominal size')
+assert_near(horizontal_merged[0].angle, 0.0, 0.01,
+            'horizontal nominal size enrichment should preserve horizontal angle')
 
 far_internal = [
   ti.new('w1023', 1800.0, 1600.0, 11.0, -90.0, 'F1', 1.0,

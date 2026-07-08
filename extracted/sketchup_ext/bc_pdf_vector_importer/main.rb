@@ -160,13 +160,12 @@ module BlueCollarSystems
       return text_items unless text_items && angle_items && !angle_items.empty?
 
       hints = angle_items.select do |it|
-        it && it.text && !it.text.to_s.strip.empty? && it.angle.to_f.abs >= 12.0
+        it && it.text && !it.text.to_s.strip.empty?
       end
       return text_items if hints.empty?
 
       text_items.map do |item|
         next item unless item && item.text
-        next item if item.angle.to_f.abs >= 12.0
 
         hint = nearest_text_angle_hint(item, hints)
         hint ? clone_text_item_with_hints(item, hint) : item
@@ -230,13 +229,21 @@ module BlueCollarSystems
       item
     end
 
-    # Merge internal PDF text-matrix origin + angle onto external bbox items.
+    # Merge internal PDF text-matrix origin, nominal size, and angle onto
+    # external bbox items. Poppler gives excellent coverage and bboxes; the
+    # internal parser gives the Adobe-faithful nominal text height.
     def self.clone_text_item_with_hints(item, hint)
+      nominal_size = begin
+        v = hint.font_size.to_f
+        v > 0.05 ? v : item.font_size
+      rescue StandardError
+        item.font_size
+      end
       TextParser::TextItem.new(
         item.text,
         hint.x,
         hint.y,
-        item.font_size,
+        nominal_size,
         hint.angle.to_f,
         item.font_name,
         hint.respond_to?(:raw_font_size) ? hint.raw_font_size : item.raw_font_size,
