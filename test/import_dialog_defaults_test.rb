@@ -166,6 +166,7 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_includes html, 'Professional import'
     refute_includes html, 'id="mode"'
     assert_includes html, '>Labels<'
+    assert_includes html, BID::TEXT_MODE_HINT
   end
 
   def test_basic_html_selects_last_used_text_mode

@@ -58,6 +58,10 @@ module BlueCollarSystems
       MODE_NAMES   = MODES.keys.join('|')
       TEXT_MODES   = 'Geometry|Glyphs|Labels|3D Text'
       TEXT_MODE_CHOICES = TEXT_MODES.split('|').freeze
+      # Round 16 (R16-3): native Sketchup::Text labels are editable but glyphs stay
+      # horizontal; 3D Text / Glyphs / Geometry deliver PDF-faithful rotation.
+      TEXT_MODE_HINT = 'Labels: editable text, faithful position, horizontal glyphs. ' \
+                       'For rotated or model-space-sized text matching the PDF, use 3D Text, Glyphs, or Geometry.'.freeze
       FIRST_RUN_TEXT_MODE = 'Labels'.freeze
       FIRST_RUN_MATCH_PDF_LAYERS = 'Yes'.freeze
 
@@ -266,7 +270,8 @@ module BlueCollarSystems
                 <option value="No"#{itext_no}>No</option>
               </select></div>
             <div><label>Text Rendering</label>
-              <select id="text_mode">#{text_opts}</select></div>
+              <select id="text_mode">#{text_opts}</select>
+              <p class="hint">#{esc(TEXT_MODE_HINT)}</p></div>
           </div>
           <div class="row"><label>Match PDF Layers</label>
             <select id="match_pdf_layers">
@@ -344,7 +349,8 @@ module BlueCollarSystems
             <div><label>Import Text</label>
               <select id="import_text">#{yn.call(:import_text)}</select></div>
             <div><label>Text Rendering</label>
-              <select id="text_mode">#{text_opts}</select></div>
+              <select id="text_mode">#{text_opts}</select>
+              <p class="hint">#{esc(TEXT_MODE_HINT)}</p></div>
           </div>
           <div class="section">Layers</div>
           <div class="row"><label>Match PDF Layers</label>
