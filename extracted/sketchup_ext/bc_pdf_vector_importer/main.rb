@@ -1667,7 +1667,7 @@ module BlueCollarSystems
         import_session_id: session_id,
         pdf_path: pdf_path,
         objects: objects,
-        version: Metadata::VERSION,
+        version: BlueCollarSystems::PDFVectorImporter::VERSION,
         page_count: stats[:pages]
       )
     rescue StandardError => e
@@ -1815,7 +1815,7 @@ module BlueCollarSystems
       sub.add_separator
       sub.add_item('About PDF Importer') {
         version = begin
-          BlueCollarSystems::PDFVectorImporter::Metadata::VERSION
+          BlueCollarSystems::PDFVectorImporter::VERSION
         rescue NameError
           PLUGIN_VERSION
         end

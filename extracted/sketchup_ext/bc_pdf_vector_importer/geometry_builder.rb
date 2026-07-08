@@ -592,8 +592,6 @@ module BlueCollarSystems
             entities.transform_entities(Geom::Transformation.new(offset), *new_ents)
           end
         end
-        calibrate_mesh_text_entities_to_bbox(entities, new_ents, item, pt)
-
         faces_to_erase = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
         entities.erase_entities(*faces_to_erase) unless faces_to_erase.empty?
         new_ents = new_ents.reject { |e| faces_to_erase.include?(e) }
@@ -1086,59 +1084,8 @@ module BlueCollarSystems
         false
       end
 
-      def bbox_glyph_height_pts(bbox_w_pts, bbox_h_pts, angle_deg)
-        bw = [bbox_w_pts.to_f, 0.0].max
-        bh = [bbox_h_pts.to_f, 0.0].max
-        return 0.0 if bw <= 1.0e-6 && bh <= 1.0e-6
-        norm = normalize_text_angle_deg(angle_deg).abs
-        if norm >= 45.0
-          return [bw, bh].min if bw > 1.0e-6 && bh > 1.0e-6
-          return [bw, bh].max
-        end
-        bh > 0 ? bh : bw
-      rescue StandardError
-        0.0
-      end
-
-      def reconcile_font_size_with_bbox(fs, item)
-        fs = [fs.to_f, 1.0].max
-        return fs unless label_has_bbox?(item)
-        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
-        bw = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
-        bh = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
-        bbox_h = bbox_glyph_height_pts(bw, bh, angle)
-        return fs if bbox_h <= 1.0e-6
-        ratio = bbox_h / fs
-        if fs > 2.0 && (ratio <= 0.75 || ratio >= 1.35)
-          fs
-        elsif ratio >= 1.35
-          bbox_h * 0.96
-        elsif ratio <= 0.75
-          bbox_h * 0.96
-        else
-          fs
-        end
-      rescue StandardError
-        fs
-      end
-
       def effective_font_size_pts(item)
-        fs = [item.font_size.to_f, 1.0].max
-        return fs unless label_has_bbox?(item)
-        bw = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs
-        bh = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs
-        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
-        if slope_triangle_label?(item.text, bw, bh, angle)
-          [bw, bh].min
-        elsif tall_single_text_bbox?(item, bw, bh)
-          [bw, bh].min
-        elsif horizontal_part_mark_in_tall_bbox?(item)
-          [bw, bh].min
-        elsif rotated_part_mark_label?(item)
-          [bw, bh].min
-        else
-          reconcile_font_size_with_bbox(fs, item)
-        end
+        [item.font_size.to_f, 1.0].max
       rescue StandardError
         [item.font_size.to_f, 1.0].max
       end
@@ -1511,7 +1458,11 @@ module BlueCollarSystems
             est_w = label_run_width_pts(item.text, fs, bbox_w, bbox_h, item)
             x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
           elsif should_center_label?(item.text, bbox_w, fs, angle)
-            est_w = item.text.to_s.strip.length * fs * 0.55
+            t = item.text.to_s.strip
+            # Use a wider per-glyph multiplier for all-caps strings (BOM headers
+            # like QUAN/DESC/MARK) vs mixed-case text to avoid over-centering.
+            char_w = (t == t.upcase && t =~ /[A-Z]/) ? 0.79 : 0.55
+            est_w = t.length * fs * char_w
             x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
           else
             x = bx0
