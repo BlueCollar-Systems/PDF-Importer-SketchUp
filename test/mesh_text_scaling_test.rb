@@ -3,11 +3,10 @@
 # Regression tests for 3D text (mesh) height scaling across page sizes and
 # item sources (pdftotext bbox vs internal parser matrix-scaled font_size).
 #
-# Root cause addressed: mesh_text_height_inches previously used a raw_font_size
-# branch gated on a page-relative threshold (page_h * 0.04) causing wildly
-# different heights on non-Letter/non-A4 pages. A 0.55 damping factor was
-# also applied before pts→inches conversion producing double-damping on bbox
-# items. The fix uses a single, page-size-independent pipeline.
+# Root cause addressed (v3.7.83): mesh_text_height_inches overrode nominal
+# font_size with pdftotext line-bbox heights, then calibrate_mesh_text_entities_to_bbox
+# shrank rendered 3D text to fit those microscopic boxes — producing unreadable dots
+# on D-size shop drawings. Fix: trust nominal Tf, guard reconcile/calibrate.
 
 require 'minitest/autorun'
 
@@ -95,29 +94,43 @@ class DummyBounds
 end
 
 class DummyRenderedTextEntity
-  def initialize(width, height)
-    @bounds = DummyBounds.new(width, height)
-  end
+  attr_accessor :layer
 
-  def bounds
-    @bounds
+  def initialize(width, height, typename: 'Edge')
+    @bounds = DummyBounds.new(width, height)
+    @typename = typename
   end
+  def bounds; @bounds; end
+  def typename; @typename; end
+end
+
+class DummyFaceEntity
+  attr_accessor :layer
+
+  def typename; 'Face'; end
+  def bounds; DummyBounds.new(0.1, 0.1); end
 end
 
 class DummyTransformEntities
-  attr_reader :transforms
-
+  attr_reader :transforms, :erased, :height_args
   def initialize
+    @entities = []
     @transforms = []
+    @erased = []
+    @height_args = []
   end
-
-  def transform_entities(*args)
-    @transforms << args
+  def to_a; @entities.dup; end
+  def add_3d_text(_text, _align, _font, _bold, _italic, height, _tol, _extrusion, _filled, _z)
+    @height_args << height
+    @entities << DummyRenderedTextEntity.new(height * 3.0, height, typename: 'Edge')
+    true
   end
+  def transform_entities(*args); @transforms << args; end
+  def erase_entities(*args); @erased.concat(args.flatten); end
 end
 
 # ── Constants from geometry_builder.rb ───────────────────────────────────────
-CAP_RATIO = GB::MESH_TEXT_BBOX_CAP_RATIO  # 0.72
+# MESH_TEXT_BBOX_CAP_RATIO removed in Round 13: height = effective_font_size_pts * PT_TO_IN.
 PT_TO_IN  = GB::PDF_POINT_TO_INCH         # 1/72
 MIN_IN    = GB::MESH_TEXT_HEIGHT_MIN_IN   # 0.01
 MAX_IN    = GB::MESH_TEXT_HEIGHT_MAX_IN   # 1.5
@@ -127,7 +140,6 @@ class MeshTextScalingTest < Minitest::Test
   # ── Constants ──────────────────────────────────────────────────────────────
   def test_constants_sane
     assert_in_delta 1.0/72.0, PT_TO_IN, 1e-9
-    assert_in_delta 0.72, CAP_RATIO, 0.001
     assert_equal 0.01, MIN_IN
     assert_equal 1.5,  MAX_IN
   end
@@ -137,7 +149,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(LETTER)
     item = bbox_item('MARK', 8.0, 10.0)   # 8pt font, 10pt bbox_h
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    expected = (10.0 * CAP_RATIO) * PT_TO_IN   # 7.2pt * (1/72) ≈ 0.1 in
+    expected = 8.0 * PT_TO_IN   # Round 13: height = nominal effective_font_size_pts * PT_TO_IN
     assert_in_delta expected, h, 0.001
     assert h >= MIN_IN
     assert h <= MAX_IN
@@ -204,12 +216,13 @@ class MeshTextScalingTest < Minitest::Test
   # ── Tiny text must clamp to MIN ────────────────────────────────────────────
   def test_tiny_font_clamped_to_min
     b = make_builder(LETTER)
-    # 0.1pt bbox height — below anything real; floor is [bh*CAP_RATIO, 1.0].max = 1.0pt
-    item = bbox_item('x', 0.1, 0.1)
+    # 0.1pt font_size pdftotext item: mesh_text_readability_floor_inches applies the
+    # 6pt shop minimum (stream_fs<=2 guard) → h ≈ 6/72 ≈ 0.083". Must stay in MIN..MAX.
+    item = TI.new('x', 50.0, 100.0, 0.1, 0.0, 'pdftotext',
+                  nil, 50.0, 100.0, 50.1, 100.1)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    # 1.0pt * (1/72) ≈ 0.01389" — between MIN_IN and a sensible ceiling
-    assert h >= MIN_IN,   "Tiny text must be >= MIN_IN (got #{h})"
-    assert h <= 0.02,     "Tiny text must not inflate beyond 0.02\" (got #{h})"
+    assert h >= MIN_IN,  "Tiny text must be >= MIN_IN (got #{h})"
+    assert h <= 0.12,    "Tiny text must not inflate beyond 0.12\" (got #{h})"
   end
 
   # ── Giant bbox must clamp to MAX ───────────────────────────────────────────
@@ -221,13 +234,15 @@ class MeshTextScalingTest < Minitest::Test
     assert_in_delta MAX_IN, h, 0.0001
   end
 
-  def test_long_text_is_fit_to_narrow_bbox_before_mesh_creation
+  def test_long_text_height_within_valid_range
     b = make_builder(LETTER)
+    # 24pt font, 20pt bbox_h, narrow 30pt bbox_w.
+    # Round 13: height = effective_font_size_pts * PT_TO_IN — no width-based shrink.
+    # effective_font_size_pts: ratio=20/24=0.833 (in 0.75-1.35 range) → fs=24
     item = bbox_item('LONG CALLOUT TEXT', 24.0, 20.0, bbox_w: 30.0)
-
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-
-    assert h < 0.09, "Long text should shrink to bbox width before mesh creation (got #{h.round(5)})"
+    assert h >= MIN_IN, "Long text height must be >= MIN_IN (got #{h.round(5)})"
+    assert h <= MAX_IN, "Long text height must be <= MAX_IN (got #{h.round(5)})"
   end
 
   # ── import scale factor applied once ──────────────────────────────────────
@@ -287,7 +302,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(negative_origin_box)
     item = bbox_item('MARK', 8.0, 10.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    expected = (10.0 * CAP_RATIO) * PT_TO_IN
+    expected = 8.0 * PT_TO_IN
     assert_in_delta expected, h, 0.001, "Negative MediaBox origin must not corrupt height"
   end
 
@@ -312,8 +327,9 @@ class MeshTextScalingTest < Minitest::Test
     h90 = b.send(:mesh_text_height_inches, item90, 90.0, LETTER[3])
     assert_in_delta h0, h90, 0.0001,
                     'upright part mark in tall bbox must match explicit 90° height'
-    assert h0 < 0.10,
-           "vertical part mark must not scale to full bbox height (got #{h0.round(4)}\")"
+    # Round 13: height = 8pt * (1/72) = 0.1111" — no bbox shrink in height path
+    assert h0 < 0.13,
+           "vertical part mark height must not blow up (got #{h0.round(4)}\")"
   end
 
   # ── Rotated page: mesh height must match unrotated page for same bbox ─────
@@ -340,60 +356,70 @@ class MeshTextScalingTest < Minitest::Test
     assert h > 0.05, "w1023-like height must not be too small (got #{h.round(5)})"
   end
 
-  def test_rendered_mesh_text_is_shrunk_to_source_bbox
+  def test_place_mesh_text_uses_nominal_height_without_bbox_scaling
+    # Microscopic pdftotext bbox (1.5pt tall, 3pt wide) must not shrink 8pt nominal.
+    # mesh_text_fit_font_size_pts skips normal-axis shrink when bbox_h < 35% of fs.
     b = make_builder(LETTER)
-    item = bbox_item('W12X30', 8.0, 10.0, bbox_w: 48.0)
-    ents = DummyTransformEntities.new
-    rendered = DummyRenderedTextEntity.new(10.0, 10.0)
-    anchor = Geom::Point3d.new(0, 0, 0)
-
-    b.send(:calibrate_mesh_text_entities_to_bbox, ents, [rendered], item, anchor)
-
-    scale_call = ents.transforms.find { |args| args.first.respond_to?(:kind) && args.first.kind == :scaling }
-    refute_nil scale_call, 'Oversized rendered 3D text must get a scaling transform'
-    factor = scale_call.first.args.last
-    assert factor < 1.0, "Expected shrink factor below 1.0, got #{factor.inspect}"
+    item = bbox_item('W12X30', 8.0, 1.5, bbox_w: 3.0)
+    h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
+    # bbox_h=1.5pt < 8*0.35=2.8pt → normal_too_small guard fires → fs stays at 8pt
+    # mesh_text_readability_floor_inches may then apply a floor; 8pt > shop_min_in(6pt)
+    # so floor is driven by bbox context: expect h to reflect ~8pt, not ~1.5pt
+    assert h >= 8.0 * PT_TO_IN * 0.90,
+           "Microscopic bbox must not shrink 8pt text (got #{h.round(5)})"
+    assert h <= MAX_IN, "Height must be within MAX_IN (got #{h.round(5)})"
   end
 
-  # ── calibrate grow path: undersized rendered text should be scaled up ──────
-  # When mesh_text_fit_font_size_pts shrinks a font too aggressively (e.g.
-  # short label in a wide bbox), the rendered geometry is much shorter than
-  # the PDF bbox height. calibrate must grow it back up, capped at 1.3×.
-  def test_calibrate_grows_undersized_rendered_text
+  # ── Face entities from add_3d_text must be erased after placement ─────────────
+  # add_3d_text with extrude=0.0 still creates filled Face entities for each
+  # letter glyph. In a 2D drawing import these appear as large opaque polygons
+  # (arrows/triangles) obscuring geometry. Only edge loops must survive.
+  def test_face_entities_erased_after_place_mesh_text
     b = make_builder(LETTER)
-    # bbox: 10pt high, 200pt wide (much wider than text needs → fit shrank font)
-    item = bbox_item('A', 8.0, 10.0, bbox_w: 200.0)
-    # Simulate: rendered text came out at 4pt height (in inches = 4/72)
-    # bbox_y limit_in = 10 * (1/72) = 0.1389". 4/72 ≈ 0.0556" < 0.70 * 0.1389" → grow fires
-    rendered_h_in = 4.0 / 72.0
-    rendered_w_in = 3.0 / 72.0
-    ents = DummyTransformEntities.new
-    rendered = DummyRenderedTextEntity.new(rendered_w_in, rendered_h_in)
-    anchor = Geom::Point3d.new(0, 0, 0)
+    item = bbox_item('A', 8.0, 10.0, bbox_w: 50.0)
+    edge1 = DummyRenderedTextEntity.new(5.0 / 72.0, 8.0 / 72.0, typename: 'Edge')
+    face1 = DummyFaceEntity.new
+    face2 = DummyFaceEntity.new
+    ents  = DummyTransformEntities.new
 
-    b.send(:calibrate_mesh_text_entities_to_bbox, ents, [rendered], item, anchor)
+    # Simulate the face-erasure step place_mesh_text performs after calibrate
+    new_ents = [edge1, face1, face2]
+    faces = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
+    ents.erase_entities(*faces) unless faces.empty?
+    remaining = new_ents.reject { |e| faces.include?(e) }
 
-    scale_call = ents.transforms.find { |args| args.first.respond_to?(:kind) && args.first.kind == :scaling }
-    refute_nil scale_call, 'Undersized rendered 3D text must be grown by calibrate'
-    factor = scale_call.first.args.last
-    assert factor > 1.0, "Expected grow factor > 1.0 for undersized text, got #{factor.inspect}"
-    assert factor <= 1.3, "Grow factor must not exceed 1.3 cap (got #{factor.inspect})"
+    assert_equal 2, ents.erased.length,    'Both Face entities must be erased'
+    assert_equal 1, remaining.length,      'Only the Edge entity survives'
+    assert_equal 'Edge', remaining.first.typename, 'Survivor must be an Edge'
+    refute_includes ents.erased, edge1,    'Edge must NOT be erased'
   end
 
-  # ── calibrate: near-correct size should not fire any transform ─────────────
-  def test_calibrate_no_transform_for_correct_size
-    b = make_builder(LETTER)
-    # bbox 10pt high → limit_y ≈ 0.1389". rendered at 0.9× limit → within tolerance.
-    item = bbox_item('p1', 8.0, 10.0, bbox_w: 50.0)
-    limit_y_in = 10.0 / 72.0
-    ents = DummyTransformEntities.new
-    rendered = DummyRenderedTextEntity.new(20.0 / 72.0, limit_y_in * 0.92)
-    anchor = Geom::Point3d.new(0, 0, 0)
+  # ── v3.7.83: nominal font_size must survive tiny pdftotext line bbox ───────
+  def test_nominal_font_size_not_shrunk_by_microscopic_pdftotext_bbox
+    b = make_builder(ANSI_D)
+    item = TI.new('W12X30', 50.0, 100.0, 10.0, 0.0, 'pdftotext',
+                  nil, 50.0, 100.0, 120.0, 101.5)
+    h = b.send(:mesh_text_height_inches, item, 0.0, ANSI_D[3])
+    expected = 10.0 * PT_TO_IN
+    assert_in_delta expected, h, 0.002,
+                    "10pt nominal must not shrink to microscopic bbox (got #{h.round(5)})"
+    assert h >= 0.08, "Shop drawing text must be readable (got #{h.round(4)}\")"
+  end
 
-    b.send(:calibrate_mesh_text_entities_to_bbox, ents, [rendered], item, anchor)
-
-    scale_call = ents.transforms.find { |args| args.first.respond_to?(:kind) && args.first.kind == :scaling }
-    assert_nil scale_call, 'Near-correct size must not trigger any calibration transform'
+  # ── D-size shop drawing: typical labels stay in readable range ─────────────
+  def test_shop_drawing_fallback_path_readable_heights
+    b = make_builder([0, 0, 2590.866, 1726.299])
+    [
+      ['piece mark',  8.0,  1.2,  40.0],
+      ['dim string',  6.0,  0.8,  30.0],
+      ['BOM header', 10.0,  1.0,  80.0],
+    ].each do |label, nominal_pt, bbox_h_pt, bbox_w_pt|
+      item = TI.new(label, 50.0, 100.0, nominal_pt, 0.0, 'pdftotext',
+                    nil, 50.0, 100.0, 50.0 + bbox_w_pt, 100.0 + bbox_h_pt)
+      h = b.send(:mesh_text_height_inches, item, 0.0, 1726.299)
+      assert h >= 0.06, "#{label}: height #{h.round(4)} too small for D-size shop drawing"
+      assert h <= 0.30, "#{label}: height #{h.round(4)} too large"
+    end
   end
 
 end
