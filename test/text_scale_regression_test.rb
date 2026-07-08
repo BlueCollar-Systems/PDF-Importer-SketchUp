@@ -40,7 +40,7 @@ assert_near(
   builder.send(:effective_font_size_pts, undersized_bbox),
   6.0,
   0.0001,
-  'bbox mismatch must not grow effective font size'
+  'bbox mismatch must not change effective font size (nominal parity)'
 )
 
 pdftotext_item = item_class.new(

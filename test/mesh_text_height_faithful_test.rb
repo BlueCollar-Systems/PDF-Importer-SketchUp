@@ -46,6 +46,7 @@ class MeshTextHeightFaithfulTest < Minitest::Test
     body = method_body('effective_font_size_pts')
     assert_includes body, 'item.font_size',
                     'effective_font_size_pts must return the nominal font_size'
-    refute_includes body, 'bbox', 'nominal size must not be bbox-derived'
+    refute_includes body, 'reconcile_font_size_pts',
+                    'nominal size must not be bbox-reconciled at render time'
   end
 end
