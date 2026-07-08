@@ -9,7 +9,28 @@ module BlueCollarSystems
     module ReportDialog
 
       # ---------------------------------------------------------------
-      # Show import report + offer next-step actions
+      # Non-blocking completion notice (default on every import).
+      # Owner rule: NO gratuitous every-import modal. A concise result
+      # goes to the status bar; the full plain-English summary lives in
+      # import_report.json and Extensions > Import Health (on demand).
+      # ---------------------------------------------------------------
+      def self.announce(stats)
+        return unless defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+        pg = stats[:pages] || 0
+        edges = stats[:edges] || 0
+        text = stats[:text] || 0
+        elapsed = stats[:elapsed_seconds]
+        time_str = elapsed ? " — #{elapsed}s" : ""
+        Sketchup.status_text =
+          "PDF import complete — #{pg} page#{pg == 1 ? '' : 's'}, " \
+          "#{edges} edges, #{text} text#{time_str}. See Extensions > Import Health for details."
+      rescue StandardError
+        nil
+      end
+
+      # ---------------------------------------------------------------
+      # On-demand summary (Import Health / menu only — never auto-fired
+      # as a blocking modal after import).
       # ---------------------------------------------------------------
       def self.show_report(stats)
         msg = build_summary(stats)

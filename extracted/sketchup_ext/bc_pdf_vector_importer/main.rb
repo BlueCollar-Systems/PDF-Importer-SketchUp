@@ -1697,7 +1697,9 @@ module BlueCollarSystems
         return unless opts
         stats = run_pipeline(model, path, opts)
         if stats
-          ReportDialog.show_report(stats)
+          # No blocking every-import modal (owner rule). Concise result on
+          # the status bar; full summary in import_report.json + Import Health.
+          ReportDialog.announce(stats)
         else
           UI.messagebox("No vector content found in PDF.")
         end
