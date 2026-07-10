@@ -118,7 +118,6 @@ module BlueCollarSystems
 
         # Track all temporary salvaged files so they can be removed at
         # process exit (CLI) and on demand (long-running SketchUp host).
-        @temp_salvages ||= []
         begin
           at_exit { BlueCollarSystems::PDFVectorImporter::PdfSalvage.cleanup_all }
         rescue StandardError
@@ -151,7 +150,7 @@ module BlueCollarSystems
             return nil
           end
           if check.page_count > 0
-            @temp_salvages << out
+            temp_salvages << out
             out
           else
             File.delete(out) if File.file?(out)
@@ -162,18 +161,27 @@ module BlueCollarSystems
         public
 
         # Remove one salvaged temp file after the host has finished parsing.
+        # Salvaged temp files created this session (never user files).
+        def temp_salvages
+          @temp_salvages ||= []
+        end
+
+        # MEMBERSHIP-GUARDED: a path this module did not create is
+        # never deleted, so callers may pass the import path
+        # unconditionally (it is usually the user's original PDF).
         def cleanup(path)
-          return unless path.is_a?(String)
-          @temp_salvages.delete(path)
+          return nil unless path.is_a?(String)
+          return nil unless temp_salvages.delete(path)
           File.delete(path) if File.file?(path)
+          nil
         rescue StandardError
           nil
         end
 
         # Remove all salvaged temp files. Safe to call on exit.
         def cleanup_all
-          paths = @temp_salvages.dup
-          @temp_salvages.clear
+          paths = temp_salvages.dup
+          temp_salvages.clear
           paths.each do |p|
             File.delete(p) if File.file?(p)
           end
