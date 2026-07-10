@@ -541,6 +541,7 @@ module BlueCollarSystems
       # Hard limits in inches, independent of page size.
       MESH_TEXT_HEIGHT_MIN_IN = 0.01   # never smaller than 0.01" (~0.72pt)
       MESH_TEXT_HEIGHT_MAX_IN = 1.5    # never larger than 1.5" (~108pt)
+      TEXT_FACE_RGB = [0.0, 0.0, 0.0].freeze
 
       def mesh_text_height_inches(item, _angle_deg, _page_h)
         # Round 13 contract: TextItem#font_size is already the nominal PDF
@@ -592,9 +593,9 @@ module BlueCollarSystems
             entities.transform_entities(Geom::Transformation.new(offset), *new_ents)
           end
         end
-        faces_to_erase = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
-        entities.erase_entities(*faces_to_erase) unless faces_to_erase.empty?
-        new_ents = new_ents.reject { |e| faces_to_erase.include?(e) }
+        text_faces = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
+        apply_text_face_material(text_faces)
+        @face_count += text_faces.length
 
         new_ents.each do |entity|
           begin
@@ -616,6 +617,25 @@ module BlueCollarSystems
           end
         rescue StandardError => e2
           Logger.warn("GeometryBuilder", "add_text fallback failed: #{e2.message}")
+        end
+      end
+
+      def apply_text_face_material(faces)
+        return if faces.nil? || faces.empty?
+
+        mat = nil
+        begin
+          mat = get_or_create_material(TEXT_FACE_RGB)
+        rescue StandardError => e
+          Logger.warn("GeometryBuilder", "text face material unavailable: #{e.message}")
+        end
+        faces.each do |face|
+          begin
+            face.material = mat if mat && face.respond_to?(:material=)
+            face.back_material = mat if mat && face.respond_to?(:back_material=)
+          rescue StandardError => e
+            Logger.warn("GeometryBuilder", "set text face material failed: #{e.message}")
+          end
         end
       end
 

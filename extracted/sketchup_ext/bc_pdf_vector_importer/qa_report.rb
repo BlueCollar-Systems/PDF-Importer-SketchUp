@@ -7,6 +7,7 @@ require 'json'
 require 'digest'
 require 'fileutils'
 require 'time'
+require File.join(File.dirname(__FILE__), 'metadata')
 require File.join(File.dirname(__FILE__), 'model_3d_extruder')
 require File.join(File.dirname(__FILE__), 'model_3d_intent')
 require File.join(File.dirname(__FILE__), 'parts_bootstrap')

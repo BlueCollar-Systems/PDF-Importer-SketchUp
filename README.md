@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.85-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.86-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -36,7 +36,8 @@ assets, checksums, license, and notes.
   Vector, Raster, Hybrid. Every mode targets maximum fidelity.
 - **4 Text Rendering Options** — Geometry, Glyphs, Labels, 3D Text
   (orthogonal to mode) + separate Import text toggle. The dialog reopens
-  with the last text rendering option used; first-run fallback is Geometry.
+  with the last text rendering option used; first-run fallback is 3D Text for
+  full-page visual parity.
 
   | Mode | Editability | Glyph rotation | Model-space size |
   |------|-------------|----------------|------------------|
@@ -44,9 +45,10 @@ assets, checksums, license, and notes.
   | **3D Text** | Not editable | Faithful to PDF | Faithful (nominal pt × scale) |
   | **Glyphs** / **Geometry** | Not editable | Faithful to PDF | Faithful (nominal pt × scale) |
 
-  Use **Labels** when you need to edit piece marks or notes after import.
-  Use **3D Text** (or Glyphs/Geometry) when rotated dimensions or PDF-matched
-  text size at a given zoom matters more than editability.
+  Use **3D Text** for go-live visual comparison against Adobe at equal zoom.
+  Use **Labels** only when you need to edit piece marks or notes after import.
+  Use **Glyphs/Geometry** when exact outline geometry is preferred over native
+  SketchUp 3D text.
 - **Built-in Ruby vector parser** — core vector import requires no gems or C extensions
 - **Adaptive Bezier subdivision** with configurable flatness tolerance
 - **Kasa algebraic circle fitting** for arc reconstruction from point sequences

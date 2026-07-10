@@ -105,7 +105,7 @@ class DummyRenderedTextEntity
 end
 
 class DummyFaceEntity
-  attr_accessor :layer
+  attr_accessor :layer, :material, :back_material
 
   def typename; 'Face'; end
   def bounds; DummyBounds.new(0.1, 0.1); end
@@ -370,11 +370,11 @@ class MeshTextScalingTest < Minitest::Test
     assert h <= MAX_IN, "Height must be within MAX_IN (got #{h.round(5)})"
   end
 
-  # ── Face entities from add_3d_text must be erased after placement ─────────────
-  # add_3d_text with extrude=0.0 still creates filled Face entities for each
-  # letter glyph. In a 2D drawing import these appear as large opaque polygons
-  # (arrows/triangles) obscuring geometry. Only edge loops must survive.
-  def test_face_entities_erased_after_place_mesh_text
+  # ── Face entities from add_3d_text must survive for visual PDF parity ─────
+  # add_3d_text with fill=true creates glyph faces. Keeping those faces makes
+  # dimensions/marks readable at full-page zoom instead of reducing text to
+  # hairline outlines.
+  def test_face_entities_retained_after_place_mesh_text
     b = make_builder(LETTER)
     item = bbox_item('A', 8.0, 10.0, bbox_w: 50.0)
     edge1 = DummyRenderedTextEntity.new(5.0 / 72.0, 8.0 / 72.0, typename: 'Edge')
@@ -382,16 +382,14 @@ class MeshTextScalingTest < Minitest::Test
     face2 = DummyFaceEntity.new
     ents  = DummyTransformEntities.new
 
-    # Simulate the face-erasure step place_mesh_text performs after calibrate
+    # Simulate the retained text geometry set place_mesh_text now preserves.
     new_ents = [edge1, face1, face2]
     faces = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
-    ents.erase_entities(*faces) unless faces.empty?
-    remaining = new_ents.reject { |e| faces.include?(e) }
+    b.send(:apply_text_face_material, faces)
 
-    assert_equal 2, ents.erased.length,    'Both Face entities must be erased'
-    assert_equal 1, remaining.length,      'Only the Edge entity survives'
-    assert_equal 'Edge', remaining.first.typename, 'Survivor must be an Edge'
-    refute_includes ents.erased, edge1,    'Edge must NOT be erased'
+    assert_equal 0, ents.erased.length, 'Text faces must not be erased'
+    assert_equal 3, new_ents.length, 'Edges and filled glyph faces both survive'
+    assert_equal 2, faces.length, 'Both Face entities are retained for filled text'
   end
 
   # ── v3.7.83: nominal font_size must survive tiny pdftotext line bbox ───────

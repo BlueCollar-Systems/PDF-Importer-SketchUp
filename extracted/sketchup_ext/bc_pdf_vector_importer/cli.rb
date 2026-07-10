@@ -39,7 +39,7 @@ module BlueCollarSystems
         mode: 'auto',
         pages: 'All',
         scale: '1.0',
-        text_mode: 'Labels',
+        text_mode: '3D Text',
         import_text: 'Yes',
         match_pdf_layers: 'Yes',
         grouping_mode: 'Group per page',

@@ -26,14 +26,14 @@ module BlueCollarSystems
       MODES = {
         'Auto' => {
           'import_mode'        => 'auto',
-          'text_mode'          => 'Labels',
+          'text_mode'          => '3D Text',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
         }.freeze,
         'Vector' => {
           'import_mode'        => 'vector',
-          'text_mode'          => 'Labels',
+          'text_mode'          => '3D Text',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -47,7 +47,7 @@ module BlueCollarSystems
         }.freeze,
         'Hybrid' => {
           'import_mode'        => 'hybrid',
-          'text_mode'          => 'Labels',
+          'text_mode'          => '3D Text',
           'import_text'        => 'Yes',
           'grouping_mode'      => 'Group per page',
           'page_arrangement'   => 'Spread (20% gap)',
@@ -60,9 +60,9 @@ module BlueCollarSystems
       TEXT_MODE_CHOICES = TEXT_MODES.split('|').freeze
       # Round 16 (R16-3): native Sketchup::Text labels are editable but glyphs stay
       # horizontal; 3D Text / Glyphs / Geometry deliver PDF-faithful rotation.
-      TEXT_MODE_HINT = 'Labels: editable text, faithful position, horizontal glyphs. ' \
-                       'For rotated or model-space-sized text matching the PDF, use 3D Text, Glyphs, or Geometry.'.freeze
-      FIRST_RUN_TEXT_MODE = 'Labels'.freeze
+      TEXT_MODE_HINT = '3D Text is the default visual mode: model-space size and rotation match the PDF. ' \
+                       'Use Labels only when editable SketchUp text matters more than PDF-like appearance.'.freeze
+      FIRST_RUN_TEXT_MODE = '3D Text'.freeze
       FIRST_RUN_MATCH_PDF_LAYERS = 'Yes'.freeze
 
       # Workflow choices kept after the Rule 5 sweep
