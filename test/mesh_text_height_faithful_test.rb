@@ -49,4 +49,19 @@ class MeshTextHeightFaithfulTest < Minitest::Test
     refute_includes body, 'reconcile_font_size_pts',
                     'nominal size must not be bbox-reconciled at render time'
   end
+
+  # Owner field bug (2026-07-10, second report): v3.7.83..v3.7.85 shipped
+  # correctly SIZED 3D text whose glyph FACES were erased right after
+  # add_3d_text, so imports showed hairline outlines that read as
+  # "microscopic dashes" at sheet zoom. Source-level lock: the 3D-text
+  # placement path must keep and paint its faces, never erase them.
+  def test_place_mesh_text_retains_glyph_faces
+    body = method_body('place_mesh_text')
+    assert_includes body, 'apply_text_face_material',
+                    '3D-text faces must be painted, proving they are retained'
+    refute_includes body, 'erase_entities',
+                    '3D-text glyph faces must never be erased (v3.7.83 regression)'
+    refute_includes body, 'faces_to_erase',
+                    '3D-text glyph faces must never be erased (v3.7.83 regression)'
+  end
 end
