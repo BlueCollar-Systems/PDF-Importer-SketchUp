@@ -13,9 +13,9 @@ For each representative shop drawing you import:
 
 | Check | Pass |
 |-------|------|
-| **Labels** — BOM, dimensions, and notes readable | ☐ |
-| **Outlines/Glyphs** — linework and symbols faithful to the PDF | ☐ |
-| **3D Text** (experimental, if used) — letterforms present and scale checked against Labels/Glyphs | ☐ |
+| **3D Text default** — BOM, dimensions, notes, rotation, and scale visually match Adobe Reader at the same zoom | ☐ |
+| **Outlines/Glyphs** — linework and symbols are faithful to the PDF when selected | ☐ |
+| **Labels** — editable text remains readable when selected, with expected SketchUp screen-space/horizontal behavior | ☐ |
 | Scale plausible vs the source drawing | ☐ |
 | Multi-page import behaves as expected | ☐ |
 

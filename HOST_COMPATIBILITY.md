@@ -40,12 +40,12 @@ disabled.
 
 | Option | SketchUp result |
 |--------|-----------------|
-| **Geometry** | Text as edges only; first-run fallback and recommended production path |
-| **Glyphs** | Per-glyph edges; same high-fidelity SVG path pipeline |
-| **Labels** | Editable text entities; required to meet the same visual accuracy gate |
-| **3D Text** | 3D / extruded text geometry; required to meet the same visual accuracy gate |
+| **3D Text** | Default visual-parity path; preserves model-space size and PDF rotation for Adobe-like review |
+| **Glyphs** | Per-glyph edges; high-fidelity outline path when exact geometry is preferred |
+| **Geometry** | Text as edges only; useful when host-native 3D text is unavailable or outline geometry is required |
+| **Labels** | Editable text entities; horizontal and screen-space by SketchUp host behavior |
 
-The dialog restores the last text rendering option used. It does not force Geometry after the user chooses another valid mode.
+The dialog defaults to 3D Text on first run and restores the last text rendering option used after that. Labels are an editability tradeoff, not the default visual sign-off mode.
 
 ### PDF layers / SketchUp Tags
 

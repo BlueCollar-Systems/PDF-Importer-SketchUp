@@ -39,7 +39,8 @@ Release build fails if bundled Poppler helpers are missing.
 
 ## Legacy hardware notes
 
-- Prefer **Labels** over **Glyphs/Geometry** on PCs with **&lt; 8 GB RAM** or pre-2015 CPUs — glyph modes create many edges.
+- Use the default **3D Text** mode for Adobe-like visual review. On PCs with **&lt; 8 GB RAM** or pre-2015 CPUs, avoid **Glyphs/Geometry** unless exact outline geometry is required because those modes create many edges.
+- Use **Labels** only when editable SketchUp text matters more than model-space PDF appearance.
 - Use **page ranges** for large shop sets on slow machines.
 - Import report `human_summary` notes fallbacks; open **Import Health** after import.
 
