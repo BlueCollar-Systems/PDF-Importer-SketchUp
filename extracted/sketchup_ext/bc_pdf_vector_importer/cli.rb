@@ -209,6 +209,7 @@ module BlueCollarSystems
         }
       ensure
         Logger.flush_log
+        PdfSalvage.cleanup(pdf_path) if defined?(PdfSalvage)
       end
 
       def extract_pdf(pdf_path, opts, cli_opts)

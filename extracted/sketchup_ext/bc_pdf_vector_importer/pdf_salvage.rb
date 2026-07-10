@@ -116,6 +116,16 @@ module BlueCollarSystems
           nil
         end
 
+        # Track all temporary salvaged files so they can be removed at
+        # process exit (CLI) and on demand (long-running SketchUp host).
+        @temp_salvages ||= []
+        begin
+          at_exit { BlueCollarSystems::PDFVectorImporter::PdfSalvage.cleanup_all }
+        rescue StandardError
+          # at_exit is unavailable in some embedded hosts; cleanup is still
+          # available explicitly.
+        end
+
         def salvage_with_poppler(pdf_path, reason)
           exe = begin
             DependencyResolver.find_pdftocairo
@@ -129,6 +139,7 @@ module BlueCollarSystems
           out = File.join(Dir.tmpdir,
                           'bc_salvaged_' + Process.pid.to_s + '_' +
                           File.basename(pdf_path))
+          File.delete(out) if File.file?(out)
           ok = run_pdftocairo(exe, pdf_path, out)
           return nil unless ok && File.file?(out) && File.size(out) > 0
 
@@ -136,10 +147,42 @@ module BlueCollarSystems
           begin
             check.parse
           rescue StandardError
+            File.delete(out) if File.file?(out)
             return nil
           end
-          check.page_count > 0 ? out : nil
+          if check.page_count > 0
+            @temp_salvages << out
+            out
+          else
+            File.delete(out) if File.file?(out)
+            nil
+          end
         end
+
+        public
+
+        # Remove one salvaged temp file after the host has finished parsing.
+        def cleanup(path)
+          return unless path.is_a?(String)
+          @temp_salvages.delete(path)
+          File.delete(path) if File.file?(path)
+        rescue StandardError
+          nil
+        end
+
+        # Remove all salvaged temp files. Safe to call on exit.
+        def cleanup_all
+          paths = @temp_salvages.dup
+          @temp_salvages.clear
+          paths.each do |p|
+            File.delete(p) if File.file?(p)
+          end
+          nil
+        rescue StandardError
+          nil
+        end
+
+        private
 
         def run_pdftocairo(exe, input, output)
           if defined?(CommandRunner) && CommandRunner.respond_to?(:run)

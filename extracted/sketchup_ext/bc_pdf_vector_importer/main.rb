@@ -1424,6 +1424,7 @@ module BlueCollarSystems
       stats
     ensure
       Logger.flush_log
+      PdfSalvage.cleanup(path) if defined?(PdfSalvage)
     end
 
     def self.place_embedded_images(model, assets, media_box, opts, y_offset, page_rotation, target_entities = nil)
