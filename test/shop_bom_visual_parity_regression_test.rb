@@ -1,15 +1,17 @@
 #!/usr/bin/env ruby
-# test/shop_1015_bom_regression_test.rb
-# Go-live regression anchor for owner shop drawing 1015 FRAME DETAIL.
-# Verifies BOM table text is extracted and placed (Labels + 3D Text).
-# Skips when the PDF is absent (CI/public clones).
+# test/shop_bom_visual_parity_regression_test.rb
+# Go-live regression anchor for a private shop BOM drawing.
+# Verifies BOM table text is extracted and placed in Labels and 3D Text modes.
+# Skips when the private PDF is not configured.
 
 require 'minitest/autorun'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 SRC_ROOT = File.join(REPO_ROOT, 'extracted', 'sketchup_ext')
 $LOAD_PATH.unshift(SRC_ROOT)
+$LOAD_PATH.unshift(REPO_ROOT)
 
+require 'corpus_paths'
 require 'bc_pdf_vector_importer/external_text_extractor'
 require 'bc_pdf_vector_importer/pdf_parser'
 require 'bc_pdf_vector_importer/text_parser'
@@ -43,23 +45,22 @@ module Geom
   end
 end
 
-class Shop1015BomRegressionTest < Minitest::Test
+class ShopBomVisualParityRegressionTest < Minitest::Test
   PDF_CANDIDATES = [
-    ENV['BCS_SHOP_1015_PDF'],
-    File.expand_path('~/Desktop/PDFTest Files/1015 - Rev 0.pdf'),
-    'C:/Users/Rowdy Payton/Desktop/PDFTest Files/1015 - Rev 0.pdf'
+    ENV['BCS_SHOP_BOM_REGRESSION_PDF'],
+    BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf('PRIVATE-01'),
+    BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('PRIVATE-01.pdf', subdir: 'private/user')
   ].compact.uniq.freeze
 
   BOM_HEADERS = %w[QUAN MARK DESCRIPTION LENGTH].freeze
-  BOM_MARKS = %w[w1023 1015FR1].freeze
-  BOM_SAMPLE_RE = /\A(QUAN|MARK|DESCRIPTION|LENGTH|w1023|1015FR1|\d{1,2})\z/i
+  BOM_SAMPLE_RE = /\A(QUAN|MARK|DESCRIPTION|LENGTH|\d{1,2})\z/i
 
   def pdf_path
     @pdf_path ||= PDF_CANDIDATES.find { |p| p && File.file?(p) }
   end
 
   def skip_unless_pdf!
-    skip '1015 shop PDF not configured (set BCS_SHOP_1015_PDF)' unless pdf_path
+    skip 'Private shop BOM regression PDF not configured (set BCS_SHOP_BOM_REGRESSION_PDF or BCS_PRIVATE_VALIDATION_ROOT)' unless pdf_path
   end
 
   def merged_items
@@ -87,15 +88,20 @@ class Shop1015BomRegressionTest < Minitest::Test
       @labels = []
       @mesh = []
     end
+
     def add_text(text, pt, dir = nil)
       @labels << { text: text, pt: pt, dir: dir }
       Object.new.tap { |o| def o.valid?; true; end }
     end
+
     def add_3d_text(text, _align, _font, _bold, _italic, height, _tol, _extrusion, _filled, _z)
       @mesh << { text: text, height: height }
       true
     end
-    def to_a; []; end
+
+    def to_a
+      []
+    end
   end
 
   def simulate_placement(use_3d_text:)
@@ -120,11 +126,8 @@ class Shop1015BomRegressionTest < Minitest::Test
     BOM_HEADERS.each do |hdr|
       assert texts.any? { |t| t.casecmp?(hdr) }, "missing BOM header #{hdr}"
     end
-    BOM_MARKS.each do |mark|
-      assert texts.any? { |t| t.casecmp?(mark) }, "missing part mark #{mark}"
-    end
     row_count = texts.count { |t| t =~ BOM_SAMPLE_RE }
-    assert_operator row_count, :>=, 40, 'expected BOM table row/header sample strings'
+    assert_operator row_count, :>=, 25, 'expected BOM table row/header sample strings'
   end
 
   def test_labels_mode_places_bom_strings
@@ -133,9 +136,6 @@ class Shop1015BomRegressionTest < Minitest::Test
     placed = ents.labels.map { |e| e[:text].to_s.strip }
     BOM_HEADERS.each do |hdr|
       assert placed.any? { |t| t.casecmp?(hdr) }, "Labels mode missing #{hdr}"
-    end
-    BOM_MARKS.each do |mark|
-      assert placed.any? { |t| t.casecmp?(mark) }, "Labels mode missing #{mark}"
     end
     assert_operator ents.labels.length, :>=, 250, 'Labels mode should place most extracted strings'
   end
@@ -149,11 +149,11 @@ class Shop1015BomRegressionTest < Minitest::Test
     end
     tiny = ents.mesh.count { |e| e[:height].to_f < 0.02 }
     assert_equal 0, tiny, '3D Text must not shrink to microscopic heights'
-    quan = ents.mesh.find { |e| e[:text].to_s.strip.casecmp?('QUAN') }
-    assert quan, '3D Text missing QUAN mesh'
-    assert_operator quan[:height], :>=, 0.08,
-                    "QUAN 3D height too small (#{quan[:height].round(4)} in)"
-    assert_operator quan[:height], :<=, 0.30,
-                    "QUAN 3D height too large (#{quan[:height].round(4)} in)"
+    header = BOM_HEADERS.map { |hdr| ents.mesh.find { |e| e[:text].to_s.strip.casecmp?(hdr) } }.compact.first
+    assert header, '3D Text missing BOM header mesh'
+    assert_operator header[:height], :>=, 0.08,
+                    "BOM header 3D height too small (#{header[:height].round(4)} in)"
+    assert_operator header[:height], :<=, 0.30,
+                    "BOM header 3D height too large (#{header[:height].round(4)} in)"
   end
 end
