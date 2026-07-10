@@ -90,6 +90,13 @@ module BlueCollarSystems
           report_meta: build_report_meta(version),
           extra: extra_block(stats, warnings, degraded_renderers, opts)
         }
+        flags = pdf_interactive_flags(pdf_path)
+        unless flags.empty?
+          report[:extra][:pdf_interactive_flags] = flags
+          report[:extra][:pdf_interactive_note] =
+            'PDF contains document scripting/actions (' + flags.join(', ') +
+            '). The importer never executes these; flagged for awareness '             'to match the Python hosts (R2-6).'
+        end
         enrich_report_extras!(report)
         attach_source_provenance!(report, stats)
         report
@@ -116,6 +123,22 @@ module BlueCollarSystems
         }
         enrich_report_extras!(report)
         report
+      end
+
+      # R2-6 parity with the Python hosts: detect document scripting /
+      # auto-run actions so reports can flag them. Warn-only; the importer
+      # never executes PDF actions. Raw-byte scan is deliberate — it works
+      # on files the strict parser refuses. Ruby 2.2 compatible.
+      def pdf_interactive_flags(pdf_path)
+        return [] unless pdf_path && File.file?(pdf_path)
+        raw = File.binread(pdf_path)
+        flags = []
+        flags << 'JavaScript' if raw =~ %r{/(?:JavaScript|JS)[\s/<\[(]}n
+        flags << 'OpenAction' if raw =~ %r{/OpenAction[\s/<\[(]}n
+        flags << 'AdditionalActions' if raw =~ %r{/AA[\s/<]}n
+        flags
+      rescue StandardError
+        []
       end
 
       def write_json(report, output_path)

@@ -378,6 +378,16 @@ module BlueCollarSystems
           add.call('pdf_header', header.start_with?('%PDF-'),
                    header.start_with?('%PDF-') ? 'valid %PDF- header' : 'not a PDF (bad header)')
         end
+        if pdf_path && File.file?(pdf_path)
+          begin
+            flags = QAReport.send(:pdf_interactive_flags, pdf_path)
+            checks << { 'id' => 'active_content',
+                        'status' => flags.empty? ? 'pass' : 'warn',
+                        'message' => flags.empty? ? 'no document scripting/actions detected' : "PDF declares #{flags.join(', ')} (never executed; awareness only)" }
+          rescue StandardError
+            # scan is best-effort; absence of the check is acceptable
+          end
+        end
         bin_dir = File.join(File.dirname(__FILE__), 'bin')
         %w[pdftotext.exe pdftocairo.exe pdffonts.exe].each do |exe|
           present = File.file?(File.join(bin_dir, exe))
