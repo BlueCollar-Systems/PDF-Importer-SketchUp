@@ -82,11 +82,10 @@ def help_text
       --pages All|1|1-3|1,3,5
       --scale VALUE
       --text-mode MODE
+        labels, 3d_text, glyphs, geometry, or no_text (matches FC/LC/BL CLI)
       --no-text
       --extract-images / --no-extract-images
       --no-primitives-json
-      --extrude-to-3d
-      --extrude-depth-mm MM
   HELP
 end
 
@@ -102,11 +101,11 @@ def parse_legacy_args(argv)
   }
 
   value_flags = %w[
-    --output-dir --mode --pages --scale --text-mode --extrude-depth-mm
+    --output-dir --mode --pages --scale --text-mode
   ]
   bool_flags = %w[
     --no-text --extract-images --no-extract-images --no-primitives-json
-    --extrude-to-3d --quiet
+    --quiet
   ]
 
   i = 0
@@ -129,11 +128,12 @@ def parse_legacy_args(argv)
     when /\A--report=(.+)\z/
       options[:report] = Regexp.last_match(1)
       options[:cli_args].concat(['--report', options[:report]])
-    when '--extrude-depth'
-      i += 1
-      options[:cli_args].concat(['--extrude-depth-mm', argv[i]]) if argv[i]
-    when /\A--extrude-depth=(.+)\z/
-      options[:cli_args].concat(['--extrude-depth-mm', Regexp.last_match(1)])
+    when '--extrude-to-3d', '--extrude-depth', '--extrude-depth-mm'
+      raise OptionParser::InvalidOption,
+            "#{arg} is currently shelved; 3D shape extrusion is disabled for go-live imports"
+    when /\A--extrude-depth(?:-mm)?=.+\z/
+      raise OptionParser::InvalidOption,
+            "#{arg.split('=').first} is currently shelved; 3D shape extrusion is disabled for go-live imports"
     when *value_flags
       i += 1
       options[:cli_args].concat([arg, argv[i]]) if argv[i]

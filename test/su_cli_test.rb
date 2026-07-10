@@ -36,10 +36,17 @@ pf = JSON.parse(pf_out) rescue nil
 check.call('--preflight emits ready_check JSON', pf && pf['schema'] == 'bcs.ready_check/1.0')
 check.call('--preflight without input reports fail', pf && pf['status'] == 'fail')
 
+# Shelved 3D shape extrusion must not be advertised as a usable headless option.
+help_out, help_status = Open3.capture2(RbConfig.ruby, CLI, '--help')
+check.call('--help exits 0', help_status.success?)
+check.call('--help omits shelved extrusion flags', help_out !~ /extrude-to-3d|extrude-depth-mm/)
+_, extrude_err, extrude_status = Open3.capture3(RbConfig.ruby, CLI, '--extrude-to-3d')
+check.call('--extrude-to-3d exits nonzero while shelved', !extrude_status.success?)
+check.call('--extrude-to-3d explains shelved state', extrude_err.include?('currently shelved'), extrude_err)
+
 unless File.file?(TEST_PDF)
   puts "SKIP (visible): corpus synthetic PDF not found at #{TEST_PDF} -- " \
-       'extraction assertions not run. Set BCS_PRIVATE_VALIDATION_ROOT or regenerate via ' \
-       'private-validation-assets tools/generate_stacked_fraction_pdf.py.'
+       'extraction assertions not run. Set BCS_PRIVATE_VALIDATION_ROOT to a local validation asset root.'
   puts "PASS: #{pass_count} assertions (CLI plumbing only)"
   exit(failures.empty? ? 0 : 1)
 end

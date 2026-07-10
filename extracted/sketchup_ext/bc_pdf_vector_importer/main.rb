@@ -69,6 +69,9 @@ module BlueCollarSystems
     DEFAULT_AUTO_RECOGNITION_PRIMITIVE_LIMIT = 20_000
     DEFAULT_AUTO_RECOGNITION_PATH_LIMIT = 12_000
     DEFAULT_AUTO_RECOGNITION_STREAM_MB_LIMIT = 24.0
+    # Shelved for go-live: keep the retained extrusion helpers inert until the
+    # 3D-model workflow is explicitly revived.
+    SHAPE_EXTRUSION_ENABLED = false
 
     def self.env_numeric(name, fallback)
       raw = ENV[name.to_s]
@@ -1315,11 +1318,8 @@ module BlueCollarSystems
           )
         end
 
-        # ── 3D Extrude (SketchUp-only, opt-in) ──────────────────────────
-        # When the user supplies extrude_depth > 0 and the page has real
-        # vector geometry (not raster-only), push/pull every flat face by
-        # the requested depth to produce a rough 3D massing model.
-        if opts[:extrude_depth].to_f > 0.0 && builder.page_group &&
+        # ── 3D Extrude (SketchUp-only, currently shelved) ───────────────
+        if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0 && builder.page_group &&
            opts[:import_mode].to_s != 'raster'
           begin
             Sketchup.status_text = "PDF Import#{pct} \u2014 Page #{page_num} \u2014 Extruding 3D faces... [#{(Time.now - import_start).round(1)}s]"
@@ -1348,7 +1348,7 @@ module BlueCollarSystems
       end
       end
 
-      if opts[:extrude_to_3d]
+      if SHAPE_EXTRUSION_ENABLED && opts[:extrude_to_3d]
         stats[:model_3d] = Model3DExtruder.extrude_imported(model, pre_import_entities, opts)
       end
 

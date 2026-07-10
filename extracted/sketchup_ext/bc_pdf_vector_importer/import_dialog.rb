@@ -483,14 +483,23 @@ module BlueCollarSystems
         # BCS-ARCH-001 text resolver: Geometry|Glyphs|Labels|3D Text.
         # Import Text checkbox is the orthogonal on/off control.
         import_text_flag = (raw[:import_text] || 'Yes') == 'Yes'
-        text_mode_raw = (raw[:text_mode] || FIRST_RUN_TEXT_MODE).to_s
-        text_mode = case text_mode_raw
-                    when /No text/i           then :none
-                    when /Labels/i            then :labels
-                    when /\A3D\s*Text\z/i     then :text3d
-                    when /Glyphs/i            then :glyphs
-                    when /Geometry/i          then :geometry
-                    else                            :geometry
+        text_mode_raw = (raw[:text_mode] || FIRST_RUN_TEXT_MODE).to_s.strip
+        text_mode_key = text_mode_raw.downcase.gsub(/\s+/, '_')
+        text_mode = case text_mode_key
+                    when 'no_text', 'none'     then :none
+                    when 'labels'             then :labels
+                    when '3d_text', 'text3d'  then :text3d
+                    when 'glyphs'             then :glyphs
+                    when 'geometry'           then :geometry
+                    else
+                      case text_mode_raw
+                      when /No text/i           then :none
+                      when /Labels/i            then :labels
+                      when /\A3D\s*Text\z/i     then :text3d
+                      when /Glyphs/i            then :glyphs
+                      when /Geometry/i          then :geometry
+                      else                            :geometry
+                      end
                     end
         # If the user disables Import Text, force the pipeline to :none.
         text_mode = :none unless import_text_flag
@@ -555,7 +564,7 @@ module BlueCollarSystems
 
       PREF_KEY = 'BlueCollarSystems_PDFVectorImporter'.freeze
 
-      # Dialog default: last-used text mode from save_prefs; Geometry on first run.
+      # Dialog default: last-used text mode from save_prefs; 3D Text on first run.
       def self.effective_text_mode(prefs)
         mode = prefs[:text_mode].to_s
         return mode if TEXT_MODE_CHOICES.include?(mode)

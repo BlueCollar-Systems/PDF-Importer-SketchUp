@@ -28,6 +28,7 @@ class ImportDialogDefaultsTest < Minitest::Test
   BID = BlueCollarSystems::PDFVectorImporter::ImportDialog
   BIC = BlueCollarSystems::PDFVectorImporter::ImportConfig
   PREF_KEY = 'BlueCollarSystems_PDFVectorImporter'.freeze
+  MAIN_SOURCE = File.read(File.expand_path('../extracted/sketchup_ext/bc_pdf_vector_importer/main.rb', __dir__))
 
   DEPRECATED_MODE_NAMES = [
     'Fast',
@@ -128,6 +129,22 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_equal true, opts[:import_text]
   end
 
+  def test_cli_snake_case_text_mode_aliases_match_pdfcadcore_contract
+    {
+      '3d_text' => :text3d,
+      'labels' => :labels,
+      'glyphs' => :glyphs,
+      'geometry' => :geometry,
+      'no_text' => :none
+    }.each do |raw, expected|
+      opts = BID.send(:build_opts,
+                      import_mode: 'auto',
+                      import_text: 'Yes',
+                      text_mode: raw)
+      assert_equal expected, opts[:text_mode], "expected #{raw} -> #{expected}"
+    end
+  end
+
   def test_no_text_option_disables_text_even_if_import_text_is_yes
     opts = BID.send(:build_opts,
                     import_mode: 'auto',
@@ -219,6 +236,12 @@ class ImportDialogDefaultsTest < Minitest::Test
       assert_equal false, opts[:extrude_to_3d]
       assert_nil opts[:extrude_depth_mm]
     end
+  end
+
+  def test_shape_extrusion_pipeline_remains_shelved
+    assert_includes MAIN_SOURCE, 'SHAPE_EXTRUSION_ENABLED = false'
+    assert_includes MAIN_SOURCE, 'if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0'
+    assert_includes MAIN_SOURCE, 'if SHAPE_EXTRUSION_ENABLED && opts[:extrude_to_3d]'
   end
 
   def test_basic_import_callback_uses_auto_mode
