@@ -95,7 +95,8 @@ module BlueCollarSystems
           report[:extra][:pdf_interactive_flags] = flags
           report[:extra][:pdf_interactive_note] =
             'PDF contains document scripting/actions (' + flags.join(', ') +
-            '). The importer never executes these; flagged for awareness '             'to match the Python hosts (R2-6).'
+            '). The importer never executes these; flagged for awareness ' \
+            'to match the Python hosts (R2-6).'
         end
         enrich_report_extras!(report)
         attach_source_provenance!(report, stats)

@@ -81,6 +81,22 @@ class QAReportTest < Minitest::Test
     end
   end
 
+  def test_flags_interactive_pdf_actions_without_executing_them
+    path = File.join(Dir.tmpdir, "qa_report_interactive_#{Process.pid}.pdf")
+    File.binwrite(path, "%PDF-1.7\n1 0 obj\n<< /OpenAction 2 0 R /AA <<>> /JS (app.alert) >>\nendobj\n")
+    stats = { pages: 1, primitives: 1, edges: 1, text: 0, layers: [], text_renderers: [] }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(path, {}, stats)
+    flags = report[:extra][:pdf_interactive_flags]
+
+    assert_includes flags, 'JavaScript'
+    assert_includes flags, 'OpenAction'
+    assert_includes flags, 'AdditionalActions'
+    assert_includes report[:extra][:pdf_interactive_note], 'never executes'
+  ensure
+    File.delete(path) if path && File.exist?(path)
+  end
+
   def test_records_actionable_diagnostics_for_dense_degraded_text
     stats = {
       pages: 1,
