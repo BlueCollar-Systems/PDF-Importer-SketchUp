@@ -96,7 +96,85 @@ module BlueCollarSystems
           streams = collect_content_streams(contents)
         end
 
+        # Round 18: content may live inside Form XObjects (Acrobat's
+        # "optimize" and several CAD exporters wrap whole pages in one).
+        # Expand each `/Name Do` inline as `q <Matrix> cm <form> Q` so the
+        # vector parser, text parser, and nominal scanner all see it in the
+        # graphics state active at the invocation point.
+        streams = expand_form_xobjects(streams, dict) unless streams.empty?
+
         { media_box: media_box, crop_box: crop_box, rotation: rotation, content_streams: streams }
+      end
+
+      # ---------------------------------------------------------------
+      # Form XObject inline expansion (Round 18)
+      # ---------------------------------------------------------------
+      FORM_EXPANSION_MAX_DEPTH = 6
+      FORM_EXPANSION_MAX_BYTES = 64_000_000
+      FORM_DO_PATTERN = %r{/([^\s\/\[\]()<>{}%]+)\s+Do(?![0-9A-Za-z])}n
+
+      def expand_form_xobjects(streams, owner_dict, depth = 0)
+        xmap = xobject_ref_map(owner_dict)
+        return streams if xmap.empty?
+        budget = [FORM_EXPANSION_MAX_BYTES]
+        streams.map { |s| expand_forms_in_stream(s, xmap, depth, budget) }
+      rescue StandardError
+        streams
+      end
+
+      # XObject resource map: bare name => "N G R" reference string.
+      def xobject_ref_map(owner_dict)
+        map = {}
+        return map unless owner_dict
+        res = find_inherited(owner_dict, '/Resources')
+        res_dict = to_dict(resolve_object(res))
+        return map unless res_dict
+        xo_dict = to_dict(resolve_object(res_dict['/XObject']))
+        return map unless xo_dict
+        xo_dict.each do |k, v|
+          next unless v.is_a?(String) && v =~ /\A\d+\s+\d+\s+R\z/
+          map[k.sub(/\A\//, '')] = v
+        end
+        map
+      rescue StandardError
+        {}
+      end
+
+      def expand_forms_in_stream(stream, xmap, depth, budget)
+        return stream unless stream.is_a?(String)
+        return stream if depth >= FORM_EXPANSION_MAX_DEPTH
+        bin = stream.dup.force_encoding(Encoding::BINARY)
+        bin.gsub(FORM_DO_PATTERN) do |whole|
+          name = Regexp.last_match(1)
+          ref = xmap[name]
+          expansion = ref ? form_expansion_for(ref, depth, budget) : nil
+          expansion ? expansion : whole
+        end
+      rescue StandardError
+        stream
+      end
+
+      def form_expansion_for(ref, depth, budget)
+        fdict = to_dict(resolve_object(ref))
+        return nil unless fdict
+        return nil unless fdict['/Subtype'].to_s =~ /Form/
+        obj_num = ref[/\A(\d+)/, 1].to_i
+        body = get_stream_data(obj_num)
+        return nil unless body.is_a?(String) && !body.empty?
+        budget[0] -= body.bytesize
+        return nil if budget[0] < 0
+        inner_map = xobject_ref_map(fdict)
+        unless inner_map.empty?
+          body = expand_forms_in_stream(body, inner_map, depth + 1, budget)
+        end
+        matrix = parse_array_nums(fdict['/Matrix'])
+        matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] unless matrix && matrix.length == 6
+        mtx = matrix.map { |v| format('%.6g', v.to_f) }.join(' ')
+        head = ("q\n" + mtx + " cm\n").dup.force_encoding(Encoding::BINARY)
+        tail = "\nQ\n".dup.force_encoding(Encoding::BINARY)
+        head + body.dup.force_encoding(Encoding::BINARY) + tail
+      rescue StandardError
+        nil
       end
 
       # ---------------------------------------------------------------

@@ -17,6 +17,7 @@ require File.join(dir, 'logger')
 require File.join(dir, 'command_runner')
 require File.join(dir, 'dependency_resolver')
 require File.join(dir, 'pdf_open_gate')
+require File.join(dir, 'pdf_salvage')
 require File.join(dir, 'pdf_parser')
 require File.join(dir, 'content_stream_parser')
 require File.join(dir, 'text_parser')
@@ -101,9 +102,7 @@ module BlueCollarSystems
           o.on('--extract-images', 'Extract embedded Image XObjects') { opts[:extract_images] = true }
           o.on('--no-extract-images', 'Do not extract embedded images') { opts[:extract_images] = false }
           o.on('--no-primitives-json', 'Skip primitives.json output') { opts[:write_primitives] = false }
-          # 3D extrusion shelved — revisit after 3D text scaling resolved
-          # o.on('--extrude-to-3d', 'Extrude closed fill faces to 3D (optional)') { opts[:extrude_to_3d] = 'Yes' }
-          # o.on('--extrude-depth-mm MM', 'Extrusion depth in millimeters (default 3.175 = 1/8" plate)') { |v| opts[:extrude_depth_mm] = v }
+          # 3D shape extrusion is shelved for go-live; do not expose CLI flags.
           o.on('--preflight', 'Run preflight checks and emit ready_check JSON') { opts[:preflight] = true }
           o.on('--version', 'Print plugin version and exit') { opts[:version] = true }
           o.on('--quiet', 'Only use exit code and files') { opts[:quiet] = true }
@@ -140,6 +139,28 @@ module BlueCollarSystems
         import_opts = ImportDialog.send(:build_opts, raw_opts)
         import_opts[:extract_embedded_images] = cli_opts[:extract_images]
         import_opts[:embedded_image_dir] = File.join(output_dir, 'embedded_images')
+
+        # Round 18: normalize hostile PDFs (empty-password encryption,
+        # damaged xref) through poppler BEFORE the open gate judges them —
+        # viewers open these files, so the importer must too.
+        begin
+          pdf_path, salvage_note = PdfSalvage.prepare_if_needed(pdf_path)
+          Logger.info('CLI', salvage_note) if salvage_note
+        rescue PdfSalvage::SalvageError => e
+          report = QAReport.build_open_failure(pdf_path, import_opts, 'encrypted', e.message)
+          report_path = write_report(report, pdf_path, output_dir, cli_opts[:report])
+          return {
+            ok: false,
+            summary: {
+              status: 'refused',
+              reason: 'encrypted',
+              message: e.message,
+              report: report_path
+            }
+          }
+        rescue StandardError => e
+          Logger.warn('CLI', "salvage preflight failed: #{e.message}")
+        end
 
         gate = PdfOpenGate.inspect_path(pdf_path)
         unless gate[:ok]

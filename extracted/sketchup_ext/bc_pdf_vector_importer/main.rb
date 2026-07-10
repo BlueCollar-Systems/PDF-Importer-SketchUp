@@ -19,6 +19,7 @@ module BlueCollarSystems
     require File.join(dir, 'command_runner')
     require File.join(dir, 'dependency_resolver')
     require File.join(dir, 'pdf_open_gate')
+    require File.join(dir, 'pdf_salvage')
     require File.join(dir, 'pdf_parser')
     require File.join(dir, 'content_stream_parser')
     require File.join(dir, 'text_parser')
@@ -747,6 +748,20 @@ module BlueCollarSystems
       rescue StandardError => e
         Logger.warn("Pipeline", "File size check failed: #{e.message}")
       end
+
+      # Round 18: encrypted (empty-password) and damaged-xref files are
+      # normalized through poppler before the strict internal parser sees
+      # them, so "any PDF type" imports instead of failing or degrading.
+      salvage_note = nil
+      begin
+        path, salvage_note = PdfSalvage.prepare_if_needed(path)
+      rescue PdfSalvage::SalvageError => e
+        UI.messagebox(e.message)
+        return nil
+      rescue StandardError => e
+        Logger.warn("Pipeline", "salvage preflight failed: #{e.message}")
+      end
+      Logger.info("Pipeline", salvage_note) if salvage_note
 
       parser = PDFParser.new(path)
       parser.parse
@@ -1649,6 +1664,24 @@ module BlueCollarSystems
 
       reason = result[:reason]
       message = result[:message]
+
+      # Round 18: before refusing, see whether poppler can normalize the
+      # file (empty-password encryption, damaged xref — files every viewer
+      # opens). Salvage is memoized, so the pipeline reuses this result.
+      if reason.to_s != 'not_a_pdf'
+        begin
+          _sp, note = PdfSalvage.prepare_if_needed(path)
+          if note
+            Logger.info("OpenGate", "gate '#{reason}' overridden: #{note}")
+            return nil
+          end
+        rescue PdfSalvage::SalvageError => e
+          message = e.message
+        rescue StandardError => e
+          Logger.warn("OpenGate", "salvage attempt failed: #{e.message}")
+        end
+      end
+
       Logger.reset if Logger.log_path.nil?
       Logger.warn("OpenGate",
         "Refusing #{path ? File.basename(path.to_s) : 'file'}: #{reason} — #{message}")

@@ -187,8 +187,8 @@ def main(argv)
   end
 
   unless opts[:input] && File.file?(opts[:input])
-    warn 'Give me a PDF to inspect, e.g.: ruby tools/su_pdf_cli.rb "C:\\drawings\\my-shop-drawing.pdf" --json out.json'
-    warn 'The file was not found.' if opts[:input]
+    $stderr.puts 'Give me a PDF to inspect, e.g.: ruby tools/su_pdf_cli.rb "C:\\drawings\\my-shop-drawing.pdf" --json out.json'
+    $stderr.puts 'The file was not found.' if opts[:input]
     return 2
   end
 
@@ -200,8 +200,19 @@ def main(argv)
   puts JSON.pretty_generate(summary) unless opts[:quiet]
   result[:ok] ? 0 : 1
 rescue OptionParser::ParseError => e
-  warn e.message
+  $stderr.puts e.message
   return 2
+rescue StandardError => e
+  # Round 18: a hostile/damaged PDF must produce a clean refusal, never a
+  # Ruby backtrace. Machine-readable on stdout, human hint on stderr.
+  puts JSON.pretty_generate(
+    'schema' => 'bcs.sketchup_cli_error/1.0',
+    'ok' => false,
+    'error' => e.message.to_s,
+    'error_class' => e.class.name
+  )
+  $stderr.puts "Import refused: #{e.message}"
+  return 1
 end
 
 exit(main(ARGV)) if $PROGRAM_NAME == __FILE__
