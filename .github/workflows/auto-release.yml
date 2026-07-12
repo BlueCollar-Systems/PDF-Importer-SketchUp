@@ -149,31 +149,45 @@ jobs:
           TAG="v${{ steps.version.outputs.version }}"
           RBZ="SketchUp-PDF-Importer_v${{ steps.version.outputs.version }}.rbz"
 
-          # R21-3: when this version is already released, warn if product files
-          # changed since the tag (stranded / silent-republish detector).
-          # Warning-first — never hard-fail (panel amendment over hard-fail).
-          # Escape hatch: bump ALL version sites (metadata/loader/README) so a
-          # new tag is minted; do not rely on --clobber to "ship" fixes.
-          # Escalation to hard-fail only if warnings are ignored across rounds.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            if git rev-parse "$TAG" >/dev/null 2>&1; then
-              STRANDED=$(git log --oneline "${TAG}..HEAD" -- \
-                ':!**/*.md' ':!docs/**' ':!.github/**' ':!test/**' ':!tools/**' \
-                ':!**/*_test.rb' ':!**/*_test.py' ':!**/test_*.py' \
-                || true)
-              if [ -n "$STRANDED" ]; then
-                MSG="R21-3: release ${TAG} already exists but product commits landed since the tag — bump VERSION or expect a silent republish under the same tag."
-                echo "::warning::${MSG}"
+            echo "Release ${TAG} already exists — immutable; skipping asset upload."
+            # R21-3: stranded-release detector, warning-first (NEVER hard-fail:
+            # legitimate staging like CI-only -> fix -> bump-later would go red).
+            # Escape hatch: bump ALL version sites (metadata/loader/README) so a
+            # new tag is minted; never re-upload assets under an existing tag.
+            # NOTE (RB-03): tools/** is deliberately NOT excluded — packaging
+            # tools (build_release.py inputs, Poppler prune) change shipped bytes.
+            STRANDED_EXCLUDES=(
+              ':(exclude)**/*.md'
+              ':(exclude)docs/**'
+              ':(exclude).github/**'
+              ':(exclude)test/**'
+              ':(exclude)**/*_test.rb'
+              ':(exclude)**/*_test.py'
+              ':(exclude)**/test_*.py'
+            )
+            if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+              STRANDED_FILES=$(git diff --name-only "${TAG}..HEAD" -- "${STRANDED_EXCLUDES[@]}" || true)
+              if [ -n "$STRANDED_FILES" ]; then
+                STRANDED_COMMITS=$(git log --no-merges --format='%h %s' "${TAG}..HEAD" -- "${STRANDED_EXCLUDES[@]}" || true)
+                echo "::warning::Stranded product commits past ${TAG} (release exists, nothing minted): $(echo "${STRANDED_COMMITS}" | tr '\n' ';')"
                 {
-                  echo "### Stranded product commits since ${TAG}"
+                  echo "### Stranded product commits past ${TAG}"
+                  echo ""
+                  echo "Product files changed after tag \`${TAG}\` but this push minted no release."
+                  echo "Ship them with a version-bump commit (see quick card §4.2)."
                   echo ""
                   echo '```'
-                  echo "$STRANDED"
+                  echo "${STRANDED_COMMITS}"
                   echo '```'
                 } >> "$GITHUB_STEP_SUMMARY"
               fi
             fi
-            gh release upload "$TAG" "$RBZ" --clobber
+            # Round 21 corrective §5 (RB-03): existing releases are immutable.
+            # The audit above warns about stranded product commits; exit green
+            # WITHOUT uploading — never re-upload/clobber assets under an
+            # existing tag.
+            exit 0
           else
             gh release create "$TAG" \
               --target "${RELEASE_TARGET:-$GITHUB_SHA}" \
