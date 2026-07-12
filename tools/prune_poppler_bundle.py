@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """prune_poppler_bundle.py — keep only PE-reachable Poppler binaries.
 
-Walks the PE import tables of pdftocairo/pdftotext/pdffonts (and their
-transitive local DLL deps) and removes unused sibling DLLs from
+Walks the PE import tables (and delay-load import tables) of
+pdftocairo/pdftotext/pdffonts (and their transitive local DLL deps) and
+removes unused sibling DLLs from
 extracted/sketchup_ext/bc_pdf_vector_importer/bin.
 
 Note: libcurl → libssh2 → libcrypto-3-x64 are REQUIRED by this
@@ -24,10 +25,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = REPO_ROOT / "extracted" / "sketchup_ext" / "bc_pdf_vector_importer" / "bin"
 ROOT_EXES = ("pdftocairo.exe", "pdftotext.exe", "pdffonts.exe")
-# Always keep notices / license folder even if not PE-reachable.
-KEEP_ALWAYS = {
-    "third_party_notices.txt",
-}
+
+# IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT = 13
+_DELAY_DIR_INDEX = 13
+# dlattrRva flag: when set, delay-descriptor fields are RVAs (PE32+ norm).
+_DLATTR_RVA = 0x1
 
 
 def _rva_to_offset(sections: list[tuple[int, int, int]], rva: int) -> int | None:
@@ -37,23 +39,19 @@ def _rva_to_offset(sections: list[tuple[int, int, int]], rva: int) -> int | None
     return None
 
 
-def pe_imports(path: Path) -> list[str]:
-    data = path.read_bytes()
+def _pe_sections(data: bytes) -> tuple[int, list[tuple[int, int, int]]] | None:
     if data[:2] != b"MZ":
-        return []
+        return None
     e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
     if data[e_lfanew : e_lfanew + 4] != b"PE\0\0":
-        return []
+        return None
     magic = struct.unpack_from("<H", data, e_lfanew + 24)[0]
     if magic == 0x20B:  # PE32+
         data_dir_off = e_lfanew + 24 + 112
     elif magic == 0x10B:  # PE32
         data_dir_off = e_lfanew + 24 + 96
     else:
-        return []
-    import_rva, _import_size = struct.unpack_from("<II", data, data_dir_off + 8)
-    if import_rva == 0:
-        return []
+        return None
     num_sections = struct.unpack_from("<H", data, e_lfanew + 6)[0]
     size_opt = struct.unpack_from("<H", data, e_lfanew + 20)[0]
     sec_off = e_lfanew + 24 + size_opt
@@ -65,22 +63,80 @@ def pe_imports(path: Path) -> list[str]:
         raw_size = struct.unpack_from("<I", data, off + 16)[0]
         raw_ptr = struct.unpack_from("<I", data, off + 20)[0]
         sections.append((va, max(vsize, raw_size), raw_ptr))
+    return data_dir_off, sections
+
+
+def _read_cstring(data: bytes, sections: list[tuple[int, int, int]], rva: int) -> str | None:
+    noff = _rva_to_offset(sections, rva)
+    if noff is None:
+        return None
+    end = data.find(b"\0", noff)
+    if end < 0:
+        return None
+    return data[noff:end].decode("ascii", "ignore")
+
+
+def pe_imports(path: Path) -> list[str]:
+    """Return DLL names from the standard import table + delay-load table."""
+    data = path.read_bytes()
+    parsed = _pe_sections(data)
+    if parsed is None:
+        return []
+    data_dir_off, sections = parsed
 
     imports: list[str] = []
-    idx = 0
-    while True:
-        off = _rva_to_offset(sections, import_rva + idx * 20)
-        if off is None:
-            break
-        name_rva = struct.unpack_from("<I", data, off + 12)[0]
-        oft_rva = struct.unpack_from("<I", data, off + 0)[0]
-        if name_rva == 0 and oft_rva == 0:
-            break
-        noff = _rva_to_offset(sections, name_rva)
-        if noff is not None:
-            end = data.find(b"\0", noff)
-            imports.append(data[noff:end].decode("ascii", "ignore"))
-        idx += 1
+
+    # Standard IMAGE_DIRECTORY_ENTRY_IMPORT (index 1) — 8 bytes after export.
+    import_rva, _import_size = struct.unpack_from("<II", data, data_dir_off + 8)
+    if import_rva:
+        idx = 0
+        while True:
+            off = _rva_to_offset(sections, import_rva + idx * 20)
+            if off is None:
+                break
+            name_rva = struct.unpack_from("<I", data, off + 12)[0]
+            oft_rva = struct.unpack_from("<I", data, off + 0)[0]
+            if name_rva == 0 and oft_rva == 0:
+                break
+            name = _read_cstring(data, sections, name_rva)
+            if name:
+                imports.append(name)
+            idx += 1
+
+    # Delay-load IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT (index 13) — R21-7.
+    delay_rva, _delay_size = struct.unpack_from(
+        "<II", data, data_dir_off + _DELAY_DIR_INDEX * 8
+    )
+    if delay_rva:
+        idx = 0
+        while True:
+            off = _rva_to_offset(sections, delay_rva + idx * 32)
+            if off is None:
+                break
+            attrs = struct.unpack_from("<I", data, off + 0)[0]
+            name_field = struct.unpack_from("<I", data, off + 4)[0]
+            # Null terminator descriptor.
+            if attrs == 0 and name_field == 0:
+                break
+            # Prefer RVA form (dlattrRva). Absolute VA form is rare in modern
+            # MSVC delay-load; if attrs lacks the flag, treat name_field as RVA
+            # only when it resolves inside a section (best-effort).
+            name_rva = name_field
+            if attrs & _DLATTR_RVA == 0:
+                # Absolute VA: subtract preferred image base when possible.
+                magic = struct.unpack_from("<H", data, struct.unpack_from("<I", data, 0x3C)[0] + 24)[0]
+                e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+                if magic == 0x20B:
+                    image_base = struct.unpack_from("<Q", data, e_lfanew + 24 + 24)[0]
+                else:
+                    image_base = struct.unpack_from("<I", data, e_lfanew + 24 + 28)[0]
+                if name_field >= image_base:
+                    name_rva = int(name_field - image_base)
+            name = _read_cstring(data, sections, name_rva)
+            if name:
+                imports.append(name)
+            idx += 1
+
     return imports
 
 
@@ -121,8 +177,9 @@ def prune(bin_dir: Path, *, dry_run: bool = False) -> tuple[list[tuple[str, int]
     needed = reachable_files(bin_dir)
     removed: list[tuple[str, int]] = []
     total = 0
+    # Only DLLs are prune candidates (helpers/notices stay).
     for path in sorted(bin_dir.glob("*.dll")):
-        if path.name.lower() in needed or path.name.lower() in KEEP_ALWAYS:
+        if path.name.lower() in needed:
             continue
         size = path.stat().st_size
         removed.append((path.name, size))

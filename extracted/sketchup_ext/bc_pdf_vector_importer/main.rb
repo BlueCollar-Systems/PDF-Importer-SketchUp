@@ -1689,10 +1689,18 @@ module BlueCollarSystems
       reason = result[:reason]
       message = result[:message]
 
-      # Round 18: before refusing, see whether poppler can normalize the
-      # file (empty-password encryption, damaged xref — files every viewer
-      # opens). Salvage is memoized, so the pipeline reuses this result.
-      if reason.to_s != 'not_a_pdf'
+      # Round 18: gate runs first at entry points; salvage may OVERRIDE a
+      # refusal when poppler can normalize the file (empty-password encryption,
+      # damaged xref — files every viewer opens). Salvage is memoized, so
+      # run_pipeline's later prepare_if_needed reuses this result.
+      # R21-18 / QQ-3: denylist skips salvage for not_a_pdf + file_missing
+      # (file_missing cannot be memo-keyed; every retry would spawn doomed
+      # pdftocairo). Prefer extending this denylist over flipping to an
+      # allowlist — an allowlist would silently exclude future salvageable
+      # reasons. Escape hatch: add/remove a reason here intentionally when a
+      # new gate code should/shouldn't attempt salvage; keep file_missing and
+      # not_a_pdf skipped (safety, not a product freeze).
+      if reason.to_s != 'not_a_pdf' && reason.to_s != 'file_missing'
         begin
           _sp, note = PdfSalvage.prepare_if_needed(path)
           if note

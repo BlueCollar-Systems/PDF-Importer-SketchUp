@@ -4,6 +4,10 @@
 Modern Ruby can parse or execute code that SketchUp Make 2017 cannot. This
 guard intentionally scans the shipped extension payload before packaging so a
 release cannot include Ruby 2.3+ convenience APIs or Ruby 2.6+ syntax.
+
+Escape hatch: if the product floor rises above Make 2017 / Ruby 2.2, update
+COMPATIBILITY.md, this pattern list, CI Ruby matrix, and ruby22_* tests in the
+same change — do not delete the guard silently mid-fix.
 """
 
 from __future__ import annotations

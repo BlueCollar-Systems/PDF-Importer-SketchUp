@@ -29,6 +29,8 @@ module BlueCollarSystems
         'encrypted'          => 'This PDF is password-protected and cannot be imported. ' \
                                 'Remove the password protection and try again.',
         # Fail closed when the sniff itself errors (matches Python safe_open).
+        # Salvage may still override encrypted/truncated (not file_missing /
+        # not_a_pdf) in main.rb#handle_open_gate — see denylist comment there.
         'unreadable'         => 'This PDF could not be checked safely and was not imported.'
       }.freeze
 

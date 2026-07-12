@@ -600,7 +600,8 @@ if File.exist?(PDF_TIER1_USER)
               "all PRIVATE-01 bbox-backed labels should place (got #{placed_total} of #{expected_placements})")
   puts "  PRIVATE-01 PDF: #{items.length} text items, #{with_bbox} with bbox, #{headers.length} BOM headers"
 else
-  puts "  SKIP: PRIVATE-01 PDF not found at #{PDF_TIER1_USER}"
+  skip_at = PDF_TIER1_USER.to_s.strip.empty? ? '(set BCS_TIER1_USER_PDF or BCS_CORPUS_ROOT)' : PDF_TIER1_USER
+  puts "  SKIP: PRIVATE-01 PDF not found at #{skip_at}"
 end
 
 puts

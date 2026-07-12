@@ -56,6 +56,7 @@ jobs:
         run: |
           set -e
           python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext
+          python3 tools/test_prune_poppler_bundle.py
           find extracted/sketchup_ext test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
           ruby test/smoke_test.rb
           ruby test/ruby22_compat_test.rb
@@ -65,6 +66,8 @@ jobs:
           ruby test/text_mode_routing_test.rb
           ruby test/mesh_text_scaling_test.rb
           ruby test/mesh_text_height_faithful_test.rb
+          ruby test/open_gate_file_missing_salvage_test.rb
+          ruby test/source_provenance_test.rb
           docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
             set -e
             find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
@@ -146,7 +149,30 @@ jobs:
           TAG="v${{ steps.version.outputs.version }}"
           RBZ="SketchUp-PDF-Importer_v${{ steps.version.outputs.version }}.rbz"
 
+          # R21-3: when this version is already released, warn if product files
+          # changed since the tag (stranded / silent-republish detector).
+          # Warning-first — never hard-fail (panel amendment over hard-fail).
+          # Escape hatch: bump ALL version sites (metadata/loader/README) so a
+          # new tag is minted; do not rely on --clobber to "ship" fixes.
+          # Escalation to hard-fail only if warnings are ignored across rounds.
           if gh release view "$TAG" >/dev/null 2>&1; then
+            if git rev-parse "$TAG" >/dev/null 2>&1; then
+              STRANDED=$(git log --oneline "${TAG}..HEAD" -- \
+                ':!**/*.md' ':!docs/**' ':!.github/**' ':!test/**' ':!tools/**' \
+                ':!**/*_test.rb' ':!**/*_test.py' ':!**/test_*.py' \
+                || true)
+              if [ -n "$STRANDED" ]; then
+                MSG="R21-3: release ${TAG} already exists but product commits landed since the tag — bump VERSION or expect a silent republish under the same tag."
+                echo "::warning::${MSG}"
+                {
+                  echo "### Stranded product commits since ${TAG}"
+                  echo ""
+                  echo '```'
+                  echo "$STRANDED"
+                  echo '```'
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
             gh release upload "$TAG" "$RBZ" --clobber
           else
             gh release create "$TAG" \

@@ -103,6 +103,13 @@ def build(out_dir: Path, *, require_helpers: bool = True) -> Path:
     )
     _verify_bundled_helpers(required=require_helpers)
 
+    # R21-8 empirical smoke. Visible-skip returns 0 (bin absent / non-Windows);
+    # a real helper failure must stop the build (check=True). Escape: fix bin/
+    # or re-run tools/fetch_third_party_binaries.ps1 — do not soft-ignore.
+    smoke = REPO_ROOT / "tools" / "smoke_poppler_helpers.py"
+    if smoke.is_file():
+        subprocess.run([sys.executable, str(smoke)], check=True)
+
     file_count = 0
     skipped    = 0
 

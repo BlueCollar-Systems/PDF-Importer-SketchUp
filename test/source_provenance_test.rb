@@ -14,6 +14,42 @@ require 'bc_pdf_vector_importer/source_provenance'
 BlueCollarSystems::PDFVectorImporter::Logger.debug = false
 SP = BlueCollarSystems::PDFVectorImporter::SourceProvenance
 
+# Minimal stubs so GeometryBuilder can load headlessly for provenance unit tests.
+module Geom
+  class Point3d
+    attr_accessor :x, :y, :z
+    def initialize(x = 0, y = 0, z = 0)
+      @x = x.to_f
+      @y = y.to_f
+      @z = z.to_f
+    end
+  end
+  class Vector3d
+    attr_accessor :x, :y, :z
+    def initialize(x = 0, y = 0, z = 0)
+      @x = x.to_f
+      @y = y.to_f
+      @z = z.to_f
+    end
+  end
+  class Transformation
+    def initialize(*); end
+    def self.rotation(*); new; end
+    def self.scaling(*); new; end
+  end
+end
+ORIGIN = Geom::Point3d.new(0, 0, 0)
+Z_AXIS = Geom::Vector3d.new(0, 0, 1)
+TextAlignLeft = 0 unless defined?(TextAlignLeft)
+class Numeric
+  def degrees
+    self.to_f * Math::PI / 180.0
+  end
+end unless Numeric.method_defined?(:degrees)
+
+load File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb')
+GB = BlueCollarSystems::PDFVectorImporter::GeometryBuilder
+
 class SourceProvenanceTest < Minitest::Test
   def test_write_sidecar_schema
     Dir.mktmpdir('su_prov_') do |dir|
@@ -25,7 +61,8 @@ class SourceProvenanceTest < Minitest::Test
           object_id: 'text_span:1:0',
           page: 1,
           source_kind: 'text_span',
-          created_entity_type: 'native_label'
+          created_entity_type: 'native_label',
+          span_id: 0
         }
       ]
       path = SP.write_sidecar(
@@ -40,6 +77,33 @@ class SourceProvenanceTest < Minitest::Test
       data = JSON.parse(File.read(out))
       assert_equal 'bcs.source_provenance/1.0', data['schema']
       assert_equal 1, data['objects'].length
+      assert_equal 0, data['objects'][0]['span_id']
     end
+  end
+
+  # R21-18.1: GeometryBuilder emits integer span_id for bootstrap joins.
+  def test_record_text_span_provenance_emits_span_id
+    bucket = []
+    builder = GB.allocate
+    builder.instance_variable_set(:@provenance_bucket, bucket)
+    builder.instance_variable_set(:@page_number, 2)
+    builder.instance_variable_set(:@use_3d_text, false)
+
+    item = Object.new
+    def item.bbox_x0; 10.0; end
+    def item.bbox_y0; 20.0; end
+    def item.bbox_x1; 30.0; end
+    def item.bbox_y1; 40.0; end
+
+    builder.send(:record_text_span_provenance, item)
+    assert_equal 1, bucket.length
+    entry = bucket[0]
+    assert_equal 0, entry[:span_id]
+    assert_equal 'text_span:2:0', entry[:object_id]
+    assert_equal [10.0, 20.0, 30.0, 40.0], entry[:source_bbox_pdf]
+
+    builder.send(:record_text_span_provenance, item)
+    assert_equal 1, bucket[1][:span_id]
+    assert_equal 'text_span:2:1', bucket[1][:object_id]
   end
 end

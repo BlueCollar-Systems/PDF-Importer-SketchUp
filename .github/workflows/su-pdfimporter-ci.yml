@@ -92,3 +92,16 @@ jobs:
           ruby test/import_health_test.rb
           ruby test/arc_fitter_test.rb
           ruby test/unit_parser_test.rb
+
+  poppler-prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Poppler PE prune lock (R21-7/R21-8)
+        run: python tools/test_prune_poppler_bundle.py -v
+      - name: Poppler helper empirical smoke (R21-8; visible-skip off Windows)
+        run: python tools/smoke_poppler_helpers.py

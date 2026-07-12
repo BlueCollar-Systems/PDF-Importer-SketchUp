@@ -5,8 +5,8 @@ licenses; Poppler itself is GPL-family licensed, and the Windows bundle also
 contains LGPL/MIT/BSD-style support libraries):
   pdftocairo.exe, pdftotext.exe, pdffonts.exe and PE-reachable required DLLs
 
-Fetched by tools/fetch_third_party_binaries.ps1 from:
-  https://github.com/oschwartz10612/poppler-windows/releases/latest
+Fetched by tools/fetch_third_party_binaries.ps1 from pinned tag:
+  https://github.com/oschwartz10612/poppler-windows/releases/tag/v26.02.0-0
 
 After fetch, tools/prune_poppler_bundle.py drops unused sibling DLLs
 (poppler-glib/cpp, iconv, duplicate libtiff/libzstd, etc.). The

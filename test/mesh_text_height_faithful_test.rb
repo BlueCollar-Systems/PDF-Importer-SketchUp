@@ -79,12 +79,16 @@ class MeshTextHeightFaithfulTest < Minitest::Test
   # fixed tolerance 0.6" only coarsened glyph curves (same size, same faces);
   # tolerance 0.0 is kept for curve quality and the faithful height is passed
   # to add_3d_text directly — generate-then-scale was dropped as redundant.
+  #
+  # Escape hatch (not a forever freeze): if a future host/API change needs
+  # generate-then-scale again, bring live-host measurements + update this
+  # guard in the same change — do not "work around" the refute by renaming.
   def test_place_mesh_text_uses_zero_tolerance_and_direct_height
     body = method_body('place_mesh_text')
     refute_match(/add_3d_text\([\s\S]*?,\s*0\.6\s*,/, body,
                  'must not hard-code add_3d_text tolerance 0.6 (R20-1)')
     refute_includes body, 'Transformation.scaling',
-                    'no post-generation rescale of glyph geometry (R20-2 panel verdict)'
+                    'no post-generation rescale of glyph geometry (R20-2 panel verdict; update this guard with evidence if design changes)'
     assert_includes body, 'record_mesh_text_height_sample',
                     'faithful target heights must feed the report crosscheck'
   end

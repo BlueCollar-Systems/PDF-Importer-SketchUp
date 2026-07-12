@@ -819,7 +819,10 @@ module BlueCollarSystems
           object_id: "text_span:#{@page_number}:#{idx}",
           page: @page_number,
           source_kind: 'text_span',
-          created_entity_type: entity_type
+          created_entity_type: entity_type,
+          # Integer index matching FreeCAD pdfcadcore emission (R21-18 / QP-1).
+          # Enables parts_bootstrap.span_ids ↔ provenance.span_id joins.
+          span_id: idx
         }
         bbox = item_source_bbox_pdf(item)
         entry[:source_bbox_pdf] = bbox if bbox

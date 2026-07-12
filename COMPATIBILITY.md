@@ -104,5 +104,5 @@ All Ruby code in this extension **must** run on Ruby 2.2.4, which ships with Ske
 ### General Rules
 
 1. CI runs `ruby22_syntax_check.rb` on every shipped `.rb` file.
-2. Never use features listed above without a version guard.
+2. Default: do not use features listed above without a version guard (or a Ruby-2.2-safe polyfill). This is a host floor, not a freeze on dropping Make 2017 support — raising the floor is an explicit product decision that updates this doc + CI matrix together.
 3. When in doubt: `docker run --rm ruby:2.2 ruby -c yourfile.rb`.
