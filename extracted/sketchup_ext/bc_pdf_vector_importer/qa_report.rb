@@ -220,8 +220,37 @@ module BlueCollarSystems
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers),
           model_3d_intent: model_3d_intent_block(stats),
           model_3d: model_3d_block(stats, opts),
-          parts_bootstrap: parts_bootstrap_block(stats)
+          parts_bootstrap: parts_bootstrap_block(stats),
+          text_height_crosscheck: text_height_crosscheck_block(stats)
         }
+      end
+
+      # Round 20 (R20-1b/R20-2): report faithful mesh-text target heights and
+      # the height-fallback count so Import Health / Report Doctor can
+      # distinguish SIZE issues from host runtime issues.
+      def text_height_crosscheck_block(stats)
+        samples = Array(stats[:text_height_samples] || stats['text_height_samples'])
+          .map { |v| v.to_f }
+          .select { |v| v > 0.0 }
+          .sort
+        fallbacks = (stats[:text_height_fallback_count] ||
+                     stats['text_height_fallback_count']).to_i
+        return nil if samples.empty? && fallbacks.zero?
+
+        mid = samples.empty? ? 0.0 : samples[samples.length / 2]
+        {
+          sample_count: samples.length,
+          min_in: (samples.first || 0.0).round(5),
+          median_in: mid.round(5),
+          max_in: (samples.last || 0.0).round(5),
+          policy: 'nominal_pt_to_inch_x_scale',
+          fallback_count: fallbacks,
+          note: 'Heights are faithful nominal PDF targets (pt/72 x scale). ' \
+                'fallback_count > 0 means the height safety floor engaged ' \
+                '(R20-2) and text may render at the 0.01" minimum.'
+        }
+      rescue StandardError
+        nil
       end
 
       def model_3d_intent_block(stats)

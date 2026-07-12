@@ -142,6 +142,23 @@ module BlueCollarSystems
       stats[:text_renderers] << entry
     end
 
+    # Round 20: accumulate faithful mesh-text target heights (inches) for
+    # import_report extra.text_height_crosscheck.
+    def self.merge_text_height_samples!(stats, samples)
+      return unless samples.respond_to?(:each)
+      stats[:text_height_samples] ||= []
+      samples.each do |h|
+        begin
+          v = h.to_f
+          stats[:text_height_samples] << v if v > 0.0
+        rescue StandardError
+          next
+        end
+      end
+    rescue StandardError
+      nil
+    end
+
     def self.new_import_session_id
       require 'securerandom'
       SecureRandom.uuid
@@ -1207,6 +1224,9 @@ module BlueCollarSystems
         result = builder.build
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
+        merge_text_height_samples!(stats, result[:text_height_samples])
+        stats[:text_height_fallback_count] =
+          stats[:text_height_fallback_count].to_i + result[:text_height_fallback_count].to_i
 
         if opts[:import_text] && !use_svg_text && result[:text_objects].to_i > 0
           renderer = builder_use_3d_text ? :add_3d_text : :labels
@@ -1299,6 +1319,9 @@ module BlueCollarSystems
               import_session_id: provenance_opts[:import_session_id])
             fb_result = fallback_builder.build
             stats[:text] += fb_result[:text_objects]
+            merge_text_height_samples!(stats, fb_result[:text_height_samples])
+            stats[:text_height_fallback_count] =
+              stats[:text_height_fallback_count].to_i + fb_result[:text_height_fallback_count].to_i
             stats[:text_mode] = fallback_use_3d ? :text3d : :labels
             record_text_renderer(stats, page_num,
               renderer: (fallback_use_3d ? :add_3d_text : :labels),
