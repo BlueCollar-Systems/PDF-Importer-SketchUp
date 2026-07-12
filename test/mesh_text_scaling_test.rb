@@ -112,17 +112,20 @@ class DummyFaceEntity
 end
 
 class DummyTransformEntities
-  attr_reader :transforms, :erased, :height_args
+  attr_reader :transforms, :erased, :height_args, :tolerance_args
   def initialize
     @entities = []
     @transforms = []
     @erased = []
     @height_args = []
+    @tolerance_args = []
   end
   def to_a; @entities.dup; end
-  def add_3d_text(_text, _align, _font, _bold, _italic, height, _tol, _extrusion, _filled, _z)
+  def add_3d_text(_text, _align, _font, _bold, _italic, height, tol, _extrusion, _filled, _z)
     @height_args << height
+    @tolerance_args << tol
     @entities << DummyRenderedTextEntity.new(height * 3.0, height, typename: 'Edge')
+    @entities << DummyFaceEntity.new
     true
   end
   def transform_entities(*args); @transforms << args; end
@@ -418,6 +421,60 @@ class MeshTextScalingTest < Minitest::Test
       assert h >= 0.06, "#{label}: height #{h.round(4)} too small for D-size shop drawing"
       assert h <= 0.30, "#{label}: height #{h.round(4)} too large"
     end
+  end
+
+  # ── Round 20 (R20-2): Ruby 2.2 canary — a VALUE assertion, not source regex ─
+  # Field bug v3.7.81–3.7.89: Numeric#clamp (Ruby 2.4+) raised NoMethodError on
+  # the SketchUp Make 2017 host, the rescue swallowed it, and EVERY item shipped
+  # at MESH_TEXT_HEIGHT_MIN_IN (0.01") — uniform illegible specks. This test
+  # MUST execute under Docker ruby:2.2 in CI and the release gate; it fails
+  # there if any post-2.2 API sneaks back into the height path.
+  def test_ruby22_canary_12pt_height_is_faithful_not_min
+    b = make_builder(ARCH_D)
+    item = bbox_item('W12X30', 12.0, 14.0)
+    h = b.send(:mesh_text_height_inches, item, 0.0, ARCH_D[3])
+    assert_in_delta 12.0 * PT_TO_IN, h, 0.0001,
+      "12pt must yield 0.1667\" (got #{h} — 0.01 means the rescue floor engaged)"
+  end
+
+  # ── Round 20 (R20-2): a height-path failure must be counted, never silent ──
+  def test_height_fallback_is_counted_not_silent
+    b = make_builder(LETTER)
+    h = b.send(:mesh_text_height_inches, Object.new, 0.0, 792.0)
+    assert_in_delta MIN_IN, h, 1e-9, 'fallback must return the safety floor'
+    assert_equal 1, b.instance_variable_get(:@text_height_fallback_count),
+                 'height fallback must increment the crosscheck counter'
+    result = nil
+    begin
+      result = b.send(:text_height_samples)
+    rescue StandardError
+      result = []
+    end
+    assert_kind_of Array, result
+  end
+
+  # ── Round 20 (R20-1 quality): faithful height direct, tolerance 0.0 ────────
+  # Live probes: tolerance 0.6 only coarsened curves (116 vs 235 edges at the
+  # same size/faces); generate-then-scale produced byte-identical bounds, so
+  # the height is passed to add_3d_text directly with tolerance 0.0.
+  def test_place_mesh_text_passes_faithful_height_with_zero_tolerance
+    b = make_builder(ANSI_D)
+    item = bbox_item('W12X30', 8.0, 10.0, bbox_w: 50.0)
+    ents = DummyTransformEntities.new
+    b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
+
+    assert_equal 1, ents.height_args.length
+    assert_in_delta 8.0 * PT_TO_IN, ents.height_args[0], 1e-9,
+                    'add_3d_text must receive the faithful target height directly'
+    assert_equal [0.0], ents.tolerance_args,
+                 'add_3d_text tolerance must be 0.0 (R20-1 quality)'
+    kinds = ents.transforms.map { |args| args[0].respond_to?(:kind) ? args[0].kind : nil }
+    refute_includes kinds, :scaling,
+                    'no post-generation rescale of glyphs (R20-2 panel verdict)'
+    samples = b.send(:text_height_samples)
+    assert_equal 1, samples.length
+    assert_in_delta 8.0 * PT_TO_IN, samples[0], 0.001
+    assert_equal 0, ents.erased.length
   end
 
 end

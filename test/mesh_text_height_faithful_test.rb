@@ -64,4 +64,28 @@ class MeshTextHeightFaithfulTest < Minitest::Test
     refute_includes body, 'faces_to_erase',
                     '3D-text glyph faces must never be erased (v3.7.83 regression)'
   end
+
+  # Round 20 (R20-2): the v3.7.81–3.7.89 field bug — Numeric#clamp (Ruby 2.4+)
+  # raised NoMethodError on the SketchUp Make 2017 host (Ruby 2.2.4), the
+  # rescue swallowed it, and every 3D text item shipped at the 0.01" floor.
+  # The height path must stay Ruby-2.2-safe.
+  def test_mesh_text_height_is_ruby22_safe
+    body = method_body('mesh_text_height_inches')
+    refute_match(/\.\s*clamp\b/, body,
+                 'Numeric#clamp does not exist on SketchUp Make 2017 Ruby 2.2 (R20-2)')
+  end
+
+  # Round 20 (R20-1 quality, panel-verified): live-host probes showed the old
+  # fixed tolerance 0.6" only coarsened glyph curves (same size, same faces);
+  # tolerance 0.0 is kept for curve quality and the faithful height is passed
+  # to add_3d_text directly — generate-then-scale was dropped as redundant.
+  def test_place_mesh_text_uses_zero_tolerance_and_direct_height
+    body = method_body('place_mesh_text')
+    refute_match(/add_3d_text\([\s\S]*?,\s*0\.6\s*,/, body,
+                 'must not hard-code add_3d_text tolerance 0.6 (R20-1)')
+    refute_includes body, 'Transformation.scaling',
+                    'no post-generation rescale of glyph geometry (R20-2 panel verdict)'
+    assert_includes body, 'record_mesh_text_height_sample',
+                    'faithful target heights must feed the report crosscheck'
+  end
 end

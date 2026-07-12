@@ -51,6 +51,8 @@ module BlueCollarSystems
         @face_count = 0
         @arc_count  = 0
         @text_count = 0
+        @text_height_samples = []
+        @text_height_fallback_count = 0
       end
 
       def build
@@ -170,7 +172,9 @@ module BlueCollarSystems
           edges: @edge_count,
           faces: @face_count,
           arcs: @arc_count,
-          text_objects: @text_count
+          text_objects: @text_count,
+          text_height_samples: Array(@text_height_samples),
+          text_height_fallback_count: @text_height_fallback_count.to_i
         }
       end
 
@@ -548,9 +552,37 @@ module BlueCollarSystems
         # text height in points. Bboxes are placement hints only.
         fs_pts = effective_font_size_pts(item)
         height = fs_pts * PDF_POINT_TO_INCH * @scale
-        height.clamp(MESH_TEXT_HEIGHT_MIN_IN, MESH_TEXT_HEIGHT_MAX_IN)
-      rescue StandardError
+        # SketchUp Make 2017 runs Ruby 2.2, which has no Numeric#clamp (2.4+).
+        # A clamp call here raised NoMethodError on the live host, the rescue
+        # swallowed it, and EVERY item shipped at the 0.01" minimum (R20-2).
+        height = MESH_TEXT_HEIGHT_MIN_IN if height < MESH_TEXT_HEIGHT_MIN_IN
+        height = MESH_TEXT_HEIGHT_MAX_IN if height > MESH_TEXT_HEIGHT_MAX_IN
+        height
+      rescue StandardError => e
+        # R20-2: this rescue silently hid a NoMethodError for 9 releases and
+        # shipped 0.01" specks. Fallbacks must be LOUD (capped to avoid one
+        # warning per item on dense sheets) and counted for the import report.
+        @text_height_fallback_count = @text_height_fallback_count.to_i + 1
+        if @text_height_fallback_count <= 3
+          Logger.warn("GeometryBuilder",
+                      "mesh_text_height_inches failed (#{e.class}: #{e.message}); " \
+                      "using #{MESH_TEXT_HEIGHT_MIN_IN}\" minimum " \
+                      "(occurrence #{@text_height_fallback_count})")
+        end
         MESH_TEXT_HEIGHT_MIN_IN
+      end
+
+      def record_mesh_text_height_sample(height)
+        @text_height_samples ||= []
+        @text_height_samples << height.to_f
+      rescue StandardError
+        nil
+      end
+
+      def text_height_samples
+        Array(@text_height_samples)
+      rescue StandardError
+        []
       end
 
       def place_mesh_text(entities, item, origin_x, origin_y, layer)
@@ -564,6 +596,10 @@ module BlueCollarSystems
         return if height <= 0
 
         count_before = entities.to_a.length
+        # add_3d_text tolerance is absolute inches; 0.0 = highest curve
+        # quality (R20-1, quality only — live probes showed the legacy 0.6
+        # merely coarsened curves; the Round 20 speck bug was the Ruby 2.2
+        # clamp fallback fixed in mesh_text_height_inches, R20-2).
         success = entities.add_3d_text(
           item.text,
           TextAlignLeft,
@@ -571,7 +607,7 @@ module BlueCollarSystems
           false,
           false,
           height,
-          0.6,
+          0.0,
           0.0,
           true,
           0.0
@@ -605,6 +641,7 @@ module BlueCollarSystems
           end
         end
         @text_count += 1
+        record_mesh_text_height_sample(height)
         record_text_span_provenance(item)
       rescue StandardError => e
         Logger.warn("GeometryBuilder", "add_3d_text failed: #{e.message}")
