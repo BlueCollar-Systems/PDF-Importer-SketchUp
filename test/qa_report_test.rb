@@ -358,4 +358,48 @@ class QAReportTest < Minitest::Test
     assert_equal 2, row['quantity']
     assert_equal 'PL', row['profile_hint']
   end
+
+  # Round 20 (R20-1b/R20-2): mesh-text sizing health must reach the report.
+  def test_text_height_crosscheck_reports_samples_and_fallbacks
+    stats = {
+      pages: 1, primitives: 5, edges: 5, text: 3, layers: [],
+      elapsed_seconds: 0.2,
+      text_height_samples: [0.30, 0.10, 0.20],
+      text_height_fallback_count: 2
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('t.pdf', {}, stats)
+    cc = report[:extra][:text_height_crosscheck]
+    refute_nil cc, 'crosscheck block must be present when samples exist'
+    assert_equal 3, cc[:sample_count]
+    assert_in_delta 0.10, cc[:min_in], 1e-6
+    assert_in_delta 0.20, cc[:median_in], 1e-6
+    assert_in_delta 0.30, cc[:max_in], 1e-6
+    assert_equal 'nominal_pt_to_inch_x_scale', cc[:policy]
+    assert_equal 2, cc[:fallback_count],
+                 'Ruby 2.2-floor engagements must be visible in the report (R20-2)'
+  end
+
+  def test_text_height_crosscheck_present_when_only_fallbacks_occurred
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      elapsed_seconds: 0.1,
+      text_height_samples: [],
+      text_height_fallback_count: 4
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('t.pdf', {}, stats)
+    cc = report[:extra][:text_height_crosscheck]
+    refute_nil cc, 'a fallback-only import must still surface the crosscheck'
+    assert_equal 0, cc[:sample_count]
+    assert_equal 4, cc[:fallback_count]
+  end
+
+  def test_text_height_crosscheck_absent_without_mesh_text
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 0, layers: [],
+      elapsed_seconds: 0.1
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('t.pdf', {}, stats)
+    assert_nil report[:extra][:text_height_crosscheck],
+               'headless/label imports place no mesh text — block stays absent'
+  end
 end
