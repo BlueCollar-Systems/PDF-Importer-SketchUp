@@ -75,6 +75,7 @@ jobs:
             ruby test/import_health_test.rb
             ruby test/arc_fitter_test.rb
             ruby test/unit_parser_test.rb
+            ruby test/mesh_text_scaling_test.rb
           '
 
       - name: Ruby syntax check

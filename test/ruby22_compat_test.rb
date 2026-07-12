@@ -12,7 +12,7 @@ TEST_DIR  = File.join(REPO_ROOT, 'test')
 LOADER    = File.join(EXT_DIR, 'bc_pdf_vector_importer.rb')
 
 MODERN_METHOD_PATTERN =
-  /&\.|(?<!\.)\.(?:match\?|positive\?|negative\?|dig|sum|then|yield_self|filter|filter_map|tally|transform_values|delete_prefix|delete_suffix|fetch_values|chunk_while)(?=[^A-Za-z0-9_]|$)/
+  /&\.|(?<!\.)\.(?:match\?|positive\?|negative\?|dig|sum|then|yield_self|filter|filter_map|tally|transform_values|transform_keys|delete_prefix|delete_suffix|fetch_values|chunk_while|clamp|unpack1|digits|grep_v|bsearch_index)(?=[^A-Za-z0-9_]|$)/
 ENDLESS_RANGE_PATTERN   = /(^|[^.])\.\.(?!\.)\s*(?:[\]\)\}]|$)/
 BEGINLESS_RANGE_PATTERN = /(?:\[|\()\s*\.\.(?!\.)/
 

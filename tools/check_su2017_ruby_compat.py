@@ -21,11 +21,17 @@ INCOMPATIBLE_PATTERNS = [
             r"(?<!\.)\.\s*(?:"
             r"positive\?|negative\?|dig|match\?|casecmp\?|"
             r"delete_prefix|delete_suffix|fetch_values|"
-            r"sum|filter|filter_map|tally|transform_values|"
-            r"then|yield_self|chunk_while"
-            r")\s*(?:\(|\b)"
+            r"sum|filter|filter_map|tally|transform_values|transform_keys|"
+            r"then|yield_self|chunk_while|"
+            r"clamp|unpack1|digits|grep_v|bsearch_index"
+            r")\s*(?:\(|\b|(?=\W|$))"
         ),
         "method is not available in Ruby 2.2",
+    ),
+    (re.compile(r"\bkeyword_init\b"), "Struct keyword_init requires Ruby 2.5+"),
+    (
+        re.compile(r"\b(?:File|Dir)\s*\.\s*empty\?"),
+        "File.empty?/Dir.empty? require Ruby 2.4+",
     ),
     (re.compile(r"<<~"), "squiggly heredoc requires Ruby 2.3+"),
     (re.compile(r"\[[^\]\n]*\.\.\s*\]"), "endless range requires Ruby 2.6+"),

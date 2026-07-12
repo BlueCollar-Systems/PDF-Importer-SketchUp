@@ -63,12 +63,15 @@ jobs:
           ruby test/dependency_resolver_test.rb
           ruby test/qa_report_test.rb
           ruby test/text_mode_routing_test.rb
+          ruby test/mesh_text_scaling_test.rb
+          ruby test/mesh_text_height_faithful_test.rb
           docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
             set -e
             find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
             ruby test/smoke_test.rb
             ruby test/ruby22_compat_test.rb
             ruby test/import_health_test.rb
+            ruby test/mesh_text_scaling_test.rb
           '
 
       - name: Read committed version
