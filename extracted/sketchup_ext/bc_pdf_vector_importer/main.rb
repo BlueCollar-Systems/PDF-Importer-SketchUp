@@ -1716,8 +1716,21 @@ module BlueCollarSystems
       end
       result
     rescue StandardError => e
+      # Fail closed (Python-host parity): never admit the file because the
+      # gate wrapper crashed. Record a visible refusal instead.
       Logger.warn("OpenGate", "gate check failed: #{e.message}")
-      nil
+      reason = 'unreadable'
+      message = PdfOpenGate.message_for(reason)
+      begin
+        record_open_failure_report(path, opts, reason, message)
+        Logger.flush_log
+      rescue StandardError
+        # best-effort diagnostics only
+      end
+      if show_ui && defined?(UI) && UI.respond_to?(:messagebox)
+        UI.messagebox(message)
+      end
+      { ok: false, reason: reason, message: message }
     end
 
     def self.write_source_provenance_sidecar(pdf_path, opts, stats)

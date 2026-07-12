@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.90-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.91-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -197,7 +197,7 @@ When reading `extra.resolved_scale` from `import_report.json` (or the in-app rep
 
 All hosts show the same actionable messages for encrypted, non-PDF, and truncated files.
 Python importers (**FreeCAD, LibreCAD, Blender**) **fail closed** at open time via `safe_open` / `PdfOpenError`.
-SketchUp runs the same checks but **fail open** if the gate itself errors — rare edge cases may reach the parser.
+SketchUp runs the same cheap byte-level checks and also **fails closed** if the gate itself errors (`reason: unreadable`), recording an open-failure `import_report.json` instead of admitting the file. Salvage may still override encrypted/truncated refusals when Poppler can normalize the PDF.
 Do not assume identical refusal behavior across hosts; compare `fallback.reason` in each host's import report.
 
 ---

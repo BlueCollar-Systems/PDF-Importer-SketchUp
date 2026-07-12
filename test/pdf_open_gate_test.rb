@@ -49,4 +49,18 @@ class PdfOpenGateTest < Minitest::Test
       assert_equal 'encrypted', result[:reason]
     end
   end
+
+  def test_gate_errors_fail_closed_as_unreadable
+    path = File.expand_path(__FILE__)
+    original = G.method(:leading_bytes)
+    G.define_singleton_method(:leading_bytes) { |_p, _n| raise 'simulated sniff failure' }
+    begin
+      result = G.inspect_path(path)
+      assert_equal false, result[:ok]
+      assert_equal 'unreadable', result[:reason]
+      assert_match(/could not be checked safely/i, result[:message].to_s)
+    ensure
+      G.define_singleton_method(:leading_bytes, original)
+    end
+  end
 end

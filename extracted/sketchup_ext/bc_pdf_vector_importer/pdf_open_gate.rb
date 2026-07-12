@@ -27,7 +27,9 @@ module BlueCollarSystems
         'not_a_pdf'          => 'This file is not a valid PDF.',
         'empty_or_truncated' => 'This PDF appears to be empty or truncated and cannot be imported.',
         'encrypted'          => 'This PDF is password-protected and cannot be imported. ' \
-                                'Remove the password protection and try again.'
+                                'Remove the password protection and try again.',
+        # Fail closed when the sniff itself errors (matches Python safe_open).
+        'unreadable'         => 'This PDF could not be checked safely and was not imported.'
       }.freeze
 
       # How far into the file a conforming %PDF- header may appear.
@@ -56,9 +58,10 @@ module BlueCollarSystems
 
         { ok: true, reason: nil, message: nil }
       rescue StandardError
-        # A pure sniff should never abort the import on its own bugs;
-        # let the normal parser path produce its own diagnostics.
-        { ok: true, reason: nil, message: nil }
+        # Fail closed (Python-host parity): a gate bug must not silently
+        # admit a hostile/malformed file into the parser. Salvage may still
+        # override encrypted/truncated refusals in handle_open_gate.
+        failure('unreadable')
       end
 
       def message_for(reason)
