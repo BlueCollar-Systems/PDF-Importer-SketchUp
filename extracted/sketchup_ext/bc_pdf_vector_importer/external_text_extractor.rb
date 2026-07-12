@@ -286,7 +286,7 @@ module BlueCollarSystems
               tail = numeric_tail_candidate(items[candidate_idx].text.to_s.strip) ||
                      items[candidate_idx].text.to_s.strip
               merged = normalize_line_text(merge_head_tail(text, tail))
-              out << TextParser::TextItem.new(
+              merged_item = TextParser::TextItem.new(
                 merged,
                 it.x.to_f,
                 it.y.to_f,
@@ -294,6 +294,11 @@ module BlueCollarSystems
                 merge_angle(it.angle, items[candidate_idx].angle),
                 it.font_name
               )
+              # Merged fragments keep the head item's span identity (corrective §1).
+              if it.respond_to?(:source_span_id)
+                merged_item.source_span_id = it.source_span_id
+              end
+              out << merged_item
               used[i] = true
               used[candidate_idx] = true
             else
@@ -446,7 +451,9 @@ module BlueCollarSystems
             by0,
             bx1,
             by1,
-            a1.respond_to?(:layer_name) ? a1.layer_name : nil
+            a1.respond_to?(:layer_name) ? a1.layer_name : nil,
+            # Merged angle marks keep the leading item's span identity (corrective §1).
+            a1.respond_to?(:source_span_id) ? a1.source_span_id : nil
           )
         rescue StandardError
           a1
@@ -495,7 +502,7 @@ module BlueCollarSystems
 
             if candidate_idx && candidate_frac
               rebuilt = replace_trailing_whole_with_fraction(text, candidate_frac)
-              out << TextParser::TextItem.new(
+              rebuilt_item = TextParser::TextItem.new(
                 normalize_line_text(rebuilt),
                 it.x.to_f,
                 it.y.to_f,
@@ -503,6 +510,11 @@ module BlueCollarSystems
                 merge_angle(it.angle, items[candidate_idx].angle),
                 it.font_name
               )
+              # Repaired pairs keep the head item's span identity (corrective §1).
+              if it.respond_to?(:source_span_id)
+                rebuilt_item.source_span_id = it.source_span_id
+              end
+              out << rebuilt_item
               used[i] = true
               used[candidate_idx] = true
             else

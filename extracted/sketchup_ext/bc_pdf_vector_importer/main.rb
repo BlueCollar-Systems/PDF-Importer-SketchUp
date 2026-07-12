@@ -23,6 +23,7 @@ module BlueCollarSystems
     require File.join(dir, 'pdf_parser')
     require File.join(dir, 'content_stream_parser')
     require File.join(dir, 'text_parser')
+    require File.join(dir, 'text_source_identity')
     require File.join(dir, 'external_text_extractor')
     require File.join(dir, 'bezier')
     require File.join(dir, 'arc_fitter')
@@ -272,7 +273,9 @@ module BlueCollarSystems
         item.respond_to?(:bbox_y0) ? item.bbox_y0 : nil,
         item.respond_to?(:bbox_x1) ? item.bbox_x1 : nil,
         item.respond_to?(:bbox_y1) ? item.bbox_y1 : nil,
-        item.respond_to?(:layer_name) ? item.layer_name : nil
+        item.respond_to?(:layer_name) ? item.layer_name : nil,
+        # Clones keep the source item's span identity (corrective §1).
+        item.respond_to?(:source_span_id) ? item.source_span_id : nil
       )
     rescue StandardError
       item
@@ -1062,6 +1065,13 @@ module BlueCollarSystems
               Logger.warn("Pipeline", "Page #{page_num}: internal text angle hints unavailable: #{e.message}")
             end
           end
+          # Corrective 2026-07-12 §1 (RB-01): assign deterministic source-span
+          # identity ONCE per page — after final extractor selection, merging,
+          # and angle-hint replacement above, and BEFORE stats[:page_text_map]
+          # (PartsBootstrap input) and GeometryBuilder consume the SAME item
+          # objects below. This is what makes parts_bootstrap row span_ids and
+          # source_provenance span_id join.
+          TextSourceIdentity.assign!(text_items, page_num)
           Logger.info("Pipeline", "Page #{page_num}: text extractor=#{text_source}, items=#{text_items ? text_items.length : 0}")
           stats[:page_text_sources][page_num] = text_source if text_source
           stats[:page_text_map][page_num] = text_items if text_items && !text_items.empty?

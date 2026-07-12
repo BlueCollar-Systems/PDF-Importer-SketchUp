@@ -727,7 +727,7 @@ module BlueCollarSystems
       def sub_dimension_text_item(item, token, bx0, bx1, by0, by1)
         row_h = (by1 - by0).abs
         fs = [row_h, 1.0].max
-        item.class.new(
+        sub = item.class.new(
           token,
           bx0,
           by0,
@@ -740,6 +740,12 @@ module BlueCollarSystems
           bx1,
           by1
         )
+        # Derived/split text keeps the source item's span identity so its
+        # provenance rows still join with parts_bootstrap (corrective §1).
+        if sub.respond_to?(:source_span_id=) && item.respond_to?(:source_span_id)
+          sub.source_span_id = item.source_span_id
+        end
+        sub
       rescue StandardError
         item
       end
@@ -819,11 +825,19 @@ module BlueCollarSystems
           object_id: "text_span:#{@page_number}:#{idx}",
           page: @page_number,
           source_kind: 'text_span',
-          created_entity_type: entity_type,
-          # Integer index matching FreeCAD pdfcadcore emission (R21-18 / QP-1).
-          # Enables parts_bootstrap.span_ids ↔ provenance.span_id joins.
-          span_id: idx
+          created_entity_type: entity_type
         }
+        # Corrective 2026-07-12 §1 (RB-01): span_id is the SAME deterministic
+        # source-span identity that PartsBootstrap emits in row span_ids
+        # (TextSourceIdentity "text_span:<page>:<index>"), so the two sidecars
+        # join. object_id above stays a separate created-entity label. When an
+        # item carries no assigned identity (legacy/out-of-pipeline callers
+        # only), span_id is OMITTED — never fabricate a bucket-index id that
+        # cannot join (the shipped v3.7.92 defect); consumers fall back to an
+        # explicit page-level result.
+        if item && item.respond_to?(:source_span_id) && item.source_span_id
+          entry[:span_id] = item.source_span_id
+        end
         bbox = item_source_bbox_pdf(item)
         entry[:source_bbox_pdf] = bbox if bbox
         @provenance_bucket << entry

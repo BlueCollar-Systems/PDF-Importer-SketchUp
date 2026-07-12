@@ -21,6 +21,7 @@ require File.join(dir, 'pdf_salvage')
 require File.join(dir, 'pdf_parser')
 require File.join(dir, 'content_stream_parser')
 require File.join(dir, 'text_parser')
+require File.join(dir, 'text_source_identity')
 require File.join(dir, 'external_text_extractor')
 require File.join(dir, 'bezier')
 require File.join(dir, 'arc_fitter')
@@ -270,6 +271,10 @@ module BlueCollarSystems
           paths += xobj_paths if xobj_paths && !xobj_paths.empty?
 
           text_items, text_source = extract_text(parser, pdf_path, page_num, streams, ocg_map, opts)
+          # Corrective 2026-07-12 §1 (RB-01): deterministic source-span identity
+          # is assigned ONCE per page on the final extracted array, BEFORE
+          # stats[:page_text_map] (PartsBootstrap input) is built below.
+          TextSourceIdentity.assign!(text_items, page_num)
           images = opts[:extract_embedded_images] == false ? [] : image_extractor.extract_page(page_num)
           page_data = PrimitiveExtractor.extract(
             paths,

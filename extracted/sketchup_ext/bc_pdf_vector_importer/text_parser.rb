@@ -21,7 +21,12 @@ module BlueCollarSystems
         :bbox_y0,     # Optional PDF bbox min Y (bottom, media space)
         :bbox_x1,     # Optional PDF bbox max X
         :bbox_y1,     # Optional PDF bbox max Y (top, media space)
-        :layer_name   # OCG layer name when marked content is active
+        :layer_name,  # OCG layer name when marked content is active
+        # Deterministic source-span identity "text_span:<page>:<index>",
+        # assigned ONCE per page by TextSourceIdentity.assign! after final
+        # extractor selection/merging/angle hints (corrective 2026-07-12 §1).
+        # MUST stay the FINAL member so positional constructors stay valid.
+        :source_span_id
       )
 
       # Common structural drawing fraction denominators
@@ -666,7 +671,10 @@ module BlueCollarSystems
           text = it.text.to_s
           fixed = normalize_fraction_spacing(text)
           if fixed != text
-            TextItem.new(fixed, it.x, it.y, it.font_size, it.angle, it.font_name, it.raw_font_size || it.font_size)
+            clone = TextItem.new(fixed, it.x, it.y, it.font_size, it.angle, it.font_name, it.raw_font_size || it.font_size)
+            # Clones keep the source item's span identity (corrective §1).
+            clone.source_span_id = it.source_span_id if it.respond_to?(:source_span_id)
+            clone
           else
             it
           end
@@ -743,7 +751,7 @@ module BlueCollarSystems
         end
 
         base = run.first
-        TextItem.new(
+        merged = TextItem.new(
           clean_text(text),
           base.x,
           base.y,
@@ -752,6 +760,9 @@ module BlueCollarSystems
           base.font_name,
           base.raw_font_size || base.font_size
         )
+        # Merged runs keep the base item's span identity (corrective §1).
+        merged.source_span_id = base.source_span_id if base.respond_to?(:source_span_id)
+        merged
       end
 
       def estimate_text_width(text, font_size)
@@ -864,7 +875,7 @@ module BlueCollarSystems
                   # Found a fraction! Reconstruct as inline
                   frac_text = "#{numerator}/#{denominator}"
                   mid_y = (item.y + other.y) / 2.0
-                  result << TextItem.new(
+                  frac_item = TextItem.new(
                     frac_text,
                     [item.x, other.x].min,
                     mid_y,
@@ -873,6 +884,12 @@ module BlueCollarSystems
                     item.font_name,
                     [item.raw_font_size || item.font_size, other.raw_font_size || other.font_size].max
                   )
+                  # Reconstructed fractions keep the base item's span identity
+                  # (corrective §1).
+                  if base_item.respond_to?(:source_span_id)
+                    frac_item.source_span_id = base_item.source_span_id
+                  end
+                  result << frac_item
                   used[i] = true
                   used[j] = true
                   break
@@ -886,11 +903,16 @@ module BlueCollarSystems
             if item.text =~ /\A\d{3,4}\z/
               frac = try_split_fraction(item.text)
               if frac
-                result << TextItem.new(
+                split_item = TextItem.new(
                   "#{frac[0]}/#{frac[1]}",
                   item.x, item.y, item.font_size, item.angle, item.font_name,
                   item.raw_font_size || item.font_size
                 )
+                # Split-derived text keeps the source span identity (corrective §1).
+                if item.respond_to?(:source_span_id)
+                  split_item.source_span_id = item.source_span_id
+                end
+                result << split_item
                 used[i] = true
                 next
               end

@@ -14,7 +14,8 @@
 #       { page: 1,
 #         rows: [
 #           { piece_mark: 'p1019', quantity: 2, description: 'PL1/2X8X24',
-#             profile_hint: 'PL', length_in: 24.0, span_ids: ['t_0042'] }
+#             profile_hint: 'PL', length_in: 24.0,
+#             span_ids: ['text_span:1:42'] }
 #         ] }
 #     ] }
 
@@ -41,7 +42,9 @@ module BlueCollarSystems
 
       # Build the full sidecar hash from a hash of page_num => [text_items].
       # text_items must respond to: #text (String), #page_number (Integer),
-      #   #bbox_x0 (Float), #bbox_y0 (Float), #id or #object_id (String).
+      #   #bbox_x0 (Float), #bbox_y0 (Float), and carry the deterministic
+      #   #source_span_id assigned by TextSourceIdentity (corrective §1).
+      #   #id / #object_id remain as legacy fallbacks only.
       def build(pages_text_map, session_id: nil)
         tables = []
         pages_text_map.each do |page_num, items|
@@ -196,7 +199,18 @@ module BlueCollarSystems
       end
 
       def item_id(item)
-        if item.respond_to?(:id) && item.id
+        # Canonical id: the deterministic "text_span:<page>:<index>" identity
+        # assigned by TextSourceIdentity before this module runs. It is the
+        # SAME value GeometryBuilder emits as provenance span_id, so the
+        # parts_bootstrap and source_provenance sidecars join (corrective
+        # 2026-07-12 §1 / RB-01).
+        if item.respond_to?(:source_span_id) && item.source_span_id
+          item.source_span_id.to_s
+        # Legacy fallbacks below are for out-of-pipeline callers only; the
+        # real import pipeline always assigns source_span_id first. Ruby
+        # object_id in particular is nondeterministic memory identity and can
+        # never join with provenance.
+        elsif item.respond_to?(:id) && item.id
           "t_#{item.id}"
         elsif item.respond_to?(:object_id)
           "t_#{item.object_id}"

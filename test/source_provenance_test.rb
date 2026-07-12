@@ -62,7 +62,7 @@ class SourceProvenanceTest < Minitest::Test
           page: 1,
           source_kind: 'text_span',
           created_entity_type: 'native_label',
-          span_id: 0
+          span_id: 'text_span:1:0'
         }
       ]
       path = SP.write_sidecar(
@@ -77,12 +77,15 @@ class SourceProvenanceTest < Minitest::Test
       data = JSON.parse(File.read(out))
       assert_equal 'bcs.source_provenance/1.0', data['schema']
       assert_equal 1, data['objects'].length
-      assert_equal 0, data['objects'][0]['span_id']
+      assert_equal 'text_span:1:0', data['objects'][0]['span_id']
     end
   end
 
-  # R21-18.1: GeometryBuilder emits integer span_id for bootstrap joins.
-  def test_record_text_span_provenance_emits_span_id
+  # Corrective 2026-07-12 §1 (RB-01): GeometryBuilder emits the item's
+  # TextSourceIdentity-assigned source_span_id as span_id — the SAME value
+  # PartsBootstrap writes in row span_ids — so the sidecars join. It never
+  # fabricates a bucket-index span_id (the shipped v3.7.92 defect).
+  def test_record_text_span_provenance_emits_source_span_id
     bucket = []
     builder = GB.allocate
     builder.instance_variable_set(:@provenance_bucket, bucket)
@@ -94,16 +97,41 @@ class SourceProvenanceTest < Minitest::Test
     def item.bbox_y0; 20.0; end
     def item.bbox_x1; 30.0; end
     def item.bbox_y1; 40.0; end
+    def item.source_span_id; 'text_span:2:7'; end
 
     builder.send(:record_text_span_provenance, item)
     assert_equal 1, bucket.length
     entry = bucket[0]
-    assert_equal 0, entry[:span_id]
-    assert_equal 'text_span:2:0', entry[:object_id]
+    assert_equal 'text_span:2:7', entry[:span_id]
+    assert_equal 'text_span:2:0', entry[:object_id],
+                 'object_id stays a separate created-entity label'
     assert_equal [10.0, 20.0, 30.0, 40.0], entry[:source_bbox_pdf]
 
     builder.send(:record_text_span_provenance, item)
-    assert_equal 1, bucket[1][:span_id]
+    assert_equal 'text_span:2:7', bucket[1][:span_id]
     assert_equal 'text_span:2:1', bucket[1][:object_id]
+  end
+
+  # An item with no assigned identity (legacy callers only) must not get a
+  # fabricated bucket-index span_id — absence is honest and lets consumers
+  # fall back to an explicit page-level result.
+  def test_record_text_span_provenance_omits_span_id_when_unassigned
+    bucket = []
+    builder = GB.allocate
+    builder.instance_variable_set(:@provenance_bucket, bucket)
+    builder.instance_variable_set(:@page_number, 1)
+    builder.instance_variable_set(:@use_3d_text, false)
+
+    item = Object.new
+    def item.bbox_x0; 10.0; end
+    def item.bbox_y0; 20.0; end
+    def item.bbox_x1; 30.0; end
+    def item.bbox_y1; 40.0; end
+
+    builder.send(:record_text_span_provenance, item)
+    assert_equal 1, bucket.length
+    refute bucket[0].key?(:span_id),
+           'no fabricated span_id for unassigned items (RB-01)'
+    assert_equal 'text_span:1:0', bucket[0][:object_id]
   end
 end
