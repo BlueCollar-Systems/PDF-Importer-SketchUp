@@ -99,9 +99,11 @@ helpers are detected at runtime and reported through **Extensions > PDF Vector
 Importer > Compatibility Report**.
 
 Current Windows release RBZ files include Poppler `pdftocairo`, `pdftotext`,
-`pdffonts`, and required DLLs under the extension `bin/` folder. Source builds
-must run `tools/fetch_third_party_binaries.ps1` before `python build_release.py`;
-the build fails if the bundled helper set is missing.
+`pdffonts`, and PE-reachable required DLLs under the extension `bin/` folder.
+Source builds must run `tools/fetch_third_party_binaries.ps1` before
+`python build_release.py` (the fetch script prunes unused sibling DLLs via
+`tools/prune_poppler_bundle.py`); the build fails if the bundled helper set is
+missing.
 
 | Helper | Used for | If missing |
 |--------|----------|------------|

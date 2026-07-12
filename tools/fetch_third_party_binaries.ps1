@@ -72,10 +72,16 @@ Bundled third-party tools for PDF Vector Importer (SketchUp)
 Poppler utilities and supporting DLLs (distributed under their upstream
 licenses; Poppler itself is GPL-family licensed, and the Windows bundle also
 contains LGPL/MIT/BSD-style support libraries):
-  pdftocairo.exe, pdftotext.exe, pdffonts.exe and required DLLs
+  pdftocairo.exe, pdftotext.exe, pdffonts.exe and PE-reachable required DLLs
 
 Fetched by tools/fetch_third_party_binaries.ps1 from:
   https://github.com/oschwartz10612/poppler-windows/releases/latest
+
+After fetch, tools/prune_poppler_bundle.py drops unused sibling DLLs
+(poppler-glib/cpp, iconv, duplicate libtiff/libzstd, etc.). The
+libcurl → libssh2 → libcrypto chain is retained because poppler.dll
+imports it (hard PE IAT dependency), even though local conversion
+never uses network/SSH.
 
 For exact license files, source links, and component versions, preserve this
 notice plus the copied licenses/ folder with each published BlueCollar Systems
@@ -84,6 +90,13 @@ release.
 MuPDF mutool is NOT bundled here (AGPL license review required).
 Ghostscript is NOT bundled here (large installer; user one-click install documented).
 '@ | Set-Content -Path (Join-Path $BinDir 'THIRD_PARTY_NOTICES.txt') -Encoding UTF8
+
+Write-Host ""
+Write-Host "Pruning unused Poppler DLLs (PE import walk)..."
+& python (Join-Path $RepoRoot 'tools\prune_poppler_bundle.py') --bin-dir $BinDir
+if ($LASTEXITCODE -ne 0) {
+    throw "prune_poppler_bundle.py failed with exit code $LASTEXITCODE"
+}
 
 Write-Host ""
 Write-Host "Poppler tools copied to:"
