@@ -101,9 +101,9 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Poppler PE prune lock (R21-7/R21-8)
+      - name: Poppler PE prune lock (static-only evidence; R21-7/R21-8)
         run: python tools/test_prune_poppler_bundle.py -v
-      - name: Poppler helper empirical smoke (R21-8; visible-skip off Windows)
+      - name: Poppler helper smoke (static-only visible-skip off Windows; R21-8)
         run: python tools/smoke_poppler_helpers.py
 
   poppler-smoke-windows:

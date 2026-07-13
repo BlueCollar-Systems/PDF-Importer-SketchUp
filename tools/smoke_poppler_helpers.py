@@ -61,7 +61,7 @@ def run_smoke(
     if missing:
         message = f"Poppler helpers absent in {bin_dir}: {', '.join(missing)}"
         if required:
-            print(f"ERROR: {message}", file=sys.stderr)
+            print(f"FAIL: {message}", file=sys.stderr)
             return 1
         print(f"SKIP: {message}")
         print("  Run: powershell -ExecutionPolicy Bypass -File tools/fetch_third_party_binaries.ps1")
@@ -70,7 +70,7 @@ def run_smoke(
     if platform_name != "nt":
         message = f"Poppler helper smoke requires Windows (bundled .exe); platform_name={platform_name!r}"
         if required:
-            print(f"ERROR: {message}", file=sys.stderr)
+            print(f"FAIL: {message}", file=sys.stderr)
             return 1
         print(f"SKIP: {message}")
         return 0
