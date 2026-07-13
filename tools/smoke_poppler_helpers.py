@@ -13,6 +13,7 @@ Fail (exit 1) on nonzero helper RC when the smoke is armed.
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -49,18 +50,29 @@ startxref
 """
 
 
-def main() -> int:
-    missing = [h for h in HELPERS if not (BIN_DIR / h).is_file()]
+def run_smoke(
+    *,
+    bin_dir: Path = BIN_DIR,
+    platform_name: str = os.name,
+    run_command=subprocess.run,
+    required: bool = False,
+) -> int:
+    missing = [h for h in HELPERS if not (bin_dir / h).is_file()]
     if missing:
-        print(f"SKIP: Poppler helpers absent in {BIN_DIR}: {', '.join(missing)}")
+        message = f"Poppler helpers absent in {bin_dir}: {', '.join(missing)}"
+        if required:
+            print(f"ERROR: {message}", file=sys.stderr)
+            return 1
+        print(f"SKIP: {message}")
         print("  Run: powershell -ExecutionPolicy Bypass -File tools/fetch_third_party_binaries.ps1")
         return 0
 
-    if os.name != "nt":
-        print(
-            "SKIP: Poppler helper smoke requires Windows (bundled .exe); "
-            f"os.name={os.name!r}"
-        )
+    if platform_name != "nt":
+        message = f"Poppler helper smoke requires Windows (bundled .exe); platform_name={platform_name!r}"
+        if required:
+            print(f"ERROR: {message}", file=sys.stderr)
+            return 1
+        print(f"SKIP: {message}")
         return 0
 
     with tempfile.TemporaryDirectory(prefix="su_poppler_smoke_") as tmp:
@@ -71,16 +83,16 @@ def main() -> int:
         png_stem = tmp_path / "page"
 
         steps = [
-            ([str(BIN_DIR / "pdftotext.exe"), "-bbox", str(smoke_pdf), str(xml_out)], "pdftotext"),
+            ([str(bin_dir / "pdftotext.exe"), "-bbox", str(smoke_pdf), str(xml_out)], "pdftotext"),
             (
-                [str(BIN_DIR / "pdftocairo.exe"), "-png", "-singlefile", str(smoke_pdf), str(png_stem)],
+                [str(bin_dir / "pdftocairo.exe"), "-png", "-singlefile", str(smoke_pdf), str(png_stem)],
                 "pdftocairo",
             ),
-            ([str(BIN_DIR / "pdffonts.exe"), str(smoke_pdf)], "pdffonts"),
+            ([str(bin_dir / "pdffonts.exe"), str(smoke_pdf)], "pdffonts"),
         ]
         for cmd, label in steps:
             print(f"RUN: {' '.join(cmd)}")
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = run_command(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
                 sys.stderr.write(proc.stdout or "")
                 sys.stderr.write(proc.stderr or "")
@@ -89,6 +101,19 @@ def main() -> int:
 
     print("PASS: pdftotext / pdftocairo / pdffonts RC=0 on synthetic PDF")
     return 0
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Empirical post-prune Poppler helper smoke check."
+    )
+    parser.add_argument(
+        "--required",
+        action="store_true",
+        help="Exit 1 when helpers are missing or this is not Windows (default: visible skip with exit 0).",
+    )
+    args = parser.parse_args(argv)
+    return run_smoke(bin_dir=BIN_DIR, required=args.required)
 
 
 if __name__ == "__main__":

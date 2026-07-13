@@ -16,6 +16,7 @@ Excluded:
 Usage:
   python build_release.py
   python build_release.py --out /path/to/output_dir
+  python build_release.py --require-poppler-smoke --out /path/to/output_dir
 
 Optional (Windows release with bundled Poppler):
   powershell -ExecutionPolicy Bypass -File tools/fetch_third_party_binaries.ps1
@@ -39,6 +40,8 @@ SUPPORT_DIR = EXT_ROOT / "bc_pdf_vector_importer"
 EXCLUDE_DIRS  = {".git", ".github", "test", "__pycache__", ".ruff_cache"}
 EXCLUDE_FILES = {"build_release.py", ".gitignore", ".gitattributes"}
 EXCLUDE_SUFFIXES = {".bak", ".swp", ".pyo", ".pyc"}
+
+SMOKE_SCRIPT = REPO_ROOT / "tools" / "smoke_poppler_helpers.py"
 
 BUNDLED_HELPERS = {
     "pdftocairo.exe",
@@ -87,7 +90,23 @@ def _verify_bundled_helpers(required: bool = True) -> None:
     print(f"WARNING: {message}")
 
 
-def build(out_dir: Path, *, require_helpers: bool = True) -> Path:
+def _run_poppler_smoke(*, required: bool = False) -> None:
+    """Run tools/smoke_poppler_helpers.py; fail the build when required."""
+    if not SMOKE_SCRIPT.is_file():
+        if required:
+            raise RuntimeError(
+                f"Poppler smoke script not found: {SMOKE_SCRIPT}. "
+                "The release build requires it."
+            )
+        return
+
+    command = [sys.executable, str(SMOKE_SCRIPT)]
+    if required:
+        command.append("--required")
+    subprocess.run(command, check=True)
+
+
+def build(out_dir: Path, *, require_helpers: bool = True, require_poppler_smoke: bool = False) -> Path:
     version  = _read_version()
     rbz_name = f"SketchUp-PDF-Importer_v{version}.rbz"
     rbz_path = out_dir / rbz_name
@@ -106,9 +125,7 @@ def build(out_dir: Path, *, require_helpers: bool = True) -> Path:
     # R21-8 empirical smoke. Visible-skip returns 0 (bin absent / non-Windows);
     # a real helper failure must stop the build (check=True). Escape: fix bin/
     # or re-run tools/fetch_third_party_binaries.ps1 — do not soft-ignore.
-    smoke = REPO_ROOT / "tools" / "smoke_poppler_helpers.py"
-    if smoke.is_file():
-        subprocess.run([sys.executable, str(smoke)], check=True)
+    _run_poppler_smoke(required=require_poppler_smoke)
 
     file_count = 0
     skipped    = 0
@@ -141,9 +158,12 @@ def main() -> None:
                         help="Output directory (default: repo root)")
     parser.add_argument("--allow-missing-bundled-poppler", action="store_true",
                         help="Build without bundled Windows Poppler helpers (source/dev only).")
+    parser.add_argument("--require-poppler-smoke", action="store_true",
+                        help="Require Poppler helper smoke to pass (Windows release gate).")
     args   = parser.parse_args()
     out    = Path(args.out).resolve()
-    rbz    = build(out, require_helpers=not args.allow_missing_bundled_poppler)
+    rbz    = build(out, require_helpers=not args.allow_missing_bundled_poppler,
+                   require_poppler_smoke=args.require_poppler_smoke)
     print(f"\nRelease ready: {rbz}")
 
 

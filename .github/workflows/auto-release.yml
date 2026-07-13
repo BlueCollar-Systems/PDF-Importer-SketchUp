@@ -28,7 +28,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  poppler-smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Poppler PE prune lock (R21-7/R21-8)
+        run: python tools/test_prune_poppler_bundle.py -v
+      - name: Poppler helper smoke unit tests (R21-8)
+        run: python tools/test_smoke_poppler_helpers.py -v
+      - name: Build release with required Poppler smoke (R21-8)
+        run: python build_release.py --require-poppler-smoke --out "$env:RUNNER_TEMP\su-rbz"
+
   release:
+    needs: poppler-smoke-windows
     if: "!startsWith(github.event.head_commit.message, 'chore: bump version to') && !contains(github.event.head_commit.message, 'automation/version-bump') && !contains(github.event.head_commit.message, '[skip release]')"
     runs-on: ubuntu-latest
     steps:
