@@ -118,5 +118,7 @@ jobs:
         run: python tools/test_prune_poppler_bundle.py -v
       - name: Poppler helper smoke unit tests (R21-8)
         run: python tools/test_smoke_poppler_helpers.py -v
+      - name: Release safety unit tests (R21-5)
+        run: python tools/test_release_safety.py
       - name: Build release with required Poppler smoke (R21-8)
         run: python build_release.py --require-poppler-smoke --out "$env:RUNNER_TEMP\su-rbz"

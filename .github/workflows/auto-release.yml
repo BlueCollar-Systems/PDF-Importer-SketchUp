@@ -40,6 +40,8 @@ jobs:
         run: python tools/test_prune_poppler_bundle.py -v
       - name: Poppler helper smoke unit tests (R21-8)
         run: python tools/test_smoke_poppler_helpers.py -v
+      - name: Release safety unit tests (R21-5)
+        run: python tools/test_release_safety.py
       - name: Build release with required Poppler smoke (R21-8)
         run: python build_release.py --require-poppler-smoke --out "$env:RUNNER_TEMP\su-rbz"
 
@@ -73,6 +75,7 @@ jobs:
           set -e
           python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext
           python3 tools/test_prune_poppler_bundle.py
+          python3 tools/test_release_safety.py
           find extracted/sketchup_ext test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
           ruby test/smoke_test.rb
           ruby test/ruby22_compat_test.rb
@@ -158,6 +161,7 @@ jobs:
           PY
 
       - name: Create or update release
+        id: mint
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -167,42 +171,17 @@ jobs:
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — immutable; skipping asset upload."
-            # R21-3: stranded-release detector, warning-first (NEVER hard-fail:
-            # legitimate staging like CI-only -> fix -> bump-later would go red).
-            # Escape hatch: bump ALL version sites (metadata/loader/README) so a
-            # new tag is minted; never re-upload assets under an existing tag.
-            # NOTE (RB-03): tools/** is deliberately NOT excluded — packaging
-            # tools (build_release.py inputs, Poppler prune) change shipped bytes.
-            STRANDED_EXCLUDES=(
-              ':(exclude)**/*.md'
-              ':(exclude)docs/**'
-              ':(exclude).github/**'
-              ':(exclude)test/**'
-              ':(exclude)**/*_test.rb'
-              ':(exclude)**/*_test.py'
-              ':(exclude)**/test_*.py'
-            )
-            if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-              STRANDED_FILES=$(git diff --name-only "${TAG}..HEAD" -- "${STRANDED_EXCLUDES[@]}" || true)
-              if [ -n "$STRANDED_FILES" ]; then
-                STRANDED_COMMITS=$(git log --no-merges --format='%h %s' "${TAG}..HEAD" -- "${STRANDED_EXCLUDES[@]}" || true)
-                echo "::warning::Stranded product commits past ${TAG} (release exists, nothing minted): $(echo "${STRANDED_COMMITS}" | tr '\n' ';')"
-                {
-                  echo "### Stranded product commits past ${TAG}"
-                  echo ""
-                  echo "Product files changed after tag \`${TAG}\` but this push minted no release."
-                  echo "Ship them with a version-bump commit (see quick card §4.2)."
-                  echo ""
-                  echo '```'
-                  echo "${STRANDED_COMMITS}"
-                  echo '```'
-                } >> "$GITHUB_STEP_SUMMARY"
-              fi
-            fi
-            # Round 21 corrective §5 (RB-03): existing releases are immutable.
-            # The audit above warns about stranded product commits; exit green
-            # WITHOUT uploading — never re-upload/clobber assets under an
-            # existing tag.
+            # Round 21 Task 5: stateful, bounded stranded-release audit.  First
+            # product push past an existing tag records a warning (exit 0) so
+            # contributors can acknowledge.  A later product push beyond the
+            # 24h deadline in release mode exits 2.
+            python tools/release_safety.py audit-existing-tag \
+              --repo "${GITHUB_REPOSITORY}" \
+              --tag "$TAG" \
+              --session-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              --release-mode \
+              --warnings-file .release-safety/warnings.json
+            echo "minted=false" >> "$GITHUB_OUTPUT"
             exit 0
           else
             gh release create "$TAG" \
@@ -213,6 +192,7 @@ jobs:
             **Install:** Download \`${RBZ}\` below, then in SketchUp: **Window > Extension Manager > Install Extension**." \
               --latest \
               "$RBZ"
+            echo "minted=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Check website dispatch token secret
@@ -227,7 +207,7 @@ jobs:
           fi
 
       - name: Dispatch website release update
-        if: steps.website_dispatch_token.outputs.has_token == 'true'
+        if: steps.mint.outputs.minted == 'true' && steps.website_dispatch_token.outputs.has_token == 'true'
         uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.WEBSITE_DISPATCH_TOKEN || secrets.BLUECOLLAR_WEBSITE_DISPATCH_TOKEN || secrets.REPO_DISPATCH_TOKEN }}
@@ -253,7 +233,7 @@ jobs:
             core.info('Dispatched product-release to BlueCollar-Website');
 
       - name: Warn when website dispatch token is missing
-        if: steps.website_dispatch_token.outputs.has_token != 'true'
+        if: steps.mint.outputs.minted == 'true' && steps.website_dispatch_token.outputs.has_token != 'true'
         run: |
           echo "::warning::Skipping website dispatch because no valid dispatch token secret is configured."
           echo "Set WEBSITE_DISPATCH_TOKEN (or BLUECOLLAR_WEBSITE_DISPATCH_TOKEN / REPO_DISPATCH_TOKEN) to enable cross-repo dispatch."
