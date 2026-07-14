@@ -864,13 +864,13 @@ module BlueCollarSystems
         Logger.warn(
           "Pipeline",
           "Geometry/Glyphs text requested but Poppler (pdftocairo) and MuPDF (mutool) were not found; " \
-          "text will fail closed to native labels with degraded fidelity."
+          "text will degrade to 3D Text (then Labels only if mesh is unavailable) — mode-fidelity fallback."
         )
         if defined?(UI) && UI.respond_to?(:messagebox)
           choice = UI.messagebox(
             "Geometry/Glyphs text mode needs Poppler (pdftocairo) or MuPDF (mutool).\n\n" \
-            "Without one of these helpers, text will import as native SketchUp labels " \
-            "with reduced fidelity instead of outline geometry.\n\n" \
+            "Without one of these helpers, text will import as SketchUp 3D Text " \
+            "(closest free model-space fallback) instead of outline geometry.\n\n" \
             "Install Poppler or open Extensions > PDF Vector Importer > Compatibility Report.\n\n" \
             "Continue with degraded text?",
             MB_OKCANCEL)
@@ -1088,9 +1088,9 @@ module BlueCollarSystems
           end
         end
 
-        # If the page is text-dominant with little/no vector geometry, importing
-        # only text produces misaligned/low-trust results on OCR/geospatial PDFs.
-        # Prefer a faithful raster import in this case.
+        # Opt-in page strategy (raster_fallback): text-dominant OCR/geospatial
+        # pages may take a full-page raster path. This is NOT a text-mode switch
+        # and must not run unless the caller enabled raster_fallback.
         if opts[:raster_fallback] && paths.length <= 10 && text_items.length >= 200
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Text-heavy page, using raster fallback... [#{(Time.now - import_start).round(1)}s]"
           Logger.warn("Pipeline",
@@ -1301,11 +1301,11 @@ module BlueCollarSystems
               text_performance_mode: svg_result[:text_performance_mode],
               component_container: svg_result[:component_container])
           else
-            # SVG glyph text unavailable/disabled. Geometry/Glyphs fail closed to
-            # labels so dense CAD text does not become inaccurate mesh text.
-            # Explicit 3D Text mode still honors the user's selected mesh path.
+            # SVG outline path unavailable. Glyphs↔Geometry are peer SVG modes, so
+            # the next free representation is 3D Text (model-space), then Labels.
+            # Do NOT skip 3D Text to paper over mesh transform bugs (mode fidelity).
             Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Fallback text rendering... [#{(Time.now - import_start).round(1)}s]"
-            fallback_use_3d = (requested_text_mode == :text3d)
+            fallback_use_3d = [:text3d, :geometry, :glyphs].include?(requested_text_mode)
             fallback_mode = fallback_use_3d ? "3D text" : "labels"
             missing_renderer_note = if stats[:svg_renderer_missing]
                                       'Poppler/MuPDF not found'

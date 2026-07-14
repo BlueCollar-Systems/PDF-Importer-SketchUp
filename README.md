@@ -48,7 +48,9 @@ assets, checksums, license, and notes.
   Use **3D Text** for go-live visual comparison against Adobe at equal zoom.
   Use **Labels** only when you need to edit piece marks or notes after import.
   Use **Glyphs/Geometry** when exact outline geometry is preferred over native
-  SketchUp 3D text.
+  SketchUp 3D text. The selected option is sacred: fix transforms in-mode; do
+  not switch representation to paper over alignment/rotation/scale bugs
+  (see [AGENTS.md](AGENTS.md)).
 - **Built-in Ruby vector parser** — core vector import requires no gems or C extensions
 - **Adaptive Bezier subdivision** with configurable flatness tolerance
 - **Kasa algebraic circle fitting** for arc reconstruction from point sequences

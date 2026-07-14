@@ -514,32 +514,21 @@ module BlueCollarSystems
         end
       end
 
-      # Shared PDF insertion point for Labels and 3D Text — matches label heuristics
+      # Shared PDF insertion point for Labels — matches label heuristics
       # used by the external pdftotext path (bbox centering, baseline, angle cleanup).
       def text_insertion_pdf(item)
         label_insertion_pdf(item)
       end
 
-      def mesh_text_run_width_inches(text, height)
-        chars = [text.to_s.strip.length, 1].max
-        [[chars * height.to_f * 0.55, height.to_f * 0.55].max, height.to_f * chars * 1.25].min
+      # 3D text mesh anchor — the bottom-left (baseline) of the generated mesh.
+      # add_3d_text draws the text along +x and upward along +y, so the mesh origin
+      # is the baseline. For rotated items the anchor is the bbox baseline-left,
+      # obtained by shifting the bbox center by half the mesh height along the
+      # normal (not the small label-baseline offset used for add_text).
+      def mesh_text_insertion_pdf(item)
+        label_insertion_pdf(item, true)
       rescue StandardError
-        height.to_f * 0.55
-      end
-
-      def mesh_text_post_rotation_offset(display_angle, run_w, height)
-        a = display_angle.to_f
-        return nil if a.abs <= 0.1
-        if a.abs > 80.0 && a.abs < 100.0
-          # add_3d_text is horizontal; ±90° rotation around bottom-left shifts the
-          # visual center unless we nudge by one run width along the pre-rotation axis.
-          dx = 0.0
-          dy = a > 0.0 ? -run_w.to_f : run_w.to_f
-          return Geom::Vector3d.new(dx, dy, 0.0)
-        end
-        nil
-      rescue StandardError
-        nil
+        label_insertion_pdf(item, true)
       end
 
       # Hard limits in inches, independent of page size.
@@ -618,16 +607,11 @@ module BlueCollarSystems
         new_ents = entities.to_a[count_before..-1] || []
         return if new_ents.empty?
 
-        run_w = mesh_text_run_width_inches(item.text, height)
         move = Geom::Transformation.new(pt)
         entities.transform_entities(move, *new_ents)
         if display_angle.abs > 0.1
           rot = Geom::Transformation.rotation(pt, Z_AXIS, display_angle.degrees)
           entities.transform_entities(rot, *new_ents)
-          offset = mesh_text_post_rotation_offset(display_angle, run_w, height)
-          if offset
-            entities.transform_entities(Geom::Transformation.new(offset), *new_ents)
-          end
         end
         text_faces = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
         apply_text_face_material(text_faces)
@@ -812,7 +796,7 @@ module BlueCollarSystems
         end
 
         Logger.warn("GeometryBuilder",
-          "add_text unavailable for #{item.text.inspect} — falling back to mesh text")
+          "add_text unavailable for #{item.text.inspect} — falling back to 3D text (Labels mode unachievable)")
         place_mesh_text(entities, item, origin_x, origin_y, layer)
       end
 
@@ -1430,7 +1414,7 @@ module BlueCollarSystems
         [font_size_pts.to_f * 0.55, 1.0].max
       end
 
-      def rotated_bbox_text_origin_pdf(item, bx0, by0, bx1, by1, fs, angle)
+      def rotated_bbox_text_origin_pdf(item, bx0, by0, bx1, by1, fs, angle, baseline_offset_pts = nil)
         bw = (bx1 - bx0).abs
         bh = (by1 - by0).abs
         run_w = label_run_width_pts(item.text, fs, bw, bh)
@@ -1441,7 +1425,7 @@ module BlueCollarSystems
         norm_y = dir_x
         cx = (bx0 + bx1) * 0.5
         cy = (by0 + by1) * 0.5
-        baseline_offset = fs.to_f * 0.18
+        baseline_offset = baseline_offset_pts.nil? ? (fs.to_f * 0.18) : baseline_offset_pts.to_f
         [
           cx - (dir_x * run_w * 0.5) - (norm_x * baseline_offset),
           cy - (dir_y * run_w * 0.5) - (norm_y * baseline_offset)
@@ -1475,12 +1459,12 @@ module BlueCollarSystems
         false
       end
 
-      # Left anchor for add_3d_text. label_insertion_pdf already returns the
-      # left/baseline anchor after any bbox centering heuristics.
+      # Left anchor for add_3d_text. mesh_text_insertion_pdf returns the
+      # baseline-left anchor of the generated mesh, not the label anchor.
       def mesh_label_anchor_pdf(item)
-        text_insertion_pdf(item)
+        mesh_text_insertion_pdf(item)
       rescue StandardError
-        text_insertion_pdf(item)
+        mesh_text_insertion_pdf(item)
       end
 
       def matrix_origin_insertion?(item, angle_deg)
@@ -1495,7 +1479,7 @@ module BlueCollarSystems
       end
 
       # Returns [x_pdf, y_pdf, angle_deg] for label insertion.
-      def label_insertion_pdf(item)
+      def label_insertion_pdf(item, for_mesh = false)
         angle = label_angle_pdf(item)
         x = item.x.to_f
         y = item.y.to_f
@@ -1513,7 +1497,8 @@ module BlueCollarSystems
           end
           used_rotated_origin = false
           if rotated_bbox_text_origin?(item, bbox_w, bbox_h, angle)
-            x, y = rotated_bbox_text_origin_pdf(item, bx0, by0, bx1, by1, fs, angle)
+            baseline_offset = for_mesh ? (fs * 0.5) : nil
+            x, y = rotated_bbox_text_origin_pdf(item, bx0, by0, bx1, by1, fs, angle, baseline_offset)
             used_rotated_origin = true
           elsif slope_triangle_label?(item.text, bbox_w, bbox_h, angle)
             est_w = dimension_label_est_width_pts(item.text, fs, bbox_w)
@@ -1570,8 +1555,10 @@ module BlueCollarSystems
         Geom::Vector3d.new(0, 0, 0)
       end
 
-      # Non-horizontal labels use a direction vector for add_text when |angle| exceeds
-      # this threshold. Tunable via BC_SU_ROTATED_LABEL_DEG for troubleshooting.
+      # Non-horizontal Labels still use native add_text; this only decides whether
+      # to pass a non-zero direction vector when |angle| exceeds the threshold.
+      # Name is historical — it does NOT switch Labels → mesh/geometry.
+      # Tunable via BC_SU_ROTATED_LABEL_DEG for troubleshooting.
       def angle_needs_geometry_text?(angle_deg, tol_deg = 12.0)
         env = ENV['BC_SU_ROTATED_LABEL_DEG']
         if env && !env.to_s.strip.empty?

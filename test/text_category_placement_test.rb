@@ -134,9 +134,9 @@ bom = make_item('MARK', 90.0, 200.0, 140.0, 210.0, angle: 0.0, font_size: 8.0)
 bx, = builder.send(:label_insertion_pdf, bom)
 assert_true(bx > 90.0 && bx < 115.0, 'BOM header X shifts toward bbox center')
 
-# --- Rotated labels: >8° uses mesh path (SU 2017 add_text vector unreliable) ---
+# --- Rotated labels: >8° uses a non-zero add_text direction vector (still Labels mode) ---
 assert_true(builder.send(:angle_needs_geometry_text?, 45.0, 8.0),
-            '45° label should prefer geometry mesh over screen-space vector')
+            '45° label should use a non-zero native add_text direction vector (not mesh)')
 
 # --- Centered mesh anchor: bbox centering happens once, shared by Labels/3D Text ---
 bom_mesh_x, _, _ = builder.send(:mesh_label_anchor_pdf, bom)

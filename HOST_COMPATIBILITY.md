@@ -42,10 +42,12 @@ disabled.
 |--------|-----------------|
 | **3D Text** | Default visual-parity path; preserves model-space size and PDF rotation for Adobe-like review |
 | **Glyphs** | Per-glyph edges; high-fidelity outline path when exact geometry is preferred |
-| **Geometry** | Text as edges only; useful when host-native 3D text is unavailable or outline geometry is required |
+| **Geometry** | Text as edges only; outline geometry when the user selects that option |
 | **Labels** | Editable text entities; horizontal and screen-space by SketchUp host behavior |
 
 The dialog defaults to 3D Text on first run and restores the last text rendering option used after that. Labels are an editability tradeoff, not the default visual sign-off mode.
+
+**Mode fidelity:** honor the selected text option. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. If Geometry/Glyphs cannot run (no Poppler/MuPDF SVG), degrade **Glyphs ↔ Geometry → 3D Text → Labels → page raster**, report `degraded`, and stay free/bundled. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
 
 ### PDF layers / SketchUp Tags
 

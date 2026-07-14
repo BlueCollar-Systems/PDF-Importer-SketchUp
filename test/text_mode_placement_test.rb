@@ -213,6 +213,23 @@ if rotated_entities.texts.first
               'rotated native labels should hide SketchUp leader lines when possible')
 end
 
+rotated_mesh_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+  'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil, 140.0, 250.0, 148.0, 292.0
+)
+rotated_mesh_entities = DummyEntities.new
+mesh_builder.send(:place_text, rotated_mesh_entities, rotated_mesh_item, 0.0, 0.0, 792.0, 'TextLayer')
+assert_true(rotated_mesh_entities.mesh_calls.length == 1,
+            'rotated 3D text mode should add one mesh')
+assert_true(rotated_mesh_entities.texts.empty?,
+            '3D text mode should not fall back to a native label')
+rotated_mesh_kinds = rotated_mesh_entities.transforms.map { |args| args.first.kind }
+assert_true(rotated_mesh_kinds.count(:translation) == 1,
+            'rotated 3D text should move once to the mesh anchor')
+assert_true(rotated_mesh_kinds.count(:rotation) == 1,
+            'rotated 3D text should rotate once around the anchor')
+assert_true(rotated_mesh_kinds.length == 2,
+            'rotated 3D text should not apply post-rotation nudge transforms')
+
 unless File.exist?(PDF_TIER1_USER)
   puts "  SKIP: PRIVATE-01 PDF not found at #{PDF_TIER1_USER}"
 else
