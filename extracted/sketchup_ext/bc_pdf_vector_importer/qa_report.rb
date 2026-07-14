@@ -173,30 +173,94 @@ module BlueCollarSystems
       end
 
       def fallback_block(stats, degraded_renderers = [])
-        if stats[:raster_fallback_used]
-          return { used: true, reason: 'raster_fallback' }
-        end
-
         degraded = Array(degraded_renderers)
-        if degraded.empty?
-          return { used: false, reason: nil }
+        if stats[:raster_fallback_used]
+          block = { used: true, reason: 'raster_fallback' }
+        elsif degraded.empty?
+          block = { used: false, reason: nil }
+        else
+          notes = degraded.map do |entry|
+            entry[:note] || entry['note']
+          end.compact.map(&:to_s).reject(&:empty?).uniq
+          reason = if stats[:svg_renderer_missing]
+                     'text_degraded_missing_svg_renderer'
+                   elsif notes.include?('Poppler/MuPDF not found')
+                     'text_degraded_missing_svg_renderer'
+                   else
+                     'text_degraded_svg_unavailable'
+                   end
+          block = {
+            used: true,
+            reason: reason,
+            notes: notes
+          }
         end
 
-        notes = degraded.map do |entry|
-          entry[:note] || entry['note']
-        end.compact.map(&:to_s).reject(&:empty?).uniq
-        reason = if stats[:svg_renderer_missing]
-                   'text_degraded_missing_svg_renderer'
-                 elsif notes.include?('Poppler/MuPDF not found')
-                   'text_degraded_missing_svg_renderer'
-                 else
-                   'text_degraded_svg_unavailable'
-                 end
-        {
-          used: true,
-          reason: reason,
-          notes: notes
-        }
+        text = text_mode_fallback_block(degraded)
+        if text
+          block[:used] = true
+          block[:text] = text
+          if block[:reason].nil? || block[:reason].to_s.empty?
+            block[:reason] = "text_mode_fallback: #{text[:requested]} -> #{text[:delivered]} (#{text[:reason]})"
+          end
+        end
+        block
+      end
+
+      # Ruby mirror of pdfcadcore.build_text_mode_fallback.  The surrounding
+      # renderer list remains detailed per page/span; the compact fallback.text
+      # field is the portable contract consumed by Import Health and support.
+      def text_mode_fallback_block(degraded_renderers)
+        selected = nil
+        Array(degraded_renderers).each do |entry|
+          requested = normalize_report_text_mode(
+            entry[:requested_mode] || entry['requested_mode']
+          )
+          delivered = normalize_report_text_mode(
+            entry[:delivered_mode] || entry['delivered_mode'] ||
+            entry[:mode] || entry['mode'] || entry[:renderer] || entry['renderer']
+          )
+          next if requested.nil? || delivered.nil? || requested == delivered
+
+          reason = (entry[:reason] || entry['reason']).to_s.strip
+          reason = 'text_mode_substitution' if reason.empty?
+          count = (entry[:count] || entry['count']).to_i
+          count = 1 if count < 1
+          if selected && selected[:requested] == requested &&
+             selected[:delivered] == delivered && selected[:reason] == reason
+            selected[:count] = selected[:count].to_i + count
+          elsif delivered == 'raster'
+            # A terminal page raster supersedes any prior per-span rescue for
+            # the page; the visible result is raster, not the earlier label.
+            selected = {
+              requested: requested,
+              delivered: delivered,
+              reason: reason,
+              count: count
+            }
+          elsif selected.nil?
+            selected = {
+              requested: requested,
+              delivered: delivered,
+              reason: reason,
+              count: count
+            }
+          end
+        end
+        selected
+      rescue StandardError
+        nil
+      end
+
+      def normalize_report_text_mode(mode)
+        case mode.to_s.strip.downcase
+        when 'text3d', '3d_text', '3d text', 'add_3d_text' then '3d_text'
+        when 'labels', 'label', 'add_text' then 'labels'
+        when 'glyphs', 'glyph' then 'glyphs'
+        when 'geometry', 'outlines', 'outline' then 'geometry'
+        when 'raster', 'image' then 'raster'
+        else nil
+        end
       end
 
       def extra_block(stats, warning_count = 0, degraded_renderers = [], opts = {})
@@ -205,6 +269,7 @@ module BlueCollarSystems
         end
         {
           text_renderers: renderers,
+          delivered_text_entity_counts: delivered_text_entity_counts(stats),
           edges: stats[:edges].to_i,
           arcs: stats[:arcs].to_i,
           text_mode: stats[:text_mode].to_s,
@@ -373,6 +438,11 @@ module BlueCollarSystems
 
       def build_actual_text_entity_types(report)
         extra = report[:extra] || {}
+        delivered_counts = extra[:delivered_text_entity_counts] ||
+                           extra['delivered_text_entity_counts']
+        delivered_info = build_actual_text_entity_types_from_delivered_counts(delivered_counts)
+        return delivered_info if delivered_info
+
         stats_mode = extra[:text_mode] || extra['text_mode']
         mode = stats_mode.to_s.strip.downcase
         return nil if mode.empty? || mode == 'none'
@@ -399,6 +469,66 @@ module BlueCollarSystems
           info[:fallback_geometry] = total
         end
         info
+      end
+
+      # Native builders append one source-provenance object for every text
+      # entity they actually create.  Prefer those delivered types whenever
+      # available: the requested text-mode string cannot describe a legitimate
+      # TEXTMODE-1 fallback such as 3D Text -> Labels.
+      def delivered_text_entity_counts(stats)
+        counts = {}
+        Array(stats[:source_provenance_objects] || stats['source_provenance_objects']).each do |entry|
+          next unless entry.respond_to?(:[])
+          kind = (entry[:created_entity_type] || entry['created_entity_type']).to_s.strip
+          next if kind.empty?
+          counts[kind] = counts.fetch(kind, 0).to_i + 1
+        end
+        counts
+      rescue StandardError
+        {}
+      end
+
+      def build_actual_text_entity_types_from_delivered_counts(raw_counts)
+        return nil unless raw_counts.respond_to?(:each)
+
+        supported = %w[
+          native_label native_3d_text outline_curve_or_mesh raw_geometry_edges
+          dxf_text fallback_geometry
+        ]
+        counts = {}
+        raw_counts.each do |kind, value|
+          key = kind.to_s.strip
+          next unless supported.include?(key)
+          number = value.to_i
+          counts[key] = number if number > 0
+        end
+        total = counts.values.inject(0) { |sum, value| sum + value.to_i }
+        return nil if total <= 0
+
+        entity_kinds = counts.keys
+        entity_type = if entity_kinds.length > 1
+                        'mixed'
+                      elsif counts['native_label']
+                        'labels'
+                      elsif counts['native_3d_text']
+                        '3d_text'
+                      elsif counts['outline_curve_or_mesh'] || counts['raw_geometry_edges']
+                        'geometry'
+                      elsif counts['dxf_text']
+                        'dxf_text'
+                      else
+                        'fallback_geometry'
+                      end
+        info = {
+          entity_type: entity_type,
+          count: total,
+          font_rendered: !!(counts['native_label'] || counts['native_3d_text']),
+          examples: []
+        }
+        counts.each { |kind, value| info[kind.to_sym] = value }
+        info
+      rescue StandardError
+        nil
       end
 
       def build_scale_crosscheck(extra)
@@ -513,6 +643,14 @@ module BlueCollarSystems
           else
             actions << 'Review the fallback reason and attach the import report when requesting support.'
           end
+        end
+
+        text_fallback = fallback[:text] || fallback['text'] || {}
+        requested_mode = (text_fallback[:requested] || text_fallback['requested']).to_s
+        delivered_mode = (text_fallback[:delivered] || text_fallback['delivered']).to_s
+        unless requested_mode.empty? || delivered_mode.empty?
+          signals << 'text_mode_fallback'
+          actions << "Requested text mode '#{requested_mode}' was delivered as '#{delivered_mode}' — see fallback.text in this report for the reason."
         end
 
         if warning_count.to_i > 0

@@ -143,6 +143,177 @@ module BlueCollarSystems
       stats[:text_renderers] << entry
     end
 
+    # TEXTMODE-1: GeometryBuilder records native per-span substitutions.  Make
+    # them first-class renderer records so the report contains requested mode,
+    # delivered mode, and the genuine host/API failure reason.
+    def self.merge_text_mode_fallbacks!(stats, page_num, fallbacks)
+      Array(fallbacks).each do |fallback|
+        next unless fallback.respond_to?(:[])
+
+        requested = normalize_text_renderer_mode(
+          fallback[:requested] || fallback['requested']
+        )
+        delivered = normalize_text_renderer_mode(
+          fallback[:delivered] || fallback['delivered']
+        )
+        next if requested.nil? || delivered.nil? || requested == delivered
+
+        count = (fallback[:count] || fallback['count']).to_i
+        count = 1 if count < 1
+        reason = (fallback[:reason] || fallback['reason']).to_s
+        renderer = delivered == :text3d ? :add_3d_text : :labels
+        existing = Array(stats[:text_renderers]).find do |entry|
+          entry[:page].to_i == page_num.to_i &&
+            entry[:degraded] &&
+            entry[:requested_mode] == requested &&
+            entry[:delivered_mode] == delivered &&
+            entry[:reason].to_s == reason
+        end
+        if existing
+          existing[:count] = existing[:count].to_i + count
+          next
+        end
+        record_text_renderer(stats, page_num,
+          renderer: renderer,
+          mode: delivered,
+          requested_mode: requested,
+          delivered_mode: delivered,
+          degraded: true,
+          reason: reason,
+          count: count,
+          note: "Text-mode fallback: #{requested} -> #{delivered} (#{reason})")
+      end
+    rescue StandardError => e
+      Logger.warn('Pipeline', "text fallback report merge failed: #{e.message}")
+    end
+
+    def self.normalize_text_renderer_mode(mode)
+      case mode.to_s.strip.downcase
+      when 'text3d', '3d_text', '3d text', 'add_3d_text' then :text3d
+      when 'labels', 'label', 'add_text' then :labels
+      when 'glyphs', 'glyph' then :glyphs
+      when 'geometry', 'outlines', 'outline' then :geometry
+      when 'raster', 'image' then :raster
+      else nil
+      end
+    end
+
+    def self.text_fallback_event_count(fallbacks)
+      Array(fallbacks).inject(0) do |total, fallback|
+        next total unless fallback.respond_to?(:[])
+        count = (fallback[:count] || fallback['count']).to_i
+        total + (count > 0 ? count : 1)
+      end
+    rescue StandardError
+      0
+    end
+
+    # A builder's text_objects total includes both requested-mode entities and
+    # successful per-span rescues.  Keep the non-degraded renderer entry honest
+    # by reporting only spans actually delivered in its native requested mode.
+    def self.native_text_delivery_count(total, fallbacks)
+      native = total.to_i - text_fallback_event_count(fallbacks)
+      native > 0 ? native : 0
+    rescue StandardError
+      0
+    end
+
+    def self.text_delivery_failure_count(failures)
+      Array(failures).inject(0) do |total, failure|
+        next total unless failure.respond_to?(:[])
+        count = (failure[:count] || failure['count']).to_i
+        total + (count > 0 ? count : 1)
+      end
+    rescue StandardError
+      0
+    end
+
+    # TEXTMODE-1 terminal rung.  This is intentionally independent of the
+    # normal raster_fallback option: a readable PDF whose requested/native text
+    # APIs are both impossible must still receive a visible page representation.
+    def self.promote_text_delivery_failures_to_raster!(model, pdf_path, page_num,
+                                                        media_box, opts, import_start,
+                                                        y_offset, render_box, page_group,
+                                                        requested_mode, stats, failures,
+                                                        page_vector_entities = nil)
+      count = text_delivery_failure_count(failures)
+      return false if count <= 0
+
+      vector_entities = Array(page_vector_entities).compact
+      if page_group && !page_group.respond_to?(:hidden=)
+        Logger.warn('Pipeline', "Page #{page_num}: page group cannot be hidden for terminal raster fallback.")
+        return false
+      end
+      if page_group.nil? && !vector_entities.empty? &&
+         (!model || !model.respond_to?(:active_entities) ||
+          !model.active_entities.respond_to?(:erase_entities))
+        Logger.warn('Pipeline', "Page #{page_num}: ungrouped vector entities cannot be removed for terminal raster fallback.")
+        return false
+      end
+
+      reason = Array(failures).map do |failure|
+        failure[:reason] || failure['reason'] if failure.respond_to?(:[])
+      end.compact.map(&:to_s).reject(&:empty?).first
+      reason = 'text_native_api_unavailable' if reason.to_s.empty?
+      raster_ok = import_page_as_raster(
+        model, pdf_path, page_num, media_box, opts, import_start, y_offset, render_box
+      )
+      return false unless raster_ok
+
+      begin
+        if page_group
+          page_group.hidden = true
+        elsif !vector_entities.empty?
+          model.active_entities.erase_entities(*vector_entities)
+        end
+      rescue StandardError => e
+        Logger.warn('Pipeline', "Page #{page_num}: remove vector page before raster fallback failed: #{e.message}")
+        return false
+      end
+      stats[:text_renderers] = Array(stats[:text_renderers]).reject do |entry|
+        entry.respond_to?(:[]) && entry[:page].to_i == page_num.to_i
+      end
+      record_text_renderer(stats, page_num,
+        renderer: :raster,
+        mode: :raster,
+        requested_mode: requested_mode,
+        delivered_mode: :raster,
+        degraded: true,
+        reason: reason,
+        count: count,
+        note: "Text-mode terminal raster fallback: #{reason}")
+      stats[:raster_fallback_used] = true
+      Logger.warn(
+        'Pipeline',
+        "Page #{page_num}: #{count} text span(s) exhausted native text rungs; delivered page raster fallback."
+      )
+      true
+    rescue StandardError => e
+      Logger.warn('Pipeline', "Page #{page_num}: terminal text raster fallback failed: #{e.message}")
+      false
+    end
+
+    def self.discard_hidden_page_vector_result!(stats, page_counts, provenance_start)
+      [:edges, :faces, :arcs, :text].each do |key|
+        stats[key] = page_counts[key].to_i
+      end
+      objects = stats[:source_provenance_objects]
+      if objects.is_a?(Array) && objects.length > provenance_start.to_i
+        objects.slice!(provenance_start.to_i, objects.length - provenance_start.to_i)
+      end
+    rescue StandardError => e
+      Logger.warn('Pipeline', "discard hidden vector page result failed: #{e.message}")
+    end
+
+    def self.page_entities_created_since(model, before_entities)
+      return [] unless model && model.respond_to?(:active_entities)
+      entities = model.active_entities
+      return [] unless entities && entities.respond_to?(:to_a)
+      Array(entities.to_a) - Array(before_entities)
+    rescue StandardError
+      []
+    end
+
     # Round 20: accumulate faithful mesh-text target heights (inches) for
     # import_report extra.text_height_crosscheck.
     def self.merge_text_height_samples!(stats, samples)
@@ -1215,6 +1386,16 @@ module BlueCollarSystems
           provenance_bucket: stats[:source_provenance_objects],
           import_session_id: stats[:import_session_id]
         }
+        page_counts_before_builder = {
+          edges: stats[:edges], faces: stats[:faces], arcs: stats[:arcs], text: stats[:text]
+        }
+        page_provenance_before_builder = Array(stats[:source_provenance_objects]).length
+        page_entities_before_builder = begin
+          model && model.active_entities && model.active_entities.respond_to?(:to_a) ?
+            Array(model.active_entities.to_a) : []
+        rescue StandardError
+          []
+        end
 
         builder = GeometryBuilder.new(model, paths, builder_text_items, media_box,
           scale_factor: opts[:scale], bezier_segments: opts[:bezier_segments],
@@ -1226,6 +1407,7 @@ module BlueCollarSystems
           import_text: use_svg_text ? false : opts[:import_text],
           use_3d_text: builder_use_3d_text,
           strict_text_fidelity: opts[:strict_text_fidelity],
+          requested_text_mode: requested_text_mode,
           layer_manager: layer_mgr,
           y_offset: page_y_offset,
           page_rotation: page_rotation,
@@ -1234,16 +1416,38 @@ module BlueCollarSystems
         result = builder.build
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
+        merge_text_mode_fallbacks!(stats, page_num, result[:text_fallbacks])
         merge_text_height_samples!(stats, result[:text_height_samples])
         stats[:text_height_fallback_count] =
           stats[:text_height_fallback_count].to_i + result[:text_height_fallback_count].to_i
 
-        if opts[:import_text] && !use_svg_text && result[:text_objects].to_i > 0
+        if !Array(result[:text_delivery_failures]).empty?
+          terminal_raster = promote_text_delivery_failures_to_raster!(
+            model, path, page_num, media_box, opts, import_start, page_y_offset,
+            svg_page_box, builder.page_group, requested_text_mode, stats,
+            result[:text_delivery_failures],
+            page_entities_created_since(model, page_entities_before_builder)
+          )
+          unless terminal_raster
+            raise "Page #{page_num}: native text ladder was exhausted and the terminal raster fallback failed."
+          end
+          discard_hidden_page_vector_result!(
+            stats, page_counts_before_builder, page_provenance_before_builder
+          )
+          add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
+          running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
+          next
+        end
+
+        native_text_objects = native_text_delivery_count(
+          result[:text_objects], result[:text_fallbacks]
+        )
+        if opts[:import_text] && !use_svg_text && native_text_objects > 0
           renderer = builder_use_3d_text ? :add_3d_text : :labels
-          stats[:text_mode] = builder_use_3d_text ? :text3d : :labels
           record_text_renderer(stats, page_num,
-            renderer: renderer, mode: stats[:text_mode],
-            requested_mode: requested_text_mode, degraded: false)
+            renderer: renderer, mode: requested_text_mode,
+            requested_mode: requested_text_mode, degraded: false,
+            count: native_text_objects)
         end
 
         # Build hatching on separate layer if group mode
@@ -1321,6 +1525,7 @@ module BlueCollarSystems
               group_per_page: false, page_number: page_num,
               flatten_to_2d: true, import_text: true, use_3d_text: fallback_use_3d,
               strict_text_fidelity: opts[:strict_text_fidelity],
+              requested_text_mode: requested_text_mode,
               layer_manager: layer_mgr,
               y_offset: page_y_offset,
               page_rotation: page_rotation,
@@ -1329,14 +1534,39 @@ module BlueCollarSystems
               import_session_id: provenance_opts[:import_session_id])
             fb_result = fallback_builder.build
             stats[:text] += fb_result[:text_objects]
+            merge_text_mode_fallbacks!(stats, page_num, fb_result[:text_fallbacks])
             merge_text_height_samples!(stats, fb_result[:text_height_samples])
             stats[:text_height_fallback_count] =
               stats[:text_height_fallback_count].to_i + fb_result[:text_height_fallback_count].to_i
-            stats[:text_mode] = fallback_use_3d ? :text3d : :labels
-            record_text_renderer(stats, page_num,
-              renderer: (fallback_use_3d ? :add_3d_text : :labels),
-              mode: stats[:text_mode], requested_mode: requested_text_mode,
-              degraded: true, note: missing_renderer_note)
+            if !Array(fb_result[:text_delivery_failures]).empty?
+              terminal_raster = promote_text_delivery_failures_to_raster!(
+                model, path, page_num, media_box, opts, import_start, page_y_offset,
+                svg_page_box, builder.page_group, requested_text_mode, stats,
+                fb_result[:text_delivery_failures],
+                page_entities_created_since(model, page_entities_before_builder)
+              )
+              unless terminal_raster
+                raise "Page #{page_num}: fallback text ladder was exhausted and the terminal raster fallback failed."
+              end
+              discard_hidden_page_vector_result!(
+                stats, page_counts_before_builder, page_provenance_before_builder
+              )
+              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
+              running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
+              next
+            end
+            native_fb_text_objects = native_text_delivery_count(
+              fb_result[:text_objects], fb_result[:text_fallbacks]
+            )
+            if native_fb_text_objects > 0
+              delivered_mode = fallback_use_3d ? :text3d : :labels
+              record_text_renderer(stats, page_num,
+                renderer: (fallback_use_3d ? :add_3d_text : :labels),
+                mode: delivered_mode, requested_mode: requested_text_mode,
+                delivered_mode: delivered_mode,
+                degraded: true, reason: 'svg_text_unavailable',
+                count: native_fb_text_objects, note: missing_renderer_note)
+            end
           end
         end
 

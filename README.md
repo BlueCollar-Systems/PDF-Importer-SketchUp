@@ -50,7 +50,22 @@ assets, checksums, license, and notes.
   Use **Glyphs/Geometry** when exact outline geometry is preferred over native
   SketchUp 3D text. The selected option is sacred: fix transforms in-mode; do
   not switch representation to paper over alignment/rotation/scale bugs
-  (see [AGENTS.md](AGENTS.md)).
+  just to make a defect less visible.
+
+  ### Text-mode fidelity and fallbacks
+
+  The selected text representation is delivered whenever SketchUp and the PDF
+  make it possible. A fallback is used only for a genuine per-file/API failure,
+  is recorded in `import_report.json` as `fallback.text`, and never changes a
+  mode merely to hide alignment, rotation, or scaling defects.
+
+  - **3D Text:** Labels → page raster.
+  - **Glyphs / Geometry:** peer outline family → 3D Text → Labels → page raster.
+  - **Labels:** 3D Text → page raster.
+  - **Raster:** terminal visual representation.
+
+  Every ladder preserves the closest usable representation first and ends in a
+  visible result; no paid component is required for a fallback.
 - **Built-in Ruby vector parser** — core vector import requires no gems or C extensions
 - **Adaptive Bezier subdivision** with configurable flatness tolerance
 - **Kasa algebraic circle fitting** for arc reconstruction from point sequences

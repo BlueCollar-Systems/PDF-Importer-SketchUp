@@ -28,12 +28,12 @@ class TextModeRoutingTest < Minitest::Test
 
   def test_svg_fallback_only_for_geometry_and_glyphs_modes
     assert_match(/note: 'SVG text unavailable'|note: missing_renderer_note/, @main)
-    assert_match(/degraded: true, note: missing_renderer_note/, @main)
+    assert_match(/degraded: true, reason: 'svg_text_unavailable'/, @main)
     assert_match(/next free representation is 3D Text/m, @main)
     assert_match(/fallback_use_3d = \[:text3d, :geometry, :glyphs\]\.include\?\(requested_text_mode\)/, @main)
     assert_match(/fallback_mode = fallback_use_3d \? "3D text" : "labels"/, @main)
     refute_match(/else\s+SvgTextRenderer\.render/m, @main)
-    svg_fallback_section = @main[/Fallback text rendering.*?degraded: true, note: missing_renderer_note/m]
+    svg_fallback_section = @main[/Fallback text rendering.*?count: native_fb_text_objects/m]
     assert svg_fallback_section, 'expected SVG unavailable fallback block'
     refute_match(/SvgTextRenderer\.render/, svg_fallback_section)
     assert_match(/renderer: \(fallback_use_3d \? :add_3d_text : :labels\)/, svg_fallback_section)

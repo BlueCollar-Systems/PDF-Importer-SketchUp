@@ -14,7 +14,7 @@ module BlueCollarSystems
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
 
-      attr_reader :page_group, :text_group
+      attr_reader :page_group, :text_group, :text_fallbacks, :text_delivery_failures
 
       def initialize(model, paths, text_items, media_box, opts = {})
         @model = model
@@ -40,6 +40,8 @@ module BlueCollarSystems
         @map_dashes      = opts[:map_dashes] || false
         @import_text     = opts[:import_text] || false
         @use_3d_text     = opts[:use_3d_text] || false
+        @requested_text_mode = normalize_text_mode_symbol(opts[:requested_text_mode]) ||
+                               (@use_3d_text ? :text3d : :labels)
         @strict_text_fidelity = opts[:strict_text_fidelity] || false
         @target_entities = opts[:target_entities] || nil
         @y_offset        = opts[:y_offset] || 0.0
@@ -53,6 +55,10 @@ module BlueCollarSystems
         @text_count = 0
         @text_height_samples = []
         @text_height_fallback_count = 0
+        # TEXTMODE-1: a per-span native API failure must be passed upward so
+        # main.rb can make the delivered representation visible in the report.
+        @text_fallbacks = []
+        @text_delivery_failures = []
       end
 
       def build
@@ -174,7 +180,9 @@ module BlueCollarSystems
           arcs: @arc_count,
           text_objects: @text_count,
           text_height_samples: Array(@text_height_samples),
-          text_height_fallback_count: @text_height_fallback_count.to_i
+          text_height_fallback_count: @text_height_fallback_count.to_i,
+          text_fallbacks: Array(@text_fallbacks),
+          text_delivery_failures: Array(@text_delivery_failures)
         }
       end
 
@@ -501,16 +509,22 @@ module BlueCollarSystems
 
         begin
           if @use_3d_text
-            place_mesh_text(entities, item, origin_x, origin_y, layer)
+            place_mesh_text(
+              entities, item, origin_x, origin_y, layer, @requested_text_mode
+            )
           elsif stacked_vertical_dimension_labels?(item)
             place_stacked_vertical_dimension_labels(
               entities, item, origin_x, origin_y, layer
             )
           else
-            place_annotation_label(entities, item, origin_x, origin_y, layer)
+            place_annotation_label(
+              entities, item, origin_x, origin_y, layer, true, @requested_text_mode
+            )
           end
         rescue StandardError => e
           Logger.warn("GeometryBuilder", "place_text failed: #{e.message}")
+          record_text_delivery_failure(@requested_text_mode, 'text_placement_exception')
+          false
         end
       end
 
@@ -574,7 +588,9 @@ module BlueCollarSystems
         []
       end
 
-      def place_mesh_text(entities, item, origin_x, origin_y, layer)
+      def place_mesh_text(entities, item, origin_x, origin_y, layer,
+                          requested_mode = nil, fallback_reason = nil)
+        requested_mode = @requested_text_mode if requested_mode.nil?
         label_x, label_y, label_angle = mesh_label_anchor_pdf(item)
         display_angle = display_text_angle(item, label_angle)
         pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
@@ -582,7 +598,12 @@ module BlueCollarSystems
         page_h = PageTransform.effective_height(@media_box, @page_rotation)
         page_h = 792.0 if page_h < 1
         height = mesh_text_height_inches(item, display_angle, page_h)
-        return if height <= 0
+        if height <= 0
+          return fallback_mesh_text_to_label(
+            entities, item, origin_x, origin_y, layer, requested_mode,
+            mesh_failure_reason(requested_mode, 'text3d_mesh_height_unavailable')
+          )
+        end
 
         count_before = entities.to_a.length
         # add_3d_text tolerance is absolute inches; 0.0 = highest curve
@@ -602,10 +623,20 @@ module BlueCollarSystems
           0.0
         )
 
-        return unless success
+        unless success
+          return fallback_mesh_text_to_label(
+            entities, item, origin_x, origin_y, layer, requested_mode,
+            mesh_failure_reason(requested_mode, 'text3d_mesh_unavailable')
+          )
+        end
 
         new_ents = entities.to_a[count_before..-1] || []
-        return if new_ents.empty?
+        if new_ents.empty?
+          return fallback_mesh_text_to_label(
+            entities, item, origin_x, origin_y, layer, requested_mode,
+            mesh_failure_reason(requested_mode, 'text3d_mesh_empty')
+          )
+        end
 
         move = Geom::Transformation.new(pt)
         entities.transform_entities(move, *new_ents)
@@ -626,19 +657,55 @@ module BlueCollarSystems
         end
         @text_count += 1
         record_mesh_text_height_sample(height)
-        record_text_span_provenance(item)
+        record_text_span_provenance(item, 'native_3d_text')
+        record_text_mode_fallback(requested_mode, :text3d, fallback_reason) if fallback_reason
+        true
       rescue StandardError => e
         Logger.warn("GeometryBuilder", "add_3d_text failed: #{e.message}")
-        begin
-          text = entities.add_text(item.text, pt)
-          if text
-            set_layer(text, layer)
-            @text_count += 1
-            record_text_span_provenance(item)
-          end
-        rescue StandardError => e2
-          Logger.warn("GeometryBuilder", "add_text fallback failed: #{e2.message}")
+        fallback_mesh_text_to_label(
+          entities, item, origin_x, origin_y, layer, requested_mode,
+          mesh_failure_reason(requested_mode, 'text3d_exception')
+        )
+      end
+
+      # The final SketchUp per-span 3D Text rung is Labels.  The optional
+      # false flag prevents the reverse Labels -> 3D Text rescue from cycling
+      # back into this method if both host APIs are unavailable.
+      def fallback_mesh_text_to_label(entities, item, origin_x, origin_y, layer,
+                                      requested_mode, reason)
+        if normalize_text_mode_symbol(requested_mode) == :labels
+          record_text_delivery_failure(requested_mode, "#{reason}_labels_unavailable")
+          Logger.warn(
+            'GeometryBuilder',
+            "3D text fallback also failed for #{item.text.inspect}; " \
+            'the page-level raster terminal rung is required.'
+          )
+          return false
         end
+
+        Logger.warn(
+          'GeometryBuilder',
+          "3D text unavailable for #{item.text.inspect} — falling back to Labels (#{reason})"
+        )
+        delivered = place_annotation_label(
+          entities, item, origin_x, origin_y, layer, false, requested_mode
+        )
+        if delivered
+          record_text_mode_fallback(requested_mode, :labels, reason)
+          return true
+        end
+
+        Logger.warn(
+          'GeometryBuilder',
+          "3D text fallback to Labels also failed for #{item.text.inspect}; " \
+          'the page-level raster terminal rung is required.'
+        )
+        record_text_delivery_failure(requested_mode, "#{reason}_labels_unavailable")
+        false
+      rescue StandardError => e
+        Logger.warn('GeometryBuilder', "3D text fallback failed: #{e.message}")
+        record_text_delivery_failure(requested_mode, "#{reason}_label_exception")
+        false
       end
 
       def apply_text_face_material(faces)
@@ -780,7 +847,9 @@ module BlueCollarSystems
         end
       end
 
-      def place_annotation_label(entities, item, origin_x, origin_y, layer)
+      def place_annotation_label(entities, item, origin_x, origin_y, layer,
+                                 allow_mesh_fallback = true, requested_mode = nil)
+        requested_mode = @requested_text_mode if requested_mode.nil?
         label_x, label_y, label_angle = label_insertion_pdf(item)
         display_angle = display_text_angle(item, label_angle)
         pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
@@ -791,19 +860,72 @@ module BlueCollarSystems
           hide_annotation_leader(text, preserve_vector)
           set_layer(text, layer)
           @text_count += 1
-          record_text_span_provenance(item)
-          return
+          record_text_span_provenance(item, 'native_label')
+          return true
         end
+
+        return false unless allow_mesh_fallback
 
         Logger.warn("GeometryBuilder",
           "add_text unavailable for #{item.text.inspect} — falling back to 3D text (Labels mode unachievable)")
-        place_mesh_text(entities, item, origin_x, origin_y, layer)
+        place_mesh_text(
+          entities, item, origin_x, origin_y, layer, requested_mode,
+          'add_text_unavailable'
+        )
       end
 
-      def record_text_span_provenance(item)
+      def record_text_mode_fallback(requested, delivered, reason)
+        requested_mode = normalize_text_mode_symbol(requested)
+        delivered_mode = normalize_text_mode_symbol(delivered)
+        return if requested_mode.nil? || delivered_mode.nil?
+        return if requested_mode == delivered_mode
+
+        @text_fallbacks ||= []
+        @text_fallbacks << {
+          requested: requested_mode,
+          delivered: delivered_mode,
+          reason: reason.to_s,
+          count: 1
+        }
+      rescue StandardError => e
+        Logger.warn('GeometryBuilder', "text fallback record failed: #{e.message}")
+      end
+
+      def record_text_delivery_failure(requested, reason)
+        requested_mode = normalize_text_mode_symbol(requested)
+        return if requested_mode.nil?
+
+        @text_delivery_failures ||= []
+        @text_delivery_failures << {
+          requested: requested_mode,
+          reason: reason.to_s,
+          count: 1
+        }
+      rescue StandardError => e
+        Logger.warn('GeometryBuilder', "text delivery failure record failed: #{e.message}")
+      end
+
+      def mesh_failure_reason(requested_mode, reason)
+        return reason unless normalize_text_mode_symbol(requested_mode) == :labels
+        "add_text_unavailable_then_#{reason}"
+      end
+
+      def normalize_text_mode_symbol(mode)
+        case mode.to_s.strip.downcase
+        when 'text3d', '3d_text', '3d text', 'add_3d_text' then :text3d
+        when 'labels', 'label', 'add_text' then :labels
+        when 'glyphs', 'glyph' then :glyphs
+        when 'geometry', 'outlines', 'outline' then :geometry
+        when 'raster', 'image' then :raster
+        else nil
+        end
+      end
+
+      def record_text_span_provenance(item, delivered_entity_type = nil)
         return unless @provenance_bucket.is_a?(Array)
 
-        entity_type = @use_3d_text ? 'native_3d_text' : 'native_label'
+        entity_type = delivered_entity_type ||
+                      (@use_3d_text ? 'native_3d_text' : 'native_label')
         idx = @provenance_bucket.length
         entry = {
           object_id: "text_span:#{@page_number}:#{idx}",

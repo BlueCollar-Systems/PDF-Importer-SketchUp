@@ -67,6 +67,56 @@ class QAReportTest < Minitest::Test
     assert_equal true, report[:extra][:svg_renderer_missing]
   end
 
+  def test_records_requested_and_delivered_text_modes_in_fallback_block
+    stats = {
+      pages: 1,
+      primitives: 1,
+      edges: 1,
+      text: 1,
+      layers: [],
+      elapsed_seconds: 0.5,
+      text_renderers: [
+        {
+          page: 1,
+          renderer: :labels,
+          mode: :labels,
+          requested_mode: :text3d,
+          degraded: true,
+          reason: 'text3d_mesh_unavailable',
+          count: 1
+        }
+      ]
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('x.pdf', {}, stats)
+
+    assert_equal true, report[:fallback][:used]
+    assert_equal '3d_text', report[:fallback][:text][:requested]
+    assert_equal 'labels', report[:fallback][:text][:delivered]
+    assert_equal 'text3d_mesh_unavailable', report[:fallback][:text][:reason]
+    assert_equal 1, report[:fallback][:text][:count]
+    assert_includes report[:extra][:diagnostics][:signals], 'text_mode_fallback'
+  end
+
+  def test_aggregates_matching_text_mode_fallback_counts
+    stats = {
+      pages: 1,
+      primitives: 1,
+      edges: 1,
+      text: 2,
+      layers: [],
+      text_renderers: [
+        { requested_mode: :text3d, mode: :labels, degraded: true,
+          reason: 'text3d_mesh_unavailable', count: 1 },
+        { requested_mode: :text3d, mode: :labels, degraded: true,
+          reason: 'text3d_mesh_unavailable', count: 1 }
+      ]
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('x.pdf', {}, stats)
+    assert_equal 2, report[:fallback][:text][:count]
+  end
+
   def test_writes_json_file
     stats = { pages: 1, primitives: 1, edges: 1, text: 0, layers: [], text_renderers: [] }
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('x.pdf', {}, stats)
@@ -217,6 +267,31 @@ class QAReportTest < Minitest::Test
     assert_equal 12, entity['native_label']
     refute_nil report[:report_meta]
     assert_includes report[:report_meta][:build_stamp].to_s, 'sketchup'
+  end
+
+  def test_actual_text_entity_types_follow_delivered_provenance_not_requested_mode
+    stats = {
+      pages: 1,
+      primitives: 40,
+      edges: 40,
+      text: 2,
+      layers: [],
+      elapsed_seconds: 0.8,
+      text_renderers: [],
+      text_mode: :text3d,
+      source_provenance_objects: [
+        { created_entity_type: 'native_3d_text' },
+        { created_entity_type: 'native_label' }
+      ]
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('text.pdf', {}, stats)
+    entity = report[:extra][:actual_text_entity_types]
+
+    assert_equal 'mixed', entity['entity_type']
+    assert_equal 2, entity['count']
+    assert_equal 1, entity['native_3d_text']
+    assert_equal 1, entity['native_label']
   end
 
   def test_builds_open_failure_report
