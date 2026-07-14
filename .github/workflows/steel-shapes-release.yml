@@ -33,6 +33,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Steel Shapes ${{ github.ref_name }}
           generate_release_notes: true
+          overwrite_files: false
           files: |
             ${{ steps.pack.outputs.zip_name }}
             ${{ steps.pack.outputs.latest_zip }}

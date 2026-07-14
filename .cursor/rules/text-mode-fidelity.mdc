@@ -1,0 +1,18 @@
+---
+description: Sacred text-mode fidelity — never downgrade representation to paper over transform bugs
+alwaysApply: true
+---
+
+# Text mode fidelity (owner doctrine)
+
+If the option asks for **Geometry**, **Glyphs**, **Labels**, **3D Text**, or **raster**, produce that representation.
+
+1. **Mode fidelity is sacred** — never change mode to paper over alignment/rotation/scale bugs.
+2. **Fix transforms in-place** in the requested mode (restore past-correct behavior).
+3. **Fallback only** when that *(importer, option, PDF)* truly cannot achieve the mode.
+4. **Ordered fallback** (`ImportDialog::TEXT_MODE_CHOICES`): Glyphs ↔ Geometry → **3D Text** → Labels → page raster. Always pick the closest related option; never leave text empty when a related path exists; log + report `degraded`.
+5. **Free to user** — bundled/host-native only; no paid-only fallback path.
+
+Reject: switching Labels↔3D Text/Geometry/raster to hide transform bugs; skipping 3D Text after Geometry/Glyphs SVG failure because mesh "might look wrong"; silent empty text.
+
+SIZE-1 / R20-2 are in-mode height contracts, not licenses to change representation. Rotated Labels stay Labels.
