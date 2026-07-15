@@ -155,7 +155,9 @@ quan = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   'QUAN', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil, 90.0, 198.0, 130.0, 210.0
 )
 lx, ly, lang = label_builder.send(:text_insertion_pdf, quan)
-mx, my, mang = mesh_builder.send(:text_insertion_pdf, quan)
+# Horizontal text: Labels and 3D Text share the same PDF anchor. Mesh placement
+# must go through mesh_text_insertion_pdf (not the Labels helper alone).
+mx, my, mang = mesh_builder.send(:mesh_text_insertion_pdf, quan)
 assert_near(lx, mx, 0.01, 'Labels and 3D Text share QUAN insertion X')
 assert_near(ly, my, 0.01, 'Labels and 3D Text share QUAN insertion Y')
 assert_near(lang, mang, 0.01, 'Labels and 3D Text share QUAN angle')
@@ -230,6 +232,29 @@ assert_true(rotated_mesh_kinds.count(:rotation) == 1,
 assert_true(rotated_mesh_kinds.length == 2,
             'rotated 3D text should not apply post-rotation nudge transforms')
 
+# Rotated mesh uses a half-height baseline offset (add_3d_text origin), not the
+# Labels 0.18*fs screen-space heuristic — lock both so a reintroduced nudge or
+# shared-label anchor cannot silently return.
+label_rx, label_ry, = label_builder.send(:label_insertion_pdf, rotated_mesh_item)
+mesh_rx, mesh_ry, = mesh_builder.send(:mesh_text_insertion_pdf, rotated_mesh_item)
+assert_true((mesh_rx - label_rx).abs > 0.5 || (mesh_ry - label_ry).abs > 0.5,
+            'rotated 3D Text mesh anchor must diverge from Labels baseline heuristic')
+fs = 8.0
+expected_mesh = mesh_builder.send(
+  :rotated_bbox_text_origin_pdf,
+  rotated_mesh_item,
+  140.0, 250.0, 148.0, 292.0, fs, 90.0, fs * 0.5
+)
+assert_near(mesh_rx, expected_mesh[0], 0.01,
+            'rotated 3D Text X uses half-height mesh baseline offset')
+assert_near(mesh_ry, expected_mesh[1], 0.01,
+            'rotated 3D Text Y uses half-height mesh baseline offset')
+assert_true(
+  !File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb'))
+       .include?('mesh_text_post_rotation_offset'),
+  'geometry_builder must not reintroduce mesh_text_post_rotation_offset'
+)
+
 unless File.exist?(PDF_TIER1_USER)
   puts "  SKIP: PRIVATE-01 PDF not found at #{PDF_TIER1_USER}"
 else
@@ -256,9 +281,12 @@ else
   [quan_bom, p1052, w1023, aa_a1006, aa_a1005].compact.each do |item|
     next unless item
     lpt = label_builder.send(:text_insertion_pdf, item)
-    mpt = mesh_builder.send(:text_insertion_pdf, item)
-    assert_near(lpt[0], mpt[0], 0.01, "#{item.text} X must match across modes")
-    assert_near(lpt[1], mpt[1], 0.01, "#{item.text} Y must match across modes")
+    mpt = mesh_builder.send(:mesh_text_insertion_pdf, item)
+    # Horizontal shop labels share anchors; rotated items may diverge by design.
+    if item.angle.to_f.abs <= 0.1
+      assert_near(lpt[0], mpt[0], 0.01, "#{item.text} X must match across modes")
+      assert_near(lpt[1], mpt[1], 0.01, "#{item.text} Y must match across modes")
+    end
     assert_near(lpt[2], mpt[2], 0.01, "#{item.text} angle must match across modes")
   end
 
@@ -275,7 +303,7 @@ else
   end
 
   if w1023
-    wx, wy, wang = mesh_builder.send(:text_insertion_pdf, w1023)
+    wx, wy, wang = mesh_builder.send(:mesh_text_insertion_pdf, w1023)
     assert_near(wx, 822.74, PDF_TOL, "PRIVATE-01 connection w1023 X left-anchored (got #{wx})")
     assert_near(wy, 762.12, PDF_TOL, "PRIVATE-01 connection w1023 Y baseline (got #{wy})")
     assert_near(wang, 0.0, PDF_TOL, "PRIVATE-01 connection w1023 stays horizontal per PDF angle (got #{wang})")
@@ -285,7 +313,7 @@ else
 
   if aa_a1006
     ax, ay, aang = label_builder.send(:text_insertion_pdf, aa_a1006)
-    mx, my, mang = mesh_builder.send(:text_insertion_pdf, aa_a1006)
+    mx, my, mang = mesh_builder.send(:mesh_text_insertion_pdf, aa_a1006)
     assert_near(ax, 782.16, PDF_TOL, "PRIVATE-01 SECTION A-A a1006 label X (got #{ax})")
     assert_near(ay, 299.39, PDF_TOL, "PRIVATE-01 SECTION A-A a1006 label Y (got #{ay})")
     assert_near(aang, 0.0, PDF_TOL, "PRIVATE-01 SECTION A-A a1006 label angle (got #{aang})")
@@ -296,7 +324,7 @@ else
 
   if aa_a1005
     ax, ay, aang = label_builder.send(:text_insertion_pdf, aa_a1005)
-    mx, my, mang = mesh_builder.send(:text_insertion_pdf, aa_a1005)
+    mx, my, mang = mesh_builder.send(:mesh_text_insertion_pdf, aa_a1005)
     assert_near(ax, 901.55, PDF_TOL, "PRIVATE-01 SECTION A-A a1005 label X (got #{ax})")
     assert_near(ay, 298.32, PDF_TOL, "PRIVATE-01 SECTION A-A a1005 label Y (got #{ay})")
     assert_near(aang, 0.0, PDF_TOL, "PRIVATE-01 SECTION A-A a1005 label angle (got #{aang})")
