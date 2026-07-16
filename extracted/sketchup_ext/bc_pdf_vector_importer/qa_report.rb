@@ -286,7 +286,8 @@ module BlueCollarSystems
           model_3d_intent: model_3d_intent_block(stats),
           model_3d: model_3d_block(stats, opts),
           parts_bootstrap: parts_bootstrap_block(stats),
-          text_height_crosscheck: text_height_crosscheck_block(stats)
+          text_height_crosscheck: text_height_crosscheck_block(stats),
+          text_width_crosscheck: text_width_crosscheck_block(stats)
         }
       end
 
@@ -313,6 +314,47 @@ module BlueCollarSystems
           note: 'Heights are faithful nominal PDF targets (pt/72 x scale). ' \
                 'fallback_count > 0 means the height safety floor engaged ' \
                 '(R20-2) and text may render at the 0.01" minimum.'
+        }
+      rescue StandardError
+        nil
+      end
+
+      # Round 22: report the width-fidelity factors applied to native 3D text
+      # runs (condensed title-block parity) so Import Health / Report Doctor
+      # can tell width compression from height problems. Mirrors
+      # text_height_crosscheck. Factors are declared/rendered run-width
+      # ratios; the height axis factor is always exactly 1.0.
+      def text_width_crosscheck_block(stats)
+        samples = Array(stats[:text_width_factor_samples] ||
+                        stats['text_width_factor_samples'])
+          .map { |v| v.to_f }
+          .select { |v| v > 0.0 }
+          .sort
+        out_of_bounds = (stats[:text_width_out_of_bounds_count] ||
+                         stats['text_width_out_of_bounds_count']).to_i
+        skipped_near_1 = (stats[:text_width_skipped_near_1_count] ||
+                          stats['text_width_skipped_near_1_count']).to_i
+        errors = (stats[:text_width_error_count] ||
+                  stats['text_width_error_count']).to_i
+        if samples.empty? && out_of_bounds.zero? && skipped_near_1.zero? && errors.zero?
+          return nil
+        end
+
+        mid = samples.empty? ? 0.0 : samples[samples.length / 2]
+        {
+          sample_count: samples.length,
+          samples: samples.map { |v| v.round(5) },
+          min_factor: (samples.first || 0.0).round(5),
+          median_factor: mid.round(5),
+          max_factor: (samples.last || 0.0).round(5),
+          policy: 'declared_span_width_over_rendered_run_width',
+          out_of_bounds_count: out_of_bounds,
+          skipped_near_1_count: skipped_near_1,
+          error_count: errors,
+          note: 'Horizontal-only run-axis factors compressing/expanding 3D ' \
+                'text to the PDF-declared span extent (R22). Height axis is ' \
+                'always exactly 1.0. out_of_bounds_count > 0 means spans ' \
+                'kept their natural width because the factor left 0.25..4.0.'
         }
       rescue StandardError
         nil
