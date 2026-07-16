@@ -44,6 +44,7 @@ DEFAULT_EXCLUDES = [
     "tests/**",
     "test/**",
     ".github/**",
+    ".gitignore",
     "_archived/**",
     "dist/_archived/**",
     "dev_logs/**",

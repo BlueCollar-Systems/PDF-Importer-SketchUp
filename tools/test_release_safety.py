@@ -65,6 +65,7 @@ class ReleaseSafetyTest:
         assert not rs.is_product_path("test/smoke_test.rb")
         assert not rs.is_product_path(".github/workflows/ci.yml")
         assert not rs.is_product_path("tools/test_release_safety.py")
+        assert not rs.is_product_path(".gitignore")
 
     def test_collect_delta_filters_commits_by_files(self):
         git = fake_git_factory(
