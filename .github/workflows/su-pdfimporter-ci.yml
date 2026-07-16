@@ -63,6 +63,21 @@ jobs:
           ruby-version: ${{ matrix.ruby-version }}
           bundler-cache: false
 
+      # R22 incident (2026-07-16): a value-if with a `return` branch parses on
+      # Ruby 3.4 but is a SyntaxError ("void value expression") on the
+      # SketchUp Make 2017 Ruby 2.2 host. The regex compat checker CANNOT see
+      # parser-level incompatibilities — only a real 2.2 parser can. This
+      # dedicated gate parses EVERY shipped extension file under ruby:2.2 and
+      # fails on any parse error, before anything else runs.
+      - name: Ruby 2.2 PARSE gate — every extension file (R22 incident class)
+        if: matrix.ruby-version == '2.2'
+        run: |
+          set -e
+          docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
+            set -e
+            find extracted/sketchup_ext -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
+          '
+
       - name: Ruby 2.2 syntax + smoke (SketchUp Make 2017 compatibility)
         if: matrix.ruby-version == '2.2'
         run: |
@@ -76,6 +91,9 @@ jobs:
             ruby test/arc_fitter_test.rb
             ruby test/unit_parser_test.rb
             ruby test/mesh_text_scaling_test.rb
+            ruby test/mesh_text_width_fidelity_test.rb
+            ruby test/condensed_text_width_regression_test.rb
+            ruby test/all_modes_placement_contract_test.rb
             ruby test/textmode1_invariant_test.rb
             ruby test/geometry_builder_text_fallback_test.rb
           '
@@ -94,6 +112,9 @@ jobs:
           ruby test/import_health_test.rb
           ruby test/arc_fitter_test.rb
           ruby test/unit_parser_test.rb
+          ruby test/mesh_text_width_fidelity_test.rb
+          ruby test/condensed_text_width_regression_test.rb
+          ruby test/all_modes_placement_contract_test.rb
           ruby test/textmode1_invariant_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
 
