@@ -43,6 +43,7 @@ module BlueCollarSystems
         @requested_text_mode = normalize_text_mode_symbol(opts[:requested_text_mode]) ||
                                (@use_3d_text ? :text3d : :labels)
         @strict_text_fidelity = opts[:strict_text_fidelity] || false
+        @installed_font_families_override = opts[:installed_font_families]
         @target_entities = opts[:target_entities] || nil
         @y_offset        = opts[:y_offset] || 0.0
         @page_rotation   = PageTransform.normalize_rotation(opts[:page_rotation])
@@ -548,13 +549,82 @@ module BlueCollarSystems
       # Hard limits in inches, independent of page size.
       MESH_TEXT_HEIGHT_MIN_IN = 0.01   # never smaller than 0.01" (~0.72pt)
       MESH_TEXT_HEIGHT_MAX_IN = 1.5    # never larger than 1.5" (~108pt)
+      ARIAL_SKETCHUP_LETTER_RATIO = 1491.0 / 2048.0
+      ROMANT_SKETCHUP_LETTER_RATIO = 1538.0 / 2048.0
       TEXT_FACE_RGB = [0.0, 0.0, 0.0].freeze
 
-      def mesh_text_height_inches(item, _angle_deg, _page_h)
-        # Round 13 contract: TextItem#font_size is already the nominal PDF
-        # text height in points. Bboxes are placement hints only.
-        fs_pts = effective_font_size_pts(item)
-        height = fs_pts * PDF_POINT_TO_INCH * @scale
+      def installed_text_font_families
+        return @installed_text_font_families if @installed_text_font_families
+        names = {}
+        supplied = @installed_font_families_override
+        if supplied.respond_to?(:each)
+          supplied.each { |name| names[name.to_s.downcase] = true }
+        else
+          begin
+            require 'win32/registry'
+            key = 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts'
+            Win32::Registry::HKEY_LOCAL_MACHINE.open(key) do |reg|
+              reg.each_value do |name, _type, _data|
+                family = name.to_s.sub(/\s+\([^)]*\)\z/, '')
+                family = family.sub(/\s+(Bold|Italic|Oblique|Regular).*/i, '')
+                names[family.downcase] = true unless family.empty?
+              end
+            end
+          rescue StandardError => e
+            Logger.warn('GeometryBuilder', "installed font query failed: #{e.message}; using Arial")
+          end
+        end
+        names['arial'] = true
+        @installed_text_font_families = names
+      end
+
+      def trusted_letter_ratio(value)
+        ratio = value.to_f
+        ratio.finite? && ratio >= 0.60 && ratio <= 0.95 ? ratio : nil
+      rescue StandardError
+        nil
+      end
+
+      def mesh_text_font_profile(item)
+        requested = item.respond_to?(:source_font_family) ? item.source_font_family.to_s.strip : ''
+        requested = 'Arial' if requested.empty?
+        installed = installed_text_font_families
+        selected = installed[requested.downcase] ? requested : 'Arial'
+        substitution = selected == requested ? nil : "#{requested} unavailable; using #{selected}"
+        source_ratio = item.respond_to?(:font_to_sketchup_letter_ratio) ?
+                         trusted_letter_ratio(item.font_to_sketchup_letter_ratio) : nil
+        ratio = if selected.downcase == 'romant'
+                  source_ratio || ROMANT_SKETCHUP_LETTER_RATIO
+                elsif selected.downcase == 'arial' || selected.downcase == 'arial narrow'
+                  source_ratio && selected == requested ? source_ratio : ARIAL_SKETCHUP_LETTER_RATIO
+                else
+                  source_ratio || ARIAL_SKETCHUP_LETTER_RATIO
+                end
+        metric_source = if substitution
+                          :font_substitution_arial_family
+                        elsif item.respond_to?(:font_to_sketchup_letter_ratio_source) &&
+                              item.font_to_sketchup_letter_ratio_source
+                          item.font_to_sketchup_letter_ratio_source
+                        else
+                          :default_arial_family
+                        end
+        {
+          family: selected,
+          bold: item.respond_to?(:source_font_bold) && !!item.source_font_bold,
+          italic: item.respond_to?(:source_font_italic) && !!item.source_font_italic,
+          letter_height_ratio: ratio,
+          metric_source: metric_source,
+          substitution_reason: substitution
+        }
+      end
+
+      def mesh_text_pdf_em_height_inches(item)
+        effective_font_size_pts(item) * PDF_POINT_TO_INCH * @scale
+      end
+
+      def mesh_text_height_inches(item, _angle_deg, _page_h, profile = nil)
+        profile ||= mesh_text_font_profile(item)
+        height = mesh_text_pdf_em_height_inches(item) * profile[:letter_height_ratio].to_f
         # SketchUp Make 2017 runs Ruby 2.2, which has no Numeric#clamp (2.4+).
         # A clamp call here raised NoMethodError on the live host, the rescue
         # swallowed it, and EVERY item shipped at the 0.01" minimum (R20-2).
@@ -597,7 +667,8 @@ module BlueCollarSystems
 
         page_h = PageTransform.effective_height(@media_box, @page_rotation)
         page_h = 792.0 if page_h < 1
-        height = mesh_text_height_inches(item, display_angle, page_h)
+        profile = mesh_text_font_profile(item)
+        height = mesh_text_height_inches(item, display_angle, page_h, profile)
         if height <= 0
           return fallback_mesh_text_to_label(
             entities, item, origin_x, origin_y, layer, requested_mode,
@@ -613,9 +684,9 @@ module BlueCollarSystems
         success = entities.add_3d_text(
           item.text,
           TextAlignLeft,
-          "Arial",
-          false,
-          false,
+          profile[:family],
+          profile[:bold],
+          profile[:italic],
           height,
           0.0,
           0.0,

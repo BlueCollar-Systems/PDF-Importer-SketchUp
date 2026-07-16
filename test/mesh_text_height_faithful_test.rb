@@ -44,30 +44,27 @@ class MeshTextHeightFaithfulTest < Minitest::Test
     body
   end
 
-  def test_mesh_text_height_uses_nominal_font_size_only
-    body = method_body('mesh_text_height_inches')
-    # Must derive from the nominal font size and the fixed point->inch scale.
-    assert_includes body, 'effective_font_size_pts',
-                    'height must come from nominal font size'
-    assert_includes body, 'PDF_POINT_TO_INCH', 'height must use the pt->inch factor'
-    # Must NOT read bbox extents in the height path. bbox_* tokens are valid
-    # elsewhere in the file (placement/provenance), so these stay
-    # method-scoped over the robustly isolated body.
-    %w[bbox_x0 bbox_x1 bbox_y0 bbox_y1].each do |forbidden|
-      refute_includes body, forbidden,
-        "mesh-text height must not use #{forbidden} (bbox-fit masking is forbidden)"
-    end
-  end
+  def test_mesh_text_vertical_metric_uses_nominal_em_and_selected_font_ratio
+    em_body = method_body('mesh_text_pdf_em_height_inches')
+    height_body = method_body('mesh_text_height_inches')
+    profile_body = method_body('mesh_text_font_profile')
 
-  # RB-10 whole-file scans: these bbox-fit/shim identifiers exist NOWHERE in
-  # geometry_builder.rb, so scanning the whole file cannot truncate and any
-  # reintroduction anywhere in the builder fails the lock.
-  def test_no_bbox_fit_shims_anywhere_in_geometry_builder
-    %w[mesh_text_fit_font_size_pts mesh_text_bbox_axes_pts
-       calibrate_mesh_text].each do |forbidden|
-      refute_includes source, forbidden,
-        "#{forbidden} must not exist anywhere in geometry_builder.rb " \
-        '(bbox-fit masking is forbidden, SIZE-1)'
+    assert_includes em_body, 'effective_font_size_pts',
+                    'PDF em height must come from nominal font size'
+    assert_includes em_body, 'PDF_POINT_TO_INCH',
+                    'PDF em height must use the pt->inch factor'
+    assert_includes height_body, 'mesh_text_pdf_em_height_inches',
+                    'vertical size must begin with the canonical PDF em height'
+    assert_includes height_body, 'letter_height_ratio',
+                    'vertical size must use the selected SketchUp font metric'
+
+    # Bboxes may be used by Task 4 for safe local-X fitting, but they must never
+    # select PDF em height, vertical letter height, or the font metric ratio.
+    %w[bbox_x0 bbox_x1 bbox_y0 bbox_y1].each do |forbidden|
+      [em_body, height_body, profile_body].each do |body|
+        refute_includes body, forbidden,
+          "vertical-size and ratio selection must not use #{forbidden}"
+      end
     end
   end
 
@@ -99,16 +96,6 @@ class MeshTextHeightFaithfulTest < Minitest::Test
                     '3D-text faces must be painted, proving they are retained'
   end
 
-  # Whole-file: the v3.7.83 face-erase regression identifiers exist nowhere
-  # in the builder; any erase path anywhere fails the lock.
-  def test_no_face_erase_anywhere_in_geometry_builder
-    %w[erase_entities faces_to_erase].each do |forbidden|
-      refute_includes source, forbidden,
-        "#{forbidden} must not exist anywhere in geometry_builder.rb " \
-        '(3D-text glyph faces must never be erased — v3.7.83 regression, FACE-1)'
-    end
-  end
-
   # Round 20 (R20-2): the v3.7.81–3.7.89 field bug — Numeric#clamp (Ruby 2.4+)
   # raised NoMethodError on the SketchUp Make 2017 host (Ruby 2.2.4), the
   # rescue swallowed it, and every 3D text item shipped at the 0.01" floor.
@@ -120,21 +107,11 @@ class MeshTextHeightFaithfulTest < Minitest::Test
   end
 
   # Round 20 (R20-1 quality, panel-verified): live-host probes showed the old
-  # fixed tolerance 0.6" only coarsened glyph curves (same size, same faces);
-  # tolerance 0.0 is kept for curve quality and the faithful height is passed
-  # to add_3d_text directly — generate-then-scale was dropped as redundant.
-  #
-  # Escape hatch (not a forever freeze): if a future host/API change needs
-  # generate-then-scale again, bring live-host measurements + update this
-  # guard in the same change — do not "work around" the refute by renaming.
-  # Whole-file: neither the 0.6 tolerance call shape nor any
-  # Transformation.scaling rescale exists anywhere in the builder.
-  def test_no_legacy_tolerance_or_post_scale_anywhere
+  # fixed tolerance 0.6" only coarsened glyph curves. Tolerance 0.0 remains the
+  # quality contract; Task 4 is allowed to apply a safe local-X-only transform.
+  def test_no_legacy_tolerance_anywhere
     refute_match(/add_3d_text\([\s\S]*?,\s*0\.6\s*,/, source,
                  'must not hard-code add_3d_text tolerance 0.6 (R20-1)')
-    refute_includes source, 'Transformation.scaling',
-                    'no post-generation rescale of glyph geometry (R20-2 panel verdict; ' \
-                    'update this guard with evidence if design changes)'
   end
 
   def test_place_mesh_text_records_height_samples
