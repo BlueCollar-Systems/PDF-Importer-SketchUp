@@ -31,6 +31,7 @@ builder = BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
 
 item_class = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem
 pt_to_in = BlueCollarSystems::PDFVectorImporter::GeometryBuilder::PDF_POINT_TO_INCH
+arial_ratio = 1491.0 / 2048.0
 
 undersized_bbox = item_class.new(
   'W12X30', 100.0, 200.0, 6.0, 0.0, 'Helvetica', 6.0,
@@ -50,9 +51,9 @@ pdftotext_item = item_class.new(
 mesh_h = builder.send(:mesh_text_height_inches, pdftotext_item, 0.0, 792.0)
 assert_near(
   mesh_h,
-  12.0 * pt_to_in,
+  12.0 * pt_to_in * arial_ratio,
   0.0005,
-  'pdftotext 3D text height should equal nominal font size converted to inches'
+  'pdftotext 3D text height should use the Arial SketchUp letter metric'
 )
 
 oversized_bbox = item_class.new(

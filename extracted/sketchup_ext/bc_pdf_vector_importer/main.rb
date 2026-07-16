@@ -410,14 +410,9 @@ module BlueCollarSystems
     end
 
     def self.clone_text_item_with_angle(item, angle)
-      clone_text_item_with_hints(
-        item,
-        TextParser::TextItem.new(
-          item.text, item.x, item.y, item.font_size, angle,
-          item.font_name,
-          item.respond_to?(:raw_font_size) ? item.raw_font_size : nil
-        )
-      )
+      hint = item.dup
+      hint.angle = angle
+      clone_text_item_with_hints(item, hint)
     rescue StandardError
       item
     end
@@ -432,7 +427,7 @@ module BlueCollarSystems
       rescue StandardError
         item.font_size
       end
-      TextParser::TextItem.new(
+      clone = TextParser::TextItem.new(
         item.text,
         hint.x,
         hint.y,
@@ -448,6 +443,10 @@ module BlueCollarSystems
         # Clones keep the source item's span identity (corrective §1).
         item.respond_to?(:source_span_id) ? item.source_span_id : nil
       )
+      TextParser.copy_text_item_final_fields!(clone, item)
+      TextParser.copy_text_item_metadata!(clone, hint)
+      clone.source_span_id = item.source_span_id if clone.respond_to?(:source_span_id=)
+      clone
     rescue StandardError
       item
     end

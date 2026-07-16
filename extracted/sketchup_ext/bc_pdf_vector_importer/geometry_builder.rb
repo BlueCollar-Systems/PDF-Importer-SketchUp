@@ -14,7 +14,8 @@ module BlueCollarSystems
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
 
-      attr_reader :page_group, :text_group, :text_fallbacks, :text_delivery_failures
+      attr_reader :page_group, :text_group, :text_fallbacks, :text_delivery_failures,
+                  :text_font_substitutions
 
       def initialize(model, paths, text_items, media_box, opts = {})
         @model = model
@@ -43,6 +44,7 @@ module BlueCollarSystems
         @requested_text_mode = normalize_text_mode_symbol(opts[:requested_text_mode]) ||
                                (@use_3d_text ? :text3d : :labels)
         @strict_text_fidelity = opts[:strict_text_fidelity] || false
+        @installed_font_families_override = opts[:installed_font_families]
         @target_entities = opts[:target_entities] || nil
         @y_offset        = opts[:y_offset] || 0.0
         @page_rotation   = PageTransform.normalize_rotation(opts[:page_rotation])
@@ -59,6 +61,7 @@ module BlueCollarSystems
         # main.rb can make the delivered representation visible in the report.
         @text_fallbacks = []
         @text_delivery_failures = []
+        @text_font_substitutions = []
       end
 
       def build
@@ -182,7 +185,8 @@ module BlueCollarSystems
           text_height_samples: Array(@text_height_samples),
           text_height_fallback_count: @text_height_fallback_count.to_i,
           text_fallbacks: Array(@text_fallbacks),
-          text_delivery_failures: Array(@text_delivery_failures)
+          text_delivery_failures: Array(@text_delivery_failures),
+          text_font_substitutions: Array(@text_font_substitutions)
         }
       end
 
@@ -548,13 +552,88 @@ module BlueCollarSystems
       # Hard limits in inches, independent of page size.
       MESH_TEXT_HEIGHT_MIN_IN = 0.01   # never smaller than 0.01" (~0.72pt)
       MESH_TEXT_HEIGHT_MAX_IN = 1.5    # never larger than 1.5" (~108pt)
+      MESH_TEXT_RESIDUAL_MIN = 0.50
+      MESH_TEXT_AXIS_ANGLE_TOL_DEG = 3.0
+      ARIAL_LETTER_HEIGHT_TO_EM = 1491.0 / 2048.0
+      ROMANT_LETTER_HEIGHT_TO_EM = 1538.0 / 2048.0
       TEXT_FACE_RGB = [0.0, 0.0, 0.0].freeze
 
-      def mesh_text_height_inches(item, _angle_deg, _page_h)
-        # Round 13 contract: TextItem#font_size is already the nominal PDF
-        # text height in points. Bboxes are placement hints only.
-        fs_pts = effective_font_size_pts(item)
-        height = fs_pts * PDF_POINT_TO_INCH * @scale
+      def installed_text_font_families
+        return @installed_text_font_families if @installed_text_font_families
+        names = {}
+        supplied = @installed_font_families_override
+        if supplied.respond_to?(:each)
+          supplied.each { |name| names[name.to_s.downcase] = true }
+        else
+          begin
+            require 'win32/registry'
+            key = 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts'
+            Win32::Registry::HKEY_LOCAL_MACHINE.open(key) do |reg|
+              reg.each_value do |name, _type, _data|
+                family = name.to_s.sub(/\s+\([^)]*\)\z/, '')
+                family = family.sub(/\s+(Bold|Italic|Oblique|Regular).*/i, '')
+                names[family.downcase] = true unless family.empty?
+              end
+            end
+          rescue StandardError => e
+            Logger.warn('GeometryBuilder', "installed font query failed: #{e.message}; using Arial")
+          end
+        end
+        names['arial'] = true
+        @installed_text_font_families = names
+      end
+
+      def trusted_letter_ratio(value)
+        ratio = value.to_f
+        ratio.finite? && ratio >= 0.60 && ratio <= 0.95 ? ratio : nil
+      rescue StandardError
+        nil
+      end
+
+      def mesh_text_font_profile(item)
+        requested = item.respond_to?(:source_font_family) ? item.source_font_family.to_s.strip : ''
+        requested = 'Arial' if requested.empty?
+        installed = installed_text_font_families
+        selected = installed[requested.downcase] ? requested : 'Arial'
+        substitution = selected == requested ? nil : "#{requested} unavailable; using #{selected}"
+        source_ratio = item.respond_to?(:font_to_sketchup_letter_ratio) ?
+                         trusted_letter_ratio(item.font_to_sketchup_letter_ratio) : nil
+        source_kind = item.respond_to?(:font_to_sketchup_letter_ratio_source) ?
+                        item.font_to_sketchup_letter_ratio_source : nil
+        selected_key = selected.downcase
+        if substitution
+          ratio = ARIAL_LETTER_HEIGHT_TO_EM
+          metric_source = :font_substitution_arial_family
+        elsif selected_key == 'arial' || selected_key == 'arial narrow'
+          ratio = ARIAL_LETTER_HEIGHT_TO_EM
+          metric_source = :known_arial_family
+        elsif selected_key == 'romant'
+          ratio = ROMANT_LETTER_HEIGHT_TO_EM
+          metric_source = :known_romant
+        elsif source_kind == :font_descriptor_ascent && source_ratio
+          ratio = source_ratio
+          metric_source = :font_descriptor_ascent
+        else
+          ratio = ARIAL_LETTER_HEIGHT_TO_EM
+          metric_source = :default_arial_family
+        end
+        {
+          family: selected,
+          bold: item.respond_to?(:source_font_bold) && !!item.source_font_bold,
+          italic: item.respond_to?(:source_font_italic) && !!item.source_font_italic,
+          letter_height_ratio: ratio,
+          metric_source: metric_source,
+          substitution_reason: substitution
+        }
+      end
+
+      def mesh_text_pdf_em_height_inches(item)
+        effective_font_size_pts(item) * PDF_POINT_TO_INCH * @scale
+      end
+
+      def mesh_text_height_inches(item, _angle_deg, _page_h, profile = nil)
+        profile ||= mesh_text_font_profile(item)
+        height = mesh_text_pdf_em_height_inches(item) * profile[:letter_height_ratio].to_f
         # SketchUp Make 2017 runs Ruby 2.2, which has no Numeric#clamp (2.4+).
         # A clamp call here raised NoMethodError on the live host, the rescue
         # swallowed it, and EVERY item shipped at the 0.01" minimum (R20-2).
@@ -582,22 +661,175 @@ module BlueCollarSystems
         nil
       end
 
+      def record_text_font_substitution(item, profile)
+        reason = profile[:substitution_reason].to_s
+        return if reason.empty?
+        requested = item.respond_to?(:source_font_family) ?
+                      item.source_font_family.to_s.strip : ''
+        requested = 'Arial' if requested.empty?
+        @text_font_substitutions ||= []
+        @text_font_substitutions << {
+          requested_font: requested,
+          delivered_font: profile[:family],
+          reason: reason
+        }
+      rescue StandardError => e
+        Logger.warn('GeometryBuilder', "font substitution record failed: #{e.message}")
+      end
+
       def text_height_samples
         Array(@text_height_samples)
       rescue StandardError
         []
       end
 
+      def mesh_text_matrix_x_scale(item)
+        value = item.respond_to?(:trusted_text_matrix_x_scale) ?
+                  item.trusted_text_matrix_x_scale.to_f : 0.0
+        value.finite? && value > 0.0 ? value : 1.0
+      rescue StandardError
+        1.0
+      end
+
+      def mesh_text_entities_width_inches(created)
+        mins = []
+        maxs = []
+        Array(created).each do |entity|
+          next unless entity.respond_to?(:bounds)
+          bounds = entity.bounds
+          mins << bounds.min.x.to_f
+          maxs << bounds.max.x.to_f
+        end
+        return nil if mins.empty? || maxs.empty?
+        width = maxs.max - mins.min
+        width.finite? && width > 0.0 ? width : nil
+      rescue StandardError
+        nil
+      end
+
+      def mesh_text_bbox_run_width_inches(item, display_angle)
+        values = [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1].map do |name|
+          return nil unless item.respond_to?(name) && !item.send(name).nil?
+          item.send(name).to_f
+        end
+        return nil unless values.all? { |value| value.finite? }
+        return nil if (values[2] - values[0]).abs <= 1.0e-9 ||
+                      (values[3] - values[1]).abs <= 1.0e-9
+
+        box = PageTransform.transform_bbox(
+          values[0], values[1], values[2], values[3], @media_box, @page_rotation
+        )
+        angle = PageTransform.normalize_angle(display_angle).abs
+        # Ruby 2.2: cannot use `return` as the value of an if-expression assignment.
+        if angle <= MESH_TEXT_AXIS_ANGLE_TOL_DEG
+          points = (box[2] - box[0]).abs
+        elsif (angle - 90.0).abs <= MESH_TEXT_AXIS_ANGLE_TOL_DEG
+          points = (box[3] - box[1]).abs
+        else
+          return nil
+        end
+        width = points * PDF_POINT_TO_INCH * @scale
+        width.finite? && width > 0.0 ? width : nil
+      rescue StandardError
+        nil
+      end
+
+      def mesh_text_residual_x_scale(item, created, display_angle, matrix_x)
+        angle = PageTransform.normalize_angle(display_angle).abs
+        unless angle <= MESH_TEXT_AXIS_ANGLE_TOL_DEG ||
+               (angle - 90.0).abs <= MESH_TEXT_AXIS_ANGLE_TOL_DEG
+          return [1.0, :skipped, 'diagonal_angle']
+        end
+
+        generated = mesh_text_entities_width_inches(created)
+        target = mesh_text_bbox_run_width_inches(item, display_angle)
+        return [1.0, :skipped, 'invalid_width'] unless generated && target
+
+        width_after_matrix = generated * matrix_x.to_f
+        unless width_after_matrix.finite? && width_after_matrix > 0.0
+          return [1.0, :skipped, 'invalid_width']
+        end
+
+        factor = target / width_after_matrix
+        return [1.0, :skipped, 'no_overflow'] if factor >= 1.0
+        if factor < MESH_TEXT_RESIDUAL_MIN
+          return [1.0, :rejected_outlier, 'residual_below_0_50']
+        end
+        [factor, :fitted, 'bbox_overflow_shrink']
+      rescue StandardError
+        [1.0, :skipped, 'fit_exception']
+      end
+
+      def mesh_text_entity_snapshot(entities)
+        Array(entities.to_a).dup
+      end
+
+      def mesh_text_created_entities(before, after)
+        Array(after).select do |entity|
+          !Array(before).any? { |existing| existing.equal?(entity) }
+        end
+      end
+
+      def erase_partial_mesh_entities(entities, created)
+        doomed = Array(created).compact
+        return true if doomed.empty?
+
+        entities.erase_entities(*doomed)
+        remaining = mesh_text_entity_snapshot(entities)
+        doomed.none? do |entity|
+          remaining.any? { |candidate| candidate.equal?(entity) }
+        end
+      rescue StandardError => e
+        Logger.warn('GeometryBuilder', "partial 3D text cleanup failed: #{e.message}")
+        false
+      end
+
+      def fallback_after_mesh_cleanup(entities, created, item, origin_x, origin_y,
+                                      layer, requested_mode, reason)
+        unless erase_partial_mesh_entities(entities, created)
+          record_text_delivery_failure(
+            requested_mode, "#{reason}_partial_cleanup_failed"
+          )
+          return false
+        end
+        fallback_mesh_text_to_label(
+          entities, item, origin_x, origin_y, layer, requested_mode,
+          mesh_failure_reason(requested_mode, reason)
+        )
+      end
+
+      def mesh_text_face_entities(created)
+        Array(created).select do |entity|
+          begin
+            entity.respond_to?(:typename) && entity.typename == 'Face'
+          rescue StandardError => e
+            Logger.warn('GeometryBuilder', "3D text face inspection failed: #{e.message}")
+            false
+          end
+        end
+      end
+
       def place_mesh_text(entities, item, origin_x, origin_y, layer,
                           requested_mode = nil, fallback_reason = nil)
         requested_mode = @requested_text_mode if requested_mode.nil?
-        label_x, label_y, label_angle = mesh_label_anchor_pdf(item)
-        display_angle = display_text_angle(item, label_angle)
-        pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
+        before = nil
+        begin
+          label_x, label_y, label_angle = mesh_label_anchor_pdf(item)
+          display_angle = display_text_angle(item, label_angle)
+          pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
+          page_h = PageTransform.effective_height(@media_box, @page_rotation)
+          page_h = 792.0 if page_h < 1
+          profile = mesh_text_font_profile(item)
+          height = mesh_text_height_inches(item, display_angle, page_h, profile)
+          before = mesh_text_entity_snapshot(entities)
+        rescue StandardError => e
+          Logger.warn('GeometryBuilder', "text3d_pre_generation_exception: #{e.message}")
+          return fallback_mesh_text_to_label(
+            entities, item, origin_x, origin_y, layer, requested_mode,
+            mesh_failure_reason(requested_mode, 'text3d_pre_generation_exception')
+          )
+        end
 
-        page_h = PageTransform.effective_height(@media_box, @page_rotation)
-        page_h = 792.0 if page_h < 1
-        height = mesh_text_height_inches(item, display_angle, page_h)
         if height <= 0
           return fallback_mesh_text_to_label(
             entities, item, origin_x, origin_y, layer, requested_mode,
@@ -605,50 +837,110 @@ module BlueCollarSystems
           )
         end
 
-        count_before = entities.to_a.length
         # add_3d_text tolerance is absolute inches; 0.0 = highest curve
         # quality (R20-1, quality only — live probes showed the legacy 0.6
         # merely coarsened curves; the Round 20 speck bug was the Ruby 2.2
         # clamp fallback fixed in mesh_text_height_inches, R20-2).
-        success = entities.add_3d_text(
-          item.text,
-          TextAlignLeft,
-          "Arial",
-          false,
-          false,
-          height,
-          0.0,
-          0.0,
-          true,
-          0.0
+        success = nil
+        generation_error = nil
+        begin
+          success = entities.add_3d_text(
+            item.text,
+            TextAlignLeft,
+            profile[:family],
+            profile[:bold],
+            profile[:italic],
+            height,
+            0.0,
+            0.0,
+            true,
+            0.0
+          )
+        rescue StandardError => e
+          generation_error = e
+        end
+
+        begin
+          created = mesh_text_created_entities(before, mesh_text_entity_snapshot(entities))
+        rescue StandardError => e
+          reason = if generation_error
+                     'text3d_generation_exception'
+                   elsif success
+                     'text3d_mesh_snapshot_failed'
+                   else
+                     'text3d_mesh_unavailable'
+                   end
+          Logger.warn('GeometryBuilder', "#{reason}: entity snapshot failed: #{e.message}")
+          record_text_delivery_failure(
+            requested_mode, "#{reason}_partial_cleanup_failed"
+          )
+          return false
+        end
+
+        if generation_error
+          reason = 'text3d_generation_exception'
+          Logger.warn('GeometryBuilder', "#{reason}: #{generation_error.message}")
+          return fallback_after_mesh_cleanup(
+            entities, created, item, origin_x, origin_y, layer, requested_mode, reason
+          )
+        end
+
+        unless success && !created.empty?
+          reason = success ? 'text3d_mesh_empty' : 'text3d_mesh_unavailable'
+          return fallback_after_mesh_cleanup(
+            entities, created, item, origin_x, origin_y, layer, requested_mode, reason
+          )
+        end
+
+        matrix_x = mesh_text_matrix_x_scale(item)
+        residual_x, = mesh_text_residual_x_scale(
+          item, created, display_angle, matrix_x
         )
+        total_x = matrix_x * residual_x
 
-        unless success
-          return fallback_mesh_text_to_label(
-            entities, item, origin_x, origin_y, layer, requested_mode,
-            mesh_failure_reason(requested_mode, 'text3d_mesh_unavailable')
+        begin
+          scale = Geom::Transformation.scaling(ORIGIN, total_x, 1.0, 1.0)
+          transformed = entities.transform_entities(scale, *created)
+          raise 'transform_entities returned false' if transformed == false
+        rescue StandardError => e
+          reason = 'text3d_scale_transform_failed'
+          Logger.warn('GeometryBuilder', "#{reason}: #{e.message}")
+          return fallback_after_mesh_cleanup(
+            entities, created, item, origin_x, origin_y, layer, requested_mode, reason
           )
         end
 
-        new_ents = entities.to_a[count_before..-1] || []
-        if new_ents.empty?
-          return fallback_mesh_text_to_label(
-            entities, item, origin_x, origin_y, layer, requested_mode,
-            mesh_failure_reason(requested_mode, 'text3d_mesh_empty')
+        begin
+          move = Geom::Transformation.new(pt)
+          transformed = entities.transform_entities(move, *created)
+          raise 'transform_entities returned false' if transformed == false
+        rescue StandardError => e
+          reason = 'text3d_translation_transform_failed'
+          Logger.warn('GeometryBuilder', "#{reason}: #{e.message}")
+          return fallback_after_mesh_cleanup(
+            entities, created, item, origin_x, origin_y, layer, requested_mode, reason
           )
         end
 
-        move = Geom::Transformation.new(pt)
-        entities.transform_entities(move, *new_ents)
         if display_angle.abs > 0.1
-          rot = Geom::Transformation.rotation(pt, Z_AXIS, display_angle.degrees)
-          entities.transform_entities(rot, *new_ents)
+          begin
+            rot = Geom::Transformation.rotation(pt, Z_AXIS, display_angle.degrees)
+            transformed = entities.transform_entities(rot, *created)
+            raise 'transform_entities returned false' if transformed == false
+          rescue StandardError => e
+            reason = 'text3d_rotation_transform_failed'
+            Logger.warn('GeometryBuilder', "#{reason}: #{e.message}")
+            return fallback_after_mesh_cleanup(
+              entities, created, item, origin_x, origin_y, layer, requested_mode, reason
+            )
+          end
         end
-        text_faces = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
+
+        text_faces = mesh_text_face_entities(created)
         apply_text_face_material(text_faces)
         @face_count += text_faces.length
 
-        new_ents.each do |entity|
+        created.each do |entity|
           begin
             set_layer(entity, layer)
           rescue StandardError => e
@@ -657,15 +949,10 @@ module BlueCollarSystems
         end
         @text_count += 1
         record_mesh_text_height_sample(height)
+        record_text_font_substitution(item, profile)
         record_text_span_provenance(item, 'native_3d_text')
         record_text_mode_fallback(requested_mode, :text3d, fallback_reason) if fallback_reason
         true
-      rescue StandardError => e
-        Logger.warn("GeometryBuilder", "add_3d_text failed: #{e.message}")
-        fallback_mesh_text_to_label(
-          entities, item, origin_x, origin_y, layer, requested_mode,
-          mesh_failure_reason(requested_mode, 'text3d_exception')
-        )
       end
 
       # The final SketchUp per-span 3D Text rung is Labels.  The optional
@@ -791,11 +1078,7 @@ module BlueCollarSystems
           bx1,
           by1
         )
-        # Derived/split text keeps the source item's span identity so its
-        # provenance rows still join with parts_bootstrap (corrective §1).
-        if sub.respond_to?(:source_span_id=) && item.respond_to?(:source_span_id)
-          sub.source_span_id = item.source_span_id
-        end
+        TextParser.copy_text_item_final_fields!(sub, item)
         sub
       rescue StandardError
         item

@@ -33,7 +33,11 @@ module Geom
       @args = args
       @kind = :translation
     end
-    def self.rotation(*); new; end
+    def self.rotation(*args)
+      t = new(*args)
+      t.instance_variable_set(:@kind, :rotation)
+      t
+    end
     def self.scaling(*args)
       t = new(*args)
       t.instance_variable_set(:@kind, :scaling)
@@ -112,31 +116,42 @@ class DummyFaceEntity
 end
 
 class DummyTransformEntities
-  attr_reader :transforms, :erased, :height_args, :tolerance_args
-  def initialize
-    @entities = []
+  attr_reader :transforms, :erased, :height_args, :tolerance_args,
+              :font_style_args, :filled_args, :entities
+  def initialize(initial_entities = [])
+    @entities = initial_entities.dup
     @transforms = []
     @erased = []
     @height_args = []
     @tolerance_args = []
+    @font_style_args = []
+    @filled_args = []
   end
   def to_a; @entities.dup; end
   def add_3d_text(_text, _align, _font, _bold, _italic, height, tol, _extrusion, _filled, _z)
+    @font_style_args << [_font, _bold, _italic]
     @height_args << height
     @tolerance_args << tol
+    @filled_args << _filled
     @entities << DummyRenderedTextEntity.new(height * 3.0, height, typename: 'Edge')
     @entities << DummyFaceEntity.new
     true
   end
-  def transform_entities(*args); @transforms << args; end
-  def erase_entities(*args); @erased.concat(args.flatten); end
+  def transform_entities(*args); @transforms << args; true; end
+  def erase_entities(*args)
+    doomed = args.flatten
+    @erased.concat(doomed)
+    @entities.delete_if { |entity| doomed.any? { |candidate| candidate.equal?(entity) } }
+    true
+  end
 end
 
 # ── Constants from geometry_builder.rb ───────────────────────────────────────
-# MESH_TEXT_BBOX_CAP_RATIO removed in Round 13: height = effective_font_size_pts * PT_TO_IN.
-PT_TO_IN  = GB::PDF_POINT_TO_INCH         # 1/72
-MIN_IN    = GB::MESH_TEXT_HEIGHT_MIN_IN   # 0.01
-MAX_IN    = GB::MESH_TEXT_HEIGHT_MAX_IN   # 1.5
+# PDF em height is converted to the selected SketchUp font's visible letter metric.
+PT_TO_IN    = GB::PDF_POINT_TO_INCH         # 1/72
+ARIAL_RATIO = 1491.0 / 2048.0
+MIN_IN      = GB::MESH_TEXT_HEIGHT_MIN_IN   # 0.01
+MAX_IN      = GB::MESH_TEXT_HEIGHT_MAX_IN   # 1.5
 
 class MeshTextScalingTest < Minitest::Test
 
@@ -152,7 +167,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(LETTER)
     item = bbox_item('MARK', 8.0, 10.0)   # 8pt font, 10pt bbox_h
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    expected = 8.0 * PT_TO_IN   # Round 13: height = nominal effective_font_size_pts * PT_TO_IN
+    expected = 8.0 * PT_TO_IN * ARIAL_RATIO
     assert_in_delta expected, h, 0.001
     assert h >= MIN_IN
     assert h <= MAX_IN
@@ -188,7 +203,7 @@ class MeshTextScalingTest < Minitest::Test
     # 8pt after Tm scale, no bbox
     item = no_bbox_item('p1019', 8.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    expected = [8.0, 1.0].max * PT_TO_IN
+    expected = [8.0, 1.0].max * PT_TO_IN * ARIAL_RATIO
     assert_in_delta expected, h, 0.001
   end
 
@@ -305,7 +320,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(negative_origin_box)
     item = bbox_item('MARK', 8.0, 10.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    expected = 8.0 * PT_TO_IN
+    expected = 8.0 * PT_TO_IN * ARIAL_RATIO
     assert_in_delta expected, h, 0.001, "Negative MediaBox origin must not corrupt height"
   end
 
@@ -314,7 +329,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(LETTER)
     item = no_bbox_item('x', 0.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    # [0.0, 1.0].max = 1.0pt → 1/72" ≈ 0.01389" > MIN_IN
+    # [0.0, 1.0].max = 1.0pt, then the Arial metric keeps it just above MIN_IN.
     assert h >= MIN_IN
     assert h <= MAX_IN
   end
@@ -330,7 +345,7 @@ class MeshTextScalingTest < Minitest::Test
     h90 = b.send(:mesh_text_height_inches, item90, 90.0, LETTER[3])
     assert_in_delta h0, h90, 0.0001,
                     'upright part mark in tall bbox must match explicit 90° height'
-    # Round 13: height = 8pt * (1/72) = 0.1111" — no bbox shrink in height path
+    # Height is 8pt * (1/72) * Arial's letter ratio; bbox never selects it.
     assert h0 < 0.13,
            "vertical part mark height must not blow up (got #{h0.round(4)}\")"
   end
@@ -365,7 +380,9 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(LETTER)
     item = bbox_item('W12X30', 8.0, 1.5, bbox_w: 3.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert h >= 8.0 * PT_TO_IN * 0.90,
+    # SIZE-1: vertical size stays nominal PDF em × SketchUp letter ratio.
+    # Microscopic pdftotext bbox must not shrink height (bbox is placement-only).
+    assert h >= 8.0 * PT_TO_IN * ARIAL_RATIO * 0.90,
            "Microscopic bbox must not shrink 8pt text (got #{h.round(5)})"
     assert h <= MAX_IN, "Height must be within MAX_IN (got #{h.round(5)})"
   end
@@ -377,19 +394,26 @@ class MeshTextScalingTest < Minitest::Test
   def test_face_entities_retained_after_place_mesh_text
     b = make_builder(LETTER)
     item = bbox_item('A', 8.0, 10.0, bbox_w: 50.0)
-    edge1 = DummyRenderedTextEntity.new(5.0 / 72.0, 8.0 / 72.0, typename: 'Edge')
-    face1 = DummyFaceEntity.new
-    face2 = DummyFaceEntity.new
-    ents  = DummyTransformEntities.new
+    item.angle = 30.0
+    ents = DummyTransformEntities.new
+    material = Object.new
+    layer = Object.new
+    b.define_singleton_method(:get_or_create_material) { |_rgb| material }
 
-    # Simulate the retained text geometry set place_mesh_text now preserves.
-    new_ents = [edge1, face1, face2]
-    faces = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
-    b.send(:apply_text_face_material, faces)
+    delivered = b.send(:place_mesh_text, ents, item, 0.0, 0.0, layer)
+    face = ents.entities.find { |entity| entity.respond_to?(:typename) && entity.typename == 'Face' }
+    kinds = ents.transforms.map { |args| args.first.kind }
 
-    assert_equal 0, ents.erased.length, 'Text faces must not be erased'
-    assert_equal 3, new_ents.length, 'Edges and filled glyph faces both survive'
-    assert_equal 2, faces.length, 'Both Face entities are retained for filled text'
+    assert delivered, 'successful native mesh placement must be reported as delivered'
+    assert face, 'filled add_3d_text must leave a Face in the delivered entity collection'
+    assert_same material, face.material, 'front material survives local-X transforms'
+    assert_same material, face.back_material, 'back material survives local-X transforms'
+    assert_same layer, face.layer, 'layer assignment survives local-X transforms'
+    assert_equal [true], ents.filled_args, 'native 3D text must request filled faces'
+    assert_equal [:scaling, :translation, :rotation], kinds
+    assert ents.transforms.all? { |args| args[1..-1].any? { |entity| entity.equal?(face) } },
+           'every ordered transform must target the created face'
+    assert_empty ents.erased, 'successful filled faces must never enter cleanup'
   end
 
   # ── v3.7.83: nominal font_size must survive tiny pdftotext line bbox ───────
@@ -398,7 +422,7 @@ class MeshTextScalingTest < Minitest::Test
     item = TI.new('W12X30', 50.0, 100.0, 10.0, 0.0, 'pdftotext',
                   nil, 50.0, 100.0, 120.0, 101.5)
     h = b.send(:mesh_text_height_inches, item, 0.0, ANSI_D[3])
-    expected = 10.0 * PT_TO_IN
+    expected = 10.0 * PT_TO_IN * ARIAL_RATIO
     assert_in_delta expected, h, 0.002,
                     "10pt nominal must not shrink to microscopic bbox (got #{h.round(5)})"
     assert h >= 0.08, "Shop drawing text must be readable (got #{h.round(4)}\")"
@@ -430,8 +454,8 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(ARCH_D)
     item = bbox_item('W12X30', 12.0, 14.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, ARCH_D[3])
-    assert_in_delta 12.0 * PT_TO_IN, h, 0.0001,
-      "12pt must yield 0.1667\" (got #{h} — 0.01 means the rescue floor engaged)"
+    assert_in_delta 12.0 * PT_TO_IN * ARIAL_RATIO, h, 0.0001,
+      "12pt Arial must yield 0.121337890625\" (got #{h} — 0.01 means the rescue floor engaged)"
   end
 
   # ── Round 20 (R20-2): a height-path failure must be counted, never silent ──
@@ -461,16 +485,20 @@ class MeshTextScalingTest < Minitest::Test
     b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
 
     assert_equal 1, ents.height_args.length
-    assert_in_delta 8.0 * PT_TO_IN, ents.height_args[0], 1e-9,
+    assert_in_delta 8.0 * PT_TO_IN * ARIAL_RATIO, ents.height_args[0], 1e-9,
                     'add_3d_text must receive the faithful target height directly'
     assert_equal [0.0], ents.tolerance_args,
                  'add_3d_text tolerance must be 0.0 (R20-1 quality)'
     kinds = ents.transforms.map { |args| args[0].respond_to?(:kind) ? args[0].kind : nil }
-    refute_includes kinds, :scaling,
-                    'no post-generation rescale of glyphs (R20-2 panel verdict)'
+    assert_equal [:scaling, :translation], kinds,
+                 'local-X scaling must precede the unchanged translation anchor'
+    scaling_args = ents.transforms.first[0].args
+    assert_same ORIGIN, scaling_args[0]
+    assert_equal [1.0, 1.0, 1.0], scaling_args[1..3],
+                 'unfitted text still uses exact local-X [1, 1, 1], never Y/Z scaling'
     samples = b.send(:text_height_samples)
     assert_equal 1, samples.length
-    assert_in_delta 8.0 * PT_TO_IN, samples[0], 0.001
+    assert_in_delta 8.0 * PT_TO_IN * ARIAL_RATIO, samples[0], 0.001
     assert_equal 0, ents.erased.length
   end
 

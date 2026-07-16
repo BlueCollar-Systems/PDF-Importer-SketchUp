@@ -72,6 +72,11 @@ module Geom
       t.instance_variable_set(:@kind, :rotation)
       t
     end
+    def self.scaling(*args)
+      t = new(*args)
+      t.instance_variable_set(:@kind, :scaling)
+      t
+    end
   end
 end
 
@@ -124,6 +129,7 @@ class DummyEntities
 
   def transform_entities(*args)
     @transforms << args
+    true
   end
 end
 
@@ -225,11 +231,24 @@ assert_true(rotated_mesh_entities.mesh_calls.length == 1,
 assert_true(rotated_mesh_entities.texts.empty?,
             '3D text mode should not fall back to a native label')
 rotated_mesh_kinds = rotated_mesh_entities.transforms.map { |args| args.first.kind }
+assert_true(rotated_mesh_kinds == [:scaling, :translation, :rotation],
+            'rotated 3D text transform order must be scale, translation, rotation')
+if rotated_mesh_entities.transforms.length == 3
+  scale_transform = rotated_mesh_entities.transforms[0].first
+  translation_transform = rotated_mesh_entities.transforms[1].first
+  rotation_transform = rotated_mesh_entities.transforms[2].first
+  assert_true(scale_transform.args[0].equal?(ORIGIN),
+              'local-X scaling must pivot around ORIGIN')
+  assert_true(scale_transform.args[2] == 1.0 && scale_transform.args[3] == 1.0,
+              'local-X scaling must leave Y and Z exactly 1.0')
+  assert_true(rotation_transform.args[0].equal?(translation_transform.args[0]),
+              'rotation must pivot around the unchanged translation anchor')
+end
 assert_true(rotated_mesh_kinds.count(:translation) == 1,
             'rotated 3D text should move once to the mesh anchor')
 assert_true(rotated_mesh_kinds.count(:rotation) == 1,
             'rotated 3D text should rotate once around the anchor')
-assert_true(rotated_mesh_kinds.length == 2,
+assert_true(rotated_mesh_kinds.length == 3,
             'rotated 3D text should not apply post-rotation nudge transforms')
 
 # Rotated mesh uses a half-height baseline offset (add_3d_text origin), not the

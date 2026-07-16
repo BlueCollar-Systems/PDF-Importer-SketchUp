@@ -72,6 +72,11 @@ module Geom
       t.instance_variable_set(:@kind, :rotation)
       t
     end
+    def self.scaling(*args)
+      t = new(*args)
+      t.instance_variable_set(:@kind, :scaling)
+      t
+    end
   end
 end
 
@@ -116,6 +121,7 @@ class DummyEntities
 
   def transform_entities(*args)
     @transforms << args
+    true
   end
 end
 

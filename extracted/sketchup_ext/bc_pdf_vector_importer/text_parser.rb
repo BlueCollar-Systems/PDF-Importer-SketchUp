@@ -25,9 +25,39 @@ module BlueCollarSystems
         # Deterministic source-span identity "text_span:<page>:<index>",
         # assigned ONCE per page by TextSourceIdentity.assign! after final
         # extractor selection/merging/angle hints (corrective 2026-07-12 §1).
-        # MUST stay the FINAL member so positional constructors stay valid.
-        :source_span_id
+        # MUST stay at this legacy ordinal so positional constructors stay valid.
+        :source_span_id,
+        # Append-only native text render metadata. Keep every legacy member
+        # above at its existing ordinal for SketchUp/Ruby compatibility.
+        :source_font_family,
+        :source_font_bold,
+        :source_font_italic,
+        :font_to_sketchup_letter_ratio,
+        :font_to_sketchup_letter_ratio_source,
+        :trusted_text_matrix_x_scale
       )
+
+      TEXT_ITEM_METADATA_FIELDS = [
+        :source_font_family, :source_font_bold, :source_font_italic,
+        :font_to_sketchup_letter_ratio, :font_to_sketchup_letter_ratio_source,
+        :trusted_text_matrix_x_scale
+      ].freeze
+
+      def self.copy_text_item_metadata!(target, source)
+        TEXT_ITEM_METADATA_FIELDS.each do |field|
+          writer = "#{field}="
+          target.send(writer, source.send(field)) if target.respond_to?(writer) && source.respond_to?(field)
+        end
+        target
+      end
+
+      def self.copy_text_item_final_fields!(target, source)
+        copy_text_item_metadata!(target, source)
+        if target.respond_to?(:source_span_id=) && source.respond_to?(:source_span_id)
+          target.source_span_id = source.source_span_id
+        end
+        target
+      end
 
       # Common structural drawing fraction denominators
       VALID_DENOMS = [2, 4, 8, 16, 32, 64].freeze
@@ -77,6 +107,7 @@ module BlueCollarSystems
           @text_items = dedupe_text_items(@text_items)
           @text_items = quality_filter(@text_items)
           @text_items = suppress_overlaps(@text_items)
+          @text_items = suppress_contained_fragments(@text_items)
         end
         @text_items
       end
@@ -93,6 +124,7 @@ module BlueCollarSystems
         tlm = [1, 0, 0, 1, 0, 0]  # Text line matrix
         font_size = 12.0
         font_name = ""
+        horizontal_scale = 1.0
         in_text = false
 
         tokens = tokenize(stream)
@@ -128,6 +160,9 @@ module BlueCollarSystems
               # Set font and size
               font_size = nums.last.to_f if nums.last
               font_name = names.last.to_s if names.last
+
+            when 'Tz'
+              horizontal_scale = nums.last.to_f / 100.0 if nums.last
 
             when 'Tm'
               # Set text matrix directly
@@ -167,7 +202,7 @@ module BlueCollarSystems
               if in_text
                 raw = strs.last || hexs.last
                 text = decode_text_operand(raw, font_name)
-                emit_text(text, tm, font_size, font_name) if readable_text?(text)
+                emit_text(text, tm, font_size, font_name, horizontal_scale) if readable_text?(text)
               end
 
             when 'TJ'
@@ -176,7 +211,7 @@ module BlueCollarSystems
                 arr_token = operand_stack.find { |t| t[:type] == :array }
                 if arr_token
                   text = extract_tj_text(arr_token[:value], font_name)
-                  emit_text(text, tm, font_size, font_name) if readable_text?(text)
+                  emit_text(text, tm, font_size, font_name, horizontal_scale) if readable_text?(text)
                 end
               end
 
@@ -187,7 +222,7 @@ module BlueCollarSystems
                 tm = tlm.dup
                 if !strs.empty?
                   text = decode_text_operand(strs.first, font_name)
-                  emit_text(text, tm, font_size, font_name) if readable_text?(text)
+                  emit_text(text, tm, font_size, font_name, horizontal_scale) if readable_text?(text)
                 end
               end
 
@@ -198,7 +233,7 @@ module BlueCollarSystems
                 tm = tlm.dup
                 if !strs.empty?
                   text = decode_text_operand(strs.first, font_name)
-                  emit_text(text, tm, font_size, font_name) if readable_text?(text)
+                  emit_text(text, tm, font_size, font_name, horizontal_scale) if readable_text?(text)
                 end
               end
 
@@ -230,22 +265,27 @@ module BlueCollarSystems
         end
       end
 
-      def emit_text(text, tm, font_size, font_name)
+      def emit_text(text, tm, font_size, font_name, horizontal_scale = 1.0)
         text_matrix = multiply_matrix(tm, @ctm)
-        # Extract position and rotation from text matrix
         x = text_matrix[4]
         y = text_matrix[5]
-        normal = Math.hypot(text_matrix[2].to_f, text_matrix[3].to_f)
-        # Round 13 contract: text height uses the image of the unit vertical
-        # vector only. Horizontal scaling changes width, not height.
-        scale_factor = normal
-        effective_size = font_size * scale_factor
-        effective_size = font_size if scale_factor.abs < 0.001
-        # Rotation angle
+        vertical = Math.hypot(text_matrix[2].to_f, text_matrix[3].to_f)
+        horizontal = Math.hypot(text_matrix[0].to_f, text_matrix[1].to_f)
+        effective_size = vertical.abs < 0.001 ? font_size : font_size * vertical
         angle = -Math.atan2(text_matrix[1], text_matrix[0]) * 180.0 / Math::PI
-
-        @text_items << TextItem.new(text, x, y, effective_size, angle, font_name, font_size,
-                                    nil, nil, nil, nil, @current_ocg_layer)
+        item = TextItem.new(text, x, y, effective_size, angle, font_name, font_size,
+                            nil, nil, nil, nil, @current_ocg_layer)
+        ratio = vertical > 1.0e-9 ? (horizontal / vertical) * horizontal_scale.to_f : nil
+        ratio = nil unless ratio && ratio.finite? && ratio > 0.0
+        item.trusted_text_matrix_x_scale = ratio
+        info = @font_maps[font_name.to_s] || @font_maps[font_name.to_s.sub(/\A\//, '')]
+        if info.is_a?(Hash)
+          TEXT_ITEM_METADATA_FIELDS.each do |field|
+            next if field == :trusted_text_matrix_x_scale
+            item.send("#{field}=", info[field]) if info.key?(field)
+          end
+        end
+        @text_items << item
       end
 
       def decode_text_operand(raw, font_name = nil)
@@ -589,6 +629,47 @@ module BlueCollarSystems
         items
       end
 
+      # Drop short spans whose text is already present inside a nearby longer
+      # span (e.g. keep "1/4 (TYP.)", drop ghosted standalone "1/4"). Shared by
+      # Labels / 3D Text / Geometry fallbacks that consume TextParser items.
+      def suppress_contained_fragments(items)
+        return items if items.nil? || items.length < 2
+
+        reject = {}
+        items.each_with_index do |it, idx|
+          t = it.text.to_s.strip
+          next if t.length < 2
+
+          items.each_with_index do |other, j|
+            next if idx == j || reject[j]
+            ot = other.text.to_s.strip
+            next if ot.length <= t.length + 1
+            next unless ot.include?(t)
+
+            dx = (other.x.to_f - it.x.to_f).abs
+            dy = (other.y.to_f - it.y.to_f).abs
+            da = (other.angle.to_f - it.angle.to_f).abs
+            da = 180.0 - da if da > 90.0
+            fs = [it.font_size.to_f, 1.0].max
+            next unless dx <= [fs * 3.0, 42.0].max
+            next unless dy <= [fs * 1.8, 30.0].max
+            next unless da <= 35.0
+
+            reject[idx] = true
+            break
+          end
+        end
+
+        return items if reject.empty?
+
+        out = []
+        items.each_with_index { |it, i| out << it unless reject[i] }
+        out
+      rescue StandardError => e
+        Logger.warn('TextParser', "suppress_contained_fragments failed: #{e.message}")
+        items
+      end
+
       def merge_text_runs(items)
         return items if items.length < 2
 
@@ -598,7 +679,22 @@ module BlueCollarSystems
           angle_key = (it.angle.to_f / 2.0).round
           size_key = (it.font_size.to_f / 0.5).round
           font_key = it.font_name.to_s
-          key = [angle_key, size_key, font_key]
+          letter_ratio = it.respond_to?(:font_to_sketchup_letter_ratio) ?
+                           it.font_to_sketchup_letter_ratio : nil
+          matrix_x = it.respond_to?(:trusted_text_matrix_x_scale) ?
+                       it.trusted_text_matrix_x_scale : nil
+          key = [
+            angle_key,
+            size_key,
+            font_key,
+            it.respond_to?(:source_font_family) ? it.source_font_family : nil,
+            it.respond_to?(:source_font_bold) ? it.source_font_bold : nil,
+            it.respond_to?(:source_font_italic) ? it.source_font_italic : nil,
+            letter_ratio.nil? ? nil : letter_ratio.to_f.round(6),
+            it.respond_to?(:font_to_sketchup_letter_ratio_source) ?
+              it.font_to_sketchup_letter_ratio_source : nil,
+            matrix_x.nil? ? nil : matrix_x.to_f.round(6)
+          ]
           (buckets[key] ||= []) << it
         end
 
@@ -672,8 +768,7 @@ module BlueCollarSystems
           fixed = normalize_fraction_spacing(text)
           if fixed != text
             clone = TextItem.new(fixed, it.x, it.y, it.font_size, it.angle, it.font_name, it.raw_font_size || it.font_size)
-            # Clones keep the source item's span identity (corrective §1).
-            clone.source_span_id = it.source_span_id if it.respond_to?(:source_span_id)
+            TextParser.copy_text_item_final_fields!(clone, it)
             clone
           else
             it
@@ -760,8 +855,7 @@ module BlueCollarSystems
           base.font_name,
           base.raw_font_size || base.font_size
         )
-        # Merged runs keep the base item's span identity (corrective §1).
-        merged.source_span_id = base.source_span_id if base.respond_to?(:source_span_id)
+        TextParser.copy_text_item_final_fields!(merged, base)
         merged
       end
 
@@ -884,11 +978,7 @@ module BlueCollarSystems
                     item.font_name,
                     [item.raw_font_size || item.font_size, other.raw_font_size || other.font_size].max
                   )
-                  # Reconstructed fractions keep the base item's span identity
-                  # (corrective §1).
-                  if base_item.respond_to?(:source_span_id)
-                    frac_item.source_span_id = base_item.source_span_id
-                  end
+                  TextParser.copy_text_item_final_fields!(frac_item, base_item)
                   result << frac_item
                   used[i] = true
                   used[j] = true
@@ -908,10 +998,7 @@ module BlueCollarSystems
                   item.x, item.y, item.font_size, item.angle, item.font_name,
                   item.raw_font_size || item.font_size
                 )
-                # Split-derived text keeps the source span identity (corrective §1).
-                if item.respond_to?(:source_span_id)
-                  split_item.source_span_id = item.source_span_id
-                end
+                TextParser.copy_text_item_final_fields!(split_item, item)
                 result << split_item
                 used[i] = true
                 next

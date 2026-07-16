@@ -162,9 +162,14 @@ module BlueCollarSystems
             if anchor && anchor.size_pt > 0.05
               font_size = anchor.size_pt
               angle = anchor.angle_deg
-              # Keep the CAD callout horizontal overrides authoritative.
-              angle = 0.0 if line_text =~ /\A\d{1,2}\/\d{1,2}"?\z/
-              angle = 0.0 if line_text =~ /\ATYP\.?\z/i
+              # Word-box false diagonals stay flattened for near-horizontal
+              # callouts. Trusted steep content-stream angles (diagonal welds,
+              # vertical TYP) must win — undoing them creates ghosted
+              # horizontal duplicates over correctly rotated neighbours.
+              if anchor.angle_deg.abs <= 12.0
+                angle = 0.0 if line_text =~ /\A\d{1,2}\/\d{1,2}"?\z/
+                angle = 0.0 if line_text =~ /\ATYP\.?\z/i
+              end
             elsif angle.abs > 20 && angle.abs < 160
               # Fallback (no anchor): rotated bbox — the SHORTER dimension is
               # the character height; the LONGER is the string length.
@@ -294,10 +299,7 @@ module BlueCollarSystems
                 merge_angle(it.angle, items[candidate_idx].angle),
                 it.font_name
               )
-              # Merged fragments keep the head item's span identity (corrective §1).
-              if it.respond_to?(:source_span_id)
-                merged_item.source_span_id = it.source_span_id
-              end
+              TextParser.copy_text_item_final_fields!(merged_item, it)
               out << merged_item
               used[i] = true
               used[candidate_idx] = true
@@ -439,7 +441,7 @@ module BlueCollarSystems
           bx1 = xs1.max
           by1 = ys1.max
           merged_text = "#{a1.text.to_s.strip}#{zeros.text.to_s.strip}#{digit.text.to_s.strip}"
-          TextParser::TextItem.new(
+          merged_item = TextParser::TextItem.new(
             merged_text,
             bx0,
             by0,
@@ -455,6 +457,8 @@ module BlueCollarSystems
             # Merged angle marks keep the leading item's span identity (corrective §1).
             a1.respond_to?(:source_span_id) ? a1.source_span_id : nil
           )
+          TextParser.copy_text_item_final_fields!(merged_item, a1)
+          merged_item
         rescue StandardError
           a1
         end
@@ -510,10 +514,7 @@ module BlueCollarSystems
                 merge_angle(it.angle, items[candidate_idx].angle),
                 it.font_name
               )
-              # Repaired pairs keep the head item's span identity (corrective §1).
-              if it.respond_to?(:source_span_id)
-                rebuilt_item.source_span_id = it.source_span_id
-              end
+              TextParser.copy_text_item_final_fields!(rebuilt_item, it)
               out << rebuilt_item
               used[i] = true
               used[candidate_idx] = true
@@ -644,11 +645,12 @@ module BlueCollarSystems
           items.each_with_index do |it, idx|
             t = it.text.to_s.strip
 
-            should_reject = if t =~ /\A\d{1,2}\/(?:2|4|8|16|32|64)\z/
+            should_reject = if t =~ /\A\d{1,2}\/(?:2|4|8|16|32|64)\z/ ||
+                               t =~ /\ATYP\.?\z/i
               items.each_with_index.any? do |other, j|
                 next false if idx == j
                 ot = other.text.to_s
-                next false unless ot.length > t.length + 2
+                next false unless ot.length > t.length + 1
                 next false unless ot.include?(t)
                 dx = (other.x.to_f - it.x.to_f).abs
                 dy = (other.y.to_f - it.y.to_f).abs
