@@ -16,10 +16,14 @@ class VisualFontLayerManager
 end
 
 class MeshTextVisualParityTest < Minitest::Test
-  def builder_with_fonts(fonts)
-    GB.new(Object.new, [], [], LETTER, scale_factor: 1.0,
-           import_text: true, use_3d_text: true,
-           installed_font_families: fonts)
+  def builder_with_fonts(fonts, extra = {})
+    options = {
+      scale_factor: 1.0,
+      import_text: true,
+      use_3d_text: true,
+      installed_font_families: fonts
+    }.merge(extra)
+    GB.new(Object.new, [], [], LETTER, options)
   end
 
   def render_item(text, family, ratio, bbox_height = 2.0)
@@ -148,5 +152,156 @@ class MeshTextVisualParityTest < Minitest::Test
     entities = DummyTransformEntities.new
     builder.send(:place_mesh_text, entities, item, 0.0, 0.0, nil)
     assert_equal ['Arial Narrow', true, true], entities.font_style_args.last
+  end
+
+  def test_matrix_x_accepts_only_finite_positive_trusted_values
+    builder = builder_with_fonts(['Arial'])
+    item = render_item('MATRIX', 'Arial', 1491.0 / 2048.0)
+    cases = [
+      [nil, 1.0],
+      [0.0, 1.0],
+      [-0.25, 1.0],
+      [Float::NAN, 1.0],
+      [Float::INFINITY, 1.0],
+      [-Float::INFINITY, 1.0],
+      [1.436458, 1.436458]
+    ]
+    cases.each do |value, expected|
+      item.trusted_text_matrix_x_scale = value
+      assert_in_delta expected, builder.send(:mesh_text_matrix_x_scale, item), 1.0e-12,
+                      "matrix-X validation failed for #{value.inspect}"
+    end
+  end
+
+  def test_trusted_matrix_x_can_grow_while_bbox_residual_never_grows
+    builder = builder_with_fonts(['Arial Narrow'])
+    item = render_item('ONE FRAME', 'Arial Narrow', 1491.0 / 2048.0)
+    item.trusted_text_matrix_x_scale = 1.436458
+    item.bbox_x0, item.bbox_x1 = 0.0, 200.0
+    generated = [DummyRenderedTextEntity.new(1.0, 0.1)]
+
+    residual, status, reason = builder.send(
+      :mesh_text_residual_x_scale, item, generated, 0.0, 1.436458
+    )
+
+    assert_equal [1.0, :skipped, 'no_overflow'], [residual, status, reason]
+    assert_in_delta 1.436458,
+                    builder.send(:mesh_text_matrix_x_scale, item) * residual, 1.0e-6
+  end
+
+  def test_residual_boundary_is_inclusive_at_half_and_never_grows
+    builder = builder_with_fonts(['Arial'])
+    item = render_item('BOM', 'Arial', 1491.0 / 2048.0)
+    item.bbox_x0 = 0.0
+    generated = [DummyRenderedTextEntity.new(1.0, 0.1)]
+
+    item.bbox_x1 = 72.0
+    assert_equal [1.0, :skipped, 'no_overflow'],
+                 builder.send(:mesh_text_residual_x_scale, item, generated, 0.0, 1.0)
+
+    item.bbox_x1 = 36.0
+    residual, status, reason = builder.send(
+      :mesh_text_residual_x_scale, item, generated, 0.0, 1.0
+    )
+    assert_in_delta 0.50, residual, 1.0e-12
+    assert_equal [:fitted, 'bbox_overflow_shrink'], [status, reason]
+
+    item.bbox_x1 = 35.999928
+    assert_equal [1.0, :rejected_outlier, 'residual_below_0_50'],
+                 builder.send(:mesh_text_residual_x_scale, item, generated, 0.0, 1.0)
+  end
+
+  def test_residual_axis_and_angle_tolerance_boundaries
+    builder = builder_with_fonts(['Arial'])
+    item = render_item('AXIS', 'Arial', 1491.0 / 2048.0)
+    generated = [DummyRenderedTextEntity.new(1.0, 0.1)]
+
+    item.bbox_x0, item.bbox_x1 = 0.0, 36.0
+    [0.0, 3.0].each do |angle|
+      residual, status, = builder.send(
+        :mesh_text_residual_x_scale, item, generated, angle, 1.0
+      )
+      assert_in_delta 0.50, residual, 1.0e-12
+      assert_equal :fitted, status
+    end
+
+    item.bbox_y0, item.bbox_y1 = 0.0, 36.0
+    [90.0, -90.0].each do |angle|
+      residual, status, = builder.send(
+        :mesh_text_residual_x_scale, item, generated, angle, 1.0
+      )
+      assert_in_delta 0.50, residual, 1.0e-12
+      assert_equal :fitted, status
+    end
+
+    assert_equal [1.0, :skipped, 'diagonal_angle'],
+                 builder.send(:mesh_text_residual_x_scale, item, generated, 3.01, 1.0)
+  end
+
+  def test_page_rotations_compose_bbox_and_display_angle_exactly_once
+    item = render_item('ROTATED PAGE', 'Arial', 1491.0 / 2048.0)
+    item.angle = 0.0
+    item.bbox_x0, item.bbox_x1 = 0.0, 36.0
+    item.bbox_y0, item.bbox_y1 = 100.0, 102.0
+    generated = [DummyRenderedTextEntity.new(1.0, 0.1)]
+
+    [[90, 90.0], [270, 90.0]].each do |page_rotation, expected_display_angle|
+      builder = builder_with_fonts(['Arial'], page_rotation: page_rotation)
+      display_angle = builder.send(:display_text_angle, item, item.angle)
+      assert_in_delta expected_display_angle, display_angle, 1.0e-12
+      assert_in_delta 0.50,
+                      builder.send(:mesh_text_bbox_run_width_inches, item, display_angle),
+                      1.0e-12
+      residual, status, = builder.send(
+        :mesh_text_residual_x_scale, item, generated, display_angle, 1.0
+      )
+      assert_in_delta 0.50, residual, 1.0e-12
+      assert_equal :fitted, status
+    end
+  end
+
+  def test_invalid_bbox_values_skip_residual_reconciliation
+    builder = builder_with_fonts(['Arial'])
+    item = render_item('INVALID', 'Arial', 1491.0 / 2048.0)
+    generated = [DummyRenderedTextEntity.new(1.0, 0.1)]
+    [nil, Float::NAN, Float::INFINITY].each do |bad|
+      item.bbox_x1 = bad
+      assert_equal [1.0, :skipped, 'invalid_width'],
+                   builder.send(:mesh_text_residual_x_scale, item, generated, 0.0, 1.0)
+    end
+    item.bbox_x0 = 50.0
+    item.bbox_x1 = 50.0
+    assert_equal [1.0, :skipped, 'invalid_width'],
+                 builder.send(:mesh_text_residual_x_scale, item, generated, 0.0, 1.0)
+  end
+
+  def test_diagonal_matrix_x_uses_exact_local_transform_order_and_created_entities_only
+    builder = builder_with_fonts(['Arial Narrow'])
+    item = render_item('DIAGONAL', 'Arial Narrow', 1491.0 / 2048.0)
+    item.angle = 41.0
+    item.trusted_text_matrix_x_scale = 1.436458
+    sentinel = DummyRenderedTextEntity.new(9.0, 9.0)
+    entities = DummyTransformEntities.new([sentinel])
+    label_x, label_y, = builder.send(:mesh_label_anchor_pdf, item)
+    expected_anchor = builder.send(:text_point_to_su, item, label_x, label_y, 0.0, 0.0)
+
+    assert builder.send(:place_mesh_text, entities, item, 0.0, 0.0, Object.new)
+    assert_equal [:scaling, :translation, :rotation],
+                 entities.transforms.map { |args| args.first.kind }
+
+    scale, translation, rotation = entities.transforms.map(&:first)
+    assert_same ORIGIN, scale.args[0]
+    assert_in_delta 1.436458, scale.args[1], 1.0e-12
+    assert_equal [1.0, 1.0], scale.args[2..3], 'Y and Z scale must remain exactly 1.0'
+    anchor = translation.args[0]
+    assert_in_delta expected_anchor.x, anchor.x, 1.0e-12
+    assert_in_delta expected_anchor.y, anchor.y, 1.0e-12
+    assert_same anchor, rotation.args[0], 'rotation must reuse the unchanged translation anchor'
+    assert(entities.transforms.all? do |args|
+      targets = args[1..-1]
+      !targets.any? { |entity| entity.equal?(sentinel) } &&
+        targets.all? { |entity| !entity.equal?(sentinel) }
+    end)
+    assert_includes entities.entities, sentinel
   end
 end

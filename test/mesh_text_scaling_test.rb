@@ -33,7 +33,11 @@ module Geom
       @args = args
       @kind = :translation
     end
-    def self.rotation(*); new; end
+    def self.rotation(*args)
+      t = new(*args)
+      t.instance_variable_set(:@kind, :rotation)
+      t
+    end
     def self.scaling(*args)
       t = new(*args)
       t.instance_variable_set(:@kind, :scaling)
@@ -112,26 +116,34 @@ class DummyFaceEntity
 end
 
 class DummyTransformEntities
-  attr_reader :transforms, :erased, :height_args, :tolerance_args, :font_style_args
-  def initialize
-    @entities = []
+  attr_reader :transforms, :erased, :height_args, :tolerance_args,
+              :font_style_args, :filled_args, :entities
+  def initialize(initial_entities = [])
+    @entities = initial_entities.dup
     @transforms = []
     @erased = []
     @height_args = []
     @tolerance_args = []
     @font_style_args = []
+    @filled_args = []
   end
   def to_a; @entities.dup; end
   def add_3d_text(_text, _align, _font, _bold, _italic, height, tol, _extrusion, _filled, _z)
     @font_style_args << [_font, _bold, _italic]
     @height_args << height
     @tolerance_args << tol
+    @filled_args << _filled
     @entities << DummyRenderedTextEntity.new(height * 3.0, height, typename: 'Edge')
     @entities << DummyFaceEntity.new
     true
   end
-  def transform_entities(*args); @transforms << args; end
-  def erase_entities(*args); @erased.concat(args.flatten); end
+  def transform_entities(*args); @transforms << args; true; end
+  def erase_entities(*args)
+    doomed = args.flatten
+    @erased.concat(doomed)
+    @entities.delete_if { |entity| doomed.any? { |candidate| candidate.equal?(entity) } }
+    true
+  end
 end
 
 # ── Constants from geometry_builder.rb ───────────────────────────────────────
@@ -383,19 +395,26 @@ class MeshTextScalingTest < Minitest::Test
   def test_face_entities_retained_after_place_mesh_text
     b = make_builder(LETTER)
     item = bbox_item('A', 8.0, 10.0, bbox_w: 50.0)
-    edge1 = DummyRenderedTextEntity.new(5.0 / 72.0, 8.0 / 72.0, typename: 'Edge')
-    face1 = DummyFaceEntity.new
-    face2 = DummyFaceEntity.new
-    ents  = DummyTransformEntities.new
+    item.angle = 30.0
+    ents = DummyTransformEntities.new
+    material = Object.new
+    layer = Object.new
+    b.define_singleton_method(:get_or_create_material) { |_rgb| material }
 
-    # Simulate the retained text geometry set place_mesh_text now preserves.
-    new_ents = [edge1, face1, face2]
-    faces = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
-    b.send(:apply_text_face_material, faces)
+    delivered = b.send(:place_mesh_text, ents, item, 0.0, 0.0, layer)
+    face = ents.entities.find { |entity| entity.respond_to?(:typename) && entity.typename == 'Face' }
+    kinds = ents.transforms.map { |args| args.first.kind }
 
-    assert_equal 0, ents.erased.length, 'Text faces must not be erased'
-    assert_equal 3, new_ents.length, 'Edges and filled glyph faces both survive'
-    assert_equal 2, faces.length, 'Both Face entities are retained for filled text'
+    assert delivered, 'successful native mesh placement must be reported as delivered'
+    assert face, 'filled add_3d_text must leave a Face in the delivered entity collection'
+    assert_same material, face.material, 'front material survives local-X transforms'
+    assert_same material, face.back_material, 'back material survives local-X transforms'
+    assert_same layer, face.layer, 'layer assignment survives local-X transforms'
+    assert_equal [true], ents.filled_args, 'native 3D text must request filled faces'
+    assert_equal [:scaling, :translation, :rotation], kinds
+    assert ents.transforms.all? { |args| args[1..-1].any? { |entity| entity.equal?(face) } },
+           'every ordered transform must target the created face'
+    assert_empty ents.erased, 'successful filled faces must never enter cleanup'
   end
 
   # ── v3.7.83: nominal font_size must survive tiny pdftotext line bbox ───────
@@ -472,8 +491,12 @@ class MeshTextScalingTest < Minitest::Test
     assert_equal [0.0], ents.tolerance_args,
                  'add_3d_text tolerance must be 0.0 (R20-1 quality)'
     kinds = ents.transforms.map { |args| args[0].respond_to?(:kind) ? args[0].kind : nil }
-    refute_includes kinds, :scaling,
-                    'no post-generation rescale of glyphs (R20-2 panel verdict)'
+    assert_equal [:scaling, :translation], kinds,
+                 'local-X scaling must precede the unchanged translation anchor'
+    scaling_args = ents.transforms.first[0].args
+    assert_same ORIGIN, scaling_args[0]
+    assert_equal [1.0, 1.0, 1.0], scaling_args[1..3],
+                 'unfitted text still uses exact local-X [1, 1, 1], never Y/Z scaling'
     samples = b.send(:text_height_samples)
     assert_equal 1, samples.length
     assert_in_delta 8.0 * PT_TO_IN * ARIAL_RATIO, samples[0], 0.001

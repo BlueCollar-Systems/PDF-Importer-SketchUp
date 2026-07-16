@@ -20,6 +20,12 @@ require 'bc_pdf_vector_importer/geometry_builder'
 
 TextAlignLeft = 0
 
+class Numeric
+  def degrees
+    to_f * Math::PI / 180.0
+  end
+end
+
 module Geom
   class Point3d
     attr_accessor :x, :y, :z
@@ -40,10 +46,23 @@ module Geom
   end
 
   class Transformation
-    def initialize(*); end
-    def self.rotation(*); new; end
+    attr_reader :args, :kind
+    def initialize(*args); @args = args; @kind = :translation; end
+    def self.rotation(*args)
+      transform = new(*args)
+      transform.instance_variable_set(:@kind, :rotation)
+      transform
+    end
+    def self.scaling(*args)
+      transform = new(*args)
+      transform.instance_variable_set(:@kind, :scaling)
+      transform
+    end
   end
 end
+
+ORIGIN = Geom::Point3d.new(0, 0, 0) unless defined?(ORIGIN)
+Z_AXIS = Geom::Vector3d.new(0, 0, 1) unless defined?(Z_AXIS)
 
 class ShopBomVisualParityRegressionTest < Minitest::Test
   PDF_CANDIDATES = [
@@ -83,10 +102,30 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
   end
 
   class PlacementEntities
-    attr_reader :labels, :mesh
+    class Bounds
+      attr_reader :min, :max
+      def initialize(width, height)
+        @min = Geom::Point3d.new(0, 0, 0)
+        @max = Geom::Point3d.new(width, height, 0)
+      end
+    end
+
+    class Entity
+      attr_accessor :layer, :material, :back_material
+      def initialize(typename, width, height)
+        @typename = typename
+        @bounds = Bounds.new(width, height)
+      end
+      def typename; @typename; end
+      def bounds; @bounds; end
+    end
+
+    attr_reader :labels, :mesh, :transforms, :entities
     def initialize
       @labels = []
       @mesh = []
+      @transforms = []
+      @entities = []
     end
 
     def add_text(text, pt, dir = nil)
@@ -96,11 +135,18 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
 
     def add_3d_text(text, _align, _font, _bold, _italic, height, _tol, _extrusion, _filled, _z)
       @mesh << { text: text, height: height }
+      @entities << Entity.new('Edge', height * 3.0, height)
+      @entities << Entity.new('Face', height * 3.0, height)
       true
     end
 
     def to_a
-      []
+      @entities.dup
+    end
+
+    def transform_entities(*args)
+      @transforms << args
+      true
     end
   end
 
@@ -124,7 +170,7 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
     texts = items.map { |it| it.text.to_s.strip }
     assert_operator items.length, :>=, 250, 'expected dense shop-drawing text coverage'
     BOM_HEADERS.each do |hdr|
-      assert texts.any? { |t| t.casecmp?(hdr) }, "missing BOM header #{hdr}"
+      assert texts.any? { |t| t.casecmp(hdr) == 0 }, "missing BOM header #{hdr}"
     end
     row_count = texts.count { |t| t =~ BOM_SAMPLE_RE }
     assert_operator row_count, :>=, 25, 'expected BOM table row/header sample strings'
@@ -135,7 +181,7 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
     ents = simulate_placement(use_3d_text: false)
     placed = ents.labels.map { |e| e[:text].to_s.strip }
     BOM_HEADERS.each do |hdr|
-      assert placed.any? { |t| t.casecmp?(hdr) }, "Labels mode missing #{hdr}"
+      assert placed.any? { |t| t.casecmp(hdr) == 0 }, "Labels mode missing #{hdr}"
     end
     assert_operator ents.labels.length, :>=, 250, 'Labels mode should place most extracted strings'
   end
@@ -145,15 +191,21 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
     ents = simulate_placement(use_3d_text: true)
     placed = ents.mesh.map { |e| e[:text].to_s.strip }
     BOM_HEADERS.each do |hdr|
-      assert placed.any? { |t| t.casecmp?(hdr) }, "3D Text mode missing #{hdr}"
+      assert placed.any? { |t| t.casecmp(hdr) == 0 }, "3D Text mode missing #{hdr}"
     end
     tiny = ents.mesh.count { |e| e[:height].to_f < 0.02 }
     assert_equal 0, tiny, '3D Text must not shrink to microscopic heights'
-    header = BOM_HEADERS.map { |hdr| ents.mesh.find { |e| e[:text].to_s.strip.casecmp?(hdr) } }.compact.first
+    header = BOM_HEADERS.map do |hdr|
+      ents.mesh.find { |e| e[:text].to_s.strip.casecmp(hdr) == 0 }
+    end.compact.first
     assert header, '3D Text missing BOM header mesh'
     assert_operator header[:height], :>=, 0.08,
                     "BOM header 3D height too small (#{header[:height].round(4)} in)"
     assert_operator header[:height], :<=, 0.30,
                     "BOM header 3D height too large (#{header[:height].round(4)} in)"
+    assert_empty ents.labels,
+                 '3D Text regression must not pass through empty-mesh Label fallback'
+    assert_operator ents.entities.length, :>, 0,
+                    '3D Text regression fake must retain generated native entities'
   end
 end
