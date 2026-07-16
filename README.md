@@ -60,7 +60,7 @@ assets, checksums, license, and notes.
   mode merely to hide alignment, rotation, or scaling defects.
 
   - **3D Text:** Labels → page raster.
-  - **Glyphs / Geometry:** peer outline family → 3D Text → Labels → page raster.
+  - **Glyphs / Geometry:** peer outline family (same SVG engine today) → 3D Text → Labels → page raster.
   - **Labels:** 3D Text → page raster.
   - **Raster:** terminal visual representation.
 

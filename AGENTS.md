@@ -4,7 +4,9 @@
 
 **Cursor rule (authoritative, always-on):** [`.cursor/rules/text-mode-fidelity.mdc`](.cursor/rules/text-mode-fidelity.mdc)
 
-Owner doctrine (paraphrase): if the importer is told to bring text in as text, labels, glyphs, 3D Text, geometry, or raster, that is what it must be. Do **not** alter the desired representation to correct alignment, rotation, or scaling — especially when those transforms worked in past versions. Fallback only when a specific *(importer, option, PDF)* cannot achieve the requested option. Then use the **most logical** next option (closest related first). There will be an option. Goal: visually accurate imports as close as possible to the user’s desired outcome, **at no financial cost**.
+**Hard contract:** requested text mode (Geometry / Glyphs / Labels / 3D Text / raster) is the deliverable. Alignment, rotation, and scale are fixed **in that mode** — never by switching representation, especially when those transforms worked before. Fallback only when that *(importer, option, PDF)* cannot produce the mode; then closest free option first (ladder below). Visually accurate, host-native/bundled, **no paid path**.
+
+**Agent trap:** “text looks wrong” ≠ “change the mode.” Wrong position/angle/size → transform fix. Mode change without proven impossibility = reject.
 
 ### SketchUp text-mode fallback chain
 
@@ -13,7 +15,7 @@ UI / code names from `ImportDialog::TEXT_MODE_CHOICES` / symbols `:geometry`, `:
 | Priority | Mode | When to use as fallback |
 |----------|------|-------------------------|
 | 0 | **Requested mode** | Always first; fix transforms here |
-| 1 | **Glyphs ↔ Geometry** | Peer outline paths (both need Poppler/MuPDF SVG today) |
+| 1 | **Glyphs ↔ Geometry** | Peer outline family (same `SvgTextRenderer` today — no distinct peer engine yet; on SVG failure skip to 3D Text) |
 | 2 | **3D Text** | Next free model-space representation |
 | 3 | **Labels** | Editable native text when mesh/outline unavailable |
 | 4 | **Page raster** | Completeness last resort (`raster_fallback` / Raster import strategy) |
@@ -37,3 +39,4 @@ Report every degradation (`degraded: true`, import report / Import Health). Neve
 
 - Host / text-mode matrix: [`HOST_COMPATIBILITY.md`](HOST_COMPATIBILITY.md), [`COMPATIBILITY.md`](COMPATIBILITY.md), [`README.md`](README.md)
 - Q&A corpus (external): contributor handoff SIZE-1 / R20-2 / Labels contract — do not reopen bbox-fit without live-host evidence
+- **Not on main yet:** worktree/branch `codex/sketchup-3d-text-parity` (plan/spec under `docs/superpowers/` for **3.7.95** 3D Text visual parity). Do not merge until live SketchUp 2017 acceptance; keep SIZE-1 locks on main until that design lands with updated tests.

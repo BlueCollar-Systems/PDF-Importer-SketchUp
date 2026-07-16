@@ -47,7 +47,7 @@ disabled.
 
 The dialog defaults to 3D Text on first run and restores the last text rendering option used after that. Labels are an editability tradeoff, not the default visual sign-off mode.
 
-**Mode fidelity:** honor the selected text option. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. If Geometry/Glyphs cannot run (no Poppler/MuPDF SVG), degrade **Glyphs ↔ Geometry → 3D Text → Labels → page raster**, report `degraded`, and stay free/bundled. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
+**Mode fidelity:** honor the selected text option. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. If Geometry/Glyphs cannot run (no Poppler/MuPDF SVG), degrade **Glyphs ↔ Geometry → 3D Text → Labels → page raster** (Glyphs/Geometry share one SVG renderer today, so failure skips the peer rung and goes to 3D Text), report `degraded`, and stay free/bundled. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
 
 ### PDF layers / SketchUp Tags
 
