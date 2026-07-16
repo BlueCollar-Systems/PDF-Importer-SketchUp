@@ -960,7 +960,7 @@ module BlueCollarSystems
                    'Arial Narrow'
                  elsif compact.include?('arial')
                    'Arial'
-                 elsif compact.include?('romant')
+                 elsif name =~ /\Aromant(?:[,_-]?(?:bolditalic|boldoblique|bold|italic|oblique|bd|it))?\z/i
                    'RomanT'
                  else
                    name.gsub(/[,_-]?(bolditalic|boldoblique|bold|italic|oblique|bd|it)\z/i, '')

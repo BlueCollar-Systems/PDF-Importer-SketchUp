@@ -32,6 +32,13 @@ class PdfFontMetadataTest < Minitest::Test
     end
   end
 
+  def test_romantic_near_match_is_not_treated_as_romant
+    info = info_for('/BaseFont' => '/Romantic')
+    assert_equal 'Romantic', info[:source_font_family]
+    assert_equal :default_arial_family, info[:font_to_sketchup_letter_ratio_source]
+    assert_in_delta 1491.0 / 2048.0, info[:font_to_sketchup_letter_ratio], 1.0e-12
+  end
+
   def test_descriptor_ascent_is_bounded_and_capheight_is_ignored
     valid = info_for({'/BaseFont' => '/UnknownCAD', '/FontDescriptor' => 'd'},
                      {'d' => {'/Ascent' => 600, '/CapHeight' => 500}})
@@ -49,6 +56,24 @@ class PdfFontMetadataTest < Minitest::Test
     assert_equal({}, info[:map])
     assert_equal [1], info[:code_lengths]
     assert_equal 'Arial', info[:source_font_family]
+  end
+
+  def test_page_font_maps_retains_font_without_tounicode_under_both_aliases
+    objects = {
+      'page' => {'/Resources' => 'resources'},
+      'resources' => {'/Font' => 'fonts'},
+      'fonts' => {'/F1' => 'font'},
+      'font' => {'/BaseFont' => '/Arial'}
+    }
+    parser = parser_for(objects)
+    parser.instance_variable_set(:@pages, ['page'])
+    parser.instance_variable_set(:@page_count, 1)
+
+    maps = parser.page_font_maps(1)
+    assert maps.key?('/F1')
+    assert_same maps['/F1'], maps['F1']
+    assert_equal({}, maps['/F1'][:map])
+    assert_equal [1], maps['F1'][:code_lengths]
   end
 
   def test_descriptor_italic_angle_sets_style
