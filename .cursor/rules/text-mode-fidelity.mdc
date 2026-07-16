@@ -1,18 +1,32 @@
 ---
-description: Sacred text-mode fidelity — never downgrade representation to paper over transform bugs
+description: MUST keep requested text mode; NEVER switch mode to fix alignment/rotation/scale
 alwaysApply: true
 ---
 
-# Text mode fidelity (owner doctrine)
+# Text mode fidelity (hard contract)
 
-If the option asks for **Geometry**, **Glyphs**, **Labels**, **3D Text**, or **raster**, produce that representation.
+**Requested mode wins.** Geometry / Glyphs / Labels / 3D Text / raster means that representation. Alignment, rotation, and scale bugs are **transform bugs inside that mode** — especially when they worked in past versions.
 
-1. **Mode fidelity is sacred** — never change mode to paper over alignment/rotation/scale bugs.
-2. **Fix transforms in-place** in the requested mode (restore past-correct behavior).
-3. **Fallback only** when that *(importer, option, PDF)* truly cannot achieve the mode.
-4. **Ordered fallback** (`ImportDialog::TEXT_MODE_CHOICES`): Glyphs ↔ Geometry → **3D Text** → Labels → page raster. Always pick the closest related option; never leave text empty when a related path exists; log + report `degraded`.
-5. **Free to user** — bundled/host-native only; no paid-only fallback path.
+## MUST
 
-Reject: switching Labels↔3D Text/Geometry/raster to hide transform bugs; skipping 3D Text after Geometry/Glyphs SVG failure because mesh "might look wrong"; silent empty text.
+1. **Stay in the requested mode** and fix transforms / placement / height there.
+2. **Fallback only** when that exact *(importer, option, PDF)* **cannot** produce the mode (missing engine, host API absent, empty SVG, native create fails). Prove impossibility in the report/logs.
+3. **Ordered fallback** then (closest first): Glyphs ↔ Geometry → **3D Text** → Labels → page raster. Log + report `degraded: true`. Never leave text empty when a related path exists.
+4. **Free only** — bundled / host-native. No paid-only path.
 
-SIZE-1 / R20-2 are in-mode height contracts, not licenses to change representation. Rotated Labels stay Labels.
+## MUST NOT (instant reject)
+
+- Switch Labels ↔ 3D Text / Geometry / Glyphs / raster to “fix” alignment, rotation, or scale.
+- Skip 3D Text after Geometry/Glyphs SVG failure because mesh “might look wrong.”
+- Treat SIZE-1 or R20-2 as permission to change representation (they are **in-mode** height contracts).
+- Convert rotated Labels to mesh/geometry; SketchUp `Text` limits stay Labels.
+- Silent empty text, or “helpful” mode change for prettier results.
+
+## Agent trap
+
+If the bug report is “wrong position / angle / size,” your first change is **not** the fallback ladder. Fallback is capability failure only — not quality escape.
+
+## Done only when
+
+- Delivered representation matches the requested mode, **or**
+- Impossibility is documented and the **closest** free fallback was used with `degraded` reported — and you did **not** change mode to hide a transform bug.
