@@ -24,9 +24,9 @@ ti = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem
 
 external = [
   ti.new('w1023', 822.0, 760.0, 33.0, 0.0, 'pdftotext', nil,
-         822.0, 760.0, 833.0, 794.0, nil),
+         822.0, 760.0, 833.0, 794.0, nil, 'external:w1023'),
   ti.new('p1016', 868.0, 703.0, 11.0, 0.0, 'pdftotext', nil,
-         868.0, 703.0, 900.0, 714.0, nil)
+         868.0, 703.0, 900.0, 714.0, nil, 'external:p1016')
 ]
 
 internal = [
@@ -35,6 +35,15 @@ internal = [
   ti.new('p1016', 868.0, 703.0, 11.0, 41.0, 'F1', 1.0,
          nil, nil, nil, nil, nil)
 ]
+
+internal.each do |item|
+  item.source_font_family = 'Arial Narrow'
+  item.source_font_bold = true
+  item.source_font_italic = false
+  item.font_to_sketchup_letter_ratio = 1491.0 / 2048.0
+  item.font_to_sketchup_letter_ratio_source = :known_arial_family
+  item.trusted_text_matrix_x_scale = 1.436458
+end
 
 merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hints(
   external, internal
@@ -50,6 +59,22 @@ assert_near(merged[0].font_size, 11.0, 0.01,
             'angle enrichment should adopt internal nominal text size')
 assert_near(merged[0].bbox_x0, external[0].bbox_x0, 0.01,
             'angle enrichment must preserve external bbox placement')
+assert_true(merged[0].font_name == 'pdftotext',
+            'angle enrichment must preserve the external extraction marker')
+assert_true(merged[0].source_span_id == 'external:w1023',
+            'angle enrichment must preserve the external source-span identity')
+assert_true(merged[0].source_font_family == 'Arial Narrow',
+            'angle enrichment should adopt the internal source font family')
+assert_true(merged[0].source_font_bold == true,
+            'angle enrichment should adopt the internal bold hint')
+assert_true(merged[0].source_font_italic == false,
+            'angle enrichment should adopt the internal italic hint')
+assert_near(merged[0].font_to_sketchup_letter_ratio, 1491.0 / 2048.0, 1.0e-9,
+            'angle enrichment should adopt the internal letter ratio')
+assert_true(merged[0].font_to_sketchup_letter_ratio_source == :known_arial_family,
+            'angle enrichment should adopt the internal ratio source')
+assert_near(merged[0].trusted_text_matrix_x_scale, 1.436458, 1.0e-6,
+            'angle enrichment should adopt the internal trusted matrix X scale')
 assert_near(merged[1].angle, 41.0, 0.01,
             'matching rotated part marks should accept source text-matrix angle')
 assert_near(merged[1].font_size, 11.0, 0.01,

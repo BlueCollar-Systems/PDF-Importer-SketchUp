@@ -791,11 +791,7 @@ module BlueCollarSystems
           bx1,
           by1
         )
-        # Derived/split text keeps the source item's span identity so its
-        # provenance rows still join with parts_bootstrap (corrective §1).
-        if sub.respond_to?(:source_span_id=) && item.respond_to?(:source_span_id)
-          sub.source_span_id = item.source_span_id
-        end
+        TextParser.copy_text_item_final_fields!(sub, item)
         sub
       rescue StandardError
         item

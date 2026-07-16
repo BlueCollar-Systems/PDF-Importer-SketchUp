@@ -294,10 +294,7 @@ module BlueCollarSystems
                 merge_angle(it.angle, items[candidate_idx].angle),
                 it.font_name
               )
-              # Merged fragments keep the head item's span identity (corrective §1).
-              if it.respond_to?(:source_span_id)
-                merged_item.source_span_id = it.source_span_id
-              end
+              TextParser.copy_text_item_final_fields!(merged_item, it)
               out << merged_item
               used[i] = true
               used[candidate_idx] = true
@@ -439,7 +436,7 @@ module BlueCollarSystems
           bx1 = xs1.max
           by1 = ys1.max
           merged_text = "#{a1.text.to_s.strip}#{zeros.text.to_s.strip}#{digit.text.to_s.strip}"
-          TextParser::TextItem.new(
+          merged_item = TextParser::TextItem.new(
             merged_text,
             bx0,
             by0,
@@ -455,6 +452,8 @@ module BlueCollarSystems
             # Merged angle marks keep the leading item's span identity (corrective §1).
             a1.respond_to?(:source_span_id) ? a1.source_span_id : nil
           )
+          TextParser.copy_text_item_final_fields!(merged_item, a1)
+          merged_item
         rescue StandardError
           a1
         end
@@ -510,10 +509,7 @@ module BlueCollarSystems
                 merge_angle(it.angle, items[candidate_idx].angle),
                 it.font_name
               )
-              # Repaired pairs keep the head item's span identity (corrective §1).
-              if it.respond_to?(:source_span_id)
-                rebuilt_item.source_span_id = it.source_span_id
-              end
+              TextParser.copy_text_item_final_fields!(rebuilt_item, it)
               out << rebuilt_item
               used[i] = true
               used[candidate_idx] = true
