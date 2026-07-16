@@ -199,8 +199,11 @@ class MeshTextWidthFidelityTest < Minitest::Test
 
   # ── Source locks ──────────────────────────────────────────────────────────
   def source
+    # Explicit UTF-8: the bare ruby:2.2 container defaults to US-ASCII and
+    # raises on the builder's UTF-8 comments otherwise.
     @source ||= File.read(
-      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb')
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb'),
+      encoding: 'UTF-8'
     )
   end
 

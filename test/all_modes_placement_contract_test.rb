@@ -70,7 +70,8 @@ class AllModesPlacementContractTest < Minitest::Test
     assert_equal [:scaling, :translation, :rotation], kinds,
                  'rotated 3D Text must scale about ORIGIN, then move, then rotate'
     assert(
-      !File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb'))
+      !File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb'),
+                 encoding: 'UTF-8')
            .include?('mesh_text_post_rotation_offset'),
       'mesh_text_post_rotation_offset must stay banned'
     )
@@ -90,7 +91,9 @@ class AllModesPlacementContractTest < Minitest::Test
   # Geometry and Glyphs are both SVG-rendered representations routed through
   # the same renderer with 3D Text fallback semantics.
   def test_geometry_and_glyphs_share_svg_renderer_path
-    main = File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'))
+    # Explicit UTF-8 for the bare ruby:2.2 container (US-ASCII default).
+    main = File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+                     encoding: 'UTF-8')
     assert_match(/SvgTextRenderer\.render/, main)
     assert_match(
       /fallback_use_3d = \[:text3d, :geometry, :glyphs\]\.include\?\(requested_text_mode\)/,
