@@ -75,6 +75,8 @@ module BlueCollarSystems
     # 3D-model workflow is explicitly revived.
     SHAPE_EXTRUSION_ENABLED = false
 
+    class TerminalRasterAtomicityError < StandardError; end
+
     def self.env_numeric(name, fallback)
       raw = ENV[name.to_s]
       return fallback if raw.nil? || raw.to_s.strip.empty?
@@ -198,6 +200,12 @@ module BlueCollarSystems
       end
     end
 
+    # Page-level density/fill heuristics may optimize other modes, but they
+    # must never preempt the per-item native 3D Text attempt ledger.
+    def self.page_raster_heuristics_allowed?(requested_text_mode)
+      normalize_text_renderer_mode(requested_text_mode) != :text3d
+    end
+
     def self.text_fallback_event_count(fallbacks)
       Array(fallbacks).inject(0) do |total, fallback|
         next total unless fallback.respond_to?(:[])
@@ -228,6 +236,134 @@ module BlueCollarSystems
       0
     end
 
+    def self.active_entity_snapshot(model)
+      return nil unless model && model.respond_to?(:active_entities)
+      entities = model.active_entities
+      return nil unless entities && entities.respond_to?(:to_a)
+      Array(entities.to_a).dup
+    rescue StandardError => e
+      Logger.warn('Pipeline', "active entity snapshot failed: #{e.message}")
+      nil
+    end
+
+    def self.entity_list_difference(after_entities, before_entities)
+      Array(after_entities).select do |entity|
+        !Array(before_entities).any? { |existing| existing.equal?(entity) }
+      end
+    rescue StandardError
+      []
+    end
+
+    def self.entity_list_union(*lists)
+      result = []
+      lists.each do |list|
+        Array(list).compact.each do |entity|
+          result << entity unless result.any? { |existing| existing.equal?(entity) }
+        end
+      end
+      result
+    rescue StandardError
+      []
+    end
+
+    def self.stable_entity_identity(entity)
+      if entity.respond_to?(:persistent_id)
+        value = entity.persistent_id
+        return "persistent_id:#{value}" unless value.nil? || value.to_s.empty?
+      end
+      if entity.respond_to?(:entityID)
+        value = entity.entityID
+        return "entity_id:#{value}" unless value.nil? || value.to_s.empty?
+      end
+      nil
+    rescue StandardError
+      nil
+    end
+
+    def self.stable_entity_identities(entities)
+      Array(entities).map do |entity|
+        stable_entity_identity(entity)
+      end.compact.uniq
+    rescue StandardError
+      []
+    end
+
+    def self.page_group_hidden_state(page_group)
+      return page_group.hidden? if page_group.respond_to?(:hidden?)
+      return page_group.hidden if page_group.respond_to?(:hidden)
+      nil
+    rescue StandardError
+      nil
+    end
+
+    def self.page_group_hidden_state_matches?(page_group, expected)
+      state = page_group_hidden_state(page_group)
+      !state.nil? && state == expected
+    rescue StandardError
+      false
+    end
+
+    def self.rollback_created_raster_entities(model, raster_entities)
+      doomed = Array(raster_entities).compact
+      return false if doomed.empty?
+      entities = model && model.respond_to?(:active_entities) ?
+                   model.active_entities : nil
+      return false unless entities && entities.respond_to?(:erase_entities)
+      entities.erase_entities(*doomed)
+      remaining = active_entity_snapshot(model)
+      return false if remaining.nil?
+      doomed.none? do |entity|
+        remaining.any? { |candidate| candidate.equal?(entity) }
+      end
+    rescue StandardError => e
+      Logger.warn('Pipeline', "terminal raster rollback failed: #{e.message}")
+      false
+    end
+
+    def self.record_terminal_cleanup_failure!(stats, page_num, reason, details = {})
+      stats[:terminal_cleanup_failures] ||= []
+      entry = { page: page_num, reason: reason.to_s }
+      details.each { |key, value| entry[key] = value } if details.respond_to?(:each)
+      stats[:terminal_cleanup_failures] << entry
+      stats[:failed_pages] ||= []
+      exists = stats[:failed_pages].any? do |failure|
+        page = failure.respond_to?(:[]) ? (failure[:page] || failure['page']) : failure
+        page.to_i == page_num.to_i
+      end
+      unless exists
+        stats[:failed_pages] << {
+          page: page_num,
+          error: "terminal raster cleanup failed: #{reason}"
+        }
+      end
+      mark_terminal_raster_failure!(stats, page_num, reason, details)
+      false
+    rescue StandardError => e
+      Logger.warn('Pipeline', "record terminal cleanup failure failed: #{e.message}")
+      false
+    end
+
+    def self.mark_terminal_raster_failure!(stats, page_num, reason, details = {})
+      Array(stats[:mesh_text_telemetry]).each do |sample|
+        next unless sample.is_a?(Hash)
+        page = sample[:page] || sample['page']
+        next unless page.to_i == page_num.to_i
+        sample[:terminal_reason] = reason.to_s
+        sample[:terminal_cleanup_outcome] = :failed
+        sample[:terminal_cleanup_details] = details.dup if details.respond_to?(:dup)
+        sample[:attempt_history] ||= []
+        sample[:attempt_history] << {
+          mode: :raster,
+          outcome: :failed_cleanup,
+          reason: reason.to_s,
+          cleanup_outcome: :failed,
+          delivered_mode: :none
+        }
+      end
+    rescue StandardError => e
+      Logger.warn('Pipeline', "mark terminal raster failure failed: #{e.message}")
+    end
+
     # TEXTMODE-1 terminal rung.  This is intentionally independent of the
     # normal raster_fallback option: a readable PDF whose requested/native text
     # APIs are both impossible must still receive a visible page representation.
@@ -239,35 +375,152 @@ module BlueCollarSystems
       count = text_delivery_failure_count(failures)
       return false if count <= 0
 
+      representation_blocked = Array(failures).any? do |failure|
+        failure.respond_to?(:[]) &&
+          (failure[:representation_fallback_allowed] == false ||
+           failure['representation_fallback_allowed'] == false)
+      end
+      if representation_blocked
+        return record_terminal_cleanup_failure!(
+          stats, page_num, 'representation_fallback_disallowed'
+        )
+      end
+
       vector_entities = Array(page_vector_entities).compact
       if page_group && !page_group.respond_to?(:hidden=)
         Logger.warn('Pipeline', "Page #{page_num}: page group cannot be hidden for terminal raster fallback.")
-        return false
+        return record_terminal_cleanup_failure!(
+          stats, page_num, 'page_group_hide_unavailable'
+        )
+      end
+
+      previous_hidden = nil
+      if page_group
+        previous_hidden = page_group_hidden_state(page_group)
+        if previous_hidden.nil?
+          return record_terminal_cleanup_failure!(
+            stats, page_num, 'page_group_visibility_unverifiable'
+          )
+        end
+      end
+      before_raster = active_entity_snapshot(model)
+      if before_raster.nil?
+        return record_terminal_cleanup_failure!(
+          stats, page_num, 'raster_entity_snapshot_unavailable'
+        )
       end
       if page_group.nil? && !vector_entities.empty? &&
          (!model || !model.respond_to?(:active_entities) ||
           !model.active_entities.respond_to?(:erase_entities))
         Logger.warn('Pipeline', "Page #{page_num}: ungrouped vector entities cannot be removed for terminal raster fallback.")
-        return false
+        return record_terminal_cleanup_failure!(
+          stats, page_num, 'loose_vector_cleanup_unavailable'
+        )
       end
 
       reason = Array(failures).map do |failure|
         failure[:reason] || failure['reason'] if failure.respond_to?(:[])
       end.compact.map(&:to_s).reject(&:empty?).first
       reason = 'text_native_api_unavailable' if reason.to_s.empty?
-      raster_ok = import_page_as_raster(
-        model, pdf_path, page_num, media_box, opts, import_start, y_offset, render_box
+      raster_collector = []
+      raster_error = nil
+      raster_ok = begin
+        import_page_as_raster(
+          model, pdf_path, page_num, media_box, opts, import_start, y_offset,
+          render_box, raster_collector
+        )
+      rescue StandardError => e
+        raster_error = e
+        false
+      end
+      after_raster = active_entity_snapshot(model)
+      raster_entities = entity_list_union(
+        raster_collector,
+        entity_list_difference(after_raster, before_raster)
       )
-      return false unless raster_ok
+      unless raster_ok
+        if raster_entities.empty?
+          details = {}
+          details[:error] = raster_error.message if raster_error
+          return record_terminal_cleanup_failure!(
+            stats, page_num, 'raster_creation_failed', details
+          )
+        end
+        raster_rolled_back = rollback_created_raster_entities(
+          model, raster_entities
+        )
+        reason = raster_error ?
+                   'raster_creation_exception_after_partial_creation' :
+                   'raster_creation_failed_after_partial_creation'
+        record_terminal_cleanup_failure!(
+          stats, page_num, reason,
+          raster_rollback_verified: raster_rolled_back,
+          error: (raster_error.message if raster_error)
+        )
+        unless raster_rolled_back
+          raise TerminalRasterAtomicityError,
+                "Page #{page_num}: partial raster rollback could not be verified"
+        end
+        return false
+      end
+      if after_raster.nil? || raster_entities.empty?
+        raster_rolled_back = raster_entities.empty? ? true :
+          rollback_created_raster_entities(model, raster_entities)
+        record_terminal_cleanup_failure!(
+          stats, page_num, 'raster_creation_unverifiable',
+          raster_rollback_verified: raster_rolled_back
+        )
+        unless raster_rolled_back
+          raise TerminalRasterAtomicityError,
+                "Page #{page_num}: unverifiable raster rollback could not be verified"
+        end
+        return false
+      end
 
+      cleanup_reason = nil
       begin
         if page_group
           page_group.hidden = true
+          cleanup_reason = 'page_group_hide_unverified' unless
+            page_group_hidden_state_matches?(page_group, true)
         elsif !vector_entities.empty?
           model.active_entities.erase_entities(*vector_entities)
+          remaining = active_entity_snapshot(model)
+          cleanup_reason = 'loose_vector_erase_unverified' if remaining.nil? ||
+            vector_entities.any? do |entity|
+              remaining.any? { |candidate| candidate.equal?(entity) }
+            end
         end
       rescue StandardError => e
         Logger.warn('Pipeline', "Page #{page_num}: remove vector page before raster fallback failed: #{e.message}")
+        cleanup_reason = "vector_cleanup_exception: #{e.message}"
+      end
+      if cleanup_reason
+        restored = if page_group
+                     begin
+                       page_group.hidden = previous_hidden
+                       page_group_hidden_state_matches?(page_group, previous_hidden)
+                     rescue StandardError
+                       false
+                     end
+                   else
+                     remaining = active_entity_snapshot(model)
+                     !remaining.nil? && vector_entities.all? do |entity|
+                       remaining.any? { |candidate| candidate.equal?(entity) }
+                     end
+                   end
+        raster_rolled_back = rollback_created_raster_entities(
+          model, raster_entities
+        )
+        record_terminal_cleanup_failure!(
+          stats, page_num, cleanup_reason,
+          raster_rollback_verified: raster_rolled_back,
+          vector_restore_verified: restored
+        )
+        unless raster_rolled_back && restored
+          raise TerminalRasterAtomicityError,
+                "Page #{page_num}: terminal raster cleanup could not be restored atomically"
+        end
         return false
       end
       stats[:text_renderers] = Array(stats[:text_renderers]).reject do |entry|
@@ -282,12 +535,25 @@ module BlueCollarSystems
         reason: reason,
         count: count,
         note: "Text-mode terminal raster fallback: #{reason}")
+      entity_ids = stable_entity_identities(raster_entities)
+      supersede_mesh_text_page_with_raster!(
+        stats, page_num, reason, entity_ids, :verified
+      )
+      stats[:terminal_cleanup_events] ||= []
+      stats[:terminal_cleanup_events] << {
+        page: page_num,
+        cleanup_outcome: :verified,
+        delivered_mode: :raster,
+        resulting_entity_ids: entity_ids
+      }
       stats[:raster_fallback_used] = true
       Logger.warn(
         'Pipeline',
         "Page #{page_num}: #{count} text span(s) exhausted native text rungs; delivered page raster fallback."
       )
       true
+    rescue TerminalRasterAtomicityError
+      raise
     rescue StandardError => e
       Logger.warn('Pipeline', "Page #{page_num}: terminal text raster fallback failed: #{e.message}")
       false
@@ -316,19 +582,146 @@ module BlueCollarSystems
 
     # Round 20: accumulate faithful mesh-text target heights (inches) for
     # import_report extra.text_height_crosscheck.
-    def self.merge_text_height_samples!(stats, samples)
+    def self.merge_text_height_samples!(stats, samples, page_num = nil)
       return unless samples.respond_to?(:each)
       stats[:text_height_samples] ||= []
+      stats[:text_height_sample_pages] ||= []
       samples.each do |h|
         begin
           v = h.to_f
-          stats[:text_height_samples] << v if v > 0.0
+          if v.finite? && v > 0.0
+            stats[:text_height_samples] << v
+            stats[:text_height_sample_pages] << page_num
+          end
         rescue StandardError
           next
         end
       end
     rescue StandardError
       nil
+    end
+
+    def self.merge_mesh_text_telemetry!(stats, samples, page_num = nil)
+      stats[:mesh_text_telemetry] ||= []
+      Array(samples).each do |sample|
+        unless sample.is_a?(Hash)
+          stats[:mesh_text_telemetry_invalid_sample_count] =
+            stats[:mesh_text_telemetry_invalid_sample_count].to_i + 1
+          next
+        end
+        copy = sample.dup
+        copy[:page] = page_num if copy[:page].nil? && !page_num.nil?
+        stats[:mesh_text_telemetry] << copy
+      end
+    rescue StandardError => e
+      stats[:mesh_text_telemetry_merge_failure_count] =
+        stats[:mesh_text_telemetry_merge_failure_count].to_i + 1
+      Logger.warn('Pipeline', "merge mesh text telemetry failed: #{e.message}")
+    end
+
+    def self.merge_text_font_substitutions!(stats, substitutions, page_num = nil)
+      stats[:text_font_substitutions] ||= []
+      Array(substitutions).each do |substitution|
+        unless substitution.is_a?(Hash)
+          stats[:text_font_substitution_merge_failure_count] =
+            stats[:text_font_substitution_merge_failure_count].to_i + 1
+          next
+        end
+        copy = substitution.dup
+        copy[:page] = page_num if copy[:page].nil? && !page_num.nil?
+        stats[:text_font_substitutions] << copy
+      end
+    rescue StandardError => e
+      stats[:text_font_substitution_merge_failure_count] =
+        stats[:text_font_substitution_merge_failure_count].to_i + 1
+      Logger.warn('Pipeline', "merge text font substitutions failed: #{e.message}")
+    end
+
+    def self.merge_geometry_builder_text_result!(stats, page_num, result,
+                                                 include_delivered_heights = true)
+      payload = result.is_a?(Hash) ? result : {}
+      merge_text_mode_fallbacks!(stats, page_num, payload[:text_fallbacks])
+      merge_mesh_text_telemetry!(stats, payload[:mesh_text_telemetry], page_num)
+      merge_text_font_substitutions!(
+        stats, payload[:text_font_substitutions], page_num
+      )
+      if include_delivered_heights
+        merge_text_height_samples!(
+          stats, payload[:text_height_samples], page_num
+        )
+      end
+      stats[:text_height_fallback_count] =
+        stats[:text_height_fallback_count].to_i +
+        payload[:text_height_fallback_count].to_i
+      stats[:mesh_text_telemetry_record_failure_count] =
+        stats[:mesh_text_telemetry_record_failure_count].to_i +
+        payload[:mesh_text_telemetry_record_failure_count].to_i
+      stats[:mesh_text_telemetry_initialization_failure_count] =
+        stats[:mesh_text_telemetry_initialization_failure_count].to_i +
+        payload[:mesh_text_telemetry_initialization_failure_count].to_i
+      stats
+    rescue StandardError => e
+      stats[:mesh_text_telemetry_outer_merge_failure_count] =
+        stats[:mesh_text_telemetry_outer_merge_failure_count].to_i + 1
+      Logger.warn('Pipeline', "merge GeometryBuilder text result failed: #{e.message}")
+      stats
+    end
+
+    def self.supersede_mesh_text_page_with_raster!(stats, page_num,
+                                                   terminal_reason = nil,
+                                                   resulting_entity_ids = [],
+                                                   cleanup_outcome = :verified)
+      Array(stats[:mesh_text_telemetry]).each do |sample|
+        next unless sample.is_a?(Hash)
+        page = sample[:page] || sample['page']
+        next unless page.to_i == page_num.to_i
+        previous_ids = Array(sample[:resulting_entity_ids] || sample['resulting_entity_ids'])
+        sample[:superseded_entity_ids] = previous_ids unless previous_ids.empty?
+        sample[:superseded_by_raster] = true
+        sample[:supersession_reason] = terminal_reason.to_s
+        sample[:terminal_reason] = terminal_reason.to_s
+        if sample[:delivered_mode].to_s == 'none' ||
+           sample[:outcome].to_s.start_with?('failed')
+          sample[:labels_failure_reason] ||= terminal_reason.to_s
+        end
+        sample[:terminal_cleanup_outcome] = cleanup_outcome
+        sample[:resulting_entity_ids] = Array(resulting_entity_ids)
+        sample[:delivered_mode] = :raster
+        sample[:final_delivered_font] = nil
+        sample[:attempt_history] ||= []
+        sample[:attempt_history] << {
+          mode: :raster,
+          outcome: :complete,
+          reason: terminal_reason.to_s,
+          cleanup_outcome: cleanup_outcome,
+          delivered_mode: :raster,
+          resulting_entity_ids: Array(resulting_entity_ids)
+        }
+      end
+      Array(stats[:text_font_substitutions]).each do |substitution|
+        next unless substitution.is_a?(Hash)
+        page = substitution[:page] || substitution['page']
+        next unless page.to_i == page_num.to_i
+        substitution[:superseded_by_raster] = true
+      end
+
+      heights = Array(stats[:text_height_samples])
+      pages = Array(stats[:text_height_sample_pages])
+      if heights.length == pages.length
+        kept_heights = []
+        kept_pages = []
+        heights.each_with_index do |height, index|
+          next if pages[index].to_i == page_num.to_i
+          kept_heights << height
+          kept_pages << pages[index]
+        end
+        stats[:text_height_samples] = kept_heights
+        stats[:text_height_sample_pages] = kept_pages
+      end
+      true
+    rescue StandardError => e
+      Logger.warn('Pipeline', "supersede mesh telemetry with raster failed: #{e.message}")
+      false
     end
 
     def self.new_import_session_id
@@ -912,11 +1305,16 @@ module BlueCollarSystems
           fit_bb = Geom::BoundingBox.new
           add_page_fit_bounds(fit_bb, media_box, raster_box, opts[:scale], 0.0)
           apply_top_view_fit(model, fit_bb)
-          return { pages: 1, primitives: 0, edges: 0, faces: 0, arcs: 0,
-                   text: 0, components: 0, layers: [], cleanup: {},
-                   generic: nil, mode_used: nil, xobjects: 0,
-                   raster_fallback_used: true,
-                   log_path: Logger.log_path }
+          raster_stats = {
+            pages: 1, primitives: 0, edges: 0, faces: 0, arcs: 0,
+            text: 0, components: 0, layers: [], cleanup: {},
+            generic: nil, mode_used: nil, xobjects: 0, text_mode: :none,
+            text_renderers: [], raster_fallback_used: true,
+            elapsed_seconds: (Time.now - import_start).round(1),
+            log_path: Logger.log_path
+          }
+          publish_import_evidence!(path, opts, raster_stats)
+          return raster_stats
         else
           model.abort_operation
           UI.messagebox("Force-raster import failed.\n\nMake sure pdftocairo (from Poppler) is installed.")
@@ -969,13 +1367,17 @@ module BlueCollarSystems
             fit_bb = Geom::BoundingBox.new
             add_page_fit_bounds(fit_bb, media_box, media_box, opts[:scale], 0.0)
             apply_top_view_fit(model, fit_bb)
-            return { pages: 1, primitives: 0, edges: 0, faces: 0, arcs: 0,
-                     text: 0, components: 0, layers: [], cleanup: {},
-                     generic: nil, mode_used: nil, xobjects: 0,
-                     text_mode: :none,
-                     elapsed_seconds: (Time.now - import_start).round(1),
-                     raster_fallback_used: true,
-                     log_path: Logger.log_path }
+            raster_stats = {
+              pages: 1, primitives: 0, edges: 0, faces: 0, arcs: 0,
+              text: 0, components: 0, layers: [], cleanup: {},
+              generic: nil, mode_used: nil, xobjects: 0,
+              text_mode: :none, text_renderers: [],
+              elapsed_seconds: (Time.now - import_start).round(1),
+              raster_fallback_used: true,
+              log_path: Logger.log_path
+            }
+            publish_import_evidence!(path, opts, raster_stats)
+            return raster_stats
           else
             safe_abort_operation(model, "Pipeline")
           end
@@ -1017,10 +1419,21 @@ module BlueCollarSystems
                 embedded_image_dir: nil, extruded_faces: 0,
                 text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
                 text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
-                model_3d_texts: [], page_text_map: {},
-                recognition_skipped_pages: [],
-                import_session_id: new_import_session_id,
-                source_provenance_objects: [] }
+                 model_3d_texts: [], page_text_map: {},
+                 recognition_skipped_pages: [],
+                 import_session_id: new_import_session_id,
+                 source_provenance_objects: [],
+                 mesh_text_telemetry: [],
+                 mesh_text_telemetry_initialization_failure_count: 0,
+                 mesh_text_telemetry_record_failure_count: 0,
+                 mesh_text_telemetry_invalid_sample_count: 0,
+                 mesh_text_telemetry_merge_failure_count: 0,
+                 mesh_text_telemetry_outer_merge_failure_count: 0,
+                 text_font_substitutions: [],
+                 text_font_substitution_merge_failure_count: 0,
+                 text_height_samples: [],
+                 text_height_sample_pages: [],
+                 text_height_fallback_count: 0 }
 
       image_extractor = nil
       if opts[:extract_embedded_images] != false && opts[:import_mode].to_s != 'vector'
@@ -1104,7 +1517,7 @@ module BlueCollarSystems
 
         # Smart auto-raster override for fill-art flood pages.
         flood_hit, flood_stats = looks_like_fill_art_flood?(paths, media_box)
-        if flood_hit
+        if flood_hit && page_raster_heuristics_allowed?(requested_text_mode)
           fill_pct = (flood_stats[:fill_only_ratio] * 100.0).round
           stroke_pct = (flood_stats[:stroke_ratio] * 100.0).round
           Logger.warn(
@@ -1261,7 +1674,8 @@ module BlueCollarSystems
         # Opt-in page strategy (raster_fallback): text-dominant OCR/geospatial
         # pages may take a full-page raster path. This is NOT a text-mode switch
         # and must not run unless the caller enabled raster_fallback.
-        if opts[:raster_fallback] && paths.length <= 10 && text_items.length >= 200
+        if page_raster_heuristics_allowed?(requested_text_mode) &&
+           opts[:raster_fallback] && paths.length <= 10 && text_items.length >= 200
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Text-heavy page, using raster fallback... [#{(Time.now - import_start).round(1)}s]"
           Logger.warn("Pipeline",
             "Page #{page_num}: text-dominant content (paths=#{paths.length}, text=#{text_items.length}) — raster fallback")
@@ -1415,16 +1829,16 @@ module BlueCollarSystems
         result = builder.build
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
-        merge_text_mode_fallbacks!(stats, page_num, result[:text_fallbacks])
-        merge_text_height_samples!(stats, result[:text_height_samples])
-        stats[:text_height_fallback_count] =
-          stats[:text_height_fallback_count].to_i + result[:text_height_fallback_count].to_i
+        result_text_failures = Array(result[:text_delivery_failures])
+        merge_geometry_builder_text_result!(
+          stats, page_num, result, result_text_failures.empty?
+        )
 
-        if !Array(result[:text_delivery_failures]).empty?
+        if !result_text_failures.empty?
           terminal_raster = promote_text_delivery_failures_to_raster!(
             model, path, page_num, media_box, opts, import_start, page_y_offset,
             svg_page_box, builder.page_group, requested_text_mode, stats,
-            result[:text_delivery_failures],
+            result_text_failures,
             page_entities_created_since(model, page_entities_before_builder)
           )
           unless terminal_raster
@@ -1446,6 +1860,7 @@ module BlueCollarSystems
           record_text_renderer(stats, page_num,
             renderer: renderer, mode: requested_text_mode,
             requested_mode: requested_text_mode, degraded: false,
+            delivered_mode: requested_text_mode,
             count: native_text_objects)
         end
 
@@ -1533,15 +1948,15 @@ module BlueCollarSystems
               import_session_id: provenance_opts[:import_session_id])
             fb_result = fallback_builder.build
             stats[:text] += fb_result[:text_objects]
-            merge_text_mode_fallbacks!(stats, page_num, fb_result[:text_fallbacks])
-            merge_text_height_samples!(stats, fb_result[:text_height_samples])
-            stats[:text_height_fallback_count] =
-              stats[:text_height_fallback_count].to_i + fb_result[:text_height_fallback_count].to_i
-            if !Array(fb_result[:text_delivery_failures]).empty?
+            fallback_text_failures = Array(fb_result[:text_delivery_failures])
+            merge_geometry_builder_text_result!(
+              stats, page_num, fb_result, fallback_text_failures.empty?
+            )
+            if !fallback_text_failures.empty?
               terminal_raster = promote_text_delivery_failures_to_raster!(
                 model, path, page_num, media_box, opts, import_start, page_y_offset,
                 svg_page_box, builder.page_group, requested_text_mode, stats,
-                fb_result[:text_delivery_failures],
+                fallback_text_failures,
                 page_entities_created_since(model, page_entities_before_builder)
               )
               unless terminal_raster
@@ -1619,6 +2034,10 @@ module BlueCollarSystems
         Logger.error("Pipeline", "Page #{page_num} failed: #{e.message}", e)
         stats[:failed_pages] ||= []
         stats[:failed_pages] << { page: page_num, error: e.message }
+        if e.is_a?(TerminalRasterAtomicityError)
+          safe_abort_operation(model, 'Pipeline')
+          raise
+        end
         # Continue to next page instead of aborting the entire operation.
         # Previously this called safe_abort_operation + raise, which
         # destroyed all geometry from successfully imported pages.
@@ -1657,32 +2076,7 @@ module BlueCollarSystems
       apply_top_view_fit(model, page_fit_bounds, imported_entities)
 
       stats[:log_path] = Logger.log_path
-      begin
-        report = QAReport.build_from_stats(path, opts, stats)
-        parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
-        if parts_payload && parts_payload[:row_count].to_i > 0
-          report_target = QAReport.default_output_path(path)
-          sidecar_base = File.join(File.dirname(report_target), File.basename(path.to_s, File.extname(path.to_s)))
-          parts_path = PartsBootstrap.write_sidecar(parts_payload, sidecar_base)
-          if parts_path
-            parts_payload[:sidecar_path] = parts_path
-            report[:extra][:parts_bootstrap] = parts_payload
-            stats[:parts_bootstrap_sidecar_path] = parts_path
-          end
-        end
-        stats[:human_summary] = report[:extra][:human_summary] if report[:extra]
-        stats[:scale_crosscheck] = report[:extra][:scale_crosscheck] if report[:extra]
-        stats[:performance_hint] = report[:extra][:performance_hint] if report[:extra]
-        stats[:actual_text_entity_types] = report[:extra][:actual_text_entity_types] if report[:extra]
-        stats[:model_3d_intent] = report[:extra][:model_3d_intent] if report[:extra]
-        report_path = QAReport.write_json(report, QAReport.default_output_path(path))
-        stats[:import_report_path] = report_path if report_path
-        sidecar_path = write_source_provenance_sidecar(path, opts, stats)
-        stats[:source_provenance_sidecar_path] = sidecar_path if sidecar_path
-        ImportHealth.record!(stats, path)
-      rescue StandardError => e
-        Logger.warn("Pipeline", "import_report.json write failed: #{e.message}")
-      end
+      publish_import_evidence!(path, opts, stats)
       stats
     ensure
       Logger.flush_log
@@ -1803,7 +2197,9 @@ module BlueCollarSystems
       { requested: 300, desired: 300, effective: 300, cap: 300, pixel_budget: 120_000_000 }
     end
 
-    def self.import_page_as_raster(model, pdf_path, page_num, media_box, opts, import_start, y_offset = 0.0, render_box = nil)
+    def self.import_page_as_raster(model, pdf_path, page_num, media_box, opts,
+                                   import_start, y_offset = 0.0,
+                                   render_box = nil, created_entities = nil)
       exe = safe_find_pdftocairo
       return false unless exe
 
@@ -1874,6 +2270,7 @@ module BlueCollarSystems
         begin
           # add_image available in SketchUp 2017+
           img = model.active_entities.add_image(actual_png, pt, img_w, img_h)
+          created_entities << img if img && created_entities.respond_to?(:<<)
           if img
             layer = model.layers['PDF Import'] || model.layers.add('PDF Import')
             begin
@@ -1999,6 +2396,158 @@ module BlueCollarSystems
       nil
     end
 
+    # Required release evidence is part of the import result, not a best-effort
+    # diagnostic. Keep recoverable geometry, but make every caller fail closed
+    # when generation, a required sidecar, or publication cannot be proved.
+    def self.record_import_report_failure!(stats, stage, reason)
+      failure = { stage: stage.to_sym, reason: reason.to_s }
+      stats[:import_report_failures] ||= []
+      duplicate = stats[:import_report_failures].any? do |entry|
+        entry.is_a?(Hash) &&
+          (entry[:stage] || entry['stage']).to_s == failure[:stage].to_s &&
+          (entry[:reason] || entry['reason']).to_s == failure[:reason]
+      end
+      stats[:import_report_failures] << failure unless duplicate
+      stats[:import_report_failure] = failure
+      stats[:import_report_publication_status] = :failed
+      stats[:import_contract_ready] = false
+      failure
+    rescue StandardError => e
+      Logger.warn('Pipeline', "could not record report failure: #{e.message}")
+      stats[:import_contract_ready] = false if stats.respond_to?(:[]=)
+      nil
+    end
+
+    def self.import_report_failures(stats)
+      failures = Array(stats[:import_report_failures]).dup
+      singular = stats[:import_report_failure]
+      failures << singular if singular && !failures.any? { |entry| entry == singular }
+      failures
+    rescue StandardError
+      [{ stage: :generation, reason: 'invalid_import_report_failure_state' }]
+    end
+
+    def self.copy_import_report_summary!(stats, report)
+      extra = report[:extra] || report['extra'] || {}
+      stats[:human_summary] = extra[:human_summary] || extra['human_summary']
+      stats[:scale_crosscheck] = extra[:scale_crosscheck] || extra['scale_crosscheck']
+      stats[:performance_hint] = extra[:performance_hint] || extra['performance_hint']
+      stats[:actual_text_entity_types] =
+        extra[:actual_text_entity_types] || extra['actual_text_entity_types']
+      stats[:model_3d_intent] = extra[:model_3d_intent] || extra['model_3d_intent']
+      contract = extra[:import_contract_ready] || extra['import_contract_ready'] || {}
+      ready = contract[:ready]
+      ready = contract['ready'] if ready.nil?
+      stats[:import_contract_ready] = ready == true
+      stats[:import_contract_checks] = contract[:checks] || contract['checks'] || {}
+      stats[:import_contract_failed_checks] =
+        contract[:failed_checks] || contract['failed_checks'] || []
+      stats
+    end
+
+    def self.publish_import_evidence!(pdf_path, opts, stats)
+      stats[:import_report_publication_status] = :pending
+      report_target = QAReport.default_output_path(pdf_path)
+
+      begin
+        draft_report = QAReport.build_from_stats(pdf_path, opts, stats)
+        raise 'build_from_stats_returned_nil' unless draft_report.is_a?(Hash)
+      rescue StandardError => e
+        record_import_report_failure!(stats, :generation, e.message)
+        Logger.warn('Pipeline', "import report generation failed: #{e.message}")
+        return false
+      end
+
+      parts_payload = draft_report[:extra] &&
+                      draft_report[:extra][:parts_bootstrap]
+      row_count = if parts_payload.is_a?(Hash)
+                    parts_payload[:row_count] || parts_payload['row_count']
+                  end
+      if row_count.to_i > 0
+        begin
+          sidecar_base = File.join(
+            File.dirname(report_target),
+            File.basename(pdf_path.to_s, File.extname(pdf_path.to_s))
+          )
+          parts_path = PartsBootstrap.write_sidecar(parts_payload, sidecar_base)
+          raise 'write_sidecar_returned_nil' unless parts_path
+          parts_payload[:sidecar_path] = parts_path
+          stats[:parts_bootstrap] = parts_payload
+          stats[:parts_bootstrap_sidecar_path] = parts_path
+        rescue StandardError => e
+          record_import_report_failure!(stats, :parts_bootstrap_sidecar, e.message)
+          Logger.warn('Pipeline', "parts bootstrap sidecar failed: #{e.message}")
+        end
+      end
+
+      unless Array(stats[:source_provenance_objects]).empty?
+        begin
+          sidecar_path = write_source_provenance_sidecar(pdf_path, opts, stats)
+          raise 'write_sidecar_returned_nil' unless sidecar_path
+          stats[:source_provenance_sidecar_path] = sidecar_path
+        rescue StandardError => e
+          record_import_report_failure!(stats, :source_provenance_sidecar, e.message)
+          Logger.warn('Pipeline', "source provenance sidecar failed: #{e.message}")
+        end
+      end
+
+      if import_report_failures(stats).empty?
+        # Publish a pending, explicitly fail-closed draft first. If either
+        # write cannot be proven, no on-disk report is left claiming readiness.
+        draft_path = QAReport.write_json(draft_report, report_target)
+        unless draft_path
+          record_import_report_failure!(
+            stats, :publication, 'write_json_returned_nil'
+          )
+          return false
+        end
+        stats[:import_report_path] = draft_path
+        stats[:import_report_publication_status] = :published
+      else
+        stats[:import_report_publication_status] = :failed
+      end
+
+      begin
+        final_report = QAReport.build_from_stats(pdf_path, opts, stats)
+        raise 'build_from_stats_returned_nil' unless final_report.is_a?(Hash)
+      rescue StandardError => e
+        record_import_report_failure!(stats, :generation, e.message)
+        Logger.warn('Pipeline', "final import report generation failed: #{e.message}")
+        return false
+      end
+
+      copy_import_report_summary!(stats, final_report)
+      final_path = QAReport.write_json(final_report, report_target)
+      unless final_path
+        record_import_report_failure!(stats, :publication, 'write_json_returned_nil')
+        return false
+      end
+      stats[:import_report_path] = final_path
+
+      begin
+        ImportHealth.record!(stats, pdf_path)
+      rescue StandardError => e
+        Logger.warn('Pipeline', "Import Health record failed: #{e.message}")
+      end
+
+      pipeline_result_success?(stats)
+    rescue StandardError => e
+      record_import_report_failure!(stats, :publication, e.message)
+      Logger.warn('Pipeline', "import evidence publication failed: #{e.message}")
+      false
+    end
+
+    def self.pipeline_result_success?(stats)
+      return false unless stats.is_a?(Hash)
+      return false unless Array(stats[:failed_pages]).empty?
+      return false unless import_report_failures(stats).empty?
+      return false unless stats[:import_contract_ready] == true
+      return false unless stats[:import_report_publication_status].to_s == 'published'
+      !stats[:import_report_path].to_s.strip.empty?
+    rescue StandardError
+      false
+    end
+
     def self.record_open_failure_report(path, opts, reason, message)
       report = QAReport.build_open_failure(path, opts, reason, message)
       QAReport.write_json(report, QAReport.default_output_path(path))
@@ -2020,10 +2569,16 @@ module BlueCollarSystems
         opts = ImportDialog.show(path)
         return unless opts
         stats = run_pipeline(model, path, opts)
-        if stats
+        if pipeline_result_success?(stats)
           # No blocking every-import modal (owner rule). Concise result on
           # the status bar; full summary in import_report.json + Import Health.
           ReportDialog.announce(stats)
+        elsif stats
+          message = 'Imported geometry was kept, but delivery verification ' \
+                    'or required report publication failed. Check Import Health and the log.'
+          Sketchup.status_text = message
+          Logger.warn('Import', message)
+          false
         else
           UI.messagebox("No vector content found in PDF.")
         end
@@ -2050,7 +2605,7 @@ module BlueCollarSystems
         mode.each { |k, v| sym_attrs[k.to_sym] = v }
         opts = ImportDialog.send(:build_opts, sym_attrs.merge(pages: 'All'))
         stats = run_pipeline(model, path, opts)
-        unless stats
+        unless pipeline_result_success?(stats)
           UI.messagebox("No vector content found in PDF.")
         end
       rescue StandardError => e
@@ -2090,7 +2645,12 @@ module BlueCollarSystems
             fail_c += 1
             next
           end
-          ok += 1 if run_pipeline(model, pdf, opts)
+          stats = run_pipeline(model, pdf, opts)
+          if pipeline_result_success?(stats)
+            ok += 1
+          else
+            fail_c += 1
+          end
         rescue StandardError => e
           fail_c += 1; Logger.error("Batch", File.basename(pdf), e)
         end
@@ -2178,7 +2738,11 @@ module BlueCollarSystems
         model = Sketchup.active_model
         return Sketchup::Importer::ImportFail unless model
         stats = BlueCollarSystems::PDFVectorImporter.run_pipeline(model, file_path, opts)
-        stats ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
+        if BlueCollarSystems::PDFVectorImporter.pipeline_result_success?(stats)
+          Sketchup::Importer::ImportSuccess
+        else
+          Sketchup::Importer::ImportFail
+        end
       rescue StandardError => e
         BlueCollarSystems::PDFVectorImporter.safe_abort_operation(model, "PDFFileImporter")
         Logger.error("PDFFileImporter", "load_file failed", e)

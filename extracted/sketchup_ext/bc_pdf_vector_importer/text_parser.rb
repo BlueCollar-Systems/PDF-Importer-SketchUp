@@ -318,7 +318,7 @@ module BlueCollarSystems
         code_lengths = [1] if code_lengths.empty?
         map = fmap[:map]
 
-        out = ""
+        out = String.new
         i = 0
         while i < bytes.bytesize
           hit = nil
@@ -780,7 +780,7 @@ module BlueCollarSystems
       def merge_run(run)
         return run.first if run.length == 1
 
-        text = ""
+        text = String.new
         cursor = run.first.x.to_f
         run.each_with_index do |it, idx|
             if idx > 0
@@ -1005,7 +1005,8 @@ module BlueCollarSystems
           s = s[1..-2]
         end
 
-        out = "".b
+        out = String.new
+        out.force_encoding(Encoding::BINARY)
         i = 0
         while i < s.length
           ch = s[i]
@@ -1029,7 +1030,7 @@ module BlueCollarSystems
               # CR or CRLF continuation
               i += 1 if i + 1 < s.length && s[i + 1] == "\n"
             when /[0-7]/
-              oct = esc
+              oct = String.new(esc)
               j = 0
               while j < 2 && i + 1 < s.length && s[i + 1] =~ /[0-7]/
                 i += 1
@@ -1062,7 +1063,7 @@ module BlueCollarSystems
         # TJ arrays contain strings and numbers: [(Hello ) -250 (World)]
         arr = array_str.to_s
         chunks = arr.scan(/\((?:\\.|[^\\)])*\)|<[^>]*>/)
-        text = ""
+        text = String.new
         chunks.each do |chunk|
           text << decode_text_operand(chunk, font_name)
         end

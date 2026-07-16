@@ -2,14 +2,16 @@
 
 require 'json'
 require 'minitest/autorun'
+require_relative '../corpus_paths'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/text_parser'
 
 class StackedFractionConformanceTest < Minitest::Test
   TP = BlueCollarSystems::PDFVectorImporter::TextParser
 
   def vector_file
-    corpus_root = ENV['BCS_PRIVATE_VALIDATION_ROOT'] || '__private_validation_assets_not_configured__'
-    File.join(corpus_root, 'conformance-vectors', 'stacked-fraction-merge-vectors.json')
+    BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_public_corpus_path(
+      'conformance-vectors/stacked-fraction-merge-vectors.json'
+    ) || '__public_corpus_assets_not_configured__'
   end
 
   def vectors

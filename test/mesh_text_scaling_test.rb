@@ -173,6 +173,27 @@ class MeshTextScalingTest < Minitest::Test
     assert h <= MAX_IN
   end
 
+  def test_targeted_bbox_visual_correction_keeps_nominal_metric_separate
+    builder = make_builder(LETTER)
+    item = bbox_item('4', 10.0, 20.0, bbox_w: 4.0)
+    profile = builder.send(:mesh_text_font_profile, item)
+    nominal = builder.send(
+      :mesh_text_height_inches, item, 0.0, 792.0, profile
+    )
+    attempt = {}
+
+    actual = builder.send(
+      :mesh_text_visual_height_inches, item, nominal, profile, attempt
+    )
+
+    assert_in_delta 10.0 * PT_TO_IN * ARIAL_RATIO, nominal, 0.0001
+    assert_in_delta 4.0 * PT_TO_IN * ARIAL_RATIO, actual, 0.0001
+    assert_equal 'targeted_bbox_short_side',
+                 attempt[:visual_height_correction_reason]
+    assert_in_delta nominal,
+                    attempt[:nominal_sketchup_letter_height_in], 0.0001
+  end
+
   # ── Large format (D-size) must give SAME height as Letter for same bbox ────
   def test_d_size_same_height_as_letter_for_identical_bbox
     b_letter = make_builder(LETTER)

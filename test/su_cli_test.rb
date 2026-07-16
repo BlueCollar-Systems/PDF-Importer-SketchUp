@@ -9,11 +9,13 @@
 require 'json'
 require 'open3'
 require 'tmpdir'
+require_relative '../corpus_paths'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 CLI = File.join(REPO_ROOT, 'tools', 'su_pdf_cli.rb')
-CORPUS_ROOT = ENV['BCS_PRIVATE_VALIDATION_ROOT'] || '__private_validation_assets_not_configured__'
-TEST_PDF = File.join(CORPUS_ROOT, 'tier1', 'web', 'stacked_fraction_spacing.pdf')
+TEST_PDF = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_public_corpus_path(
+  'tier1/web/stacked_fraction_spacing.pdf'
+) || '__public_corpus_assets_not_configured__'
 
 failures = []
 pass_count = 0
@@ -46,7 +48,7 @@ check.call('--extrude-to-3d explains shelved state', extrude_err.include?('curre
 
 unless File.file?(TEST_PDF)
   puts "SKIP (visible): corpus synthetic PDF not found at #{TEST_PDF} -- " \
-       'extraction assertions not run. Set BCS_PRIVATE_VALIDATION_ROOT to a local validation asset root.'
+       'extraction assertions not run. Set BCS_CORPUS_ROOT to the public corpus root.'
   puts "PASS: #{pass_count} assertions (CLI plumbing only)"
   exit(failures.empty? ? 0 : 1)
 end

@@ -326,8 +326,19 @@ else
     assert_near(wx, 822.74, PDF_TOL, "PRIVATE-01 connection w1023 X left-anchored (got #{wx})")
     assert_near(wy, 762.12, PDF_TOL, "PRIVATE-01 connection w1023 Y baseline (got #{wy})")
     assert_near(wang, 0.0, PDF_TOL, "PRIVATE-01 connection w1023 stays horizontal per PDF angle (got #{wang})")
-    mesh_h = mesh_builder.send(:mesh_text_height_inches, w1023, wang, 792.0)
+    profile = mesh_builder.send(:mesh_text_font_profile, w1023)
+    nominal_h = mesh_builder.send(
+      :mesh_text_height_inches, w1023, wang, 792.0, profile
+    )
+    correction = {}
+    mesh_h = mesh_builder.send(
+      :mesh_text_visual_height_inches, w1023, nominal_h, profile, correction
+    )
     assert_true(mesh_h < 0.12, "PRIVATE-01 connection w1023 mesh height must not blow up (got #{mesh_h})")
+    assert_true(nominal_h > mesh_h,
+                'PRIVATE-01 visual correction must remain separate from nominal em height')
+    assert_true(correction[:visual_height_correction_reason] == 'targeted_bbox_short_side',
+                'PRIVATE-01 corrected mesh height must publish its decision reason')
   end
 
   if aa_a1006

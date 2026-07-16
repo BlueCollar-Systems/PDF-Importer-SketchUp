@@ -33,10 +33,50 @@ class ImportReportParityFloorTest < Minitest::Test
     BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('parity.pdf', {}, stats)
   end
 
+  def native_mesh_report
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      text_mode: :text3d,
+      mesh_text_telemetry: [
+        {
+          page: 1, source_span_id: 'native-span', requested_mode: :text3d,
+          delivered_mode: :text3d, outcome: :complete,
+          pdf_em_height_in: 0.1, sketchup_letter_height_in: 0.07,
+          letter_height_ratio: 0.7, matrix_x: 1.0,
+          residual_x: 1.0, total_x: 1.0
+        }
+      ]
+    }
+    BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'native.pdf', {}, stats
+    )
+  end
+
+  def assert_conditional_fields(report, native_mesh)
+    extra = report[:extra] || {}
+    floor.fetch('conditional_extra_fields', {}).each_key do |field|
+      required = case field
+                 when 'actual_text_entity_types' then true
+                 when 'text_height_crosscheck' then native_mesh
+                 else
+                   flunk "Unknown conditional report field must define a test predicate: #{field}"
+                 end
+      next unless required
+      key = extra.key?(field.to_sym) ? field.to_sym : field
+      assert extra.key?(key), "Missing conditional SketchUp report field: #{field}"
+      refute_nil extra[key], "Conditional SketchUp report field is null: #{field}"
+    end
+  end
+
   def test_report_extra_matches_checked_in_floor
     report = parity_smoke_report
     extra = report[:extra] || {}
     missing = floor['required_extra_fields'].reject { |field| extra.key?(field.to_sym) || extra.key?(field) }
     assert_empty missing, "Missing SketchUp report parity fields: #{missing.join(', ')}"
+    assert_conditional_fields(report, false)
+  end
+
+  def test_native_mesh_report_enforces_conditional_telemetry_floor
+    assert_conditional_fields(native_mesh_report, true)
   end
 end

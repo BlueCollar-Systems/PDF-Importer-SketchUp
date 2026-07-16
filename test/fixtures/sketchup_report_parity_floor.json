@@ -8,7 +8,8 @@
     "model_3d_intent"
   ],
   "conditional_extra_fields": {
-    "actual_text_entity_types": "when SketchUp emits text entity verification"
+    "actual_text_entity_types": "when SketchUp emits text entity verification",
+    "text_height_crosscheck": "when native 3D Text attempts are present"
   },
   "exempt_extra_fields": [
     "dense_text_glyph_workload",

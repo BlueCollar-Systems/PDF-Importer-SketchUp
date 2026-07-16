@@ -17,6 +17,7 @@ require 'bc_pdf_vector_importer/pdf_parser'
 require 'bc_pdf_vector_importer/content_stream_parser'
 require 'bc_pdf_vector_importer/text_parser'
 require 'bc_pdf_vector_importer/external_text_extractor'
+require 'bc_pdf_vector_importer/pdf_salvage'
 
 BlueCollarSystems::PDFVectorImporter::Logger.debug = false
 
@@ -131,6 +132,43 @@ module CorpusHarness
     )
   end
 
+  def self.page_geometry_builder(page_info, page_number, rotation = nil)
+    install_headless_stubs!
+    media_box = page_info[:crop_box]
+    unless media_box.is_a?(Array) && media_box.length >= 4
+      media_box = page_info[:media_box]
+    end
+    media_box = [0, 0, 612, 792] unless media_box.is_a?(Array) &&
+                                            media_box.length >= 4
+    rotation = page_info[:rotation] if rotation.nil?
+    BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
+      Sketchup::Model.new,
+      [],
+      [],
+      media_box,
+      scale_factor: 1.0,
+      import_text: true,
+      use_3d_text: false,
+      page_number: page_number,
+      page_rotation: rotation
+    )
+  end
+
+  def self.page_height_for_info(page_info, rotation = nil)
+    media_box = page_info[:crop_box]
+    unless media_box.is_a?(Array) && media_box.length >= 4
+      media_box = page_info[:media_box]
+    end
+    media_box = [0, 0, 612, 792] unless media_box.is_a?(Array) &&
+                                            media_box.length >= 4
+    rotation = page_info[:rotation] if rotation.nil?
+    BlueCollarSystems::PDFVectorImporter::PageTransform.effective_height(
+      media_box, rotation
+    )
+  rescue StandardError
+    792.0
+  end
+
   def self.timeout_exceeded?(start_time, timeout_s)
     (Time.now - start_time) >= timeout_s.to_f
   end
@@ -189,8 +227,13 @@ module CorpusHarness
       placement_ok: 0,
       placement_total: 0,
       placement_rate: 0.0,
+      rotated_pages: 0,
+      rotated_placement_ok: 0,
+      rotated_placement_total: 0,
+      rotated_placement_rate: 1.0,
       text_hash: nil,
       text_source: nil,
+      salvage_note: nil,
       error: nil,
       time_s: 0.0,
       heavy: false
@@ -199,9 +242,11 @@ module CorpusHarness
     start_time = Time.now
     builder = geometry_builder
     all_text_items = []
-    page_count_hint = page_count_hint_for(pdf_path)
-    result[:heavy] = heavy_pdf?(pdf_path, page_count_hint)
-    timeout_s = timeout_for(pdf_path, page_count_hint)
+    page_placements = []
+    rotated_pages = 0
+    analysis_path = pdf_path
+    parser = nil
+    timeout_s = TIMEOUT_SECONDS
 
     if STRESS_PDF_SLUGS.include?(File.basename(pdf_path))
       result[:status] = 'TIMEOUT'
@@ -211,11 +256,22 @@ module CorpusHarness
     end
 
     begin
+      analysis_path, salvage_note =
+        BlueCollarSystems::PDFVectorImporter::PdfSalvage
+          .prepare_if_needed(pdf_path)
+      result[:salvage_note] = salvage_note
+      page_count_hint = page_count_hint_for(analysis_path)
+      result[:heavy] = heavy_pdf?(analysis_path, page_count_hint)
+      timeout_s = timeout_for(analysis_path, page_count_hint)
+
       Timeout.timeout(timeout_s) do
-        parser = BlueCollarSystems::PDFVectorImporter::PDFParser.new(pdf_path)
+        parser = BlueCollarSystems::PDFVectorImporter::PDFParser.new(analysis_path)
         parser.parse
+        if parser.page_count == 0
+          raise 'PDF parser returned zero pages after production salvage preflight'
+        end
         result[:pages] = parser.page_count
-        result[:heavy] = heavy_pdf?(pdf_path, parser.page_count)
+        result[:heavy] = heavy_pdf?(analysis_path, parser.page_count)
 
         total_paths = 0
         text_source = nil
@@ -245,9 +301,25 @@ module CorpusHarness
                   "Heavy PDF path budget exceeded (#{total_paths} > #{HEAVY_PATH_BUDGET})"
           end
 
-          page_items, source = extract_page_text(parser, pdf_path, pg, streams, ocg_map)
+          page_items, source = extract_page_text(
+            parser, analysis_path, pg, streams, ocg_map
+          )
           text_source ||= source
           all_text_items.concat(page_items) if page_items && !page_items.empty?
+
+          rotation = BlueCollarSystems::PDFVectorImporter::PageTransform
+                       .normalize_rotation(page_info[:rotation])
+          page_builder = page_geometry_builder(page_info, pg, rotation)
+          control_builder = rotation == 0 ? nil :
+                              page_geometry_builder(page_info, pg, 0)
+          rotated_pages += 1 unless rotation == 0
+          page_placements << simulate_placement(
+            page_builder,
+            page_items || [],
+            page_height_for_info(page_info, rotation),
+            control_builder,
+            page_height_for_info(page_info, 0)
+          )
         end
 
         result[:paths] = total_paths
@@ -260,14 +332,31 @@ module CorpusHarness
                               (100.0 * result[:bbox_items] / all_text_items.length).round(2)
                             end
 
-        placement = simulate_placement(builder, all_text_items, page_height_for(parser))
-        result[:placement_ok] = placement[:ok]
-        result[:placement_total] = placement[:total]
-        result[:placement_rate] = placement[:rate]
-        result[:text_hash] = placement[:text_hash]
+        placement_ok = page_placements.inject(0) { |sum, item| sum + item[:ok].to_i }
+        placement_total = page_placements.inject(0) do |sum, item|
+          sum + item[:total].to_i
+        end
+        placed_texts = page_placements.inject([]) do |all, item|
+          all.concat(Array(item[:placed_texts]))
+        end
+        rotated_ok = page_placements.inject(0) do |sum, item|
+          sum + item[:rotated_ok].to_i
+        end
+        rotated_total = page_placements.inject(0) do |sum, item|
+          sum + item[:rotated_total].to_i
+        end
+        result[:placement_ok] = placement_ok
+        result[:placement_total] = placement_total
+        result[:placement_rate] = placement_total == 0 ? 1.0 :
+                                    (placement_ok.to_f / placement_total).round(4)
+        result[:rotated_pages] = rotated_pages
+        result[:rotated_placement_ok] = rotated_ok
+        result[:rotated_placement_total] = rotated_total
+        result[:rotated_placement_rate] = rotated_total == 0 ? 1.0 :
+                                            (rotated_ok.to_f / rotated_total).round(4)
+        result[:text_hash] = text_hash_for(placed_texts)
         result[:texts] = all_text_items.map { |it| it.respond_to?(:text) ? it.text.to_s : it.to_s }
         result[:status] = 'OK'
-        parser.release
       end
     rescue Timeout::Error
       result[:status] = 'TIMEOUT'
@@ -275,6 +364,12 @@ module CorpusHarness
     rescue StandardError => e
       result[:status] = 'FAIL'
       result[:error] = "#{e.class}: #{e.message}"
+    ensure
+      begin
+        parser.release if parser
+      rescue StandardError
+      end
+      BlueCollarSystems::PDFVectorImporter::PdfSalvage.cleanup(analysis_path)
     end
 
     result[:time_s] = (Time.now - start_time).round(2)
@@ -318,22 +413,47 @@ module CorpusHarness
     end
   end
 
-  def self.simulate_placement(builder, items, page_height)
+  def self.simulate_placement(builder, items, page_height,
+                              control_builder = nil,
+                              control_page_height = nil)
     entities = CorpusDummyEntities.new
+    control_entities = control_builder ? CorpusDummyEntities.new : nil
     placed_texts = []
     placement_ok = 0
     placement_total = 0
+    rotated_ok = 0
+    rotated_total = 0
 
     items.each do |item|
       next unless item.text && !item.text.to_s.strip.empty?
       expected = expected_placements_for(builder, item)
       placement_total += expected
+      rotated_total += expected if control_builder
       before = entities.texts.length
       begin
         builder.send(:place_text, entities, item, 0.0, 0.0, page_height, 'TextLayer')
         added = entities.texts.length - before
         placement_ok += added if added > 0
         entities.texts[before...entities.texts.length].each { |t| placed_texts << t[0].to_s }
+
+        if control_builder
+          control_before = control_entities.texts.length
+          control_builder.send(
+            :place_text, control_entities, item, 0.0, 0.0,
+            control_page_height || page_height, 'TextLayer'
+          )
+          actual_entries = entities.texts[before...entities.texts.length]
+          control_entries = control_entities.texts[
+            control_before...control_entities.texts.length
+          ]
+          expected.times do |index|
+            if rotated_placement_evidence?(
+              actual_entries[index], control_entries[index]
+            )
+              rotated_ok += 1
+            end
+          end
+        end
       rescue StandardError
         # count as failed placement for this item
       end
@@ -344,8 +464,40 @@ module CorpusHarness
       ok: placement_ok,
       total: placement_total,
       rate: rate.round(4),
-      text_hash: text_hash_for(placed_texts)
+      text_hash: text_hash_for(placed_texts),
+      placed_texts: placed_texts,
+      rotated_ok: rotated_ok,
+      rotated_total: rotated_total
     }
+  end
+
+  def self.rotated_placement_evidence?(actual, control)
+    return false unless actual && control
+    actual_point = actual[1]
+    actual_vector = actual[2]
+    control_point = control[1]
+    control_vector = control[2]
+    return false unless finite_xyz?(actual_point) && finite_xyz?(actual_vector)
+    return false unless finite_xyz?(control_point) && finite_xyz?(control_vector)
+
+    point_delta = xyz_delta(actual_point, control_point)
+    vector_delta = xyz_delta(actual_vector, control_vector)
+    point_delta > 1.0e-8 && vector_delta > 1.0e-8
+  rescue StandardError
+    false
+  end
+
+  def self.finite_xyz?(value)
+    return false unless value
+    [:x, :y, :z].all? do |axis|
+      value.respond_to?(axis) && value.send(axis).to_f.finite?
+    end
+  end
+
+  def self.xyz_delta(left, right)
+    [:x, :y, :z].inject(0.0) do |sum, axis|
+      sum + (left.send(axis).to_f - right.send(axis).to_f).abs
+    end
   end
 
   def self.text_hash_for(texts)

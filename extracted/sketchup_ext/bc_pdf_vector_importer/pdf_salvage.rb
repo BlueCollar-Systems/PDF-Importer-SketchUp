@@ -37,7 +37,13 @@ module BlueCollarSystems
           cached = key ? @memo[key] : nil
           if cached
             raise SalvageError, cached[:error] if cached[:error]
-            return [cached[:path], cached[:note]]
+            cached_path = cached[:path]
+            if cached_path && File.file?(cached_path)
+              return [cached_path, cached[:note]]
+            end
+            # A prior import may have cleaned its temporary repaired PDF.
+            # Never return a stale path on a repeat import in the same host.
+            @memo.delete(key) if key
           end
           begin
             result = prepare_uncached(pdf_path)
@@ -172,6 +178,7 @@ module BlueCollarSystems
         def cleanup(path)
           return nil unless path.is_a?(String)
           return nil unless temp_salvages.delete(path)
+          evict_cached_path(path)
           File.delete(path) if File.file?(path)
           nil
         rescue StandardError
@@ -183,6 +190,7 @@ module BlueCollarSystems
           paths = temp_salvages.dup
           temp_salvages.clear
           paths.each do |p|
+            evict_cached_path(p)
             File.delete(p) if File.file?(p)
           end
           nil
@@ -191,6 +199,13 @@ module BlueCollarSystems
         end
 
         private
+
+        def evict_cached_path(path)
+          return unless @memo.is_a?(Hash)
+          @memo.delete_if do |_key, cached|
+            cached.is_a?(Hash) && cached[:path].to_s == path.to_s
+          end
+        end
 
         def run_pdftocairo(exe, input, output)
           if defined?(CommandRunner) && CommandRunner.respond_to?(:run)

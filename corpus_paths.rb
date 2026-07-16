@@ -7,6 +7,7 @@ module BlueCollarSystems
   module PDFVectorImporter
     module CorpusPaths
       DEFAULT_CORPUS_ROOTS = [].freeze
+      DEFAULT_PUBLIC_CORPUS_ROOTS = [].freeze
 
       # Scan profiles for private validation CI (phase 1). Earlier entries win on
       # duplicate corpus_key collisions.
@@ -30,6 +31,31 @@ module BlueCollarSystems
           return File.expand_path(path) if File.directory?(path)
         end
         nil
+      end
+
+      # Public, redistributable corpus assets are configured independently of
+      # private validation PDFs. Keeping the roots separate lets strict CI use
+      # both without copying public fixtures into the private asset tree.
+      def resolve_public_corpus_root(candidates = nil)
+        env_root = ENV['BCS_CORPUS_ROOT']
+        ordered = []
+        ordered << env_root if env_root && !env_root.to_s.strip.empty?
+        ordered.concat(Array(candidates || DEFAULT_PUBLIC_CORPUS_ROOTS))
+        ordered.each do |root|
+          path = root.to_s
+          return File.expand_path(path) if File.directory?(path)
+        end
+        nil
+      end
+
+      def resolve_public_corpus_path(relative_name, candidates = nil)
+        root = resolve_public_corpus_root(candidates)
+        return nil unless root
+
+        candidate = File.expand_path(File.join(root, relative_name.to_s))
+        root_prefix = root.end_with?(File::SEPARATOR) ? root : root + File::SEPARATOR
+        return nil unless candidate == root || candidate.start_with?(root_prefix)
+        File.exist?(candidate) ? candidate : nil
       end
 
       def resolve_corpus_pdf(relative_name, subdir: '')

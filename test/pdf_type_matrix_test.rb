@@ -18,16 +18,17 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require 'rbconfig'
+require_relative '../corpus_paths'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 CLI = File.join(REPO_ROOT, 'tools', 'su_pdf_cli.rb')
-CORPUS_ROOT = ENV['BCS_PRIVATE_VALIDATION_ROOT'] ||
-              '__private_validation_assets_not_configured__'
-MATRIX = File.join(CORPUS_ROOT, 'tier2', 'pdf-type-matrix')
+MATRIX = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_public_corpus_path(
+  'tier2/pdf-type-matrix'
+) || '__public_corpus_assets_not_configured__'
 
 unless File.directory?(MATRIX)
   puts "SKIP (visible): pdf-type-matrix not found at #{MATRIX} -- " \
-       'set BCS_PRIVATE_VALIDATION_ROOT or regenerate via corpus ' \
+       'set BCS_CORPUS_ROOT or regenerate via corpus ' \
        'tools/generate_pdf_type_matrix.py.'
   puts 'PASS: 0 assertions (matrix absent)'
   exit 0

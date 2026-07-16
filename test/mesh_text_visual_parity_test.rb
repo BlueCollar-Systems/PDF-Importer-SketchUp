@@ -161,6 +161,8 @@ class MeshTextVisualParityTest < Minitest::Test
     assert_equal ['Arial', false, false], entities.font_style_args.last
     assert_equal [
       {
+        page: 1,
+        source_span_id: nil,
         requested_font: 'RomanT',
         delivered_font: 'Arial',
         reason: 'RomanT unavailable; using Arial'

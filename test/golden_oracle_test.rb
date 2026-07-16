@@ -5,6 +5,7 @@
 # Skips oracles whose PDF is not on disk (manifest-only / user-desktop).
 
 require 'json'
+require 'digest'
 require 'minitest/autorun'
 
 require_relative 'support/corpus_harness'
@@ -23,6 +24,34 @@ class GoldenOracleTest < Minitest::Test
     assert @oracles.length >= 5
   end
 
+  def test_go_07_is_identity_and_historical_signature_locked
+    oracle = @oracles.find { |item| item['id'] == 'GO-07' }
+    refute_nil oracle
+    assert_equal '5f7c157349c1ebf5caedab4524bad2e37abf7a02bf4727cf65c2398e8466a130',
+                 oracle['sha256']
+    expect = oracle.fetch('expect')
+    assert_equal 642, expect['paths_min']
+    assert_equal 365, expect['text_items_min']
+    assert_equal 1.0, expect['placement_rate_min']
+    assert_equal 'f16cf8bca472573ebc1d53c78bd1551087823b118a8e3f91cb4512e46f9e57e6',
+                 expect['text_hash']
+  end
+
+  def test_text_hash_expectation_fails_closed_on_mismatch
+    oracle = { 'id' => 'GO-HASH' }
+    result = {
+      status: 'OK',
+      paths: 0,
+      text_items: 1,
+      pages: 1,
+      placement_rate: 1.0,
+      text_hash: 'actual'
+    }
+
+    failures = send(:check_oracle, oracle, result, 'text_hash' => 'expected')
+    assert_equal ['GO-HASH: text_hash expected expected, got actual'], failures
+  end
+
   def test_named_oracles_against_corpus
     failures = []
     @oracles.each do |oracle|
@@ -38,6 +67,13 @@ class GoldenOracleTest < Minitest::Test
       }
       result = CorpusHarness.analyze_pdf(info)
       expect = oracle['expect'] || {}
+      expected_sha = oracle['sha256'].to_s.downcase
+      unless expected_sha.empty?
+        actual_sha = Digest::SHA256.file(pdf).hexdigest.downcase
+        if actual_sha != expected_sha
+          failures << "#{oracle['id']}: sha256 expected #{expected_sha}, got #{actual_sha}"
+        end
+      end
       failures.concat(check_oracle(oracle, result, expect))
     end
 
@@ -85,7 +121,9 @@ class GoldenOracleTest < Minitest::Test
       pages_min: :pages,
       bbox_pct_min: :bbox_pct,
       placement_ok_min: :placement_rate,
-      placement_rate_min: :placement_rate
+      placement_rate_min: :placement_rate,
+      rotated_pages_min: :rotated_pages,
+      rotated_placement_rate_min: :rotated_placement_rate
     }.each do |exp_key, res_key|
       next unless expect.key?(exp_key.to_s)
       floor = expect[exp_key.to_s]
@@ -93,6 +131,14 @@ class GoldenOracleTest < Minitest::Test
       val = val.to_f if res_key == :placement_rate
       next if val.to_f >= floor.to_f
       out << "#{id}: #{exp_key} expected >= #{floor}, got #{val}"
+    end
+
+    expected_text_hash = expect['text_hash'].to_s.downcase
+    unless expected_text_hash.empty?
+      actual_text_hash = result[:text_hash].to_s.downcase
+      if actual_text_hash != expected_text_hash
+        out << "#{id}: text_hash expected #{expected_text_hash}, got #{actual_text_hash}"
+      end
     end
 
     if expect['scale_crosscheck_absent']

@@ -38,4 +38,49 @@ class PdfSalvageCleanupTest < Minitest::Test
     paths.to_a.each { |path| File.delete(path) if File.exist?(path) }
     PS.instance_variable_set(:@temp_salvages, [])
   end
+
+  def test_prepare_regenerates_salvage_after_cleanup_evicts_cached_path
+    source = File.join(Dir.tmpdir, "bc_salvage_source_#{Process.pid}.pdf")
+    File.write(source, '%PDF-1.4 source')
+    singleton = class << PS; self; end
+    original_prepare = PS.method(:prepare_uncached)
+    calls = 0
+    generated = []
+    PS.instance_variable_set(:@memo, {})
+    PS.instance_variable_set(:@temp_salvages, [])
+
+    singleton.send(:define_method, :prepare_uncached) do |_source_path|
+      calls += 1
+      path = File.join(
+        Dir.tmpdir, "bc_salvage_regenerated_#{Process.pid}_#{calls}.pdf"
+      )
+      File.write(path, "%PDF-1.4 generated #{calls}")
+      temp_salvages << path
+      generated << path
+      [path, 'salvaged via test seam']
+    end
+    singleton.send(:private, :prepare_uncached)
+
+    first, = PS.prepare_if_needed(source)
+    assert File.file?(first)
+    PS.cleanup(first)
+    refute File.exist?(first)
+
+    second, = PS.prepare_if_needed(source)
+    assert_equal 2, calls, 'deleted cached salvage must be regenerated'
+    refute_equal first, second
+    assert File.file?(second)
+  ensure
+    if singleton && original_prepare
+      singleton.send(:define_method, :prepare_uncached) do |path|
+        original_prepare.call(path)
+      end
+      singleton.send(:private, :prepare_uncached)
+    end
+    PS.cleanup_all
+    generated.to_a.each { |path| File.delete(path) if File.exist?(path) }
+    File.delete(source) if source && File.exist?(source)
+    PS.instance_variable_set(:@memo, {})
+    PS.instance_variable_set(:@temp_salvages, [])
+  end
 end

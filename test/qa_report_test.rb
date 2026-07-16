@@ -434,24 +434,128 @@ class QAReportTest < Minitest::Test
     assert_equal 'PL', row['profile_hint']
   end
 
-  # Round 20 (R20-1b/R20-2): mesh-text sizing health must reach the report.
-  def test_text_height_crosscheck_reports_samples_and_fallbacks
+  # Round 20: every native-mesh attempt must survive the report and disk JSON.
+  def test_text_height_crosscheck_reports_structured_attempts_and_fallbacks
     stats = {
       pages: 1, primitives: 5, edges: 5, text: 3, layers: [],
       elapsed_seconds: 0.2,
-      text_height_samples: [0.30, 0.10, 0.20],
+      mesh_text_telemetry: [
+        {
+          page: 1, source_span_id: 'span-a', requested_mode: :text3d,
+          delivered_mode: :text3d, pdf_em_height_in: 0.1666666667,
+          sketchup_letter_height_in: 0.121337890625,
+          nominal_sketchup_letter_height_in: 0.145,
+          visual_height_correction_reason: 'targeted_bbox_short_side',
+          visual_height_source_points: 10.0,
+          letter_height_ratio: 1491.0 / 2048.0,
+          metric_source: :known_arial_family,
+          requested_font: 'Arial Narrow', selected_font: 'Arial Narrow',
+          delivered_font: 'Arial Narrow',
+          matrix_x: 1.436458, residual_x: 0.90, total_x: 1.2928122,
+          fit_status: :fitted, fit_reason: 'bbox_overflow_shrink',
+          outcome: :complete, cleanup_outcome: :not_required
+        },
+        {
+          page: 1, source_span_id: 'span-b', requested_mode: :text3d,
+          delivered_mode: :labels, pdf_em_height_in: 0.10,
+          sketchup_letter_height_in: 0.072802734375,
+          letter_height_ratio: 1491.0 / 2048.0,
+          metric_source: :default_arial_family,
+          requested_font: 'RomanT', selected_font: 'Arial',
+          delivered_font: nil,
+          font_substitution_reason: 'RomanT unavailable; using Arial',
+          matrix_x: 1.0, residual_x: 1.0, total_x: 1.0,
+          fit_status: :rejected_outlier, fit_reason: 'residual_below_0_50',
+          outcome: :failed_rotation, failure_phase: :rotation,
+          failure_reason: 'text3d_rotation_transform_failed',
+          cleanup_outcome: :complete
+        }
+      ],
       text_height_fallback_count: 2
     }
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('t.pdf', {}, stats)
     cc = report[:extra][:text_height_crosscheck]
-    refute_nil cc, 'crosscheck block must be present when samples exist'
-    assert_equal 3, cc[:sample_count]
-    assert_in_delta 0.10, cc[:min_in], 1e-6
-    assert_in_delta 0.20, cc[:median_in], 1e-6
-    assert_in_delta 0.30, cc[:max_in], 1e-6
-    assert_equal 'nominal_pt_to_inch_x_scale', cc[:policy]
-    assert_equal 2, cc[:fallback_count],
-                 'Ruby 2.2-floor engagements must be visible in the report (R20-2)'
+    assert_equal 'pdf_em_x_font_metric_then_local_x', cc[:policy]
+    assert_equal 2, cc[:sample_count]
+    assert_equal 2, cc[:attempts].length
+    assert_equal 1, cc[:outcome_counts]['complete']
+    assert_equal 1, cc[:outcome_counts]['failed_rotation']
+    assert_equal 1, cc[:failure_phase_counts]['rotation']
+    assert_equal 1, cc[:fit_reason_counts]['bbox_overflow_shrink']
+    assert_equal 2, cc[:requested_mode_counts]['text3d']
+    assert_equal 1, cc[:delivered_mode_counts]['text3d']
+    assert_equal 1, cc[:delivered_mode_counts]['labels']
+    assert_equal 1, cc[:fitted_count]
+    assert_equal 1, cc[:rejected_outlier_count]
+    assert_equal 1, cc[:failed_transform_count]
+    assert_equal 2, cc[:fallback_count]
+    assert_equal 2, cc[:height_fallback_count]
+    assert_equal 1, cc[:visual_height_correction_count]
+    assert_equal 1,
+                 cc[:visual_height_correction_reasons]['targeted_bbox_short_side']
+    assert_in_delta 0.145,
+                    cc[:nominal_sketchup_letter_height_in][:max], 1.0e-9
+    assert_equal 1, cc[:font_substitutions]['RomanT unavailable; using Arial']
+    assert_in_delta 0.10, cc[:pdf_em_height_in][:min], 1.0e-6
+    assert_in_delta 0.121337890625,
+                    cc[:sketchup_letter_height_in][:max], 1.0e-9
+
+    path = File.join(Dir.tmpdir, "qa_report_mesh_telemetry_#{Process.pid}.json")
+    begin
+      assert_equal path,
+                   BlueCollarSystems::PDFVectorImporter::QAReport.write_json(report, path)
+      loaded = JSON.parse(File.read(path))
+      disk = loaded['extra']['text_height_crosscheck']
+      assert_equal 2, disk['sample_count']
+      assert_equal 'span-a', disk['attempts'][0]['source_span_id']
+      assert_equal 'rotation', disk['attempts'][1]['failure_phase']
+      assert_equal 'labels', disk['attempts'][1]['delivered_mode']
+      refute_nil disk['pdf_em_height_in']
+      refute_nil disk['sketchup_letter_height_in']
+    ensure
+      File.delete(path) if File.exist?(path)
+    end
+  end
+
+  def test_text_height_crosscheck_survives_nil_malformed_and_nonfinite_fields
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      mesh_text_telemetry: [
+        {
+          source_span_id: 'valid', requested_mode: :text3d,
+          delivered_mode: :text3d, outcome: :complete,
+          pdf_em_height_in: 0.1, sketchup_letter_height_in: 0.07,
+          letter_height_ratio: 0.7, matrix_x: 1.0,
+          residual_x: 1.0, total_x: 1.0
+        },
+        {
+          source_span_id: 'partial', requested_mode: :text3d,
+          delivered_mode: :labels, outcome: :failed_generation,
+          failure_phase: :generation, pdf_em_height_in: nil,
+          sketchup_letter_height_in: 'not-a-number',
+          letter_height_ratio: Float::INFINITY,
+          matrix_x: nil, residual_x: nil, total_x: nil
+        }
+      ]
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('t.pdf', {}, stats)
+    cc = report[:extra][:text_height_crosscheck]
+    refute_nil cc
+    assert_equal 2, cc[:sample_count]
+    assert_equal 1, cc[:pdf_em_height_in][:count]
+    assert_equal 1, cc[:pdf_em_height_in][:missing_count]
+    assert_equal 1, cc[:sketchup_letter_height_in][:invalid_count]
+    assert_equal 1, cc[:letter_height_ratio][:invalid_count]
+
+    path = File.join(Dir.tmpdir, "qa_report_partial_telemetry_#{Process.pid}.json")
+    begin
+      assert_equal path,
+                   BlueCollarSystems::PDFVectorImporter::QAReport.write_json(report, path)
+      loaded = JSON.parse(File.read(path))
+      assert_equal 2, loaded['extra']['text_height_crosscheck']['attempts'].length
+    ensure
+      File.delete(path) if File.exist?(path)
+    end
   end
 
   def test_text_height_crosscheck_present_when_only_fallbacks_occurred
@@ -476,5 +580,275 @@ class QAReportTest < Minitest::Test
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('t.pdf', {}, stats)
     assert_nil report[:extra][:text_height_crosscheck],
                'headless/label imports place no mesh text — block stays absent'
+  end
+
+  def valid_native_mesh_attempt
+    {
+      page: 1,
+      source_span_id: 'text_span:1:0',
+      requested_mode: :text3d,
+      delivered_mode: :text3d,
+      requested_font: 'Arial',
+      selected_font: 'Arial',
+      attempted_font: 'Arial',
+      delivered_font: 'Arial',
+      pdf_em_height_in: 0.1666666667,
+      sketchup_letter_height_in: 0.121337890625,
+      letter_height_ratio: 1491.0 / 2048.0,
+      metric_source: :known_arial_family,
+      matrix_x: 1.0,
+      residual_x: 1.0,
+      total_x: 1.0,
+      fit_status: :skipped,
+      fit_reason: 'no_overflow',
+      outcome: :complete,
+      cleanup_outcome: :not_required,
+      attempt_history: [
+        {
+          mode: :text3d, outcome: :complete, reason: nil,
+          cleanup_outcome: :not_required, delivered_mode: :text3d
+        }
+      ]
+    }
+  end
+
+  def valid_native_mesh_stats
+    {
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      text_mode: :text3d,
+      mesh_text_telemetry: [valid_native_mesh_attempt],
+      source_provenance_objects: [
+        {
+          span_id: 'text_span:1:0',
+          created_entity_type: 'native_3d_text'
+        }
+      ],
+      import_report_publication_status: :published,
+      import_report_path: 'contract_import_report.json'
+    }
+  end
+
+  def contract_for(stats)
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'contract.pdf', {}, stats
+    )
+    report[:extra][:import_contract_ready]
+  end
+
+  def test_import_contract_clean_labels_do_not_require_mesh_telemetry
+    contract = contract_for(
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      text_mode: :labels,
+      text_renderers: [
+        {
+          page: 1, requested_mode: :labels, delivered_mode: :labels,
+          renderer: :labels, degraded: false, count: 1
+        }
+      ],
+      source_provenance_objects: [
+        { span_id: 'text_span:1:0', created_entity_type: 'native_label' }
+      ],
+      import_report_publication_status: :published,
+      import_report_path: 'contract_import_report.json'
+    )
+
+    assert_equal true, contract[:ready]
+    assert_equal true, contract[:checks][:native_3d_attempt_evidence]
+  end
+
+  def test_import_contract_accepts_complete_native_mesh_attempt_evidence
+    contract = contract_for(valid_native_mesh_stats)
+
+    assert_equal true, contract[:ready]
+    assert contract[:checks].values.all?, contract.inspect
+  end
+
+  def test_import_contract_rejects_each_named_integrity_failure
+    cases = [
+      [:no_failed_pages, lambda { |stats| stats[:failed_pages] = [1] }],
+      [:telemetry_integrity, lambda { |stats| stats[:mesh_text_telemetry_record_failure_count] = 1 }],
+      [:telemetry_integrity, lambda { |stats| stats[:mesh_text_telemetry_initialization_failure_count] = 1 }],
+      [:telemetry_integrity, lambda { |stats| stats[:mesh_text_telemetry_invalid_sample_count] = 1 }],
+      [:telemetry_integrity, lambda { |stats| stats[:mesh_text_telemetry_merge_failure_count] = 1 }],
+      [:telemetry_integrity, lambda { |stats| stats[:mesh_text_telemetry_outer_merge_failure_count] = 1 }],
+      [:telemetry_integrity, lambda { |stats| stats[:text_font_substitution_merge_failure_count] = 1 }],
+      [:native_3d_attempt_evidence, lambda { |stats| stats[:mesh_text_telemetry][0].delete(:page) }],
+      [:native_3d_source_identity, lambda { |stats| stats[:mesh_text_telemetry][0].delete(:source_span_id) }],
+      [:cleanup_verified, lambda { |stats| stats[:mesh_text_telemetry][0][:cleanup_outcome] = :failed }],
+      [:cleanup_verified, lambda { |stats| stats[:terminal_cleanup_failures] = [{ page: 1, reason: 'erase_unverified' }] }],
+      [:terminal_delivery, lambda { |stats| stats[:mesh_text_telemetry][0][:delivered_mode] = :none }],
+      [:report_generation, lambda { |stats| stats[:import_report_failures] = [{ stage: :generation, reason: 'boom' }] }],
+      [:report_publication, lambda { |stats| stats[:import_report_failures] = [{ stage: :publication, reason: 'write_json_returned_nil' }] }]
+    ]
+
+    cases.each do |check_name, mutate|
+      stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+      mutate.call(stats)
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], "#{check_name} failure was accepted"
+      assert_equal false, contract[:checks][check_name],
+                   "#{check_name} was not named explicitly: #{contract.inspect}"
+    end
+  end
+
+  def test_import_contract_rejects_unknown_or_malformed_report_failure_entries
+    [
+      { stage: :unexpected, reason: 'boom' },
+      { reason: 'missing stage' },
+      'malformed failure'
+    ].each do |failure|
+      stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+      stats[:import_report_failures] = [failure]
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], failure.inspect
+      assert_equal false, contract[:checks][:report_failure_ledger],
+                   failure.inspect
+    end
+  end
+
+  def test_import_contract_rejects_missing_and_invalid_attempt_records
+    [nil, 'not-a-hash', {}, valid_native_mesh_attempt.merge(outcome: nil)].each do |bad|
+      stats = valid_native_mesh_stats
+      stats[:mesh_text_telemetry] = [bad]
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], bad.inspect
+      assert_equal false, contract[:checks][:native_3d_attempt_evidence], bad.inspect
+    end
+  end
+
+  def test_labels_import_with_any_malformed_attempt_record_fails_closed
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      text_mode: :labels,
+      mesh_text_telemetry: [
+        { delivered_mode: :labels, cleanup_outcome: :complete }
+      ],
+      import_report_publication_status: :published,
+      import_report_path: 'contract_import_report.json'
+    }
+    contract = contract_for(stats)
+
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:native_3d_attempt_evidence]
+  end
+
+  def test_terminal_raster_requires_exact_verified_cleanup_evidence
+    [:missing, :not_attempted, :unknown].each do |cleanup|
+      stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+      attempt = stats[:mesh_text_telemetry][0]
+      attempt[:delivered_mode] = :raster
+      attempt[:superseded_by_raster] = true
+      attempt[:terminal_cleanup_outcome] = cleanup unless cleanup == :missing
+      attempt[:attempt_history] << {
+        mode: :raster, outcome: :complete, reason: 'native APIs unavailable',
+        cleanup_outcome: cleanup, delivered_mode: :raster
+      }
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], cleanup
+      assert_equal false, contract[:checks][:cleanup_verified], cleanup
+    end
+  end
+
+  def test_failed_native_visual_transform_never_counts_as_ready_delivery
+    stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+    attempt = stats[:mesh_text_telemetry][0]
+    attempt[:outcome] = :failed_scale
+    attempt[:failure_phase] = :scale
+    attempt[:failure_reason] = 'text3d_scale_transform_failed'
+    attempt[:visual_fidelity_verified] = false
+    attempt[:attempt_history][0][:outcome] = :failed_scale
+    attempt[:attempt_history][0][:reason] = 'text3d_scale_transform_failed'
+    contract = contract_for(stats)
+
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:native_3d_attempt_evidence]
+  end
+
+  def test_attempt_history_failure_requires_reason_and_consistent_terminal_mode
+    missing_reason = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+    missing_reason[:mesh_text_telemetry][0][:attempt_history][0][:outcome] = :failed_generation
+    missing_reason[:mesh_text_telemetry][0][:attempt_history][0][:reason] = nil
+    assert_equal false, contract_for(missing_reason)[:ready]
+
+    inconsistent = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+    inconsistent[:mesh_text_telemetry][0][:attempt_history][0][:delivered_mode] = :labels
+    assert_equal false, contract_for(inconsistent)[:ready]
+  end
+
+  def test_publication_status_and_path_are_required_exactly
+    [:missing, :pending, :failed, :unknown].each do |status|
+      stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+      if status == :missing
+        stats.delete(:import_report_publication_status)
+      else
+        stats[:import_report_publication_status] = status
+      end
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], status
+      assert_equal false, contract[:checks][:report_publication], status
+    end
+
+    stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+    stats.delete(:import_report_path)
+    contract = contract_for(stats)
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:report_publication]
+  end
+
+  def test_import_contract_rejects_telemetry_summary_error_policy
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'contract.pdf', {}, valid_native_mesh_stats
+    )
+    report[:extra][:text_height_crosscheck] = {
+      policy: 'telemetry_summary_error', error: 'forced summary failure'
+    }
+    contract = BlueCollarSystems::PDFVectorImporter::QAReport.
+      build_import_contract_ready(report)
+
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:telemetry_integrity]
+  end
+
+  def test_even_numeric_summary_median_uses_mean_of_middle_pair
+    summary = BlueCollarSystems::PDFVectorImporter::QAReport.
+      numeric_summary([1.0, 2.0, 10.0, 20.0])
+
+    assert_equal 6.0, summary[:median]
+  end
+
+  def test_metric_and_representation_fallbacks_are_reported_separately
+    stats = valid_native_mesh_stats
+    attempt = stats[:mesh_text_telemetry][0]
+    attempt[:height_fallback_reason] = 'mesh_text_height_exception: RangeError'
+    attempt[:delivered_mode] = :labels
+    attempt[:outcome] = :failed_generation
+    attempt[:failure_phase] = :generation
+    attempt[:failure_reason] = 'text3d_mesh_unavailable'
+    attempt[:cleanup_outcome] = :not_required
+    attempt[:attempt_history] = [
+      { mode: :text3d, outcome: :failed_generation,
+        reason: 'text3d_mesh_unavailable', cleanup_outcome: :not_required },
+      { mode: :labels, outcome: :complete, reason: nil,
+        cleanup_outcome: :not_required }
+    ]
+    stats[:text_height_fallback_count] = 1
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'contract.pdf', {}, stats
+    )
+    crosscheck = report[:extra][:text_height_crosscheck]
+
+    assert_equal 1, crosscheck[:metric_fallback_count]
+    assert_equal 1, crosscheck[:representation_fallback_count]
+    assert_equal 1,
+                 crosscheck[:height_fallback_reasons]['mesh_text_height_exception: RangeError']
+  end
+
+  def test_metric_fallback_count_without_attempt_reason_fails_closed
+    stats = valid_native_mesh_stats
+    stats[:text_height_fallback_count] = 1
+    contract = contract_for(stats)
+
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:height_fallback_reasons]
   end
 end

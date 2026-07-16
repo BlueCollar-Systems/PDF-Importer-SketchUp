@@ -1,6 +1,6 @@
 {
   "schema": "bcs.validation_oracles/1",
-  "updated": "2026-07-06",
+  "updated": "2026-07-16",
   "notes": "Named private validation PDFs with expected primitive/text/placement ranges. PDFs resolve via BCS_PRIVATE_VALIDATION_ROOT and manifest.json entry IDs (PRIVATE-01.pdf, etc.).",
   "oracles": [
     {
@@ -54,25 +54,30 @@
     {
       "id": "GO-07",
       "name": "private validation user welding symbol chart",
+      "sha256": "5f7c157349c1ebf5caedab4524bad2e37abf7a02bf4727cf65c2398e8466a130",
       "manifest_entry_id": "PRIVATE-02",
       "corpus_key": "private_validation_user/PRIVATE-02.pdf",
       "pdf_candidates": ["PRIVATE-02.pdf", "private/user/PRIVATE-02.pdf"],
       "expect": {
-        "paths_min": 5,
-        "text_items_min": 0,
-        "placement_rate_min": 0.50
+        "paths_min": 642,
+        "text_items_min": 365,
+        "placement_rate_min": 1.0,
+        "text_hash": "f16cf8bca472573ebc1d53c78bd1551087823b118a8e3f91cb4512e46f9e57e6"
       }
     },
     {
       "id": "GO-08",
       "name": "Rotated page text",
+      "sha256": "ab0cb700cd5e5338fd676dfca25becae800acd2be03a4e57856485b8cfd2d28b",
       "manifest_entry_id": "PRIVATE-04",
       "corpus_key": "private_validation_web/pdfjs/sample_rotated_text_rotated.pdf",
       "pdf_candidates": ["sample_rotated_text_rotated.pdf", "private/web/pdfjs/sample_rotated_text_rotated.pdf"],
       "expect": {
         "paths_min": 0,
         "text_items_min": 1,
-        "placement_rate_min": 0.70
+        "placement_rate_min": 0.70,
+        "rotated_pages_min": 1,
+        "rotated_placement_rate_min": 1.0
       }
     },
     {

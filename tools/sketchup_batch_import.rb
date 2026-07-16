@@ -36,14 +36,15 @@ if gate
 end
 
 model = Sketchup.active_model
-config = PDF::ImportConfig.auto
+config = PDF::ImportConfig.from_mode('Auto')
 opts = config.to_opts
 opts[:import_text] = true
-opts[:text_mode] = :labels
+opts[:text_mode] = :text3d
+opts[:use_3d_text] = true
 opts[:raster_fallback] = true
 
 stats = PDF.run_pipeline(model, pdf_path, opts)
-unless stats
+unless PDF.pipeline_result_success?(stats)
   UI.messagebox("Batch import failed for:\n#{pdf_path}")
   exit 1
 end
@@ -55,7 +56,6 @@ if report_dir && stats[:import_report_path]
   stats[:import_report_path] = dest
 end
 
-model.commit_operation if model.respond_to?(:commit_operation)
 msg = "Imported #{stats[:edges]} edges, #{stats[:text]} text items.\nReport: #{stats[:import_report_path]}"
 UI.messagebox(msg)
 puts msg

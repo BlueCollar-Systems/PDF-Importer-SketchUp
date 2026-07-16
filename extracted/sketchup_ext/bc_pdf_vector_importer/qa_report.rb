@@ -286,36 +286,299 @@ module BlueCollarSystems
           model_3d_intent: model_3d_intent_block(stats),
           model_3d: model_3d_block(stats, opts),
           parts_bootstrap: parts_bootstrap_block(stats),
-          text_height_crosscheck: text_height_crosscheck_block(stats)
+          text_height_crosscheck: text_height_crosscheck_block(stats),
+          delivery_integrity: delivery_integrity_block(stats)
         }
       end
 
-      # Round 20 (R20-1b/R20-2): report faithful mesh-text target heights and
-      # the height-fallback count so Import Health / Report Doctor can
-      # distinguish SIZE issues from host runtime issues.
-      def text_height_crosscheck_block(stats)
-        samples = Array(stats[:text_height_samples] || stats['text_height_samples'])
-          .map { |v| v.to_f }
-          .select { |v| v > 0.0 }
-          .sort
-        fallbacks = (stats[:text_height_fallback_count] ||
-                     stats['text_height_fallback_count']).to_i
-        return nil if samples.empty? && fallbacks.zero?
-
-        mid = samples.empty? ? 0.0 : samples[samples.length / 2]
+      def delivery_integrity_block(stats)
+        failures = Array(
+          stats[:import_report_failures] || stats['import_report_failures']
+        ).dup
+        singular = stats[:import_report_failure] || stats['import_report_failure']
+        failures << singular if singular && !failures.any? do |entry|
+          entry.equal?(singular) || entry == singular
+        end
         {
-          sample_count: samples.length,
-          min_in: (samples.first || 0.0).round(5),
-          median_in: mid.round(5),
-          max_in: (samples.last || 0.0).round(5),
-          policy: 'nominal_pt_to_inch_x_scale',
-          fallback_count: fallbacks,
-          note: 'Heights are faithful nominal PDF targets (pt/72 x scale). ' \
-                'fallback_count > 0 means the height safety floor engaged ' \
-                '(R20-2) and text may render at the 0.01" minimum.'
+          failed_pages: normalize_json(
+            Array(stats[:failed_pages] || stats['failed_pages'])
+          ),
+          telemetry_failure_counts: {
+            initialization: (
+              stats[:mesh_text_telemetry_initialization_failure_count] ||
+              stats['mesh_text_telemetry_initialization_failure_count']
+            ).to_i,
+            record: (
+              stats[:mesh_text_telemetry_record_failure_count] ||
+              stats['mesh_text_telemetry_record_failure_count']
+            ).to_i,
+            invalid_sample: (
+              stats[:mesh_text_telemetry_invalid_sample_count] ||
+              stats['mesh_text_telemetry_invalid_sample_count']
+            ).to_i,
+            merge: (
+              stats[:mesh_text_telemetry_merge_failure_count] ||
+              stats['mesh_text_telemetry_merge_failure_count']
+            ).to_i,
+            outer_merge: (
+              stats[:mesh_text_telemetry_outer_merge_failure_count] ||
+              stats['mesh_text_telemetry_outer_merge_failure_count']
+            ).to_i,
+            font_substitution_merge: (
+              stats[:text_font_substitution_merge_failure_count] ||
+              stats['text_font_substitution_merge_failure_count']
+            ).to_i
+          },
+          terminal_cleanup_failures: normalize_json(
+            Array(
+              stats[:terminal_cleanup_failures] ||
+              stats['terminal_cleanup_failures']
+            )
+          ),
+          terminal_cleanup_events: normalize_json(
+            Array(
+              stats[:terminal_cleanup_events] ||
+              stats['terminal_cleanup_events']
+            )
+          ),
+          import_report_failures: normalize_json(failures),
+          report_publication_status: (
+            stats[:import_report_publication_status] ||
+            stats['import_report_publication_status']
+          ).to_s,
+          report_path: (
+            stats[:import_report_path] || stats['import_report_path']
+          ).to_s
         }
+      rescue StandardError => e
+        {
+          failed_pages: [],
+          telemetry_failure_counts: { integrity_block: 1 },
+          terminal_cleanup_failures: [],
+          terminal_cleanup_events: [],
+          import_report_failures: [
+            { stage: 'generation', reason: e.message.to_s }
+          ],
+          report_publication_status: 'failed',
+          report_path: ''
+        }
+      end
+
+      def telemetry_numeric_value(value)
+        return nil if value.nil?
+        return nil if value.respond_to?(:empty?) && value.empty?
+        number = value.is_a?(Numeric) ? value.to_f : Float(value.to_s)
+        return nil unless number.finite? && number > 0.0
+        number
       rescue StandardError
         nil
+      end
+
+      def numeric_summary(values)
+        valid = []
+        missing = 0
+        invalid = 0
+        Array(values).each do |value|
+          if value.nil? || (value.respond_to?(:empty?) && value.empty?)
+            missing += 1
+            next
+          end
+          number = telemetry_numeric_value(value)
+          if number
+            valid << number
+          else
+            invalid += 1
+          end
+        end
+        valid.sort!
+        if valid.empty?
+          return {
+            count: 0, min: 0.0, median: 0.0, max: 0.0,
+            missing_count: missing, invalid_count: invalid
+          }
+        end
+        {
+          count: valid.length,
+          min: valid.first.round(8),
+          median: begin
+            middle = valid.length / 2
+            value = if valid.length.even?
+                      (valid[middle - 1] + valid[middle]) / 2.0
+                    else
+                      valid[middle]
+                    end
+            value.round(8)
+          end,
+          max: valid.last.round(8),
+          missing_count: missing,
+          invalid_count: invalid
+        }
+      end
+
+      def telemetry_field(sample, field)
+        return nil unless sample.respond_to?(:[])
+        sample[field] || sample[field.to_s]
+      rescue StandardError
+        nil
+      end
+
+      def value_counts(samples, field)
+        counts = {}
+        Array(samples).each do |sample|
+          value = telemetry_field(sample, field)
+          next if value.nil? || value.to_s.empty?
+          key = value.to_s
+          counts[key] = counts.fetch(key, 0) + 1
+        end
+        counts
+      end
+
+      # Round 20: preserve one normalized attempt for every native-mesh call.
+      # PDF em and SketchUp letter height remain distinct; only local X is fit.
+      def text_height_crosscheck_block(stats)
+        raw_samples = Array(
+          stats[:mesh_text_telemetry] || stats['mesh_text_telemetry']
+        )
+        samples = raw_samples.select { |sample| sample.is_a?(Hash) }
+        fallbacks = (
+          stats[:text_height_fallback_count] ||
+          stats['text_height_fallback_count']
+        ).to_i
+
+        if samples.empty? && raw_samples.empty?
+          legacy = Array(
+            stats[:text_height_samples] || stats['text_height_samples']
+          )
+          letter = numeric_summary(legacy)
+          return nil if legacy.empty? && fallbacks.zero?
+          return {
+            sample_count: letter[:count],
+            min_in: letter[:min],
+            median_in: letter[:median],
+            max_in: letter[:max],
+            policy: 'legacy_letter_height_samples',
+            fallback_count: fallbacks,
+            height_fallback_count: fallbacks,
+            note: 'Legacy delivered SketchUp letter-height samples.'
+          }
+        end
+
+        outcomes = value_counts(samples, :outcome)
+        phases = value_counts(samples, :failure_phase)
+        fits = value_counts(samples, :fit_status)
+        letter = numeric_summary(
+          samples.map do |sample|
+            telemetry_field(sample, :sketchup_letter_height_in)
+          end
+        )
+        normalized_attempts = samples.map { |sample| normalize_json(sample) }
+        superseded = samples.inject(0) do |count, sample|
+          value = telemetry_field(sample, :superseded_by_raster)
+          count + (value == true || value.to_s == 'true' ? 1 : 0)
+        end
+        representation_fallbacks = samples.inject(0) do |count, sample|
+          requested = telemetry_field(sample, :requested_mode).to_s
+          delivered = telemetry_field(sample, :delivered_mode).to_s
+          changed = !requested.empty? && !delivered.empty? &&
+                    delivered != 'none' && requested != delivered
+          count + (changed ? 1 : 0)
+        end
+        height_fallback_reasons = value_counts(samples, :height_fallback_reason)
+        visual_height_correction_reasons =
+          value_counts(samples, :visual_height_correction_reason)
+        visual_height_correction_count =
+          visual_height_correction_reasons.values.inject(0) do |sum, value|
+            sum + value.to_i
+          end
+        {
+          sample_count: samples.length,
+          invalid_sample_count: raw_samples.length - samples.length,
+          attempts: normalized_attempts,
+          min_in: letter[:min],
+          median_in: letter[:median],
+          max_in: letter[:max],
+          policy: 'pdf_em_x_font_metric_then_local_x',
+          pdf_em_height_in: numeric_summary(
+            samples.map { |sample| telemetry_field(sample, :pdf_em_height_in) }
+          ),
+          nominal_sketchup_letter_height_in: numeric_summary(
+            samples.map do |sample|
+              telemetry_field(sample, :nominal_sketchup_letter_height_in)
+            end
+          ),
+          sketchup_letter_height_in: letter,
+          letter_height_ratio: numeric_summary(
+            samples.map { |sample| telemetry_field(sample, :letter_height_ratio) }
+          ),
+          metric_sources: value_counts(samples, :metric_source),
+          matrix_x: numeric_summary(
+            samples.map { |sample| telemetry_field(sample, :matrix_x) }
+          ),
+          residual_x: numeric_summary(
+            samples.map { |sample| telemetry_field(sample, :residual_x) }
+          ),
+          total_x: numeric_summary(
+            samples.map { |sample| telemetry_field(sample, :total_x) }
+          ),
+          outcome_counts: outcomes,
+          failure_phase_counts: phases,
+          failure_reason_counts: value_counts(samples, :failure_reason),
+          cleanup_outcome_counts: value_counts(samples, :cleanup_outcome),
+          fit_status_counts: fits,
+          fit_reason_counts: value_counts(samples, :fit_reason),
+          requested_mode_counts: value_counts(samples, :requested_mode),
+          delivered_mode_counts: value_counts(samples, :delivered_mode),
+          fitted_count: fits.fetch('fitted', 0),
+          skipped_count: fits.fetch('skipped', 0),
+          rejected_outlier_count: fits.fetch('rejected_outlier', 0),
+          failed_transform_count:
+            phases.fetch('scale', 0) +
+            phases.fetch('translation', 0) +
+            phases.fetch('rotation', 0),
+          superseded_by_raster_count: superseded,
+          fallback_count: fallbacks,
+          height_fallback_count: fallbacks,
+          metric_fallback_count: fallbacks,
+          representation_fallback_count: representation_fallbacks,
+          height_fallback_reasons: height_fallback_reasons,
+          visual_height_correction_count: visual_height_correction_count,
+          visual_height_correction_reasons: visual_height_correction_reasons,
+          font_substitutions:
+            value_counts(samples, :font_substitution_reason),
+          telemetry_record_failure_count: (
+            stats[:mesh_text_telemetry_record_failure_count] ||
+            stats['mesh_text_telemetry_record_failure_count']
+          ).to_i,
+          telemetry_initialization_failure_count: (
+            stats[:mesh_text_telemetry_initialization_failure_count] ||
+            stats['mesh_text_telemetry_initialization_failure_count']
+          ).to_i,
+          telemetry_invalid_sample_count: (
+            stats[:mesh_text_telemetry_invalid_sample_count] ||
+            stats['mesh_text_telemetry_invalid_sample_count']
+          ).to_i,
+          telemetry_merge_failure_count: (
+            stats[:mesh_text_telemetry_merge_failure_count] ||
+            stats['mesh_text_telemetry_merge_failure_count']
+          ).to_i,
+          telemetry_outer_merge_failure_count: (
+            stats[:mesh_text_telemetry_outer_merge_failure_count] ||
+            stats['mesh_text_telemetry_outer_merge_failure_count']
+          ).to_i,
+          font_substitution_merge_failure_count: (
+            stats[:text_font_substitution_merge_failure_count] ||
+            stats['text_font_substitution_merge_failure_count']
+          ).to_i,
+          note: 'PDF em height is converted by a trusted font-level ratio; ' \
+                'only local X may be reconciled.'
+        }
+      rescue StandardError => e
+        Logger.warn('QAReport', "text height crosscheck failed: #{e.message}")
+        {
+          sample_count: 0,
+          policy: 'telemetry_summary_error',
+          error: e.message.to_s
+        }
       end
 
       def model_3d_intent_block(stats)
@@ -389,17 +652,179 @@ module BlueCollarSystems
         text_count = (report[:result] || {})[:text_entities].to_i
         has_entity_types = extra.key?(:actual_text_entity_types) || extra.key?('actual_text_entity_types')
         text_ok = text_count <= 0 || has_entity_types
-        ready = has_stamp && has_crosscheck && text_ok && open_failure.nil?
+        integrity = extra[:delivery_integrity] || extra['delivery_integrity'] || {}
+        failed_pages = Array(
+          integrity[:failed_pages] || integrity['failed_pages']
+        )
+        telemetry_counts = integrity[:telemetry_failure_counts] ||
+                           integrity['telemetry_failure_counts'] || {}
+        telemetry_failures = telemetry_counts.values.inject(0) do |sum, value|
+          sum + value.to_i
+        end
+        crosscheck = extra[:text_height_crosscheck] ||
+                     extra['text_height_crosscheck']
+        policy = crosscheck.is_a?(Hash) ?
+                   (crosscheck[:policy] || crosscheck['policy']).to_s : ''
+        crosscheck_invalid = crosscheck.is_a?(Hash) ?
+          (crosscheck[:invalid_sample_count] ||
+           crosscheck['invalid_sample_count']).to_i : 0
+        attempts = crosscheck.is_a?(Hash) ?
+          Array(crosscheck[:attempts] || crosscheck['attempts']) : []
+        attempt_records_present = crosscheck.is_a?(Hash) && (
+          !attempts.empty? ||
+          (crosscheck[:sample_count] || crosscheck['sample_count']).to_i > 0 ||
+          crosscheck_invalid > 0
+        )
+        text_mode = (extra[:text_mode] || extra['text_mode']).to_s
+        entity_types = extra[:actual_text_entity_types] ||
+                       extra['actual_text_entity_types'] || {}
+        native_entity_count = (
+          entity_types[:native_3d_text] || entity_types['native_3d_text']
+        ).to_i
+        native_required = normalize_report_text_mode(text_mode) == '3d_text' ||
+                          native_entity_count > 0 || attempts.any? do |sample|
+          telemetry_field(sample, :requested_mode).to_s == 'text3d' ||
+            telemetry_field(sample, :delivered_mode).to_s == 'text3d'
+        end
+        valid_attempts = !attempts.empty? && crosscheck_invalid.zero? &&
+                         attempts.all? { |sample| valid_mesh_attempt_evidence?(sample) }
+        attempt_evidence = attempt_records_present ? valid_attempts : !native_required
+        source_identity = (!attempt_records_present && !native_required) ||
+                          (!attempts.empty? && attempts.all? do |sample|
+          !telemetry_field(sample, :source_span_id).to_s.strip.empty?
+        end)
+        terminal_delivery = attempts.all? do |sample|
+          delivered = telemetry_field(sample, :delivered_mode).to_s
+          !delivered.empty? && delivered != 'none'
+        end
+        cleanup_failures = Array(
+          integrity[:terminal_cleanup_failures] ||
+          integrity['terminal_cleanup_failures']
+        )
+        cleanup_verified = cleanup_failures.empty? && attempts.all? do |sample|
+          cleanup = telemetry_field(sample, :cleanup_outcome).to_s
+          terminal_cleanup = telemetry_field(
+            sample, :terminal_cleanup_outcome
+          ).to_s
+          delivered = telemetry_field(sample, :delivered_mode).to_s
+          base_cleanup_ok = %w[complete not_required].include?(cleanup)
+          terminal_cleanup_ok = if delivered == 'raster'
+                                  terminal_cleanup == 'verified'
+                                else
+                                  terminal_cleanup.empty? ||
+                                    terminal_cleanup == 'verified'
+                                end
+          base_cleanup_ok && terminal_cleanup_ok
+        end
+        metric_fallbacks = crosscheck.is_a?(Hash) ?
+          (crosscheck[:metric_fallback_count] ||
+           crosscheck['metric_fallback_count']).to_i : 0
+        reason_counts = crosscheck.is_a?(Hash) ?
+          (crosscheck[:height_fallback_reasons] ||
+           crosscheck['height_fallback_reasons'] || {}) : {}
+        reason_total = reason_counts.values.inject(0) do |sum, value|
+          sum + value.to_i
+        end
+        height_fallback_reasons = metric_fallbacks == reason_total
+        report_failures = Array(
+          integrity[:import_report_failures] ||
+          integrity['import_report_failures']
+        )
+        generation_ok = report_failures.none? do |failure|
+          %w[generation report_generation build].include?(
+            telemetry_field(failure, :stage).to_s
+          )
+        end
+        publication_ok = report_failures.none? do |failure|
+          stage = telemetry_field(failure, :stage).to_s
+          %w[
+            publication report_publication parts_bootstrap_sidecar
+            source_provenance_sidecar sidecar
+          ].include?(stage)
+        end
+        publication_status = (
+          integrity[:report_publication_status] ||
+          integrity['report_publication_status']
+        ).to_s
+        publication_path = (
+          integrity[:report_path] || integrity['report_path']
+        ).to_s.strip
+        publication_ok = false unless publication_status == 'published' &&
+                                      !publication_path.empty?
+        telemetry_ok = telemetry_failures.zero? && crosscheck_invalid.zero? &&
+                       policy != 'telemetry_summary_error'
+        checks = {
+          build_stamp: has_stamp,
+          scale_crosscheck: has_crosscheck,
+          actual_text_entity_types: text_ok,
+          no_open_failure: open_failure.nil?,
+          no_failed_pages: failed_pages.empty?,
+          telemetry_integrity: telemetry_ok,
+          native_3d_attempt_evidence: attempt_evidence,
+          native_3d_source_identity: source_identity,
+          cleanup_verified: cleanup_verified,
+          terminal_delivery: terminal_delivery,
+          height_fallback_reasons: height_fallback_reasons,
+          report_failure_ledger: report_failures.empty?,
+          report_generation: generation_ok,
+          report_publication: publication_ok
+        }
+        ready = checks.values.all?
         {
           ready: ready,
-          checks: {
-            build_stamp: has_stamp,
-            scale_crosscheck: has_crosscheck,
-            actual_text_entity_types: text_ok,
-            no_open_failure: open_failure.nil?
-          },
-          note: 'diagnostics stub — Report Doctor may recompute client-side'
+          checks: checks,
+          failed_checks: checks.keys.reject { |key| checks[key] },
+          note: 'Fail-closed import delivery and evidence integrity checks.'
         }
+      end
+
+      def valid_mesh_attempt_evidence?(sample)
+        return false unless sample.is_a?(Hash)
+        page = telemetry_field(sample, :page).to_i
+        identity = telemetry_field(sample, :source_span_id).to_s.strip
+        requested = telemetry_field(sample, :requested_mode).to_s
+        delivered = telemetry_field(sample, :delivered_mode).to_s
+        outcome = telemetry_field(sample, :outcome).to_s
+        cleanup = telemetry_field(sample, :cleanup_outcome).to_s
+        history = telemetry_field(sample, :attempt_history)
+        return false if page <= 0 || identity.empty? || requested.empty?
+        return false if delivered.empty? || delivered == 'none' || outcome.empty?
+        return false if cleanup.empty? || cleanup == 'not_attempted'
+        return false unless history.is_a?(Array) && !history.empty?
+        return false unless history.all? do |entry|
+          next false unless entry.is_a?(Hash)
+          mode = telemetry_field(entry, :mode).to_s
+          rung_outcome = telemetry_field(entry, :outcome).to_s
+          next false if mode.empty? || rung_outcome.empty?
+          failed = rung_outcome == 'failed' || rung_outcome.start_with?('failed_')
+          !failed || !telemetry_field(entry, :reason).to_s.strip.empty?
+        end
+        first_mode = telemetry_field(history.first, :mode).to_s
+        return false unless first_mode == requested
+        terminal_mode = telemetry_field(history.last, :delivered_mode).to_s
+        return false unless terminal_mode == delivered
+        return false if telemetry_field(sample, :representation_fallback_allowed) == false
+        if delivered == 'raster'
+          return false unless telemetry_field(sample, :terminal_cleanup_outcome).to_s == 'verified'
+          return true
+        end
+        if delivered == 'labels'
+          return false unless terminal_mode == 'labels'
+          return true
+        end
+        return false unless delivered == 'text3d'
+        return false unless %w[complete fallback_text3d].include?(outcome)
+        return false if telemetry_field(sample, :visual_fidelity_verified) == false
+
+        numeric_fields = [
+          :pdf_em_height_in, :sketchup_letter_height_in,
+          :letter_height_ratio, :matrix_x, :residual_x, :total_x
+        ]
+        numeric_fields.all? do |field|
+          !telemetry_numeric_value(telemetry_field(sample, field)).nil?
+        end && !telemetry_field(sample, :delivered_font).to_s.strip.empty?
+      rescue StandardError
+        false
       end
 
       def attach_source_provenance!(report, stats)
@@ -710,6 +1135,8 @@ module BlueCollarSystems
           value.map { |item| normalize_json(item) }
         when Symbol
           value.to_s
+        when Float
+          value.finite? ? value : nil
         else
           value
         end
