@@ -452,8 +452,13 @@ class MeshTextScalingTest < Minitest::Test
 
   # ── Round 20 (R20-1 quality): faithful height direct, tolerance 0.0 ────────
   # Live probes: tolerance 0.6 only coarsened curves (116 vs 235 edges at the
-  # same size/faces); generate-then-scale produced byte-identical bounds, so
-  # the height is passed to add_3d_text directly with tolerance 0.0.
+  # same size/faces); the height is passed to add_3d_text directly with
+  # tolerance 0.0.
+  #
+  # Round 22 (owner-evidence width reopen): width fidelity may add ONE
+  # local-X-only scaling to the PDF-declared run width, applied BEFORE the
+  # placement translation. The height passed to add_3d_text, the recorded
+  # height samples, and the Y/Z scale factors (exactly 1.0) are unchanged.
   def test_place_mesh_text_passes_faithful_height_with_zero_tolerance
     b = make_builder(ANSI_D)
     item = bbox_item('W12X30', 8.0, 10.0, bbox_w: 50.0)
@@ -466,8 +471,16 @@ class MeshTextScalingTest < Minitest::Test
     assert_equal [0.0], ents.tolerance_args,
                  'add_3d_text tolerance must be 0.0 (R20-1 quality)'
     kinds = ents.transforms.map { |args| args[0].respond_to?(:kind) ? args[0].kind : nil }
-    refute_includes kinds, :scaling,
-                    'no post-generation rescale of glyphs (R20-2 panel verdict)'
+    assert_equal [:scaling, :translation], kinds,
+                 'R22: local-X width fidelity precedes the unchanged translation'
+    scaling_args = ents.transforms[0][0].args
+    assert_same ORIGIN, scaling_args[0],
+                'width fidelity must scale about ORIGIN (pre-placement)'
+    # Declared 50pt bbox width -> 50/72". Stub renders 3x height = 24/72".
+    assert_in_delta 50.0 / 24.0, scaling_args[1], 1e-9,
+                    'X factor must be declared/rendered (self-calibrating)'
+    assert_equal [1.0, 1.0], scaling_args[2..3],
+                 'height/depth scale factors must be exactly 1.0 (SIZE-1)'
     samples = b.send(:text_height_samples)
     assert_equal 1, samples.length
     assert_in_delta 8.0 * PT_TO_IN, samples[0], 0.001
