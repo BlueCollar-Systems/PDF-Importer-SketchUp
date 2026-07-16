@@ -15,6 +15,30 @@ class VisualFontLayerManager
   end
 end
 
+class FixedWidthTransformEntities < DummyTransformEntities
+  attr_reader :generated_entities
+
+  def initialize(width)
+    super()
+    @fixed_width = width.to_f
+    @generated_entities = []
+  end
+
+  def add_3d_text(_text, _align, font, bold, italic, height, tolerance,
+                  _extrusion, filled, _z)
+    @font_style_args << [font, bold, italic]
+    @height_args << height
+    @tolerance_args << tolerance
+    @filled_args << filled
+    @generated_entities = [
+      DummyRenderedTextEntity.new(@fixed_width, height, typename: 'Edge'),
+      DummyFaceEntity.new
+    ]
+    @entities.concat(@generated_entities)
+    true
+  end
+end
+
 class MeshTextVisualParityTest < Minitest::Test
   def builder_with_fonts(fonts, extra = {})
     options = {
@@ -257,6 +281,93 @@ class MeshTextVisualParityTest < Minitest::Test
       )
       assert_in_delta 0.50, residual, 1.0e-12
       assert_equal :fitted, status
+    end
+  end
+
+  def test_place_mesh_text_multiplies_subunit_matrix_by_residual_before_placement
+    builder = builder_with_fonts(['Arial'])
+    item = render_item('COMPOSED SHRINK', 'Arial', 1491.0 / 2048.0)
+    item.angle = 90.0
+    item.trusted_text_matrix_x_scale = 0.8
+    item.bbox_x0, item.bbox_x1 = 10.0, 12.0
+    item.bbox_y0 = 0.0
+    item.bbox_y1 = 0.6 / GB::PDF_POINT_TO_INCH
+    entities = FixedWidthTransformEntities.new(1.0)
+    anchor_pdf = builder.send(:mesh_label_anchor_pdf, item)
+    expected_anchor = builder.send(
+      :text_point_to_su, item, anchor_pdf[0], anchor_pdf[1], 0.0, 0.0
+    )
+
+    assert builder.send(:place_mesh_text, entities, item, 0.0, 0.0, Object.new)
+
+    display_angle = builder.send(:display_text_angle, item, anchor_pdf[2])
+    matrix_x = builder.send(:mesh_text_matrix_x_scale, item)
+    residual_x, fit_status, fit_reason = builder.send(
+      :mesh_text_residual_x_scale,
+      item,
+      entities.generated_entities,
+      display_angle,
+      matrix_x
+    )
+    assert_in_delta 0.8, matrix_x, 1.0e-12,
+                    'valid trusted subunit matrix-X must not default to 1.0'
+    assert_in_delta 0.75, residual_x, 1.0e-12
+    assert_equal [:fitted, 'bbox_overflow_shrink'], [fit_status, fit_reason]
+    assert_in_delta 0.6, matrix_x * residual_x, 1.0e-12
+
+    assert_equal [:scaling, :translation, :rotation],
+                 entities.transforms.map { |args| args.first.kind }
+    scale, translation, rotation = entities.transforms.map(&:first)
+    assert_same ORIGIN, scale.args[0]
+    assert_equal [ORIGIN, 0.6, 1.0, 1.0], scale.args,
+                 'placement must call scaling with exact [0.6, 1.0, 1.0] arguments'
+    translated_anchor = translation.args[0]
+    assert_in_delta expected_anchor.x, translated_anchor.x, 1.0e-12
+    assert_in_delta expected_anchor.y, translated_anchor.y, 1.0e-12
+    assert_same translated_anchor, rotation.args[0]
+  end
+
+  def test_vertical_raw_angles_compose_with_page_rotation_once_before_axis_selection
+    generated = [DummyRenderedTextEntity.new(1.0, 0.1)]
+    cases = [
+      [90.0, 90, 0.0, :x],
+      [-90.0, 90, 0.0, :x],
+      [90.0, 270, 0.0, :x],
+      [-90.0, 270, 0.0, :x],
+      [90.0, 180, 90.0, :y],
+      [-90.0, 180, 90.0, :y]
+    ]
+
+    cases.each do |raw_angle, page_rotation, expected_angle, expected_axis|
+      builder = builder_with_fonts(['Arial'], page_rotation: page_rotation)
+      item = render_item('VERTICAL', 'Arial', 1491.0 / 2048.0)
+      item.angle = raw_angle
+      item.bbox_x0, item.bbox_x1 = 10.0, 12.0
+      item.bbox_y0, item.bbox_y1 = 100.0, 136.0
+      display_angle = builder.send(:display_text_angle, item, raw_angle)
+      transformed = BlueCollarSystems::PDFVectorImporter::PageTransform.transform_bbox(
+        item.bbox_x0, item.bbox_y0, item.bbox_x1, item.bbox_y1,
+        LETTER, page_rotation
+      )
+      x_points = (transformed[2] - transformed[0]).abs
+      y_points = (transformed[3] - transformed[1]).abs
+      run_points = expected_axis == :x ? x_points : y_points
+      cross_points = expected_axis == :x ? y_points : x_points
+
+      assert_in_delta expected_angle, display_angle, 1.0e-12,
+                      "raw #{raw_angle}, page #{page_rotation} display angle"
+      assert_in_delta 36.0, run_points, 1.0e-12,
+                      "raw #{raw_angle}, page #{page_rotation} along-run axis"
+      assert_in_delta 2.0, cross_points, 1.0e-12,
+                      "raw #{raw_angle}, page #{page_rotation} cross axis"
+      assert_in_delta 0.50,
+                      builder.send(:mesh_text_bbox_run_width_inches, item, display_angle),
+                      1.0e-12
+      residual, status, reason = builder.send(
+        :mesh_text_residual_x_scale, item, generated, display_angle, 1.0
+      )
+      assert_in_delta 0.50, residual, 1.0e-12
+      assert_equal [:fitted, 'bbox_overflow_shrink'], [status, reason]
     end
   end
 
