@@ -1,0 +1,62 @@
+name: release-safety-audit
+
+# Detector-blind-spot fix (2026-07 sweep, SWEEP-05): auto-release gates its
+# entire release job on the head commit NOT containing "[skip release]" and
+# ignores docs-only paths, so the stranded-release audit could never fire on
+# exactly the failure mode it exists to catch — a product commit mislabeled
+# "[skip release]" (recurred live in LibreCAD bde8b08 and Blender
+# 6ddd4ce/bb0b8a4 on 2026-07-14). This workflow runs the warn-only
+# product-delta audit on EVERY main push: no paths-ignore, no commit-message
+# guard. It never mints, never pushes, never fails the build (report mode
+# always exits 0); findings land as workflow annotations + the job summary.
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-safety-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Warn-only stranded-release audit (runs even on [skip release])
+        run: |
+          set -e
+          VERSION=$(grep -oP "VERSION = '\\K[0-9.]+" extracted/sketchup_ext/bc_pdf_vector_importer/metadata.rb | head -n1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read committed version from metadata.rb"
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          if ! git rev-parse --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::notice::Tag ${TAG} does not exist yet; auto-release should mint it. Nothing to audit."
+            echo "No existing tag for committed version ${TAG}; audit skipped." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python tools/release_safety.py audit-existing-tag \
+            --repo "${GITHUB_REPOSITORY}" \
+            --tag "${TAG}" \
+            --before "${{ github.event.before }}" \
+            --head "${GITHUB_SHA}" \
+            --session-id "audit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --mode report \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --warnings-file .release-safety/warnings.json
