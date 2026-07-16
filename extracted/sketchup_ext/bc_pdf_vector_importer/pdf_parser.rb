@@ -226,9 +226,9 @@ module BlueCollarSystems
       end
 
       # ---------------------------------------------------------------
-      # Return ToUnicode font maps for a page keyed by font resource name
-      # (example keys: "/F5", "F5"). Each value is:
-      #   { map: { byte_string => utf8_string }, code_lengths: [2,1] }
+      # Return font resource maps for a page keyed by font resource name
+      # (example keys: "/F5", "F5"). Each value includes the ToUnicode map,
+      # source font family/style, and the trusted SketchUp letter-height ratio.
       # ---------------------------------------------------------------
       def page_font_maps(page_num)
         return {} if page_num < 1 || page_num > @page_count
@@ -249,12 +249,11 @@ module BlueCollarSystems
 
         maps = {}
         font_dict.each do |font_name, font_ref|
-          cmap = extract_font_to_unicode_map(font_ref)
-          next unless cmap && cmap[:map].is_a?(Hash) && !cmap[:map].empty?
-
+          info = extract_font_resource_info(font_ref)
+          next unless info
           key = font_name.to_s
-          maps[key] = cmap
-          maps[key.sub(/\A\//, '')] = cmap
+          maps[key] = info
+          maps[key.sub(/\A\//, '')] = info
         end
 
         @font_map_cache[page_num] = maps
@@ -922,6 +921,66 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Font / ToUnicode extraction
       # ---------------------------------------------------------------
+      def extract_font_resource_info(font_ref)
+        top = to_dict(resolve_object(font_ref))
+        return nil unless top.is_a?(Hash)
+        descendant = nil
+        if top['/DescendantFonts'].is_a?(Array) && !top['/DescendantFonts'].empty?
+          descendant = to_dict(resolve_object(top['/DescendantFonts'].first))
+        end
+        descriptor = font_descriptor_for(descendant) || font_descriptor_for(top)
+        raw_name = top['/BaseFont']
+        raw_name = descendant['/BaseFont'] if (!raw_name || raw_name.to_s.empty?) && descendant
+        raw_name = descriptor['/FontName'] if (!raw_name || raw_name.to_s.empty?) && descriptor
+        family, bold, italic = normalize_source_font(raw_name, descriptor)
+        ratio, source = font_to_sketchup_letter_ratio(family, descriptor)
+        cmap = extract_font_to_unicode_map(font_ref) || { map: {}, code_lengths: [1] }
+        {
+          map: cmap[:map].is_a?(Hash) ? cmap[:map] : {},
+          code_lengths: Array(cmap[:code_lengths]).empty? ? [1] : Array(cmap[:code_lengths]),
+          source_font_family: family,
+          source_font_bold: bold,
+          source_font_italic: italic,
+          font_to_sketchup_letter_ratio: ratio,
+          font_to_sketchup_letter_ratio_source: source
+        }
+      end
+
+      def font_descriptor_for(font_dict)
+        return nil unless font_dict.is_a?(Hash)
+        to_dict(resolve_object(font_dict['/FontDescriptor']))
+      rescue StandardError
+        nil
+      end
+
+      def normalize_source_font(raw_name, descriptor = nil)
+        name = raw_name.to_s.sub(/\A\//, '').sub(/\A[A-Z]{6}\+/, '')
+        compact = name.downcase.gsub(/[^a-z0-9]/, '')
+        family = if compact.include?('arialnarrow')
+                   'Arial Narrow'
+                 elsif compact.include?('arial')
+                   'Arial'
+                 elsif compact.include?('romant')
+                   'RomanT'
+                 else
+                   name.gsub(/[,_-]?(bolditalic|boldoblique|bold|italic|oblique|bd|it)\z/i, '')
+                 end
+        bold = !!(name =~ /(bold|\bbd\b)/i)
+        italic_angle = descriptor.is_a?(Hash) ? descriptor['/ItalicAngle'].to_f : 0.0
+        italic = !!(name =~ /(italic|oblique|\bit\b)/i) || italic_angle.abs > 0.001
+        [family.to_s.empty? ? 'Arial' : family, bold, italic]
+      end
+
+      def font_to_sketchup_letter_ratio(family, descriptor)
+        key = family.to_s.downcase
+        return [1491.0 / 2048.0, :known_arial_family] if key == 'arial' || key == 'arial narrow'
+        return [1538.0 / 2048.0, :known_romant] if key == 'romant'
+        ascent = descriptor.is_a?(Hash) ? descriptor['/Ascent'].to_f : 0.0
+        ascent /= 1000.0 if ascent.abs > 10.0
+        return [ascent, :font_descriptor_ascent] if ascent >= 0.60 && ascent <= 0.95
+        [1491.0 / 2048.0, :default_arial_family]
+      end
+
       def extract_font_to_unicode_map(font_ref)
         font_obj = resolve_object(font_ref)
         font_dict = to_dict(font_obj)
