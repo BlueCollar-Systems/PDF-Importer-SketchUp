@@ -66,6 +66,7 @@ class ReleaseSafetyTest:
         assert not rs.is_product_path(".github/workflows/ci.yml")
         assert not rs.is_product_path("tools/test_release_safety.py")
         assert not rs.is_product_path(".gitignore")
+        assert not rs.is_product_path(".cursor/rules/text-mode-fidelity.mdc")
 
     def test_collect_delta_filters_commits_by_files(self):
         git = fake_git_factory(
