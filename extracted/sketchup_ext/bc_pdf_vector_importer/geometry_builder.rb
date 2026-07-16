@@ -14,7 +14,8 @@ module BlueCollarSystems
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
 
-      attr_reader :page_group, :text_group, :text_fallbacks, :text_delivery_failures
+      attr_reader :page_group, :text_group, :text_fallbacks, :text_delivery_failures,
+                  :text_font_substitutions
 
       def initialize(model, paths, text_items, media_box, opts = {})
         @model = model
@@ -60,6 +61,7 @@ module BlueCollarSystems
         # main.rb can make the delivered representation visible in the report.
         @text_fallbacks = []
         @text_delivery_failures = []
+        @text_font_substitutions = []
       end
 
       def build
@@ -183,7 +185,8 @@ module BlueCollarSystems
           text_height_samples: Array(@text_height_samples),
           text_height_fallback_count: @text_height_fallback_count.to_i,
           text_fallbacks: Array(@text_fallbacks),
-          text_delivery_failures: Array(@text_delivery_failures)
+          text_delivery_failures: Array(@text_delivery_failures),
+          text_font_substitutions: Array(@text_font_substitutions)
         }
       end
 
@@ -549,8 +552,8 @@ module BlueCollarSystems
       # Hard limits in inches, independent of page size.
       MESH_TEXT_HEIGHT_MIN_IN = 0.01   # never smaller than 0.01" (~0.72pt)
       MESH_TEXT_HEIGHT_MAX_IN = 1.5    # never larger than 1.5" (~108pt)
-      ARIAL_SKETCHUP_LETTER_RATIO = 1491.0 / 2048.0
-      ROMANT_SKETCHUP_LETTER_RATIO = 1538.0 / 2048.0
+      ARIAL_LETTER_HEIGHT_TO_EM = 1491.0 / 2048.0
+      ROMANT_LETTER_HEIGHT_TO_EM = 1538.0 / 2048.0
       TEXT_FACE_RGB = [0.0, 0.0, 0.0].freeze
 
       def installed_text_font_families
@@ -593,21 +596,25 @@ module BlueCollarSystems
         substitution = selected == requested ? nil : "#{requested} unavailable; using #{selected}"
         source_ratio = item.respond_to?(:font_to_sketchup_letter_ratio) ?
                          trusted_letter_ratio(item.font_to_sketchup_letter_ratio) : nil
-        ratio = if selected.downcase == 'romant'
-                  source_ratio || ROMANT_SKETCHUP_LETTER_RATIO
-                elsif selected.downcase == 'arial' || selected.downcase == 'arial narrow'
-                  source_ratio && selected == requested ? source_ratio : ARIAL_SKETCHUP_LETTER_RATIO
-                else
-                  source_ratio || ARIAL_SKETCHUP_LETTER_RATIO
-                end
-        metric_source = if substitution
-                          :font_substitution_arial_family
-                        elsif item.respond_to?(:font_to_sketchup_letter_ratio_source) &&
-                              item.font_to_sketchup_letter_ratio_source
-                          item.font_to_sketchup_letter_ratio_source
-                        else
-                          :default_arial_family
-                        end
+        source_kind = item.respond_to?(:font_to_sketchup_letter_ratio_source) ?
+                        item.font_to_sketchup_letter_ratio_source : nil
+        selected_key = selected.downcase
+        if substitution
+          ratio = ARIAL_LETTER_HEIGHT_TO_EM
+          metric_source = :font_substitution_arial_family
+        elsif selected_key == 'arial' || selected_key == 'arial narrow'
+          ratio = ARIAL_LETTER_HEIGHT_TO_EM
+          metric_source = :known_arial_family
+        elsif selected_key == 'romant'
+          ratio = ROMANT_LETTER_HEIGHT_TO_EM
+          metric_source = :known_romant
+        elsif source_kind == :font_descriptor_ascent && source_ratio
+          ratio = source_ratio
+          metric_source = :font_descriptor_ascent
+        else
+          ratio = ARIAL_LETTER_HEIGHT_TO_EM
+          metric_source = :default_arial_family
+        end
         {
           family: selected,
           bold: item.respond_to?(:source_font_bold) && !!item.source_font_bold,
@@ -650,6 +657,22 @@ module BlueCollarSystems
         @text_height_samples << height.to_f
       rescue StandardError
         nil
+      end
+
+      def record_text_font_substitution(item, profile)
+        reason = profile[:substitution_reason].to_s
+        return if reason.empty?
+        requested = item.respond_to?(:source_font_family) ?
+                      item.source_font_family.to_s.strip : ''
+        requested = 'Arial' if requested.empty?
+        @text_font_substitutions ||= []
+        @text_font_substitutions << {
+          requested_font: requested,
+          delivered_font: profile[:family],
+          reason: reason
+        }
+      rescue StandardError => e
+        Logger.warn('GeometryBuilder', "font substitution record failed: #{e.message}")
       end
 
       def text_height_samples
@@ -728,6 +751,7 @@ module BlueCollarSystems
         end
         @text_count += 1
         record_mesh_text_height_sample(height)
+        record_text_font_substitution(item, profile)
         record_text_span_provenance(item, 'native_3d_text')
         record_text_mode_fallback(requested_mode, :text3d, fallback_reason) if fallback_reason
         true
