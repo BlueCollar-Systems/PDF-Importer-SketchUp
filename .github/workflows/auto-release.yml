@@ -87,6 +87,8 @@ jobs:
           ruby test/mesh_text_height_faithful_test.rb
           ruby test/open_gate_file_missing_salvage_test.rb
           ruby test/source_provenance_test.rb
+          ruby test/textmode1_invariant_test.rb
+          ruby test/geometry_builder_text_fallback_test.rb
           docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
             set -e
             find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
@@ -94,6 +96,8 @@ jobs:
             ruby test/ruby22_compat_test.rb
             ruby test/import_health_test.rb
             ruby test/mesh_text_scaling_test.rb
+            ruby test/textmode1_invariant_test.rb
+            ruby test/geometry_builder_text_fallback_test.rb
           '
 
       - name: Read committed version
