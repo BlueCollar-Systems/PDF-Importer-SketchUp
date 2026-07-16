@@ -477,4 +477,57 @@ class QAReportTest < Minitest::Test
     assert_nil report[:extra][:text_height_crosscheck],
                'headless/label imports place no mesh text — block stays absent'
   end
+
+  # Round 22: width-fidelity health must reach the report (condensed
+  # title-block parity — declared/rendered run-width factors).
+  def test_text_width_crosscheck_reports_factors_and_counters
+    stats = {
+      pages: 1, primitives: 5, edges: 5, text: 3, layers: [],
+      elapsed_seconds: 0.2,
+      text_width_factor_samples: [1.4365, 0.5864, 0.7996],
+      text_width_out_of_bounds_count: 1,
+      text_width_skipped_near_1_count: 4,
+      text_width_error_count: 0
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('t.pdf', {}, stats)
+    cc = report[:extra][:text_width_crosscheck]
+    refute_nil cc, 'width crosscheck must be present when factors were applied'
+    assert_equal 3, cc[:sample_count]
+    assert_in_delta 0.5864, cc[:min_factor], 1e-6
+    assert_in_delta 0.7996, cc[:median_factor], 1e-6
+    assert_in_delta 1.4365, cc[:max_factor], 1e-6
+    assert_equal [0.5864, 0.7996, 1.4365], cc[:samples]
+    assert_equal 'declared_span_width_over_rendered_run_width', cc[:policy]
+    assert_equal 1, cc[:out_of_bounds_count]
+    assert_equal 4, cc[:skipped_near_1_count]
+    assert_equal 0, cc[:error_count]
+  end
+
+  def test_text_width_crosscheck_present_when_only_counters_occurred
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      elapsed_seconds: 0.1,
+      text_width_factor_samples: [],
+      text_width_out_of_bounds_count: 2,
+      text_width_skipped_near_1_count: 0,
+      text_width_error_count: 1
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('t.pdf', {}, stats)
+    cc = report[:extra][:text_width_crosscheck]
+    refute_nil cc, 'out-of-bounds/error-only imports must still surface the block'
+    assert_equal 0, cc[:sample_count]
+    assert_equal 2, cc[:out_of_bounds_count]
+    assert_equal 1, cc[:error_count],
+                 'width-path failures must be visible in the report (R20-2)'
+  end
+
+  def test_text_width_crosscheck_absent_without_width_reconciliation
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 0, layers: [],
+      elapsed_seconds: 0.1
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('t.pdf', {}, stats)
+    assert_nil report[:extra][:text_width_crosscheck],
+               'no width reconciliation happened — block stays absent'
+  end
 end

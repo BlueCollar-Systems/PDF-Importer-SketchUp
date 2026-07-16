@@ -33,7 +33,11 @@ module Geom
       @args = args
       @kind = :translation
     end
-    def self.rotation(*); new; end
+    def self.rotation(*args)
+      t = new(*args)
+      t.instance_variable_set(:@kind, :rotation)
+      t
+    end
     def self.scaling(*args)
       t = new(*args)
       t.instance_variable_set(:@kind, :scaling)
