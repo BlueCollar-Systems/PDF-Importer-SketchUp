@@ -361,13 +361,10 @@ class MeshTextScalingTest < Minitest::Test
 
   def test_place_mesh_text_uses_nominal_height_without_bbox_scaling
     # Microscopic pdftotext bbox (1.5pt tall, 3pt wide) must not shrink 8pt nominal.
-    # mesh_text_fit_font_size_pts skips normal-axis shrink when bbox_h < 35% of fs.
+    # SIZE-1: mesh_text_height_inches uses nominal PDF pt only — no bbox-fit shrink.
     b = make_builder(LETTER)
     item = bbox_item('W12X30', 8.0, 1.5, bbox_w: 3.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    # bbox_h=1.5pt < 8*0.35=2.8pt → normal_too_small guard fires → fs stays at 8pt
-    # mesh_text_readability_floor_inches may then apply a floor; 8pt > shop_min_in(6pt)
-    # so floor is driven by bbox context: expect h to reflect ~8pt, not ~1.5pt
     assert h >= 8.0 * PT_TO_IN * 0.90,
            "Microscopic bbox must not shrink 8pt text (got #{h.round(5)})"
     assert h <= MAX_IN, "Height must be within MAX_IN (got #{h.round(5)})"
