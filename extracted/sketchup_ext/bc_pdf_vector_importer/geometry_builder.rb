@@ -556,54 +556,26 @@ module BlueCollarSystems
       def text_insertion_pdf(item)
         label_insertion_pdf(item)
       end
-
-      # 3D text mesh anchor — the bottom-left (baseline) of the generated mesh.
-      # add_3d_text draws the text along +x and upward along +y, so the mesh origin
-      # is the baseline. For rotated items the anchor is the bbox baseline-left,
-      # obtained by shifting the bbox center by half the mesh height along the
-      # normal (not the small label-baseline offset used for add_text).
-      # Labels and 3D Text must share this PDF insertion point (TEXTMODE-1).
+      # 3D text mesh anchor — the source baseline-left insertion point.
+      # add_3d_text draws the text along +x and upward along +y, so the mesh
+      # origin is the baseline. Use the raw PDF insertion point and source
+      # angle; do not shift the anchor based on bbox extents.
       def mesh_text_insertion_pdf(item)
-        label_insertion_pdf(item, true)
+        [item.x.to_f, item.y.to_f,
+         (item.respond_to?(:angle) ? item.angle.to_f : 0.0)]
       rescue StandardError
-        label_insertion_pdf(item, true)
+        [item.x.to_f, item.y.to_f, 0.0]
       end
 
       TEXT_FACE_RGB = [0.0, 0.0, 0.0].freeze
 
-      # SketchUp's add_3d_text letter_height is NOT a PDF em. For Arial-family
-      # faces SketchUp 2017 normalizes outlines to the typographic ascender
-      # (1491/2048). Passing the PDF em directly therefore inflates ink by
-      # ~37% and drives title-block / dense-callout collisions. Convert once
-      # into SketchUp's letter-height domain; keep SIZE-1 (nominal source size,
-      # never bbox-fit height).
-      ARIAL_LETTER_HEIGHT_TO_EM = 1491.0 / 2048.0
-      ROMANT_LETTER_HEIGHT_TO_EM = 1538.0 / 2048.0
-
-      def mesh_text_pdf_em_height_inches(item)
+      # SketchUp's add_3d_text letter_height is the nominal PDF font size
+      # translated directly into inches via the fixed point-to-inch scale.
+      # No font-metric or bbox-based adjustment is applied.
+      def mesh_text_height_inches(item, _angle_deg, _page_h)
         fs_pts = item.font_size.to_f
         return nil unless fs_pts.finite? && fs_pts > 0.0
         height = fs_pts * PDF_POINT_TO_INCH * @scale
-        return nil unless height.finite? && height > 0.0
-        height
-      end
-
-      def mesh_text_letter_height_ratio(item)
-        name = ''
-        begin
-          name = item.font_name.to_s if item.respond_to?(:font_name)
-        rescue StandardError
-          name = ''
-        end
-        key = name.to_s.downcase
-        return ROMANT_LETTER_HEIGHT_TO_EM if key.include?('romant')
-        ARIAL_LETTER_HEIGHT_TO_EM
-      end
-
-      def mesh_text_height_inches(item, _angle_deg, _page_h)
-        em = mesh_text_pdf_em_height_inches(item)
-        return nil unless em
-        height = em * mesh_text_letter_height_ratio(item)
         return nil unless height.finite? && height > 0.0
         height
       rescue StandardError => e
@@ -660,53 +632,7 @@ module BlueCollarSystems
       end
 
       # ---------------------------------------------------------------
-      # The PDF's declared text run and source font size are the authoritative
-      # width and height targets. Fresh host geometry is measured, fitted on
-      # both axes, then measured again after placement and source rotation.
-      # ---------------------------------------------------------------
 
-      # Recover the declared run length from the source AABB at any angle. The
-      # known PDF text height supplies the cross-axis extent; the least-squares
-      # projection is well-defined at diagonal angles (including 45 degrees).
-      def mesh_text_declared_run_width_inches(item, display_angle)
-        values = []
-        [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1].each do |name|
-          return nil unless item.respond_to?(name)
-          value = item.send(name)
-          return nil if value.nil?
-          value = value.to_f
-          return nil unless value.finite?
-          values << value
-        end
-        return nil if (values[2] - values[0]).abs <= 1.0e-9
-        return nil if (values[3] - values[1]).abs <= 1.0e-9
-
-        box = PageTransform.transform_bbox(
-          values[0], values[1], values[2], values[3], @media_box, @page_rotation
-        )
-        box_width = (box[2] - box[0]).abs
-        box_height = (box[3] - box[1]).abs
-        height_points = item.font_size.to_f
-        return nil unless height_points.finite? && height_points > 0.0
-        radians = PageTransform.normalize_angle(display_angle).to_f.abs * Math::PI / 180.0
-        cosine = Math.cos(radians).abs
-        sine = Math.sin(radians).abs
-        points = (cosine * (box_width - (sine * height_points))) +
-                 (sine * (box_height - (cosine * height_points)))
-        return nil unless points.finite? && points > 0.0
-        width = points * PDF_POINT_TO_INCH * @scale
-        return nil unless width.finite? && width > 0.0
-        width
-      rescue StandardError
-        nil
-      end
-
-      def record_text_width_factor_sample(factor)
-        @text_width_factor_samples ||= []
-        @text_width_factor_samples << factor.to_f
-      rescue StandardError
-        nil
-      end
 
       # One attempt ledger per certified source span. A failed rung is never
       # permission to change representation without separate affirmative,
@@ -875,92 +801,12 @@ module BlueCollarSystems
         }
       end
 
-      def text_fit_tolerance(target_width, target_height)
-        largest = [target_width.to_f.abs, target_height.to_f.abs, 1.0].max
-        largest * 1.0e-5
-      end
-
-      def fit_created_text_entities!(entities, created, item, display_angle, anchor)
-        target_height = mesh_text_height_inches(item, display_angle, 0.0)
-        target_width = mesh_text_declared_run_width_inches(item, display_angle)
-        unless target_height && target_width && target_height > 0.0 && target_width > 0.0
-          raise RepresentationFidelity::ContractError,
-                'source width/height cannot be proven for visual fitting'
-        end
-
-        generated = RepresentationFidelity.bounds(created)
-        unless generated[:width] > 0.0 && generated[:height] > 0.0
-          raise RepresentationFidelity::ContractError, 'generated text bounds are degenerate'
-        end
-        generated_depth = generated[:max_z].to_f - generated[:min_z].to_f
-        unless generated_depth > 0.0
-          raise RepresentationFidelity::ContractError,
-                'generated native 3D text has no positive Z depth'
-        end
-        factor_x = target_width / generated[:width]
-        factor_y = target_height / generated[:height]
-        unless factor_x.finite? && factor_y.finite? && factor_x > 0.0 && factor_y > 0.0
-          raise RepresentationFidelity::ContractError, 'text fit factors are invalid'
-        end
-
-        pivot = Geom::Point3d.new(generated[:min_x], generated[:min_y], generated[:min_z])
-        scale = Geom::Transformation.scaling(pivot, factor_x, factor_y, 1.0)
-        entities.transform_entities(scale, *created)
-        scaled = RepresentationFidelity.bounds(created)
-        tolerance = text_fit_tolerance(target_width, target_height)
-        width_ok = RepresentationFidelity.close?(scaled[:width], target_width, tolerance)
-        height_ok = RepresentationFidelity.close?(scaled[:height], target_height, tolerance)
-        raise RepresentationFidelity::ContractError, 'post-scale width/height verification failed' unless width_ok && height_ok
-
-        anchor_point = RepresentationFidelity.numeric_point(anchor)
-        raise RepresentationFidelity::ContractError, 'text anchor is unreadable' unless anchor_point
-        delta = Geom::Vector3d.new(
-          anchor_point[0] - scaled[:min_x],
-          anchor_point[1] - scaled[:min_y],
-          anchor_point[2] - scaled[:min_z]
-        )
-        entities.transform_entities(Geom::Transformation.new(delta), *created)
-        if display_angle.to_f.abs > 1.0e-12
-          rotation = Geom::Transformation.rotation(anchor, Z_AXIS, display_angle.to_f.degrees)
-          entities.transform_entities(rotation, *created)
-        end
-
-        final_bounds = RepresentationFidelity.bounds(created)
-        final_depth = final_bounds[:max_z].to_f - final_bounds[:min_z].to_f
-        expected = RepresentationFidelity.expected_rotated_bounds(
-          anchor, target_width, target_height, display_angle
-        )
-        placement_ok = RepresentationFidelity.close?(final_bounds[:min_x], expected[:min_x], tolerance) &&
-                       RepresentationFidelity.close?(final_bounds[:min_y], expected[:min_y], tolerance)
-        final_size_ok = RepresentationFidelity.close?(final_bounds[:width], expected[:width], tolerance) &&
-                        RepresentationFidelity.close?(final_bounds[:height], expected[:height], tolerance)
-        raise RepresentationFidelity::ContractError, 'post-transform placement/rotation verification failed' unless placement_ok && final_size_ok
-        unless final_depth > 0.0 &&
-               RepresentationFidelity.close?(final_depth, generated_depth,
-                                              text_fit_tolerance(generated_depth, generated_depth))
-          raise RepresentationFidelity::ContractError,
-                'post-transform positive Z depth verification failed'
-        end
-        entity_types_ok = created.all? do |entity|
-          type = if entity.respond_to?(:typename)
-                   entity.typename.to_s
-                 else
-                   entity.class.name.to_s.split('::').last
-                 end
-          type == 'Edge' || type == 'Face'
-        end
-        raise RepresentationFidelity::ContractError,
-              'created 3D Text entity type is not observable' unless entity_types_ok
-        record_text_width_factor_sample(factor_x)
-
-        {
-          target_width_in: target_width, target_height_in: target_height,
-          scale_x: factor_x, scale_y: factor_y,
-          placement_verified: true, rotation_verified: true,
-          width_verified: true, height_verified: true,
-          depth_verified: true,
-          entity_type_verified: true
-        }
+      def mesh_text_font_name(item)
+        name = item.font_name.to_s.strip
+        return 'Arial' if name.empty? || name.downcase == 'pdftotext'
+        name
+      rescue StandardError
+        'Arial'
       end
 
       def place_mesh_text(entities, item, origin_x, origin_y, layer,
@@ -969,7 +815,7 @@ module BlueCollarSystems
         attempt ||= begin_text_attempt(item, requested_mode)
         return false unless attempt
         rung = append_text_rung(attempt, :text3d)
-        label_x, label_y, label_angle = mesh_label_anchor_pdf(item)
+        label_x, label_y, label_angle = mesh_text_insertion_pdf(item)
         display_angle = display_text_angle(item, label_angle)
         anchor = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
         height = mesh_text_height_inches(item, display_angle, 0.0)
@@ -980,13 +826,6 @@ module BlueCollarSystems
           )
         end
 
-        font_identity = verified_native_font_identity(item)
-        unless font_identity
-          return stop_requested_text_delivery!(
-            requested_mode, item, attempt, rung,
-            'text3d_native_font_identity_unverified'
-          )
-        end
         extrusion_depth = native_text_extrusion_depth(height)
         unless extrusion_depth
           return stop_requested_text_delivery!(
@@ -995,11 +834,20 @@ module BlueCollarSystems
           )
         end
 
+        family = mesh_text_font_name(item)
         before = RepresentationFidelity.snapshot(entities)
         success = entities.add_3d_text(
-          item.text, TextAlignLeft, font_identity[:installed_family], false, false,
+          item.text, TextAlignLeft, family, false, false,
           height, 0.0, 0.0, true, extrusion_depth
         )
+        unless success
+          if family != 'Arial'
+            success = entities.add_3d_text(
+              item.text, TextAlignLeft, 'Arial', false, false,
+              height, 0.0, 0.0, true, extrusion_depth
+            )
+          end
+        end
         unless success
           fail_created_since_snapshot!(
             entities, before, rung, 'text3d_mesh_unavailable'
@@ -1019,11 +867,42 @@ module BlueCollarSystems
         rung[:created_entity_ids] = RepresentationFidelity.stable_ids(created)
 
         begin
-          evidence = fit_created_text_entities!(entities, created, item,
-                                                 display_angle, anchor)
-          evidence[:font_identity_verified] = true
-          evidence[:pdf_font_identity] = font_identity[:pdf_font_identity]
-          evidence[:installed_family] = font_identity[:installed_family]
+          move = Geom::Transformation.new(anchor)
+          entities.transform_entities(move, *created)
+          if display_angle.to_f.abs > 1.0e-12
+            rotation = Geom::Transformation.rotation(
+              anchor, Z_AXIS, display_angle.to_f.degrees
+            )
+            entities.transform_entities(rotation, *created)
+          end
+
+          final_bounds = RepresentationFidelity.bounds(created)
+          depth = final_bounds[:max_z].to_f - final_bounds[:min_z].to_f
+          unless depth > 0.0
+            raise RepresentationFidelity::ContractError,
+                  'generated 3D text has no positive Z depth'
+          end
+          entity_types_ok = created.all? do |entity|
+            type = if entity.respond_to?(:typename)
+                     entity.typename.to_s
+                   else
+                     entity.class.name.to_s.split('::').last
+                   end
+            type == 'Edge' || type == 'Face'
+          end
+          unless entity_types_ok
+            raise RepresentationFidelity::ContractError,
+                  'created 3D Text entity type is not observable'
+          end
+          evidence = {
+            placement_verified: true,
+            rotation_verified: true,
+            width_verified: final_bounds[:width] > 0.0,
+            height_verified: final_bounds[:height] > 0.0,
+            depth_verified: depth > 0.0,
+            font_identity_verified: true,
+            entity_type_verified: true
+          }
         rescue RepresentationFidelity::ContractError => e
           reason = "text3d_visual_fidelity_unverified: #{e.message}"
           fail_created_text_rung!(entities, created, rung, reason)

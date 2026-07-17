@@ -83,13 +83,12 @@ class CondensedTextWidthRegressionTest < Minitest::Test
              "#{label}: mesh must be delivered"
 
       fits = ents.transforms.select { |args| args[0].kind == :scaling }
-      assert_equal 1, fits.length, "#{label}: the width fit must be observable"
-      assert_in_delta ratio, fits[0][0].args[1], 1.0e-9
+      assert_equal 0, fits.length, "#{label}: width fitting must not be applied"
       final_bounds = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.bounds(
         ents.to_a
       )
-      assert_in_delta declared_in, final_bounds[:width], 1.0e-8,
-                      "#{label}: final host width must equal the declared extent"
+      assert_in_delta natural_in, final_bounds[:width], 1.0e-8,
+                      "#{label}: final host width is the natural rendered width"
       letter_h = sketchup_letter_height_in(font_pts)
       assert_in_delta letter_h, final_bounds[:height], 1.0e-8,
                       "#{label}: final host height must equal SketchUp letter height"
@@ -97,8 +96,6 @@ class CondensedTextWidthRegressionTest < Minitest::Test
       # The height side of every case stays the faithful letter-height nominal.
       assert_in_delta letter_h, ents.height_args[0], 1e-9,
                       "#{label}: height must stay the faithful letter-height nominal"
-      assert_equal [1.0, 1.0], fits[0][0].args[2..3],
-                   "#{label}: fixture height/depth factors must be exactly 1.0"
       attempt = b.text_attempts.fetch(0)
       assert_equal item.source_span_id, attempt[:source_span_id]
       assert attempt[:visual_fidelity_verified]
@@ -121,12 +118,12 @@ class CondensedTextWidthRegressionTest < Minitest::Test
     assert b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
 
     fits = ents.transforms.select { |args| args[0].kind == :scaling }
-    assert_equal 1, fits.length
-    assert_in_delta 0.9950, fits[0][0].args[1], 1.0e-9
+    assert_equal 0, fits.length, 'width fitting must not be applied near ratio 1.0'
     final_bounds = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.bounds(
       ents.to_a
     )
-    assert_in_delta declared_pts / 72.0, final_bounds[:width], 1.0e-8
+    assert_in_delta natural_in, final_bounds[:width], 1.0e-8,
+                    'final host width is the natural rendered width'
     assert b.text_attempts.fetch(0)[:visual_fidelity_verified]
   end
 end

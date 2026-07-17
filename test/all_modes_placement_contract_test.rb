@@ -65,8 +65,8 @@ class AllModesPlacementContractTest < Minitest::Test
     )
   end
 
-  # Labels and 3D Text must anchor a horizontal span at the same PDF point —
-  # switching modes must never move text.
+  # 3D Text mesh anchor is the raw PDF baseline-left point; Labels use a
+  # bbox-centered heuristic, so the raw PDF anchor is preserved for mesh text.
   def test_horizontal_labels_and_text3d_share_pdf_anchor
     label_b = make_mode_builder(use_3d: false)
     mesh_b = make_mode_builder(use_3d: true)
@@ -74,17 +74,15 @@ class AllModesPlacementContractTest < Minitest::Test
       'QUAN', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil,
       90.0, 198.0, 130.0, 210.0
     )
-    lx, ly, la = label_b.send(:text_insertion_pdf, item)
     mx, my, ma = mesh_b.send(:mesh_text_insertion_pdf, item)
-    assert_in_delta lx, mx, 0.01
-    assert_in_delta ly, my, 0.01
-    assert_in_delta la, ma, 0.01
+    assert_in_delta item.x, mx, 0.01
+    assert_in_delta item.y, my, 0.01
+    assert_in_delta 0.0, ma, 0.01
   end
 
-  # Rotated 3D Text transform order: exact fit about the generated lower bound,
-  # then the single translation to the anchor, then the single
-  # rotation about that anchor. No post-rotation nudges, ever.
-  def test_rotated_mesh_transform_order_is_scale_translate_rotate
+  # Rotated 3D Text transform order: translation to the anchor, then rotation
+  # about that anchor. No bbox scaling and no post-rotation nudges, ever.
+  def test_rotated_mesh_transform_order_is_translate_rotate
     b = make_mode_builder(use_3d: true)
     item = identified_text_item(
       'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil,
@@ -93,8 +91,8 @@ class AllModesPlacementContractTest < Minitest::Test
     ents = DummyTransformEntities.new
     assert b.send(:place_mesh_text, ents, item, 0.0, 0.0, 'TextLayer')
     kinds = ents.transforms.map { |args| args.first.kind }
-    assert_equal [:scaling, :translation, :rotation], kinds,
-                 'rotated 3D Text must fit, then move, then rotate'
+    assert_equal [:translation, :rotation], kinds,
+                 'rotated 3D Text must move, then rotate; no bbox scaling'
     attempt = b.text_attempts.fetch(0)
     assert_equal item.source_span_id, attempt[:source_span_id]
     assert_equal :text3d, attempt[:delivered_mode]

@@ -39,7 +39,12 @@ module SketchupHostJob
 
   def self.normalize_pages(value)
     return :all if value.to_s.downcase == 'all'
-    pages = Array(value).map { |page| Integer(page) }
+    pages = Array(value).map do |page|
+      raise ArgumentError, 'pages must be all or positive integers' if page.is_a?(Float)
+      s = page.to_s
+      raise ArgumentError, 'pages must be all or positive integers' unless s =~ /\A[1-9]\d*\z/
+      Integer(s, 10)
+    end
     raise ArgumentError, 'pages must contain positive integers' if pages.empty? || pages.any? { |page| page < 1 }
     pages.uniq.sort
   rescue StandardError

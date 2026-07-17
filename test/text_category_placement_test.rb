@@ -138,9 +138,10 @@ assert_true(bx > 90.0 && bx < 115.0, 'BOM header X shifts toward bbox center')
 assert_true(builder.send(:angle_needs_geometry_text?, 45.0, 8.0),
             '45° label should use a non-zero native add_text direction vector (not mesh)')
 
-# --- Centered mesh anchor: bbox centering happens once, shared by Labels/3D Text ---
-bom_mesh_x, _, _ = builder.send(:mesh_label_anchor_pdf, bom)
-assert_near(bom_mesh_x, bx, 0.001, 'mesh anchor matches centered label insertion X')
+# --- 3D text mesh anchor is the raw PDF baseline-left point, not centered ---
+bom_mesh_x, _, _ = builder.send(:mesh_text_insertion_pdf, bom)
+assert_near(bom_mesh_x, 90.0, 0.001, 'mesh anchor is the raw PDF baseline-left X')
+assert_true((bom_mesh_x - bx).abs > 0.5, 'mesh anchor diverges from centered label X')
 
 # --- BOM table orientation regression (mirrors PRIVATE-01 QUAN|MARK|DESCRIPTION) ---
 # QUAN single-digit quantities must render UPRIGHT (0deg), not rotated 90deg.

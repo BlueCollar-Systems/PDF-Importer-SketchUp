@@ -240,13 +240,11 @@ class DummyTransformEntities
 end
 
 # ── Constants from geometry_builder.rb ───────────────────────────────────────
-# Round 13: height comes from nominal font size (never bbox). Round 24: convert
-# PDF em -> SketchUp letter_height via the Arial ascender ratio (1491/2048).
+# Round 13/24: height comes from nominal font size (PDF pt -> in) only.
 PT_TO_IN  = GB::PDF_POINT_TO_INCH         # 1/72
-LETTER_H_RATIO = GB::ARIAL_LETTER_HEIGHT_TO_EM
 
 def sketchup_letter_height_in(font_size_pts, scale = 1.0)
-  font_size_pts.to_f * PT_TO_IN * scale.to_f * LETTER_H_RATIO
+  font_size_pts.to_f * PT_TO_IN * scale.to_f
 end
 
 class MeshTextScalingTest < Minitest::Test
@@ -566,7 +564,7 @@ class MeshTextScalingTest < Minitest::Test
   #
   # The final host bounds—not transform arguments alone—must prove the exact
   # declared width, source height, placement, and rotation.
-  def test_place_mesh_text_verifies_exact_post_transform_visual_fidelity
+  def test_place_mesh_text_verifies_no_scaling_and_faithful_height
     b = make_builder(ANSI_D)
     item = bbox_item('W12X30', 8.0, 10.0, bbox_w: 50.0)
     ents = DummyTransformEntities.new
@@ -578,26 +576,21 @@ class MeshTextScalingTest < Minitest::Test
     assert_equal [0.0], ents.tolerance_args,
                  'add_3d_text tolerance must be 0.0 (R20-1 quality)'
     kinds = ents.transforms.map { |args| args[0].respond_to?(:kind) ? args[0].kind : nil }
-    assert_equal [:scaling, :translation], kinds
-    scaling_args = ents.transforms[0][0].args
-    # Declared 50pt bbox width. Stub renders 3x letter height (= 24pt * ratio).
-    assert_in_delta 50.0 / (24.0 * LETTER_H_RATIO), scaling_args[1], 1e-9,
-                    'X factor must be declared/rendered'
-                    'X factor must be declared/rendered'
-    assert_in_delta 1.0, scaling_args[2], 1.0e-12,
-                    'generated height already equals the exact source height'
-    assert_in_delta 1.0, scaling_args[3], 1.0e-12
+    assert_equal [:translation], kinds,
+                 'mesh text must be translated only; no bbox scaling allowed'
 
     actual = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.bounds(ents.to_a)
     x_pdf, y_pdf, angle = b.send(:mesh_text_insertion_pdf, item)
     display_angle = b.send(:display_text_angle, item, angle)
     anchor = b.send(:text_point_to_su, item, x_pdf, y_pdf, 0.0, 0.0)
+    # The stub renders 3x the requested height; verify natural host bounds and
+    # placement, not a forced fit to the PDF bbox width.
     expected = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.expected_rotated_bounds(
-      anchor, 50.0 * PT_TO_IN, sketchup_letter_height_in(8.0), display_angle
+      anchor, sketchup_letter_height_in(8.0) * 3.0, sketchup_letter_height_in(8.0), display_angle
     )
     [:min_x, :min_y, :max_x, :max_y, :width, :height].each do |key|
       assert_in_delta expected[key], actual[key], 1.0e-8,
-                      "final #{key} must match the requested PDF geometry"
+                      "final #{key} must match the host natural geometry"
     end
 
     attempt = b.text_attempts.fetch(0)

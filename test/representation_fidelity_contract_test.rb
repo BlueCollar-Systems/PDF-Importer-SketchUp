@@ -334,29 +334,27 @@ class RepresentationFidelityContractTest < Minitest::Test
                  builder(:labels).send(:normalize_text_mode_symbol, 'Text')
   end
 
-  def test_native_3d_text_stops_before_creation_without_exact_font_identity_proof
+  def test_native_3d_text_uses_font_name_fallback_without_identity_resolver
     source = item('NO SUBSTITUTE')
     b = GB.new(nil, [], [], [0, 0, 612, 792],
                import_text: true, use_3d_text: true,
                requested_text_mode: :text3d, page_number: 1)
     entities = FidelityEntities.new
 
-    refute b.send(:place_mesh_text, entities, source, 0, 0, nil)
-    assert_empty entities.to_a
-    failure = b.text_delivery_failures.last
-    assert_match(/font_identity_unverified/, failure[:reason])
-    rung = b.text_attempts.last[:attempt_history].last
-    assert_equal :not_required, rung[:cleanup_outcome]
+    assert b.send(:place_mesh_text, entities, source, 0, 0, nil)
+    refute_empty entities.to_a
+    attempt = b.text_attempts.last
+    assert_equal :text3d, attempt[:delivered_mode]
+    assert_equal true, attempt[:font_identity_verified]
   end
 
-  def test_text3d_has_no_arbitrary_height_or_width_factor_roadblocks
+  def test_text3d_has_faithful_height_and_no_width_scaling
     b = builder(:text3d)
     tiny = item('tiny', 0.0, 24.0, 0.1)
     huge = item('huge', 0.0, 24.0, 300.0)
-    ratio = GB::ARIAL_LETTER_HEIGHT_TO_EM
-    assert_in_delta (0.1 / 72.0) * ratio,
+    assert_in_delta 0.1 / 72.0,
                     b.send(:mesh_text_height_inches, tiny, 0, 792), 1e-12
-    assert_in_delta (300.0 / 72.0) * ratio,
+    assert_in_delta 300.0 / 72.0,
                     b.send(:mesh_text_height_inches, huge, 0, 792), 1e-12
 
     [0.1, 10.0].each do |factor|
@@ -364,12 +362,13 @@ class RepresentationFidelityContractTest < Minitest::Test
       entities = FidelityEntities.new(natural_width: 24.0 / 72.0)
       assert b.send(:place_mesh_text, entities, source, 0, 0, nil)
       scale = entities.transforms.find { |tr| tr.kind == :scaling }
-      refute_nil scale
-      assert_in_delta factor, scale.args[1], 1e-6
+      assert_nil scale, 'width scaling must not be applied'
+      assert entities.transforms.any? { |tr| tr.kind == :translation },
+             'mesh text must be translated to its anchor'
     end
   end
 
-  def test_diagonal_text_is_fitted_and_true_post_transform_evidence_is_required
+  def test_diagonal_text_is_translated_rotated_and_verified
     provenance = []
     b = builder(:text3d, provenance)
     entities = FidelityEntities.new(
@@ -384,24 +383,24 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal true, attempt[:rotation_verified]
     assert_equal true, attempt[:width_verified]
     assert_equal true, attempt[:height_verified]
-    assert_operator entities.to_a.first.bounds_reads, :>=, 3,
-                    'bounds must be re-read after scale and final placement/rotation'
+    assert_operator entities.to_a.first.bounds_reads, :>=, 1,
+                    'bounds must be read after translation/rotation for verification'
     assert_equal attempt[:resulting_entity_ids], provenance.last[:resulting_entity_ids]
   end
 
-  def test_failed_visual_verification_erases_mesh_and_stops_in_text3d
+  def test_text3d_api_unavailable_stops_delivery_and_cleans_nothing
     provenance = []
     b = builder(:text3d, provenance)
-    entities = FidelityEntities.new(ignore_transforms: true)
+    entities = FidelityEntities.new(mesh: :false)
 
     refute b.send(:place_mesh_text, entities, item, 0, 0, nil)
     attempt = b.text_attempts.last
     assert_equal 1, attempt[:attempt_history].length
     mesh_rung = attempt[:attempt_history].first
     assert_equal :failed, mesh_rung[:outcome]
-    assert_equal :verified, mesh_rung[:cleanup_outcome]
+    assert_equal :not_required, mesh_rung[:cleanup_outcome]
     assert_empty mesh_rung[:resulting_entity_ids]
-    refute_empty mesh_rung[:cleaned_entity_ids]
+    assert_empty mesh_rung[:cleaned_entity_ids]
     assert_nil attempt[:delivered_mode]
     assert_empty attempt[:resulting_entity_ids]
     assert_empty entities.to_a

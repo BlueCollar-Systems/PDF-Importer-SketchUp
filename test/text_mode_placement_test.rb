@@ -251,11 +251,11 @@ quan = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   nil, 'text_span:1:0'
 )
 lx, ly, lang = label_builder.send(:text_insertion_pdf, quan)
-# Horizontal text: Labels and 3D Text share the same PDF anchor. Mesh placement
-# must go through mesh_text_insertion_pdf (not the Labels helper alone).
+# Horizontal text: 3D Text mesh anchor is the raw PDF baseline-left insertion
+# point; Labels may use a bbox-centered heuristic, so the two anchors differ.
 mx, my, mang = mesh_builder.send(:mesh_text_insertion_pdf, quan)
-assert_near(lx, mx, 0.01, 'Labels and 3D Text share QUAN insertion X')
-assert_near(ly, my, 0.01, 'Labels and 3D Text share QUAN insertion Y')
+assert_near(quan.x, mx, 0.01, 'Mesh text insertion X is the raw PDF x')
+assert_near(quan.y, my, 0.01, 'Mesh text insertion Y is the raw PDF y')
 assert_near(lang, mang, 0.01, 'Labels and 3D Text share QUAN angle')
 
 label_h = label_builder.send(:mesh_text_height_inches, quan, lang, 792.0)
@@ -280,10 +280,13 @@ mesh_point = first_translation_point(sample_mesh_entities)
 assert_true(label_call && mesh_point, 'sample label and 3D text should both place')
 if label_call && mesh_point
   label_point = label_call[:point]
-  assert_near(label_point.x, mesh_point.x, 0.001,
-              '3D Text should use same SketchUp X anchor as label for centered bbox text')
-  assert_near(label_point.y, mesh_point.y, 0.001,
-              '3D Text should use same SketchUp Y anchor as label for centered bbox text')
+  # 3D text is now placed at the raw PDF baseline-left anchor, not the label's
+  # bbox-centered heuristic.
+  raw_mesh_su = mesh_builder.send(:text_point_to_su, quan, quan.x, quan.y, 0.0, 0.0)
+  assert_near(raw_mesh_su.x, mesh_point.x, 0.001,
+              '3D Text mesh X anchor is the raw PDF baseline-left point')
+  assert_near(raw_mesh_su.y, mesh_point.y, 0.001,
+              '3D Text mesh Y anchor is the raw PDF baseline-left point')
   label_vec = label_call[:vector]
   assert_true(label_vec && label_vec.x.abs < 0.001 && label_vec.y.abs < 0.001,
               'native Labels should use a zero leader vector')
@@ -320,32 +323,25 @@ assert_true(rotated_mesh_entities.mesh_calls.length == 1,
 assert_true(rotated_mesh_entities.texts.empty?,
             '3D text mode should not fall back to a native label')
 rotated_mesh_kinds = rotated_mesh_entities.transforms.map { |args| args.first.kind }
-assert_true(rotated_mesh_kinds.count(:scaling) == 1,
-            'rotated 3D text should be fitted once to the declared PDF width and height')
+assert_true(rotated_mesh_kinds.count(:scaling) == 0,
+            'rotated 3D text must not be bbox scaled')
 assert_true(rotated_mesh_kinds.count(:translation) == 1,
             'rotated 3D text should move once to the mesh anchor')
 assert_true(rotated_mesh_kinds.count(:rotation) == 1,
             'rotated 3D text should rotate once around the anchor')
-assert_true(rotated_mesh_kinds == [:scaling, :translation, :rotation],
-            'rotated 3D text should use only measured fit, anchor, and source rotation transforms')
+assert_true(rotated_mesh_kinds == [:translation, :rotation],
+            'rotated 3D text should use only anchor translation and source rotation transforms')
 
-# Rotated mesh uses a half-height baseline offset (add_3d_text origin), not the
-# Labels 0.18*fs screen-space heuristic — lock both so a reintroduced nudge or
-# shared-label anchor cannot silently return.
+# Rotated mesh anchor is the raw PDF insertion point; it must not be nudged or
+# shifted to the label's bbox-centered heuristic.
 label_rx, label_ry, = label_builder.send(:label_insertion_pdf, rotated_mesh_item)
 mesh_rx, mesh_ry, = mesh_builder.send(:mesh_text_insertion_pdf, rotated_mesh_item)
+assert_near(rotated_mesh_item.x, mesh_rx, 0.01,
+            'rotated 3D Text X is the raw PDF insertion point')
+assert_near(rotated_mesh_item.y, mesh_ry, 0.01,
+            'rotated 3D Text Y is the raw PDF insertion point')
 assert_true((mesh_rx - label_rx).abs > 0.5 || (mesh_ry - label_ry).abs > 0.5,
             'rotated 3D Text mesh anchor must diverge from Labels baseline heuristic')
-fs = 8.0
-expected_mesh = mesh_builder.send(
-  :rotated_bbox_text_origin_pdf,
-  rotated_mesh_item,
-  140.0, 250.0, 148.0, 292.0, fs, 90.0, fs * 0.5
-)
-assert_near(mesh_rx, expected_mesh[0], 0.01,
-            'rotated 3D Text X uses half-height mesh baseline offset')
-assert_near(mesh_ry, expected_mesh[1], 0.01,
-            'rotated 3D Text Y uses half-height mesh baseline offset')
 assert_true(
   !File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb'))
        .include?('mesh_text_post_rotation_offset'),
