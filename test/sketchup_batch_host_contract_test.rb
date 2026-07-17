@@ -1,9 +1,38 @@
 #!/usr/bin/env ruby
 require 'minitest/autorun'
+require 'tmpdir'
+require 'fileutils'
+require 'json'
+require 'digest'
 
 REPO_ROOT = File.expand_path('..', __dir__) unless defined?(REPO_ROOT)
 
 class SketchupBatchHostContractTest < Minitest::Test
+  class FakeSession
+    attr_reader :performed, :discarded, :quit, :started_payload
+
+    def initialize(raise_error = false)
+      @raise_error = raise_error
+      @discarded = false
+      @quit = false
+    end
+
+    def perform(job, binding)
+      @performed = [job, binding]
+      @started_payload = JSON.parse(File.read(job[:result_path]))
+      raise 'fake pipeline failure' if @raise_error
+      { 'requested_text_mode' => job[:text_mode].to_s, 'verified' => true }
+    end
+
+    def discard!
+      @discarded = true
+    end
+
+    def quit!
+      @quit = true
+    end
+  end
+
   def source
     File.read(
       File.join(REPO_ROOT, 'tools', 'sketchup_batch_import.rb'),
@@ -12,16 +41,60 @@ class SketchupBatchHostContractTest < Minitest::Test
   end
 
   def test_runner_uses_one_job_argument_and_never_blocks_on_messagebox
-    assert_includes source, 'SketchupHostJob.load(ARGV[0])'
-    assert_includes source, "'host_acceptance.json'"
+    assert_includes source, 'arguments.length == 1'
+    assert_includes source, 'SketchupHostJob.load(arguments[0])'
+    assert_includes source, 'SketchupBatchImport.run_argv!(ARGV)'
     assert_includes source, 'rescue Exception => error'
-    assert_includes source, 'Sketchup.quit'
-    assert_includes source, 'model.save(job[:model_path])'
+    assert_includes source, 'active_session.quit!'
+    assert_includes source, '@model.save(job[:model_path])'
     assert_includes source, 'File.file?(job[:model_path])'
-    assert_includes source, 'importer.method(:run_pipeline).source_location'
+    assert_includes source, "'run_pipeline' => importer.method(:run_pipeline).source_location"
     assert_includes source, "'source_root_verified' => true"
     refute_includes source, 'UI.messagebox'
     refute_match(/ARGV\[1\]/, source)
+  end
+
+  def test_callable_orchestration_writes_bound_started_then_ok_and_quits
+    load_runner_library
+    with_job do |job_path, result_path, environment|
+      session = FakeSession.new
+      result = SketchupBatchImport.run_argv!(
+        [job_path], session, environment
+      )
+      assert_equal 'STARTED', session.started_payload['status']
+      assert_equal environment['BC_HOST_JOB_ID'],
+                   session.started_payload['job_id']
+      assert_equal 'OK', result['status']
+      assert_equal true, result['verified']
+      assert_equal true, session.quit
+      assert_equal false, session.discarded
+      assert_equal result, JSON.parse(File.read(result_path))
+    end
+  end
+
+  def test_callable_orchestration_discards_closes_and_writes_error
+    load_runner_library
+    with_job do |job_path, result_path, environment|
+      session = FakeSession.new(true)
+      result = SketchupBatchImport.run_argv!(
+        [job_path], session, environment
+      )
+      assert_equal 'ERROR', result['status']
+      assert_match(/fake pipeline failure/, result['error'])
+      assert session.discarded
+      assert session.quit
+      assert_equal result, JSON.parse(File.read(result_path))
+    end
+  end
+
+  def test_callable_orchestration_rejects_zero_or_multiple_arguments
+    load_runner_library
+    [[], ['one', 'two']].each do |arguments|
+      error = assert_raises(ArgumentError) do
+        SketchupBatchImport.run_argv!(arguments, FakeSession.new, {})
+      end
+      assert_match(/exactly one/, error.message)
+    end
   end
 
   def test_runner_maps_requested_modes_without_substitution
@@ -56,5 +129,36 @@ class SketchupBatchHostContractTest < Minitest::Test
                     'importer::CairoGlyphSource.method(:render_page_svg).source_location'
     assert_includes source,
                     'importer.method(:verified_item_raster_entity!).source_location'
+  end
+
+
+  private
+
+  def load_runner_library
+    Object.send(:remove_const, :SketchupBatchImport) if
+      defined?(SketchupBatchImport)
+    load File.join(REPO_ROOT, 'tools', 'sketchup_batch_import.rb')
+  end
+
+  def with_job
+    Dir.mktmpdir('su-runner-contract') do |dir|
+      pdf = File.join(dir, 'input.pdf')
+      output = File.join(dir, 'out')
+      FileUtils.mkdir_p(output)
+      File.binwrite(pdf, "%PDF-1.4\n%%EOF\n")
+      job_path = File.join(dir, 'job.json')
+      File.write(job_path, JSON.generate(
+        'pdf_path' => pdf,
+        'output_dir' => output,
+        'text_mode' => 'labels',
+        'pages' => [1]
+      ))
+      environment = {
+        'BC_HOST_JOB_ID' => 'job-123',
+        'BC_HOST_JOB_SHA256' => Digest::SHA256.file(job_path).hexdigest,
+        'BC_PDF_IMPORTER_BATCH_NONINTERACTIVE' => '1'
+      }
+      yield job_path, File.join(output, 'host_acceptance.json'), environment
+    end
   end
 end

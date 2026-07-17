@@ -181,8 +181,16 @@ Expected: 10 tests, 41 assertions, 0 failures, 0 errors.
 **Files:**
 - Modify: `tools/sketchup_batch_import.rb`
 - Create: `tools/sketchup_host_evidence.rb`
+- Create: `tools/sketchup_host_launcher.rb`
+- Create: `extracted/sketchup_ext/bc_pdf_vector_importer/batch_host_policy.rb`
+- Modify: `extracted/sketchup_ext/bc_pdf_vector_importer/main.rb`
+- Modify: `extracted/sketchup_ext/bc_pdf_vector_importer/dependency_resolver.rb`
+- Modify: `extracted/sketchup_ext/bc_pdf_vector_importer/qa_report.rb`
 - Create: `test/sketchup_batch_host_contract_test.rb`
 - Create: `test/sketchup_host_evidence_test.rb`
+- Create: `test/sketchup_host_launcher_test.rb`
+- Create: `test/batch_host_nonmodal_policy_test.rb`
+- Modify: `test/qa_report_test.rb`
 
 **Interfaces:**
 - Consumes: `SketchupHostJob.load(ARGV[0])` and the production importer source tree.
@@ -246,111 +254,23 @@ Expected: FAIL because the existing runner hard-codes Labels, reads `ARGV[1]`, s
 
 - [ ] **Step 3: Implement the minimum host runner**
 
-The implementation must use the following host-safe structure as its starting
-point. The implementer may extract helpers for testability, but must preserve
-the listed observable contract:
+Use callable orchestration with an injected host-session object so ordinary
+Ruby behavioral fakes exercise STARTED/OK/ERROR, discard, and quit behavior.
+The external launcher, not the startup script, owns profile isolation, timeout,
+and the exact child PID. The startup script owns the production import,
+recursive before/after ownership, strict ledgers, report binding, save/reopen,
+and atomic bound results. Do not restore the rejected one-file skeleton: it
+could hang before rescue, load installed plugins, accept stale reports, and
+confuse session-local IDs with reopen-stable IDs.
 
-```ruby
-require 'fileutils'
-require 'json'
-require 'tmpdir'
-require File.expand_path('sketchup_host_job', __dir__)
-require File.expand_path('sketchup_host_evidence', __dir__)
-
-job = nil
-
-def write_host_result(path, payload)
-  FileUtils.mkdir_p(File.dirname(path))
-  File.open(path, 'w') do |file|
-    file.write(JSON.pretty_generate(payload))
-    file.write("\n")
-  end
-end
-
-begin
-  raise 'SketchUp host is required' unless defined?(Sketchup)
-  job = SketchupHostJob.load(ARGV[0])
-  FileUtils.mkdir_p(job[:output_dir])
-  write_host_result(job[:result_path], 'status' => 'STARTED')
-  plugin_root = File.expand_path('../extracted/sketchup_ext', __dir__)
-  load File.join(plugin_root, 'bc_pdf_vector_importer', 'main.rb')
-  importer = BlueCollarSystems::PDFVectorImporter
-  pipeline_source = importer.method(:run_pipeline).source_location
-  expected_source_root = File.expand_path(plugin_root)
-  SketchupHostEvidence.verify_source_locations!(
-    expected_source_root,
-    'run_pipeline' => pipeline_source
-  )
-  gate = importer.handle_open_gate(job[:pdf_path], {}, :show_ui => false)
-  raise "open gate refused: #{gate[:reason]}" if gate
-  model = Sketchup.active_model
-  opts = importer::ImportConfig.auto.to_opts
-  opts[:pages] = job[:pages]
-  opts[:import_mode] = job[:import_mode]
-  opts[:text_mode] = job[:text_mode]
-  opts[:force_raster] = (job[:text_mode] == :raster)
-  opts[:import_text] = (job[:text_mode] != :raster)
-  opts[:use_3d_text] = (job[:text_mode] == :text3d)
-  opts[:group_per_page] = true
-  pre_import_entity_ids = model.active_entities.to_a.map { |entity| entity.entityID }
-  stats = importer.run_pipeline(model, job[:pdf_path], opts)
-  raise 'run_pipeline returned nil' unless stats
-  raise 'model save failed' unless model.save(job[:model_path])
-  report_source = stats[:import_report_path]
-  raise 'production import report missing' unless
-    report_source && File.file?(report_source)
-  report_copy = File.join(job[:output_dir], 'import_report.json')
-  FileUtils.cp(report_source, report_copy) unless
-    File.expand_path(report_source) == File.expand_path(report_copy)
-  raise 'copied import report missing' unless File.file?(report_copy)
-
-  imported_roots = model.active_entities.to_a.reject do |entity|
-    pre_import_entity_ids.include?(entity.entityID)
-  end
-  entity_manifest = SketchupHostEvidence.snapshot_entities(imported_roots)
-  raise 'no imported host entities found' if entity_manifest.empty?
-  manifest_path = File.join(job[:output_dir], 'entity_manifest.json')
-  write_host_result(manifest_path, {
-    'requested_text_mode' => job[:text_mode].to_s,
-    'entities' => entity_manifest
-  })
-  SketchupHostEvidence.verify_delivery_evidence!(stats, entity_manifest)
-
-  write_host_result(job[:result_path], {
-    'status' => 'OK',
-    'source_root_verified' => true,
-    'pipeline_source_location' => pipeline_source,
-    'requested_text_mode' => job[:text_mode].to_s,
-    'delivery_summary_mode' => stats[:text_mode].to_s,
-    'model_path' => job[:model_path],
-    'import_report_path' => report_copy,
-    'entity_manifest_path' => manifest_path,
-    'text_entities' => stats[:text].to_i,
-    'text_attempts' => stats[:text_attempts],
-    'terminal_text_delivery_records' => stats[:terminal_text_delivery_records],
-    'page_representation_fallbacks' => stats[:page_representation_fallbacks],
-    'source_glyph_physical_deliveries' => stats[:source_glyph_physical_deliveries]
-  })
-rescue Exception => error
-  result_path = job && job[:result_path]
-  result_path ||= File.join(Dir.tmpdir, 'host_acceptance.json')
-  write_host_result(result_path, {
-    'status' => 'ERROR',
-    'error' => "#{error.class}: #{error.message}",
-    'backtrace' => Array(error.backtrace)
-  })
-ensure
-  UI.start_timer(0.5, false) { Sketchup.quit } if defined?(UI) && defined?(Sketchup)
-end
-```
-
-Capture `pre_import_entity_ids` immediately before `run_pipeline`. Implement
-`SketchupHostEvidence.snapshot_entities(entities)` recursively for groups and component instances.
-Each manifest row must contain the host `entityID`, `typename`, valid/deleted
+Capture recursive identity snapshots immediately before and after
+`run_pipeline`. Implement `SketchupHostEvidence.snapshot_entities(entities)`
+recursively for groups and component instances. Each manifest row must contain
+both host `entityID` and `persistent_id` namespaces, typename, valid/deleted
 state, bounds min/max when available, transformation matrix when available,
-and nested children. Use `entityID`, not `persistent_id`, because the
-production delivery records currently carry `entityID` values and SketchUp
-2017 evidence must be directly cross-checkable. Treat a missing/empty manifest,
+and nested children. Cross-check same-session delivery claims against their
+declared namespace; after save/reopen, correlate by `persistent_id` because
+`entityID` may legitimately change. Treat a missing/empty manifest,
 missing production report, missing copied report, failed model save, or missing
 result artifact as ERROR. Include the complete delivery arrays and both
 `representation_fidelity` and `import_contract_ready` objects in the result;
@@ -361,6 +281,14 @@ representation-fidelity normalizer/controller and each representation renderer
 used by the run. Reject any location outside `plugin_root`. This is an
 acceptance guard against SketchUp's installed 3.7.96 extension satisfying the
 run through already-loaded constants while the worktree is 3.7.97 or newer.
+
+The external `sketchup_host_launcher.rb` owns an isolated APPDATA,
+LOCALAPPDATA, and PROGRAMDATA profile with empty plugin roots, passes exactly
+one startup argument, binds each atomic result to a random job ID plus the job
+SHA-256, and kills only the PID it spawned when the host remains STARTED or
+fails to exit before timeout. The in-host runner installs a last-resort modal
+guard; production first-run, large-file, missing-renderer, and salvage paths
+must honor the explicit noninteractive policy and fail closed without prompting.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
@@ -382,11 +310,16 @@ Expected: all tests pass.
 
 Modes: `labels`, `text3d`, `glyphs`, `geometry`, `raster`; import mode `vector` except requested Raster, which uses `raster`.
 
-- [ ] **Step 2: Launch SketchUp with exactly one job argument**
+- [ ] **Step 2: Launch SketchUp through the isolated watchdog**
 
-Run: `SketchUp.exe -RubyStartup tools/sketchup_batch_import.rb -RubyStartupArg <job.json>`
+Run: set `SKETCHUP_EXE` to the SketchUp 2017 executable, then run
+`ruby tools/sketchup_host_launcher.rb <job.json>`.
 
-Expected: `host_acceptance.json` moves from STARTED to OK or a specific ERROR, SketchUp closes itself, and no BlueCollar message box appears.
+Expected: the launcher passes exactly one `-RubyStartupArg`,
+`host_acceptance.json` moves atomically from bound STARTED to bound OK or a
+specific ERROR, SketchUp closes itself, and no installed third-party plugin or
+BlueCollar message box appears. A lingering process is a timeout ERROR, never
+an acceptance pass.
 
 - [ ] **Step 3: Validate each artifact fail-closed**
 

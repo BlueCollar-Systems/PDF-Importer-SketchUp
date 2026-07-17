@@ -7,6 +7,30 @@ require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/qa_report'
 QAReportTextItem = Struct.new(:text, :page_number, :bbox_x0, :bbox_y0, :id)
 
 class QAReportTest < Minitest::Test
+  def test_report_binds_requested_mode_session_and_full_provenance_even_when_empty
+    stats = {
+      pages: 1,
+      primitives: 1,
+      edges: 1,
+      text: 0,
+      arcs: 0,
+      layers: [],
+      text_renderers: [],
+      requested_text_mode: :labels,
+      text_mode: :labels,
+      import_session_id: 'session-report-1',
+      source_provenance_objects: []
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.
+      build_from_stats('sample.pdf', { import_mode: 'vector' }, stats)
+
+    assert_equal 'labels', report[:extra][:requested_text_mode]
+    assert_equal 'session-report-1', report[:extra][:import_session_id]
+    assert_equal 'session-report-1',
+                 report[:extra][:source_provenance][:import_session_id]
+    assert_equal [], report[:extra][:source_provenance][:objects]
+  end
+
   def test_builds_import_report_schema
     stats = {
       pages: 2,

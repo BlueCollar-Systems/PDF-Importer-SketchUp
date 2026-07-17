@@ -280,6 +280,10 @@ module BlueCollarSystems
           edges: stats[:edges].to_i,
           arcs: stats[:arcs].to_i,
           text_mode: stats[:text_mode].to_s,
+          requested_text_mode: (stats[:requested_text_mode] ||
+                                stats['requested_text_mode']).to_s,
+          import_session_id: (stats[:import_session_id] ||
+                              stats['import_session_id']).to_s,
           svg_renderer_missing: !!stats[:svg_renderer_missing],
           font_substitution_note: stats[:font_substitution_note],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,
@@ -1075,7 +1079,11 @@ module BlueCollarSystems
 
       def attach_source_provenance!(report, stats)
         objects = Array(stats[:source_provenance_objects] || stats['source_provenance_objects'])
-        return if objects.empty?
+        has_provenance_ledger = stats.key?(:source_provenance_objects) ||
+                                stats.key?('source_provenance_objects')
+        has_session = stats.key?(:import_session_id) ||
+                      stats.key?('import_session_id')
+        return unless has_provenance_ledger || has_session
 
         session_id = (stats[:import_session_id] || stats['import_session_id']).to_s.strip
         if session_id.empty?
@@ -1090,7 +1098,8 @@ module BlueCollarSystems
         report[:extra][:source_provenance] = {
           schema: 'bcs.source_provenance/1.0',
           import_session_id: session_id,
-          object_count: objects.length
+          object_count: objects.length,
+          objects: normalize_json(objects)
         }
         sidecar = stats[:source_provenance_sidecar_path] || stats['source_provenance_sidecar_path']
         report[:extra][:source_provenance][:sidecar_path] = sidecar.to_s unless sidecar.to_s.empty?

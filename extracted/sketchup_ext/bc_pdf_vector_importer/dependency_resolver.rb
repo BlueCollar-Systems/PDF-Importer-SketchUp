@@ -145,6 +145,8 @@ module BlueCollarSystems
         end
 
         def maybe_show_first_run_notice
+          return if defined?(BatchHostPolicy) &&
+                    BatchHostPolicy.noninteractive?
           return unless defined?(Sketchup) && Sketchup.respond_to?(:read_default)
 
           notice_key = "#{PREF_NOTICE}_#{defined?(PLUGIN_VERSION) ? PLUGIN_VERSION : 'unknown'}"

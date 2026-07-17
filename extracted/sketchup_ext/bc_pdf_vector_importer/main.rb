@@ -18,6 +18,7 @@ module BlueCollarSystems
     require File.join(dir, 'logger')
     require File.join(dir, 'command_runner')
     require File.join(dir, 'dependency_resolver')
+    require File.join(dir, 'batch_host_policy')
     require File.join(dir, 'pdf_open_gate')
     require File.join(dir, 'pdf_salvage')
     require File.join(dir, 'pdf_parser')
@@ -165,7 +166,8 @@ module BlueCollarSystems
         "#{requested_label} text was requested, but a free Poppler/MuPDF SVG " \
         'renderer is unavailable. The requested representation will not be substituted.'
       )
-      if defined?(UI) && UI.respond_to?(:messagebox)
+      if BatchHostPolicy.prompt_allowed? &&
+         defined?(UI) && UI.respond_to?(:messagebox)
         UI.messagebox(
           "#{requested_label} text requires a free Poppler/MuPDF SVG " \
           "renderer, which is unavailable.\n\nThe import is stopping without " \
@@ -2266,7 +2268,8 @@ module BlueCollarSystems
         :xobjects => 0, :embedded_images => 0,
         :embedded_images_placed => 0, :embedded_image_paths => [],
         :embedded_image_dir => nil, :extruded_faces => 0,
-        :text_mode => :raster, :match_pdf_layers => false,
+        :text_mode => :raster, :requested_text_mode => :raster,
+        :match_pdf_layers => false,
         :text_renderers => [], :page_text_sources => {}, :peak_mb => 0.0,
         :model_3d_texts => [], :page_text_map => {},
         :recognition_skipped_pages => [],
@@ -2278,6 +2281,7 @@ module BlueCollarSystems
         :page_representation_fallbacks => [],
         :empty_page_source_inspections => [],
         :representation_ownership_group_forced_pages => [],
+        :source_glyph_physical_deliveries => [],
         :raster_delivery_records => [], :raster_fallback_used => false
       }
 
@@ -2388,14 +2392,18 @@ module BlueCollarSystems
       # ── File size warning for very large PDFs ──
       begin
         file_size_bytes = File.size(path)
-        if file_size_bytes > 100 * 1024 * 1024
+        if file_size_bytes > BatchHostPolicy::LARGE_PDF_BYTES
           size_mb = (file_size_bytes / (1024.0 * 1024.0)).round(1)
-          choice = UI.messagebox(
-            "This PDF is very large (#{size_mb} MB). Import may take a significant " \
-            "amount of time and use considerable memory. Continue?",
-            MB_OKCANCEL)
+          choice = BatchHostPolicy.confirm_large_pdf!(file_size_bytes) do
+            UI.messagebox(
+              "This PDF is very large (#{size_mb} MB). Import may take a significant " \
+              "amount of time and use considerable memory. Continue?",
+              MB_OKCANCEL)
+          end
           return nil unless choice == IDOK
         end
+      rescue BatchHostPolicy::NoninteractiveError
+        raise
       rescue StandardError => e
         Logger.warn("Pipeline", "File size check failed: #{e.message}")
       end
@@ -2407,7 +2415,9 @@ module BlueCollarSystems
       begin
         path, salvage_note = PdfSalvage.prepare_if_needed(path)
       rescue PdfSalvage::SalvageError => e
-        UI.messagebox(e.message)
+        BatchHostPolicy.handle_salvage_error!(e) do |failure|
+          UI.messagebox(failure.message)
+        end
         return nil
       rescue StandardError => e
         Logger.warn("Pipeline", "salvage preflight failed: #{e.message}")
@@ -2457,7 +2467,9 @@ module BlueCollarSystems
                 generic: nil, mode_used: nil, xobjects: 0, embedded_images: 0,
                 embedded_images_placed: 0, embedded_image_paths: [],
                 embedded_image_dir: nil, extruded_faces: 0,
-                text_mode: requested_text_mode, match_pdf_layers: match_pdf_layers,
+                text_mode: requested_text_mode,
+                requested_text_mode: requested_text_mode,
+                match_pdf_layers: match_pdf_layers,
                 text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
                 model_3d_texts: [], page_text_map: {},
                 recognition_skipped_pages: [],
@@ -2469,6 +2481,8 @@ module BlueCollarSystems
                  page_representation_fallbacks: [],
                  empty_page_source_inspections: [],
                  representation_ownership_group_forced_pages: [],
+                 source_glyph_physical_deliveries: [],
+                 raster_delivery_records: [],
                  raster_fallback_used: false }
 
       image_extractor = nil
@@ -2675,6 +2689,12 @@ module BlueCollarSystems
             page_num, requested_text_mode, text_items, streams,
             referenced_form_streams
           )
+          stats[:empty_page_source_inspections] << {
+            :page => page_num,
+            :semantic_text_extraction_complete => true,
+            :decoded_stream_text_operators => false,
+            :decoded_form_stream_text_operators => false
+          }
         end
 
         if svg_renderer_required_for_page?(
@@ -2711,7 +2731,10 @@ module BlueCollarSystems
             :svg_page_box => svg_page_box
           )
           stats[:empty_page_source_inspections] << source_summary.merge(
-            :page => page_num
+            :page => page_num,
+            :semantic_text_extraction_complete => true,
+            :decoded_stream_text_operators => false,
+            :decoded_form_stream_text_operators => false
           )
 
           if requested_text_mode == :text3d &&
@@ -2758,6 +2781,8 @@ module BlueCollarSystems
                 :cleanup_outcome => :not_required,
                 :delivery_scope => :page_raster
               }
+              stats[:raster_delivery_records] <<
+                stats[:terminal_text_delivery_records].last.dup
               record_text_renderer(
                 stats, page_num,
                 :renderer => :pdftocairo_real_raster,

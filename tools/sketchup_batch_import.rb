@@ -1,170 +1,314 @@
 #!/usr/bin/env ruby
-# SketchUp -RubyStartup entry for one fail-closed real-host acceptance job.
+# SketchUp -RubyStartup entry for one isolated, fail-closed host job.
 
-require 'fileutils'
 require 'json'
+require 'digest'
 require 'tmpdir'
 require File.expand_path('sketchup_host_job', __dir__)
 require File.expand_path('sketchup_host_evidence', __dir__)
 
-job = nil
+module SketchupBatchImport
+  class RealHostSession
+    def initialize
+      @model = nil
+      @closed = false
+    end
 
-def write_host_result(path, payload)
-  FileUtils.mkdir_p(File.dirname(path))
-  File.open(path, 'w') do |file|
-    file.write(JSON.pretty_generate(payload))
-    file.write("\n")
+    def perform(job, binding)
+      require_batch_environment!
+      install_modal_guard!
+      plugin_root = File.expand_path('../extracted/sketchup_ext', __dir__)
+      load File.join(plugin_root, 'bc_pdf_vector_importer', 'main.rb')
+      importer = BlueCollarSystems::PDFVectorImporter
+      expected_root = File.expand_path(plugin_root)
+      source_locations = importer_source_locations(importer)
+      SketchupHostEvidence.verify_source_locations!(
+        expected_root, source_locations
+      )
+
+      worktree_version = metadata_version(plugin_root)
+      loaded_version = importer::VERSION.to_s
+      unless loaded_version == worktree_version
+        raise "loaded importer version #{loaded_version} does not match " \
+              "worktree metadata version #{worktree_version}"
+      end
+
+      gate = importer.handle_open_gate(job[:pdf_path], {}, :show_ui => false)
+      raise "open gate refused: #{gate[:reason]}" if gate
+
+      @model = Sketchup.active_model
+      before_manifest = SketchupHostEvidence.snapshot_entities(
+        @model.active_entities
+      )
+      stats = importer.run_pipeline(
+        @model, job[:pdf_path], import_options(importer, job)
+      )
+      raise 'run_pipeline returned nil' unless stats.is_a?(Hash)
+
+      after_manifest = SketchupHostEvidence.snapshot_entities(
+        @model.active_entities
+      )
+      owned_manifest = SketchupHostEvidence.owned_manifest(
+        before_manifest, after_manifest
+      )
+      raise 'no recursively owned imported host entities found' if
+        owned_manifest.empty?
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, owned_manifest, job[:text_mode], job[:pages]
+      )
+
+      import_session_id = stats[:import_session_id].to_s.strip
+      raise 'pipeline import_session_id is missing' if import_session_id.empty?
+      provenance = {
+        'schema' => 'bcs.source_provenance/1.0',
+        'import_session_id' => import_session_id,
+        'objects' => Array(stats[:source_provenance_objects])
+      }
+
+      raise 'model save failed' unless @model.save(job[:model_path])
+      raise 'saved model missing' unless File.file?(job[:model_path])
+
+      report_source = stats[:import_report_path]
+      report_copy = File.join(job[:output_dir], 'import_report.json')
+      SketchupHostEvidence.copy_verified_report!(
+        report_source,
+        report_copy,
+        :pdf_path => job[:pdf_path],
+        :requested_mode => job[:text_mode],
+        :schema => importer::QAReport::SCHEMA,
+        :worktree_version => worktree_version,
+        :loaded_version => loaded_version,
+        :host_version => Sketchup.version.to_s,
+        :import_session_id => import_session_id,
+        :source_provenance_objects =>
+          Array(stats[:source_provenance_objects]),
+        :representation_fidelity => stats[:representation_fidelity],
+        :import_contract_ready => stats[:import_contract_ready]
+      )
+
+      manifest_path = File.join(job[:output_dir], 'entity_manifest.json')
+      manifest_payload = binding.merge(
+        'requested_text_mode' => job[:text_mode].to_s,
+        'source_pdf_path' => job[:pdf_path],
+        'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
+        'import_session_id' => import_session_id,
+        'source_provenance' => provenance,
+        'same_session_entities' => owned_manifest
+      )
+      SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
+
+      reopened_model = reopen_model!(job[:model_path])
+      reopened_manifest = SketchupHostEvidence.snapshot_entities(
+        reopened_model.active_entities
+      )
+      SketchupHostEvidence.verify_reopen_continuity!(
+        owned_manifest, reopened_manifest
+      )
+      manifest_payload['reopened_entities'] = reopened_manifest
+      manifest_payload['reopen_persistent_id_verified'] = true
+      SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
+
+      {
+        'source_root_verified' => true,
+        'source_root' => expected_root,
+        'source_locations' => source_locations,
+        'pipeline_source_location' => source_locations['run_pipeline'],
+        'worktree_metadata_version' => worktree_version,
+        'loaded_importer_version' => loaded_version,
+        'report_schema' => importer::QAReport::SCHEMA,
+        'host_version' => Sketchup.version.to_s,
+        'requested_text_mode' => job[:text_mode].to_s,
+        'source_pdf_path' => job[:pdf_path],
+        'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
+        'delivery_summary_mode' => stats[:text_mode].to_s,
+        'import_session_id' => import_session_id,
+        'model_path' => job[:model_path],
+        'import_report_path' => report_copy,
+        'import_report_sha256' => Digest::SHA256.file(report_copy).hexdigest,
+        'entity_manifest_path' => manifest_path,
+        'reopen_persistent_id_verified' => true,
+        'text_entities' => stats[:text].to_i,
+        'text_renderers' => Array(stats[:text_renderers]),
+        'text_source_span_ids' => Array(stats[:text_source_span_ids]),
+        'text_attempts' => Array(stats[:text_attempts]),
+        'source_provenance' => provenance,
+        'page_text_delivery_records' =>
+          Array(stats[:page_text_delivery_records]),
+        'terminal_text_delivery_records' =>
+          Array(stats[:terminal_text_delivery_records]),
+        'terminal_cleanup_events' => Array(stats[:terminal_cleanup_events]),
+        'fallback_transitions' => Array(stats[:fallback_transitions]),
+        'page_representation_fallbacks' =>
+          Array(stats[:page_representation_fallbacks]),
+        'raster_delivery_records' => Array(stats[:raster_delivery_records]),
+        'empty_page_source_inspections' =>
+          Array(stats[:empty_page_source_inspections]),
+        'source_glyph_physical_deliveries' =>
+          Array(stats[:source_glyph_physical_deliveries]),
+        'representation_fidelity' => stats[:representation_fidelity],
+        'import_contract_ready' => stats[:import_contract_ready]
+      }
+    end
+
+    def discard!
+      model = @model
+      model = Sketchup.active_model if !model && defined?(Sketchup)
+      return true unless model
+      begin
+        model.abort_operation if model.respond_to?(:abort_operation)
+      rescue StandardError
+        # The production pipeline may already have aborted/committed.
+      end
+      if model.respond_to?(:close)
+        model.close(true)
+        @closed = true
+      end
+      true
+    rescue StandardError => error
+      raise "failed to discard batch model: #{error.message}"
+    end
+
+    def quit!
+      return true unless defined?(UI) && defined?(Sketchup)
+      UI.start_timer(0.1, false) { Sketchup.quit }
+      true
+    end
+
+    private
+
+    def require_batch_environment!
+      unless ENV['BC_PDF_IMPORTER_BATCH_NONINTERACTIVE'].to_s == '1'
+        raise 'noninteractive batch environment is not enabled'
+      end
+    end
+
+    def install_modal_guard!
+      return unless defined?(UI)
+      singleton = class << UI; self; end
+      singleton.send(:define_method, :messagebox) do |*_arguments|
+        raise RuntimeError,
+              'modal UI is forbidden during noninteractive host acceptance'
+      end
+    end
+
+    def metadata_version(plugin_root)
+      path = File.join(plugin_root, 'bc_pdf_vector_importer', 'metadata.rb')
+      source = File.read(path, :encoding => 'UTF-8')
+      version = source[/^\s*VERSION\s*=\s*['"]([^'"]+)['"]/, 1]
+      raise 'worktree metadata version is missing' if version.to_s.empty?
+      version
+    end
+
+    def importer_source_locations(importer)
+      {
+        'run_pipeline' => importer.method(:run_pipeline).source_location,
+        'batch_host_policy' =>
+          importer::BatchHostPolicy.method(:noninteractive?).source_location,
+        'representation_mode_normalizer' =>
+          importer::RepresentationFidelity.method(:normalize_mode).source_location,
+        'representation_fallback_controller' =>
+          importer::RepresentationFidelity::FallbackController.
+            instance_method(:advance!).source_location,
+        'geometry_text_router' =>
+          importer::GeometryBuilder.instance_method(:place_text).source_location,
+        'labels_renderer' =>
+          importer::GeometryBuilder.
+            instance_method(:place_annotation_label).source_location,
+        'native_text3d_renderer' =>
+          importer::GeometryBuilder.instance_method(:place_mesh_text).source_location,
+        'svg_text_source_renderer' =>
+          importer::SvgTextRenderer.method(:render).source_location,
+        'cairo_glyph_source_renderer' =>
+          importer::CairoGlyphSource.method(:render_page_svg).source_location,
+        'svg_text3d_renderer' =>
+          importer::Svg3DTextRenderer.method(:render_svg).source_location,
+        'svg_item_representation_renderer' =>
+          importer::SvgItemRepresentationRenderer.method(:render_svg).source_location,
+        'raster_renderer' =>
+          importer.method(:verified_raster_entity!).source_location,
+        'item_raster_renderer' =>
+          importer.method(:verified_item_raster_entity!).source_location,
+        'metadata_writer' => importer::Metadata.method(:attach).source_location
+      }
+    end
+
+    def import_options(importer, job)
+      opts = importer::ImportConfig.auto.to_opts
+      opts[:pages] = job[:pages]
+      opts[:import_mode] = job[:import_mode]
+      opts[:text_mode] = job[:text_mode]
+      opts[:force_raster] = (job[:text_mode] == :raster)
+      opts[:import_text] = (job[:text_mode] != :raster)
+      opts[:use_3d_text] = (job[:text_mode] == :text3d)
+      opts[:group_per_page] = true
+      opts
+    end
+
+    def reopen_model!(model_path)
+      result = Sketchup.open_file(model_path)
+      raise 'saved model reopen failed' if result == false
+      model = Sketchup.active_model
+      raise 'reopened model is unavailable' unless model
+      @model = model
+      model
+    end
+  end
+
+  module_function
+
+  def run_argv!(arguments, session = nil, environment = ENV)
+    unless arguments.is_a?(Array) && arguments.length == 1
+      raise ArgumentError, 'exactly one host job argument is required'
+    end
+    job = SketchupHostJob.load(arguments[0])
+    job_id = environment['BC_HOST_JOB_ID'].to_s.strip
+    expected_sha = environment['BC_HOST_JOB_SHA256'].to_s.strip
+    unless !job_id.empty? && expected_sha =~ /\A[0-9a-f]{64}\z/ &&
+           job[:job_sha256] == expected_sha
+      raise ArgumentError, 'host job binding is missing or does not match job bytes'
+    end
+    unless environment['BC_PDF_IMPORTER_BATCH_NONINTERACTIVE'].to_s == '1'
+      raise ArgumentError, 'host job must run in noninteractive batch mode'
+    end
+    binding = { 'job_id' => job_id, 'job_sha256' => expected_sha }
+    SketchupHostEvidence.atomic_write_json(
+      job[:result_path], binding.merge('status' => 'STARTED')
+    )
+    active_session = session || RealHostSession.new
+    result = nil
+    begin
+      payload = active_session.perform(job, binding)
+      unless payload.is_a?(Hash)
+        raise 'host session returned no result payload'
+      end
+      result = binding.merge('status' => 'OK').merge(payload)
+    rescue Exception => error
+      discard_error = nil
+      begin
+        active_session.discard!
+      rescue StandardError => cleanup_failure
+        discard_error = "#{cleanup_failure.class}: #{cleanup_failure.message}"
+      end
+      result = binding.merge(
+        'status' => 'ERROR',
+        'error' => "#{error.class}: #{error.message}",
+        'backtrace' => Array(error.backtrace),
+        'discard_error' => discard_error
+      )
+    ensure
+      SketchupHostEvidence.atomic_write_json(job[:result_path], result) if result
+      begin
+        active_session.quit!
+      rescue StandardError => quit_error
+        if result
+          result['status'] = 'ERROR'
+          result['quit_error'] = "#{quit_error.class}: #{quit_error.message}"
+          SketchupHostEvidence.atomic_write_json(job[:result_path], result)
+        end
+      end
+    end
+    result
   end
 end
 
-begin
-  raise 'SketchUp host is required' unless defined?(Sketchup)
-
-  job = SketchupHostJob.load(ARGV[0])
-  FileUtils.mkdir_p(job[:output_dir])
-  write_host_result(job[:result_path], 'status' => 'STARTED')
-
-  plugin_root = File.expand_path('../extracted/sketchup_ext', __dir__)
-  load File.join(plugin_root, 'bc_pdf_vector_importer', 'main.rb')
-  importer = BlueCollarSystems::PDFVectorImporter
-
-  pipeline_source = importer.method(:run_pipeline).source_location
-  source_locations = {
-    'run_pipeline' => pipeline_source,
-    'representation_mode_normalizer' =>
-      importer::RepresentationFidelity.method(:normalize_mode).source_location,
-    'representation_fallback_controller' =>
-      importer::RepresentationFidelity::FallbackController.
-        instance_method(:advance!).source_location,
-    'geometry_text_router' =>
-      importer::GeometryBuilder.instance_method(:place_text).source_location,
-    'labels_renderer' =>
-      importer::GeometryBuilder.
-        instance_method(:place_annotation_label).source_location,
-    'native_text3d_renderer' =>
-      importer::GeometryBuilder.instance_method(:place_mesh_text).source_location,
-    'svg_text_source_renderer' =>
-      importer::SvgTextRenderer.method(:render).source_location,
-    'cairo_glyph_source_renderer' =>
-      importer::CairoGlyphSource.method(:render_page_svg).source_location,
-    'svg_text3d_renderer' =>
-      importer::Svg3DTextRenderer.method(:render_svg).source_location,
-    'svg_item_representation_renderer' =>
-      importer::SvgItemRepresentationRenderer.method(:render_svg).source_location,
-    'raster_renderer' =>
-      importer.method(:verified_raster_entity!).source_location,
-    'item_raster_renderer' =>
-      importer.method(:verified_item_raster_entity!).source_location,
-    'metadata_writer' => importer::Metadata.method(:attach).source_location
-  }
-  expected_source_root = File.expand_path(plugin_root)
-  SketchupHostEvidence.verify_source_locations!(
-    expected_source_root, source_locations
-  )
-
-  metadata_path = File.join(
-    plugin_root, 'bc_pdf_vector_importer', 'metadata.rb'
-  )
-  metadata_source = File.read(metadata_path, :encoding => 'UTF-8')
-  worktree_metadata_version = metadata_source[
-    /^\s*VERSION\s*=\s*['"]([^'"]+)['"]/, 1
-  ]
-  if worktree_metadata_version.to_s.empty?
-    raise 'worktree metadata version is missing'
-  end
-  loaded_importer_version = importer::VERSION.to_s
-  unless loaded_importer_version == worktree_metadata_version
-    raise "loaded importer version #{loaded_importer_version} does not match " \
-          "worktree metadata version #{worktree_metadata_version}"
-  end
-
-  gate = importer.handle_open_gate(job[:pdf_path], {}, :show_ui => false)
-  raise "open gate refused: #{gate[:reason]}" if gate
-
-  model = Sketchup.active_model
-  opts = importer::ImportConfig.auto.to_opts
-  opts[:pages] = job[:pages]
-  opts[:import_mode] = job[:import_mode]
-  opts[:text_mode] = job[:text_mode]
-  opts[:force_raster] = (job[:text_mode] == :raster)
-  opts[:import_text] = (job[:text_mode] != :raster)
-  opts[:use_3d_text] = (job[:text_mode] == :text3d)
-  opts[:group_per_page] = true
-
-  pre_import_entity_ids = model.active_entities.to_a.map do |entity|
-    entity.entityID
-  end
-  stats = importer.run_pipeline(model, job[:pdf_path], opts)
-  raise 'run_pipeline returned nil' unless stats
-
-  raise 'model save failed' unless model.save(job[:model_path])
-  raise 'saved model missing' unless File.file?(job[:model_path])
-
-  report_source = stats[:import_report_path]
-  unless report_source && File.file?(report_source)
-    raise 'production import report missing'
-  end
-  report_copy = File.join(job[:output_dir], 'import_report.json')
-  source_key = File.expand_path(report_source).tr('\\', '/').downcase
-  copy_key = File.expand_path(report_copy).tr('\\', '/').downcase
-  FileUtils.cp(report_source, report_copy) unless source_key == copy_key
-  raise 'copied import report missing' unless File.file?(report_copy)
-
-  imported_roots = model.active_entities.to_a.reject do |entity|
-    pre_import_entity_ids.include?(entity.entityID)
-  end
-  entity_manifest = SketchupHostEvidence.snapshot_entities(imported_roots)
-  raise 'no imported host entities found' if entity_manifest.empty?
-  manifest_path = File.join(job[:output_dir], 'entity_manifest.json')
-  write_host_result(manifest_path, {
-    'requested_text_mode' => job[:text_mode].to_s,
-    'entities' => entity_manifest
-  })
-  raise 'entity manifest missing' unless File.file?(manifest_path)
-
-  SketchupHostEvidence.verify_delivery_evidence!(stats, entity_manifest)
-
-  write_host_result(job[:result_path], {
-    'status' => 'OK',
-    'source_root_verified' => true,
-    'source_root' => expected_source_root,
-    'source_locations' => source_locations,
-    'pipeline_source_location' => pipeline_source,
-    'worktree_metadata_version' => worktree_metadata_version,
-    'loaded_importer_version' => loaded_importer_version,
-    'requested_text_mode' => job[:text_mode].to_s,
-    'delivery_summary_mode' => stats[:text_mode].to_s,
-    'model_path' => job[:model_path],
-    'import_report_path' => report_copy,
-    'entity_manifest_path' => manifest_path,
-    'text_entities' => stats[:text].to_i,
-    'text_renderers' => Array(stats[:text_renderers]),
-    'text_attempts' => Array(stats[:text_attempts]),
-    'page_text_delivery_records' =>
-      Array(stats[:page_text_delivery_records]),
-    'terminal_text_delivery_records' =>
-      Array(stats[:terminal_text_delivery_records]),
-    'terminal_cleanup_events' => Array(stats[:terminal_cleanup_events]),
-    'fallback_transitions' => Array(stats[:fallback_transitions]),
-    'page_representation_fallbacks' =>
-      Array(stats[:page_representation_fallbacks]),
-    'raster_delivery_records' => Array(stats[:raster_delivery_records]),
-    'source_glyph_physical_deliveries' =>
-      Array(stats[:source_glyph_physical_deliveries]),
-    'representation_fidelity' => stats[:representation_fidelity],
-    'import_contract_ready' => stats[:import_contract_ready]
-  })
-  raise 'host acceptance result missing' unless File.file?(job[:result_path])
-rescue Exception => error
-  result_path = job && job[:result_path]
-  result_path ||= File.join(Dir.tmpdir, 'host_acceptance.json')
-  write_host_result(result_path, {
-    'status' => 'ERROR',
-    'error' => "#{error.class}: #{error.message}",
-    'backtrace' => Array(error.backtrace)
-  })
-ensure
-  if defined?(UI) && defined?(Sketchup)
-    UI.start_timer(0.5, false) { Sketchup.quit }
-  end
-end
+SketchupBatchImport.run_argv!(ARGV) if defined?(Sketchup)

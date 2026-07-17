@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 require 'json'
+require 'digest'
 
 module SketchupHostJob
   TEXT_MODES = [:labels, :text3d, :glyphs, :geometry, :raster].freeze unless const_defined?(:TEXT_MODES, false)
@@ -27,6 +28,8 @@ module SketchupHostJob
     raise ArgumentError, "unsupported import_mode: #{import_mode}" unless IMPORT_MODES.include?(import_mode)
     base = File.basename(pdf_path, File.extname(pdf_path))
     {
+      :job_path => input,
+      :job_sha256 => Digest::SHA256.file(input).hexdigest,
       :pdf_path => pdf_path,
       :output_dir => output_dir,
       :text_mode => text_mode,
