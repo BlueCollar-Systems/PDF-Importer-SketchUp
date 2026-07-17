@@ -47,6 +47,29 @@ class QAReportTest < Minitest::Test
     assert report[:extra][:human_summary].to_s.include?('sample.pdf')
   end
 
+  # PH1-SU-2 (P1-3 fleet parity): the report must be attributable evidence.
+  # BOTH surfaces are asserted — the JSON importer.version value must be the
+  # real extension version (never 'unknown' when metadata is loaded, which is
+  # the shipped-runtime arrangement), and the human summary must carry the
+  # same version substring the other hosts' summaries carry.
+  def test_report_attributes_importer_version_in_json_and_human_summary
+    stats = { pages: 1, primitives: 3, edges: 3, text: 1, layers: [], elapsed_seconds: 0.2 }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('sample.pdf', {}, stats)
+
+    expected = BlueCollarSystems::PDFVectorImporter::VERSION
+
+    json_version = report[:importer][:version].to_s
+    refute_empty json_version, 'JSON importer.version must be present'
+    refute_equal 'unknown', json_version,
+                 'JSON importer.version must resolve the real extension version'
+    assert_equal expected, json_version
+
+    summary = report[:extra][:human_summary].to_s
+    assert_includes summary, "Importer v#{expected}",
+                    'human summary must attribute the importer version'
+    refute_includes summary, 'Importer vunknown'
+  end
+
   def test_records_text_degradation_in_fallback_block
     stats = {
       pages: 1,
