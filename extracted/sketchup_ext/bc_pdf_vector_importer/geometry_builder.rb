@@ -557,15 +557,16 @@ module BlueCollarSystems
         label_insertion_pdf(item)
       end
 
-      # 3D text mesh anchor — the source baseline-left insertion point.
-      # add_3d_text draws the text along +x and upward along +y, so the mesh
-      # origin is the baseline. Use the raw PDF insertion point and source
-      # angle; do not shift the anchor based on bbox extents.
+      # 3D text mesh anchor — the bottom-left (baseline) of the generated mesh.
+      # add_3d_text draws the text along +x and upward along +y, so the mesh origin
+      # is the baseline. For rotated items the anchor is the bbox baseline-left,
+      # obtained by shifting the bbox center by half the mesh height along the
+      # normal (not the small label-baseline offset used for add_text).
+      # Labels and 3D Text must share this PDF insertion point (TEXTMODE-1).
       def mesh_text_insertion_pdf(item)
-        [item.x.to_f, item.y.to_f,
-         (item.respond_to?(:angle) ? item.angle.to_f : 0.0)]
+        label_insertion_pdf(item, true)
       rescue StandardError
-        [item.x.to_f, item.y.to_f, 0.0]
+        label_insertion_pdf(item, true)
       end
 
       TEXT_FACE_RGB = [0.0, 0.0, 0.0].freeze
