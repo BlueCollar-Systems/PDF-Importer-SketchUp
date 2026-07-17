@@ -331,6 +331,35 @@ module BlueCollarSystems
       nil
     end
 
+    # Round 22: accumulate native 3D text width-fidelity telemetry for
+    # import_report extra.text_width_crosscheck (mirrors the height merge).
+    def self.merge_text_width_crosscheck!(stats, result)
+      return unless result.is_a?(Hash)
+      samples = result[:text_width_factor_samples]
+      if samples.respond_to?(:each)
+        stats[:text_width_factor_samples] ||= []
+        samples.each do |f|
+          begin
+            v = f.to_f
+            stats[:text_width_factor_samples] << v if v > 0.0
+          rescue StandardError
+            next
+          end
+        end
+      end
+      stats[:text_width_out_of_bounds_count] =
+        stats[:text_width_out_of_bounds_count].to_i +
+        result[:text_width_out_of_bounds_count].to_i
+      stats[:text_width_skipped_near_1_count] =
+        stats[:text_width_skipped_near_1_count].to_i +
+        result[:text_width_skipped_near_1_count].to_i
+      stats[:text_width_error_count] =
+        stats[:text_width_error_count].to_i +
+        result[:text_width_error_count].to_i
+    rescue StandardError
+      nil
+    end
+
     def self.new_import_session_id
       require 'securerandom'
       SecureRandom.uuid
@@ -1420,6 +1449,7 @@ module BlueCollarSystems
         merge_text_height_samples!(stats, result[:text_height_samples])
         stats[:text_height_fallback_count] =
           stats[:text_height_fallback_count].to_i + result[:text_height_fallback_count].to_i
+        merge_text_width_crosscheck!(stats, result)
 
         if !Array(result[:text_delivery_failures]).empty?
           terminal_raster = promote_text_delivery_failures_to_raster!(
@@ -1538,6 +1568,7 @@ module BlueCollarSystems
             merge_text_height_samples!(stats, fb_result[:text_height_samples])
             stats[:text_height_fallback_count] =
               stats[:text_height_fallback_count].to_i + fb_result[:text_height_fallback_count].to_i
+            merge_text_width_crosscheck!(stats, fb_result)
             if !Array(fb_result[:text_delivery_failures]).empty?
               terminal_raster = promote_text_delivery_failures_to_raster!(
                 model, path, page_num, media_box, opts, import_start, page_y_offset,

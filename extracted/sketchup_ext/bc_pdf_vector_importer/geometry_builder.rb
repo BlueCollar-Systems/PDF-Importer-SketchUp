@@ -55,6 +55,11 @@ module BlueCollarSystems
         @text_count = 0
         @text_height_samples = []
         @text_height_fallback_count = 0
+        # Round 22 width-fidelity telemetry (extra.text_width_crosscheck).
+        @text_width_factor_samples = []
+        @text_width_out_of_bounds_count = 0
+        @text_width_skipped_near_1_count = 0
+        @text_width_error_count = 0
         # TEXTMODE-1: a per-span native API failure must be passed upward so
         # main.rb can make the delivered representation visible in the report.
         @text_fallbacks = []
@@ -181,6 +186,10 @@ module BlueCollarSystems
           text_objects: @text_count,
           text_height_samples: Array(@text_height_samples),
           text_height_fallback_count: @text_height_fallback_count.to_i,
+          text_width_factor_samples: Array(@text_width_factor_samples),
+          text_width_out_of_bounds_count: @text_width_out_of_bounds_count.to_i,
+          text_width_skipped_near_1_count: @text_width_skipped_near_1_count.to_i,
+          text_width_error_count: @text_width_error_count.to_i,
           text_fallbacks: Array(@text_fallbacks),
           text_delivery_failures: Array(@text_delivery_failures)
         }
@@ -550,6 +559,20 @@ module BlueCollarSystems
       MESH_TEXT_HEIGHT_MAX_IN = 1.5    # never larger than 1.5" (~108pt)
       TEXT_FACE_RGB = [0.0, 0.0, 0.0].freeze
 
+      # Round 22 — width-faithful 3D Text (owner-evidence reopen of SIZE-1's
+      # WIDTH dimension ONLY; the height ban stays absolute). Live-host
+      # measurements on condensed title-block text: spans render at the host
+      # font's natural width while the PDF declares condensed/anisotropic-Tm
+      # extents (measured run-width ratios 0.5864..0.7996 condensed, up to
+      # 1.4365 expanded), so long strings overlap. After generation at the
+      # faithful height, each run is scaled along its PRE-ROTATION run axis
+      # (local X) to the PDF's own declared span extent. The height axis
+      # factor is always exactly 1.0.
+      MESH_TEXT_WIDTH_FACTOR_MIN = 0.25
+      MESH_TEXT_WIDTH_FACTOR_MAX = 4.0
+      MESH_TEXT_WIDTH_SKIP_TOLERANCE = 0.02
+      MESH_TEXT_WIDTH_AXIS_TOL_DEG = 3.0
+
       def mesh_text_height_inches(item, _angle_deg, _page_h)
         # Round 13 contract: TextItem#font_size is already the nominal PDF
         # text height in points. Bboxes are placement hints only.
@@ -586,6 +609,137 @@ module BlueCollarSystems
         Array(@text_height_samples)
       rescue StandardError
         []
+      end
+
+      # ---------------------------------------------------------------
+      # Round 22: width-faithful 3D Text (condensed title-block parity).
+      # The PDF's own declared span extent (the extractor's span bbox) is the
+      # width target; the generated run is measured and compressed/expanded
+      # along its pre-rotation run axis only. Heights are never touched —
+      # mesh_text_height_inches stays the sole height authority (SIZE-1).
+      # ---------------------------------------------------------------
+
+      # The PDF-declared run width in model inches for near-axis text, or nil
+      # when no trustworthy declared extent exists (missing/degenerate bbox,
+      # diagonal angle). Run axis follows the DISPLAY angle: ~0 deg reads the
+      # transformed bbox X extent, ~90 deg reads the Y extent.
+      def mesh_text_declared_run_width_inches(item, display_angle)
+        values = []
+        [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1].each do |name|
+          return nil unless item.respond_to?(name)
+          value = item.send(name)
+          return nil if value.nil?
+          value = value.to_f
+          return nil unless value.finite?
+          values << value
+        end
+        return nil if (values[2] - values[0]).abs <= 1.0e-9
+        return nil if (values[3] - values[1]).abs <= 1.0e-9
+
+        box = PageTransform.transform_bbox(
+          values[0], values[1], values[2], values[3], @media_box, @page_rotation
+        )
+        angle = PageTransform.normalize_angle(display_angle).abs
+        # Ruby 2.2 host parser: an if-expression assignment with a `return`
+        # branch is a "void value expression" SyntaxError (2026-07-16 host
+        # incident). Guard returns must stay statements, never if-values.
+        if angle <= MESH_TEXT_WIDTH_AXIS_TOL_DEG
+          points = (box[2] - box[0]).abs
+        elsif (angle - 90.0).abs <= MESH_TEXT_WIDTH_AXIS_TOL_DEG
+          points = (box[3] - box[1]).abs
+        else
+          return nil
+        end
+        width = points * PDF_POINT_TO_INCH * @scale
+        return nil unless width.finite? && width > 0.0
+        width
+      rescue StandardError
+        nil
+      end
+
+      # X extent (model inches) of the freshly generated, still-unplaced run.
+      # add_3d_text generates along the model X axis, so this is the run
+      # width BEFORE the placement translation/rotation transforms.
+      def mesh_text_rendered_run_width_inches(created)
+        min_x = nil
+        max_x = nil
+        Array(created).each do |entity|
+          next unless entity.respond_to?(:bounds)
+          bounds = entity.bounds
+          lo = bounds.min.x.to_f
+          hi = bounds.max.x.to_f
+          min_x = lo if min_x.nil? || lo < min_x
+          max_x = hi if max_x.nil? || hi > max_x
+        end
+        return nil if min_x.nil? || max_x.nil?
+        width = max_x - min_x
+        return nil unless width.finite? && width > 0.0
+        width
+      rescue StandardError
+        nil
+      end
+
+      # Self-calibrating factor = declared / rendered. Returns [factor, status]
+      # where status is :fit, :skipped_near_1, :out_of_bounds, or a skip
+      # reason with a nil factor when no comparison is possible.
+      def mesh_text_width_fidelity_factor(item, created, display_angle)
+        declared = mesh_text_declared_run_width_inches(item, display_angle)
+        return [nil, :no_declared_width] if declared.nil?
+        rendered = mesh_text_rendered_run_width_inches(created)
+        return [nil, :no_rendered_width] if rendered.nil?
+
+        factor = declared / rendered
+        return [nil, :invalid_factor] unless factor.finite? && factor > 0.0
+        # RB22/R20-2: explicit min/max comparisons — Numeric#clamp does not
+        # exist on the SketchUp Make 2017 Ruby 2.2 host.
+        if factor < MESH_TEXT_WIDTH_FACTOR_MIN || factor > MESH_TEXT_WIDTH_FACTOR_MAX
+          return [factor, :out_of_bounds]
+        end
+        delta = factor - 1.0
+        delta = -delta if delta < 0.0
+        return [factor, :skipped_near_1] if delta < MESH_TEXT_WIDTH_SKIP_TOLERANCE
+        [factor, :fit]
+      end
+
+      def record_text_width_factor_sample(factor)
+        @text_width_factor_samples ||= []
+        @text_width_factor_samples << factor.to_f
+      rescue StandardError
+        nil
+      end
+
+      # Applies the width-fidelity factor to the generated run along the
+      # pre-rotation run axis (local X). Height (Y) and depth (Z) factors are
+      # hard-coded 1.0 — this method must never change text height. Always
+      # returns true: width fidelity is best-effort and must never break
+      # placement of an already-generated mesh (no erase paths, FACE-1).
+      def apply_mesh_text_width_fidelity(entities, created, item, display_angle)
+        factor, status = mesh_text_width_fidelity_factor(item, created, display_angle)
+        if status == :fit
+          scale = Geom::Transformation.scaling(ORIGIN, factor, 1.0, 1.0)
+          entities.transform_entities(scale, *created)
+          record_text_width_factor_sample(factor)
+        elsif status == :skipped_near_1
+          @text_width_skipped_near_1_count = @text_width_skipped_near_1_count.to_i + 1
+        elsif status == :out_of_bounds
+          @text_width_out_of_bounds_count = @text_width_out_of_bounds_count.to_i + 1
+          if @text_width_out_of_bounds_count <= 3
+            Logger.warn('GeometryBuilder',
+                        "mesh text width factor #{factor.round(4)} outside " \
+                        "#{MESH_TEXT_WIDTH_FACTOR_MIN}..#{MESH_TEXT_WIDTH_FACTOR_MAX} " \
+                        "for #{item.text.inspect}; keeping natural width " \
+                        "(occurrence #{@text_width_out_of_bounds_count})")
+          end
+        end
+        true
+      rescue StandardError => e
+        # R20-2: never a silent rescue — count it for the report crosscheck
+        # and warn loudly (capped elsewhere by the single-span blast radius).
+        @text_width_error_count = @text_width_error_count.to_i + 1
+        Logger.warn('GeometryBuilder',
+                    "mesh text width fidelity failed (#{e.class}: #{e.message}); " \
+                    'keeping natural width')
+        true
       end
 
       def place_mesh_text(entities, item, origin_x, origin_y, layer,
@@ -637,6 +791,11 @@ module BlueCollarSystems
             mesh_failure_reason(requested_mode, 'text3d_mesh_empty')
           )
         end
+
+        # Round 22: compress/expand the run to the PDF-declared span extent
+        # along the pre-rotation run axis (local X only), AFTER generation at
+        # the faithful height and BEFORE the placement/rotation transforms.
+        apply_mesh_text_width_fidelity(entities, new_ents, item, display_angle)
 
         move = Geom::Transformation.new(pt)
         entities.transform_entities(move, *new_ents)

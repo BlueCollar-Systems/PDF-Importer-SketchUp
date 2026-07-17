@@ -85,17 +85,29 @@ jobs:
           ruby test/text_mode_routing_test.rb
           ruby test/mesh_text_scaling_test.rb
           ruby test/mesh_text_height_faithful_test.rb
+          ruby test/mesh_text_width_fidelity_test.rb
+          ruby test/condensed_text_width_regression_test.rb
+          ruby test/all_modes_placement_contract_test.rb
           ruby test/open_gate_file_missing_salvage_test.rb
           ruby test/source_provenance_test.rb
           ruby test/textmode1_invariant_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
+          # R22 incident class: 2.2-parser-only errors (e.g. value-if with a
+          # `return` branch) are invisible to the regex compat checker. The
+          # dedicated PARSE gate below runs FIRST inside ruby:2.2 on every
+          # shipped extension file; nothing mints without it.
           docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
             set -e
+            echo "=== Ruby 2.2 PARSE gate: every extension file (R22) ==="
+            find extracted/sketchup_ext -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
             find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
             ruby test/smoke_test.rb
             ruby test/ruby22_compat_test.rb
             ruby test/import_health_test.rb
             ruby test/mesh_text_scaling_test.rb
+            ruby test/mesh_text_width_fidelity_test.rb
+            ruby test/condensed_text_width_regression_test.rb
+            ruby test/all_modes_placement_contract_test.rb
             ruby test/textmode1_invariant_test.rb
             ruby test/geometry_builder_text_fallback_test.rb
           '

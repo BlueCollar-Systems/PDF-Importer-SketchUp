@@ -122,19 +122,27 @@ class MeshTextHeightFaithfulTest < Minitest::Test
   # Round 20 (R20-1 quality, panel-verified): live-host probes showed the old
   # fixed tolerance 0.6" only coarsened glyph curves (same size, same faces);
   # tolerance 0.0 is kept for curve quality and the faithful height is passed
-  # to add_3d_text directly — generate-then-scale was dropped as redundant.
+  # to add_3d_text directly.
   #
-  # Escape hatch (not a forever freeze): if a future host/API change needs
-  # generate-then-scale again, bring live-host measurements + update this
-  # guard in the same change — do not "work around" the refute by renaming.
-  # Whole-file: neither the 0.6 tolerance call shape nor any
-  # Transformation.scaling rescale exists anywhere in the builder.
-  def test_no_legacy_tolerance_or_post_scale_anywhere
+  # Round 22 escape-hatch exercise (live-host measurements + explicit owner
+  # reopen): condensed title-block text declares run widths at measured
+  # 0.5864..0.7996 of the host font's natural width (up to 1.4365 expanded),
+  # so long strings overlapped. Width fidelity now scales the generated run
+  # to the PDF-declared extent along the PRE-ROTATION run axis (local X)
+  # ONLY. Transformation.scaling is therefore allowed EXCLUSIVELY inside
+  # apply_mesh_text_width_fidelity with hard-coded 1.0 height/depth factors.
+  # Any other scaling call — and any height-axis factor — stays banned.
+  def test_no_legacy_tolerance_and_scaling_only_in_width_fidelity
     refute_match(/add_3d_text\([\s\S]*?,\s*0\.6\s*,/, source,
                  'must not hard-code add_3d_text tolerance 0.6 (R20-1)')
-    refute_includes source, 'Transformation.scaling',
-                    'no post-generation rescale of glyph geometry (R20-2 panel verdict; ' \
-                    'update this guard with evidence if design changes)'
+    occurrences = source.scan('Transformation.scaling').length
+    assert_equal 1, occurrences,
+                 'Transformation.scaling may appear exactly once — in ' \
+                 'apply_mesh_text_width_fidelity (R22 width fidelity)'
+    body = method_body('apply_mesh_text_width_fidelity')
+    assert_includes body, 'Transformation.scaling(ORIGIN, factor, 1.0, 1.0)',
+                    'width fidelity must scale local X only, with height/depth ' \
+                    'factors hard-coded to exactly 1.0 (SIZE-1 height ban)'
   end
 
   def test_place_mesh_text_records_height_samples
