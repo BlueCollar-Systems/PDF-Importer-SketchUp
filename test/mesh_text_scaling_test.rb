@@ -240,8 +240,14 @@ class DummyTransformEntities
 end
 
 # ── Constants from geometry_builder.rb ───────────────────────────────────────
-# MESH_TEXT_BBOX_CAP_RATIO removed in Round 13: height = effective_font_size_pts * PT_TO_IN.
+# Round 13: height comes from nominal font size (never bbox). Round 24: convert
+# PDF em -> SketchUp letter_height via the Arial ascender ratio (1491/2048).
 PT_TO_IN  = GB::PDF_POINT_TO_INCH         # 1/72
+LETTER_H_RATIO = GB::ARIAL_LETTER_HEIGHT_TO_EM
+
+def sketchup_letter_height_in(font_size_pts, scale = 1.0)
+  font_size_pts.to_f * PT_TO_IN * scale.to_f * LETTER_H_RATIO
+end
 
 class MeshTextScalingTest < Minitest::Test
 
@@ -255,7 +261,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(LETTER)
     item = bbox_item('MARK', 8.0, 10.0)   # 8pt font, 10pt bbox_h
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    expected = 8.0 * PT_TO_IN   # Round 13: height = nominal effective_font_size_pts * PT_TO_IN
+    expected = sketchup_letter_height_in(8.0)
     assert_in_delta expected, h, 0.001
   end
 
@@ -289,7 +295,7 @@ class MeshTextScalingTest < Minitest::Test
     # 8pt after Tm scale, no bbox
     item = no_bbox_item('p1019', 8.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    expected = [8.0, 1.0].max * PT_TO_IN
+    expected = sketchup_letter_height_in([8.0, 1.0].max)
     assert_in_delta expected, h, 0.001
   end
 
@@ -326,7 +332,7 @@ class MeshTextScalingTest < Minitest::Test
       nil, 50.0, 100.0, 50.1, 100.1
     )
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert_in_delta 0.1 * PT_TO_IN, h, 1.0e-12,
+    assert_in_delta sketchup_letter_height_in(0.1), h, 1.0e-12,
                     'tiny source text must not be inflated to a readability floor'
   end
 
@@ -334,7 +340,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(LETTER)
     item = bbox_item('TITLE', 300.0, 300.0, bbox_w: 3000.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert_in_delta 300.0 * PT_TO_IN, h, 1.0e-12,
+    assert_in_delta sketchup_letter_height_in(300.0), h, 1.0e-12,
                     'large source text must not be shrunk to a maximum height'
   end
 
@@ -345,7 +351,7 @@ class MeshTextScalingTest < Minitest::Test
     # effective_font_size_pts: ratio=20/24=0.833 (in 0.75-1.35 range) → fs=24
     item = bbox_item('LONG CALLOUT TEXT', 24.0, 20.0, bbox_w: 30.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert_in_delta 24.0 * PT_TO_IN, h, 1.0e-12
+    assert_in_delta sketchup_letter_height_in(24.0), h, 1.0e-12
   end
 
   # ── import scale factor applied once ──────────────────────────────────────
@@ -393,7 +399,7 @@ class MeshTextScalingTest < Minitest::Test
     ].each do |label, fs, bh|
       item = bbox_item(label, fs, bh)
       h = b.send(:mesh_text_height_inches, item, 0.0, ANSI_D[3])
-      assert_in_delta fs * PT_TO_IN, h, 1.0e-12,
+      assert_in_delta sketchup_letter_height_in(fs), h, 1.0e-12,
                       "#{label}: source height must be preserved exactly"
     end
   end
@@ -405,7 +411,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(negative_origin_box)
     item = bbox_item('MARK', 8.0, 10.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    expected = 8.0 * PT_TO_IN
+    expected = sketchup_letter_height_in(8.0)
     assert_in_delta expected, h, 0.001, "Negative MediaBox origin must not corrupt height"
   end
 
@@ -458,7 +464,7 @@ class MeshTextScalingTest < Minitest::Test
     # w1023: pdftotext item, bbox ~8pt tall
     item = bbox_item('w1023', 7.0, 8.5)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert_in_delta 7.0 * PT_TO_IN, h, 1.0e-12
+    assert_in_delta sketchup_letter_height_in(7.0), h, 1.0e-12
   end
 
   def test_place_mesh_text_uses_nominal_height_without_bbox_scaling
@@ -467,7 +473,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(LETTER)
     item = bbox_item('W12X30', 8.0, 1.5, bbox_w: 3.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert_in_delta 8.0 * PT_TO_IN, h, 1.0e-12,
+    assert_in_delta sketchup_letter_height_in(8.0), h, 1.0e-12,
                     'bbox dimensions must not override the source text height'
   end
 
@@ -499,7 +505,7 @@ class MeshTextScalingTest < Minitest::Test
       nil, 50.0, 100.0, 120.0, 101.5
     )
     h = b.send(:mesh_text_height_inches, item, 0.0, ANSI_D[3])
-    expected = 10.0 * PT_TO_IN
+    expected = sketchup_letter_height_in(10.0)
     assert_in_delta expected, h, 0.002,
                     "10pt nominal must not shrink to microscopic bbox (got #{h.round(5)})"
     assert h >= 0.08, "Shop drawing text must be readable (got #{h.round(4)}\")"
@@ -518,7 +524,7 @@ class MeshTextScalingTest < Minitest::Test
         nil, 50.0, 100.0, 50.0 + bbox_w_pt, 100.0 + bbox_h_pt
       )
       h = b.send(:mesh_text_height_inches, item, 0.0, 1726.299)
-      assert_in_delta nominal_pt * PT_TO_IN, h, 1.0e-12,
+      assert_in_delta sketchup_letter_height_in(nominal_pt), h, 1.0e-12,
                       "#{label}: page size and bbox must not alter source height"
     end
   end
@@ -533,7 +539,7 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(ARCH_D)
     item = bbox_item('W12X30', 12.0, 14.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, ARCH_D[3])
-    assert_in_delta 12.0 * PT_TO_IN, h, 0.0001,
+    assert_in_delta sketchup_letter_height_in(12.0), h, 0.0001,
       "12pt must yield 0.1667\" (got #{h} — 0.01 means the rescue floor engaged)"
   end
 
@@ -567,15 +573,16 @@ class MeshTextScalingTest < Minitest::Test
     assert b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
 
     assert_equal 1, ents.height_args.length
-    assert_in_delta 8.0 * PT_TO_IN, ents.height_args[0], 1e-9,
+    assert_in_delta sketchup_letter_height_in(8.0), ents.height_args[0], 1e-9,
                     'add_3d_text must receive the faithful target height directly'
     assert_equal [0.0], ents.tolerance_args,
                  'add_3d_text tolerance must be 0.0 (R20-1 quality)'
     kinds = ents.transforms.map { |args| args[0].respond_to?(:kind) ? args[0].kind : nil }
     assert_equal [:scaling, :translation], kinds
     scaling_args = ents.transforms[0][0].args
-    # Declared 50pt bbox width -> 50/72". Stub renders 3x height = 24/72".
-    assert_in_delta 50.0 / 24.0, scaling_args[1], 1e-9,
+    # Declared 50pt bbox width. Stub renders 3x letter height (= 24pt * ratio).
+    assert_in_delta 50.0 / (24.0 * LETTER_H_RATIO), scaling_args[1], 1e-9,
+                    'X factor must be declared/rendered'
                     'X factor must be declared/rendered'
     assert_in_delta 1.0, scaling_args[2], 1.0e-12,
                     'generated height already equals the exact source height'
@@ -586,7 +593,7 @@ class MeshTextScalingTest < Minitest::Test
     display_angle = b.send(:display_text_angle, item, angle)
     anchor = b.send(:text_point_to_su, item, x_pdf, y_pdf, 0.0, 0.0)
     expected = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.expected_rotated_bounds(
-      anchor, 50.0 * PT_TO_IN, 8.0 * PT_TO_IN, display_angle
+      anchor, 50.0 * PT_TO_IN, sketchup_letter_height_in(8.0), display_angle
     )
     [:min_x, :min_y, :max_x, :max_y, :width, :height].each do |key|
       assert_in_delta expected[key], actual[key], 1.0e-8,
@@ -600,7 +607,7 @@ class MeshTextScalingTest < Minitest::Test
     assert attempt[:height_verified]
     samples = b.send(:text_height_samples)
     assert_equal 1, samples.length
-    assert_in_delta 8.0 * PT_TO_IN, samples[0], 0.001
+    assert_in_delta sketchup_letter_height_in(8.0), samples[0], 0.001
     assert_empty ents.erased
   end
 

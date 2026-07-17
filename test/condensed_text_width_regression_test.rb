@@ -90,12 +90,13 @@ class CondensedTextWidthRegressionTest < Minitest::Test
       )
       assert_in_delta declared_in, final_bounds[:width], 1.0e-8,
                       "#{label}: final host width must equal the declared extent"
-      assert_in_delta font_pts / 72.0, final_bounds[:height], 1.0e-8,
-                      "#{label}: final host height must equal source font height"
+      letter_h = sketchup_letter_height_in(font_pts)
+      assert_in_delta letter_h, final_bounds[:height], 1.0e-8,
+                      "#{label}: final host height must equal SketchUp letter height"
 
-      # The height side of every case stays the faithful nominal.
-      assert_in_delta font_pts / 72.0, ents.height_args[0], 1e-9,
-                      "#{label}: height must stay the faithful nominal"
+      # The height side of every case stays the faithful letter-height nominal.
+      assert_in_delta letter_h, ents.height_args[0], 1e-9,
+                      "#{label}: height must stay the faithful letter-height nominal"
       assert_equal [1.0, 1.0], fits[0][0].args[2..3],
                    "#{label}: fixture height/depth factors must be exactly 1.0"
       attempt = b.text_attempts.fetch(0)

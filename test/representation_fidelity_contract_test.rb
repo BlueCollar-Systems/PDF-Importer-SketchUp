@@ -353,8 +353,11 @@ class RepresentationFidelityContractTest < Minitest::Test
     b = builder(:text3d)
     tiny = item('tiny', 0.0, 24.0, 0.1)
     huge = item('huge', 0.0, 24.0, 300.0)
-    assert_in_delta 0.1 / 72.0, b.send(:mesh_text_height_inches, tiny, 0, 792), 1e-12
-    assert_in_delta 300.0 / 72.0, b.send(:mesh_text_height_inches, huge, 0, 792), 1e-12
+    ratio = GB::ARIAL_LETTER_HEIGHT_TO_EM
+    assert_in_delta (0.1 / 72.0) * ratio,
+                    b.send(:mesh_text_height_inches, tiny, 0, 792), 1e-12
+    assert_in_delta (300.0 / 72.0) * ratio,
+                    b.send(:mesh_text_height_inches, huge, 0, 792), 1e-12
 
     [0.1, 10.0].each do |factor|
       source = item('factor', 0.0, 24.0 * factor, 8.0)

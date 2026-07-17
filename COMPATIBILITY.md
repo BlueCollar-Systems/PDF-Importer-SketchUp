@@ -13,7 +13,7 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 
 | Host | Status |
 |------|--------|
-| SketchUp Make 2017 | ⚠️ Expected — Ruby 2.2 CI gate; **field retest required** (use **v3.7.90+**, latest **v3.7.97**) |
+| SketchUp Make 2017 | ⚠️ Expected — Ruby 2.2 CI gate; **field retest required** (use **v3.7.90+**, latest **v3.7.98**) |
 | SketchUp 2018–2023 | ⚠️ Expected |
 | Current SketchUp Pro | ⚠️ Expected |
 
