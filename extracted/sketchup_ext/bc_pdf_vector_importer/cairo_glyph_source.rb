@@ -352,6 +352,106 @@ module BlueCollarSystems
       end
 
       # ------------------------------------------------------------------
+      # Headless helpers (CLI report parity — no SketchUp APIs involved)
+      # ------------------------------------------------------------------
+
+      # Render one page to SVG with the preferred renderer and return
+      # { :svg, :renderer, :missing_fonts, :missing_language_packs } or nil.
+      # opts[:failure_info] = {} receives [:reason] on nil (same vocabulary
+      # as SvgTextRenderer.render).
+      def self.render_page_svg(pdf_path, page_num, opts = {})
+        failure_info = opts[:failure_info].is_a?(Hash) ? opts[:failure_info] : nil
+        renderer = SvgTextRenderer.find_svg_renderer
+        unless renderer
+          failure_info[:reason] = 'no_renderer' if failure_info
+          return nil
+        end
+        svg_path = SvgTextRenderer.temp_svg_path
+        ok = false
+        stderr = ''
+        SvgTextRenderer.svg_render_arg_variants(
+          renderer, pdf_path, svg_path, page_num, false
+        ).each do |args|
+          begin
+            File.delete(svg_path) if File.exist?(svg_path)
+          rescue StandardError
+            # best-effort cleanup
+          end
+          run = CommandRunner.run(args, timeout_s: 90,
+                                  context: 'CairoGlyphSource.headless')
+          if run[:ok] && File.exist?(svg_path)
+            stderr = run[:stderr].to_s
+            ok = true
+            break
+          end
+          if run[:timed_out]
+            failure_info[:reason] = 'timeout' if failure_info
+            break
+          end
+        end
+        unless ok
+          if failure_info && failure_info[:reason].to_s.empty?
+            failure_info[:reason] = 'render_failed'
+          end
+          return nil
+        end
+        svg = File.read(svg_path, encoding: 'UTF-8')
+        {
+          svg: svg,
+          renderer: renderer[:kind],
+          missing_fonts: SvgTextRenderer.missing_display_fonts(stderr),
+          missing_language_packs: SvgTextRenderer.missing_language_packs(stderr)
+        }
+      rescue StandardError => e
+        warn_safe("render_page_svg failed: #{e.message}")
+        failure_info[:reason] = 'exception' if failure_info && failure_info[:reason].to_s.empty?
+        nil
+      ensure
+        begin
+          File.delete(svg_path) if svg_path && File.exist?(svg_path)
+        rescue StandardError
+          # best-effort cleanup
+        end
+      end
+
+      # Pen positions of placed glyphs (defs with actual outline data only)
+      # in PDF points relative to the media-box origin, y-up — the exact
+      # space match_spans expects. Pure string parsing; no SketchUp/Geom
+      # dependency, so it runs in the headless CLI.
+      def self.pen_placements_pdf(svg, media_box, opts = {})
+        svg_page_box = opts[:svg_page_box] || media_box
+        media_min_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
+        media_min_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
+        svg_min_x = svg_page_box.is_a?(Array) ? svg_page_box[0].to_f : 0.0
+        svg_min_y = svg_page_box.is_a?(Array) ? svg_page_box[1].to_f : 0.0
+        vb = SvgTextRenderer.parse_viewbox(svg)
+        vb_min_x = vb[0].to_f
+        vb_min_y = vb[1].to_f
+        vb_h = vb[3].to_f
+        if vb_h <= 0.0 && svg_page_box.is_a?(Array) && svg_page_box.length >= 4
+          vb_h = (svg_page_box[3] - svg_page_box[1]).abs.to_f
+        end
+        pen_dx = svg_min_x - media_min_x
+        pen_dy = svg_min_y - media_min_y
+
+        defs = SvgTextRenderer.parse_glyph_defs(svg)
+        pens = []
+        SvgTextRenderer.parse_use_placements(svg).each do |p|
+          next unless defs[p[:glyph_id]]
+          m = p[:matrix]
+          if m.is_a?(Array) && m.length >= 6
+            e = m[4].to_f + p[:x].to_f
+            f = m[5].to_f + p[:y].to_f
+          else
+            e = p[:x].to_f
+            f = p[:y].to_f
+          end
+          pens << { x: (e - vb_min_x) + pen_dx, y: (vb_h + vb_min_y - f) + pen_dy }
+        end
+        pens
+      end
+
+      # ------------------------------------------------------------------
       # Pure SVG -> model-space outline loops (fixture-tested; also the
       # core reused by the corpus oracle work, F-2).
       # ------------------------------------------------------------------
