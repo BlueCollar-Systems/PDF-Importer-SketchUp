@@ -21,6 +21,7 @@ require File.join(dir, 'pdf_salvage')
 require File.join(dir, 'pdf_parser')
 require File.join(dir, 'content_stream_parser')
 require File.join(dir, 'text_parser')
+require File.join(dir, 'representation_fidelity')
 require File.join(dir, 'text_source_identity')
 require File.join(dir, 'external_text_extractor')
 require File.join(dir, 'bezier')
@@ -104,7 +105,7 @@ module BlueCollarSystems
           o.on('--extract-images', 'Extract embedded Image XObjects') { opts[:extract_images] = true }
           o.on('--no-extract-images', 'Do not extract embedded images') { opts[:extract_images] = false }
           o.on('--no-primitives-json', 'Skip primitives.json output') { opts[:write_primitives] = false }
-          # 3D shape extrusion is shelved for go-live; do not expose CLI flags.
+          # Unrelated closed-shape extrusion is disabled; do not expose its CLI flags.
           o.on('--preflight', 'Run preflight checks and emit ready_check JSON') { opts[:preflight] = true }
           o.on('--version', 'Print plugin version and exit') { opts[:version] = true }
           o.on('--quiet', 'Only use exit code and files') { opts[:quiet] = true }
@@ -121,7 +122,6 @@ module BlueCollarSystems
         Logger.reset
         pdf_path = File.expand_path(cli_opts[:input].to_s)
         output_dir = default_output_dir(pdf_path, cli_opts[:output_dir])
-        FileUtils.mkdir_p(output_dir)
 
         raw_opts = {
           import_mode: normalized_mode(cli_opts[:mode]),
@@ -180,6 +180,9 @@ module BlueCollarSystems
         end
 
         stats, payload = extract_pdf(pdf_path, import_opts, cli_opts)
+        # Do not materialize an output tree until extraction (including the
+        # all-pages source-identity gate) has completed successfully.
+        FileUtils.mkdir_p(output_dir)
         report = QAReport.build_from_stats(pdf_path, import_opts, stats)
         attach_parts_sidecar(report, pdf_path, output_dir)
         report_path = write_report(report, pdf_path, output_dir, cli_opts[:report])
@@ -201,7 +204,7 @@ module BlueCollarSystems
             primitives_json: primitive_path,
             pages: stats[:pages],
             primitives: stats[:primitives],
-            text: stats[:text],
+            text: stats[:extracted_text_items],
             paths: stats[:paths],
             xobjects: stats[:xobjects],
             embedded_images: stats[:embedded_images],
@@ -221,6 +224,9 @@ module BlueCollarSystems
         ocg.parse
 
         pages = normalize_pages(opts[:pages], parser.page_count)
+        certified_pages = certify_page_text_sources(
+          parser, pdf_path, pages, opts
+        )
         IDGen.reset
         image_extractor = EmbeddedImageExtractor.new(parser, opts[:embedded_image_dir])
 
@@ -240,6 +246,9 @@ module BlueCollarSystems
           paths: 0,
           embedded_images: 0,
           embedded_image_files: [],
+          execution_scope: :extraction_only,
+          extracted_text_items: 0,
+          text_source_span_ids: [],
           text_renderers: [],
           page_text_sources: {},
           page_text_map: {},
@@ -256,12 +265,12 @@ module BlueCollarSystems
 
         start = Time.now
         pages.each do |page_num|
-          raw = parser.page_data(page_num)
-          next unless raw
-
+          certified = certified_pages[page_num]
+          next unless certified
+          raw = certified[:raw]
           media_box = raw[:media_box] || [0, 0, 612, 792]
-          streams = raw[:content_streams] || []
-          ocg_map = parser.page_ocg_map(page_num)
+          streams = certified[:streams]
+          ocg_map = certified[:ocg_map]
           cs = ContentStreamParser.new(streams, parser, ocg_map)
           paths = cs.parse
 
@@ -271,11 +280,8 @@ module BlueCollarSystems
           xobj_paths = xobj.expanded_paths(streams)
           paths += xobj_paths if xobj_paths && !xobj_paths.empty?
 
-          text_items, text_source = extract_text(parser, pdf_path, page_num, streams, ocg_map, opts)
-          # Corrective 2026-07-12 §1 (RB-01): deterministic source-span identity
-          # is assigned ONCE per page on the final extracted array, BEFORE
-          # stats[:page_text_map] (PartsBootstrap input) is built below.
-          TextSourceIdentity.assign!(text_items, page_num)
+          text_items = certified[:text_items]
+          text_source = certified[:text_source]
           images = opts[:extract_embedded_images] == false ? [] : image_extractor.extract_page(page_num)
           page_data = PrimitiveExtractor.extract(
             paths,
@@ -292,16 +298,15 @@ module BlueCollarSystems
           stats[:pages] += 1
           stats[:paths] += paths.length
           stats[:primitives] += page_data.primitives.length
-          stats[:text] += page_data.text_items.length
+          stats[:extracted_text_items] += page_data.text_items.length
           stats[:xobjects] += xobj.form_xobjects.length
           stats[:embedded_images] += images.length
           stats[:embedded_image_files].concat(images.map { |img| img.file_path }.compact)
           stats[:page_text_sources][page_num] = text_source if text_source
           stats[:page_text_map][page_num] = text_items if text_items && !text_items.empty?
           Array(text_items).each do |item|
-            raw_text = item.respond_to?(:text) ? item.text : item.to_s
-            raw_text = raw_text.to_s.strip
-            stats[:model_3d_texts] << raw_text unless raw_text.empty?
+            source_id = RepresentationFidelity.source_span_id(item)
+            stats[:text_source_span_ids] << source_id
           end
           if text_source
             stats[:text_renderers] << {
@@ -340,6 +345,67 @@ module BlueCollarSystems
         end
       end
 
+      # Certify the complete selected-page text ledger before creating any
+      # embedded-image writer or downstream output. A malformed identity on a
+      # later page therefore fails closed without partial CLI artifacts.
+      def certify_page_text_sources(parser, pdf_path, pages, opts)
+        certified = {}
+        Array(pages).each do |page_num|
+          raw = parser.page_data(page_num)
+          unless raw
+            raise "Page #{page_num}: parser returned no page data during " \
+                  'selected-page source certification'
+          end
+          streams = raw[:content_streams] || []
+          ocg_map = parser.page_ocg_map(page_num)
+          text_items, text_source = extract_text(
+            parser, pdf_path, page_num, streams, ocg_map, opts
+          )
+          enforce_extracted_text_presence!(
+            page_num, opts[:text_mode], text_items, streams
+          ) if opts[:import_text]
+          TextSourceIdentity.assign!(text_items, page_num)
+          TextSourceIdentity.validate!(text_items, page_num)
+          certified[page_num] = {
+            raw: raw,
+            streams: streams,
+            ocg_map: ocg_map,
+            text_items: text_items,
+            text_source: text_source
+          }
+        end
+        certified
+      end
+
+      # Headless extraction must not certify an empty text ledger when the
+      # decoded page stream contains real painting text. PDFParser expands
+      # referenced (including nested) Form XObjects into these page streams.
+      def enforce_extracted_text_presence!(page_num, requested_mode,
+                                           text_items, streams)
+        return true unless Array(text_items).empty?
+
+        detected = TextParser.new(
+          Array(streams), {}, { strict_text_fidelity: true,
+                                merge_text_runs: false }
+        ).nonempty_text_show_operation_count
+        return true unless detected.to_i > 0
+
+        label = requested_mode.to_s.strip
+        label = 'requested text representation' if label.empty?
+        raise RepresentationFidelity::ContractError,
+              "Page #{page_num}: #{detected.to_i} nonempty PDF text-show " \
+              "operation(s) were detected, but requested #{label} had no " \
+              'certified source spans; headless extraction stopped instead ' \
+              'of silently omitting the detected text.'
+      rescue RepresentationFidelity::ContractError
+        raise
+      rescue StandardError => e
+        raise RepresentationFidelity::ContractError,
+              "Page #{page_num}: no-text proof failed for requested " \
+              "#{requested_mode} (#{e.message}); headless extraction stopped " \
+              'instead of silently omitting possible text.'
+      end
+
       def extract_text(parser, pdf_path, page_num, streams, ocg_map, opts)
         return [[], nil] unless opts[:import_text]
 
@@ -358,8 +424,9 @@ module BlueCollarSystems
 
       # R23 (F-1): headless mirror of the live Glyphs-mode source decision —
       # renders the page with the bundled pdftocairo, matches glyph pens to
-      # extractor spans, and accumulates stats[:glyph_source] (single
-      # per-import decision, demotion only before the first delivered page).
+      # extractor spans, and accumulates stats[:glyph_source]. A failed source
+      # is reported unavailable; the CLI never invents a simplified glyph
+      # delivery from extractor text.
       def record_headless_glyph_source(stats, pdf_path, page_num, raw,
                                        media_box, text_items)
         decision = CairoGlyphSource.import_decision(stats)
@@ -392,17 +459,9 @@ module BlueCollarSystems
             )
             return
           end
-          CairoGlyphSource.demote_to_internal!(
+          CairoGlyphSource.mark_unavailable!(
             decision, CairoGlyphSource.failure_reason(failure)
           )
-        end
-
-        if CairoGlyphSource.internal_source?(decision)
-          spans = 0
-          Array(text_items).each do |item|
-            spans += 1 unless CairoGlyphSource.item_text(item).empty?
-          end
-          CairoGlyphSource.record_internal_page!(decision, spans)
         end
       rescue StandardError => e
         Logger.warn('CLI', "glyph_source telemetry failed: #{e.message}")
@@ -460,12 +519,23 @@ module BlueCollarSystems
             # scan is best-effort; absence of the check is acceptable
           end
         end
-        bin_dir = File.join(File.dirname(__FILE__), 'bin')
-        %w[pdftotext.exe pdftocairo.exe pdffonts.exe].each do |exe|
-          present = File.file?(File.join(bin_dir, exe))
-          checks << { 'id' => "poppler_#{exe.sub('.exe', '')}",
+        pdftocairo = DependencyResolver.find_pdftocairo
+        helper_paths = {
+          'pdftotext' => DependencyResolver.find_pdftotext,
+          'pdftocairo' => pdftocairo,
+          'pdffonts' => DependencyResolver.find_pdffonts(pdftocairo)
+        }
+        helper_paths.each do |name, path|
+          resolved = path.to_s.strip
+          present = !resolved.empty?
+          message = if present
+                      "resolved #{name}: #{resolved}"
+                    else
+                      "#{name} unavailable; modes that require it stop explicitly"
+                    end
+          checks << { 'id' => "poppler_#{name}",
                       'status' => present ? 'pass' : 'warn',
-                      'message' => present ? "bundled #{exe} present" : "#{exe} missing (text falls back to internal extractor)" }
+                      'message' => message }
         end
         status = checks.any? { |c| c['status'] == 'fail' } ? 'fail' :
                  checks.any? { |c| c['status'] == 'warn' } ? 'warn' : 'pass'

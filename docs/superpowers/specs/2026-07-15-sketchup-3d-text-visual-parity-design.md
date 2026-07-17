@@ -2,7 +2,10 @@
 
 Date: 2026-07-15
 
-Status: Approved direction; implementation remains gated on test-first verification.
+Status: Superseded historical design evidence. Active authority is the
+requested-representation directive in Q&A together with current verified source
+and tests; this document must not gate corrections or restore host-font
+substitution in place of exact PDF glyph outlines.
 
 ## Objective
 
@@ -175,11 +178,13 @@ descenders, parentheses, fractions, and ±90° runs before release.
 ### Failure handling and reporting
 
 If native mesh generation returns false, creates no entities, or throws, the
-existing item-level fallback ladder applies and reports the exact reason.
+requested 3D Text delivery fails explicitly for that source item. Those generic
+implementation failures do not prove 3D Text impossible and do not authorize a
+different representation.
 
 If any scale, translation, or rotation transform fails after native entities
-were created, those partial entities must be erased before the fallback rung.
-The importer must never leave both a partial mesh and a fallback Label.
+were created, those partial entities must be erased before the operation stops.
+The importer must never leave a partial mesh or substitute a Label/raster.
 
 The report distinguishes:
 
@@ -190,7 +195,7 @@ The report distinguishes:
 - residual bbox shrink;
 - fitted, skipped, rejected-outlier, and failed-transform counts;
 - requested and delivered representation;
-- font substitution and fallback reasons.
+- font substitution and requested-mode failure reasons.
 
 ## Test-First Implementation
 

@@ -22,19 +22,64 @@ module BlueCollarSystems
     module TextSourceIdentity
       module_function
 
+      class IdentityError < StandardError; end
+
       # Assign "text_span:<page>:<index>" to each item's source_span_id,
       # where <index> is the item's position in the FINAL per-page array.
       # Mutates the items in place and returns the same array so the exact
       # objects flow on to PartsBootstrap and GeometryBuilder.
       def assign!(items, page_number)
-        return items unless items.is_a?(Array)
-
+        raise IdentityError, 'text source collection must be an Array' unless items.is_a?(Array)
         page = page_number.to_i
+        raise IdentityError, 'text source page must be positive' unless page > 0
+
+        # Prove the entire page can carry a readable/writable identity before
+        # mutating any item.  A malformed later item must not leave an earlier
+        # item with a partially committed source ledger.
         items.each_with_index do |item, idx|
-          next unless item && item.respond_to?(:source_span_id=)
-          item.source_span_id = "text_span:#{page}:#{idx}"
+          unless item && item.respond_to?(:source_span_id) &&
+                 item.respond_to?(:source_span_id=)
+            raise IdentityError, "text item #{idx} cannot carry source identity"
+          end
+        end
+        previous = items.map { |item| item.source_span_id }
+
+        begin
+          items.each_with_index do |item, idx|
+            item.source_span_id = "text_span:#{page}:#{idx}"
+          end
+          validate!(items, page)
+        rescue StandardError => e
+          items.each_with_index do |item, idx|
+            begin
+              item.source_span_id = previous[idx]
+            rescue StandardError
+              # Preserve the original assignment/validation error. A carrier
+              # whose setter cannot restore is already invalid and will abort.
+            end
+          end
+          raise e if e.is_a?(IdentityError)
+          raise IdentityError, "text source identity assignment failed: #{e.message}"
         end
         items
+      end
+
+      def validate!(items, page_number)
+        raise IdentityError, 'text source collection must be an Array' unless items.is_a?(Array)
+        page = page_number.to_i
+        raise IdentityError, 'text source page must be positive' unless page > 0
+        seen = {}
+        items.each_with_index do |item, idx|
+          unless item && item.respond_to?(:source_span_id)
+            raise IdentityError, "text item #{idx} cannot expose source identity"
+          end
+          observed = item.source_span_id.to_s.strip
+          expected = "text_span:#{page}:#{idx}"
+          raise IdentityError, "text item #{idx} source identity mismatch" unless observed == expected
+          raise IdentityError, "duplicate text source identity #{observed}" if seen.key?(observed)
+          seen[observed] = true
+        end
+        true
       end
     end
   end

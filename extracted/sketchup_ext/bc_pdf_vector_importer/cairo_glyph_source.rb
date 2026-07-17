@@ -5,7 +5,7 @@
 # TEXTMODE-1: the source is a decision INSIDE the delivered Glyphs mode,
 # never a mode change. Sources, in preference order:
 #
-#   cairo_svg  - the bundled poppler pdftocairo -svg pipeline
+#   cairo_svg  - the free Poppler pdftocairo -svg pipeline when installed
 #                (SvgTextRenderer). Outlines come from the PDF's own
 #                embedded fonts, so condensed/anisotropic title-block runs
 #                keep their declared extents. Non-embedded fonts still
@@ -15,17 +15,14 @@
 #   mupdf_svg  - the same SVG pipeline through an installed MuPDF mutool
 #                when pdftocairo is unavailable (existing shipped
 #                alternative, honestly named in telemetry).
-#   internal   - the internal outline path: StrokeFont single-stroke
-#                lettering of the extractor spans (GeometryBuilder
-#                glyph_outline_text). Degraded fidelity, same
-#                representation type (outline edges), fully reported.
+#   unavailable - no source was able to produce and certify the requested
+#                 PDF glyph outlines. This is a stopped delivery, never a
+#                 simplified-stroke substitution.
 #
 # The decision is made ONCE per import and recorded in
-# stats[:glyph_source]; a failure of the SVG source before it has
-# delivered any page demotes the whole import to the internal source
-# (fallback_reason says why). After the SVG source has delivered a page,
-# later per-page failures use the existing per-page mode ladder so a
-# single import never mixes glyph sources.
+# stats[:glyph_source]. A missing/failed SVG source is marked unavailable
+# (fallback_reason says why); generic helper failures cannot authorize a
+# representation or glyph-shape substitution.
 #
 # R17-3: rendered glyph ink is position-matched back to extractor spans
 # (pen point inside the span's declared bbox) so span_ids/provenance stay
@@ -51,7 +48,7 @@ module BlueCollarSystems
 
       SOURCE_CAIRO = 'cairo_svg'.freeze
       SOURCE_MUPDF = 'mupdf_svg'.freeze
-      SOURCE_INTERNAL = 'internal'.freeze
+      SOURCE_UNAVAILABLE = 'unavailable'.freeze
 
       # Pen-in-bbox tolerance (PDF points). Probe: first-glyph pen sits
       # within 0.39 pt of the declared span xMin; 2 pt absorbs baseline vs
@@ -80,7 +77,7 @@ module BlueCollarSystems
         elsif kind == :mutool
           base_decision(SOURCE_MUPDF, 'pdftocairo_missing')
         else
-          decision = base_decision(SOURCE_INTERNAL, 'pdftocairo_missing')
+          decision = base_decision(SOURCE_UNAVAILABLE, 'pdftocairo_missing')
           decision[:locked] = true
           decision
         end
@@ -113,24 +110,23 @@ module BlueCollarSystems
         decision[:source] == SOURCE_CAIRO || decision[:source] == SOURCE_MUPDF
       end
 
-      def self.internal_source?(decision)
-        decision.is_a?(Hash) && decision[:source] == SOURCE_INTERNAL
+      def self.unavailable_source?(decision)
+        decision.is_a?(Hash) && decision[:source] == SOURCE_UNAVAILABLE
       end
 
-      # Demote the import decision to the internal source. Only allowed
-      # while the SVG source has not delivered any page yet (single
-      # per-import decision — never mix sources mid-import). Returns true
-      # when the demotion happened.
-      def self.demote_to_internal!(decision, reason)
+      # Record that the requested glyph source could not be certified.  This
+      # is deliberately not a demotion to simplified stroke lettering.
+      def self.mark_unavailable!(decision, reason)
         return false unless decision.is_a?(Hash)
-        return true if decision[:source] == SOURCE_INTERNAL
-        return false if decision[:pages].to_i > 0 || decision[:locked]
-        decision[:source] = SOURCE_INTERNAL
+        unless decision[:source] == SOURCE_UNAVAILABLE
+          decision[:attempted_source] = decision[:source]
+        end
+        decision[:source] = SOURCE_UNAVAILABLE
         decision[:fallback_reason] = reason.to_s.empty? ? 'svg_source_failed' : reason.to_s
         decision[:locked] = true
         Logger.warn('CairoGlyphSource',
           "Glyphs mode SVG source unavailable (#{decision[:fallback_reason]}); " \
-          'delivering internal stroke-outline source for this import (reported).')
+          'the requested Glyphs delivery is stopped without substitution.')
         true
       rescue StandardError
         false
@@ -167,6 +163,119 @@ module BlueCollarSystems
       # Page recording + span matching (R17-3)
       # ------------------------------------------------------------------
 
+      # Build the only evidence eligible to complete a deferred Poppler
+      # diagnostic. This runs after SVG parsing and host placement, and after
+      # matching those placed pens to the current extractor source spans.
+      # Missing evidence is represented as a nonempty failure collection;
+      # absence can never masquerade as zero failures.
+      def self.semantic_completion_evidence(svg_result, text_items, media_box,
+                                            allowed_unoutlined_ids = [])
+        result = svg_result.is_a?(Hash) ? svg_result : {}
+        match = match_spans(result[:placements_pdf], text_items, media_box)
+        source_items = Array(text_items).select do |item|
+          !item_text(item).empty?
+        end
+        source_ids = source_items.map { |item| source_span_id_for(item) }
+        matched_ids = Array(match[:matched_items]).map do |item|
+          source_span_id_for(item)
+        end
+        unmatched_runs = Array(match[:unmatched_source_runs]).map do |item|
+          source_span_evidence(item)
+        end
+
+        if source_ids.empty?
+          unmatched_runs << { :reason => :source_span_set_empty }
+        elsif source_ids.any? { |span_id| span_id.empty? }
+          unmatched_runs << { :reason => :source_span_id_missing }
+        elsif source_ids.uniq.length != source_ids.length
+          unmatched_runs << { :reason => :source_span_id_duplicate }
+        elsif matched_ids.sort != source_ids.sort
+          unmatched_runs << { :reason => :source_span_set_incomplete }
+        end
+
+        glyphs = result[:semantic_svg_glyphs]
+        placements = result[:semantic_svg_placements]
+        allowed_unoutlined = Array(allowed_unoutlined_ids).map do |glyph_id|
+          glyph_id.to_s
+        end.uniq.sort
+        skipped_placements = required_array_evidence(
+          result, :skipped_placement_evidence,
+          :skipped_placement_evidence_missing
+        )
+        unoutlined = required_array_evidence(
+          result, :unoutlined_placement_evidence,
+          :unoutlined_placement_evidence_missing
+        )
+        unoutlined.each do |entry|
+          glyph_id = entry.is_a?(Hash) ? entry[:glyph_id].to_s : ''
+          skipped_placements << entry unless
+            allowed_unoutlined.include?(glyph_id)
+        end
+        placement_failures = required_array_evidence(
+          result, :placement_failure_evidence,
+          :placement_failure_evidence_missing
+        )
+        unless glyphs.is_a?(Hash) && placements.is_a?(Array) &&
+               !glyphs.empty? && !placements.empty?
+          placement_failures << { :reason => :semantic_svg_evidence_missing }
+        end
+
+        {
+          :renderer => result[:renderer],
+          :representation => :glyph_geometry,
+          :glyphs => glyphs,
+          :placements => placements,
+          :matched_source_span_ids => matched_ids,
+          :allowed_unoutlined_glyph_ids => allowed_unoutlined,
+          :unmatched_source_runs => unmatched_runs,
+          :unmatched_placements => Array(match[:unmatched_placements]),
+          :missing_language_packs => required_array_evidence(
+            result, :missing_language_packs,
+            :missing_language_pack_evidence_missing
+          ),
+          :skipped_placements => skipped_placements,
+          :placement_failures => placement_failures
+        }
+      rescue StandardError => e
+        {
+          :renderer => nil,
+          :representation => :glyph_geometry,
+          :glyphs => nil,
+          :placements => nil,
+          :matched_source_span_ids => [],
+          :allowed_unoutlined_glyph_ids => [],
+          :unmatched_source_runs => [{ :reason => :evidence_exception,
+                                       :detail => e.message.to_s }],
+          :unmatched_placements => [{ :reason => :evidence_exception }],
+          :missing_language_packs => [{ :reason => :evidence_exception }],
+          :skipped_placements => [{ :reason => :evidence_exception }],
+          :placement_failures => [{ :reason => :evidence_exception }]
+        }
+      end
+
+      def self.required_array_evidence(result, key, missing_reason)
+        return [{ :reason => missing_reason }] unless result.key?(key)
+        value = result[key]
+        return [{ :reason => missing_reason }] unless value.is_a?(Array)
+        value.dup
+      rescue StandardError
+        [{ :reason => missing_reason }]
+      end
+
+      def self.source_span_id_for(item)
+        return '' unless item.respond_to?(:source_span_id)
+        item.source_span_id.to_s
+      rescue StandardError
+        ''
+      end
+
+      def self.source_span_evidence(item)
+        {
+          :source_span_id => source_span_id_for(item),
+          :text => item_text(item)
+        }
+      end
+
       # Record a successful SVG-source page: accumulates telemetry and
       # attaches provenance entries for matched spans. Returns the match
       # result hash.
@@ -196,18 +305,6 @@ module BlueCollarSystems
         nil
       end
 
-      # Record an internal-source page (StrokeFont outlines render straight
-      # from the extractor spans, so delivered spans are matched runs by
-      # construction; provenance is recorded per span by GeometryBuilder).
-      def self.record_internal_page!(decision, delivered_count)
-        return nil unless decision.is_a?(Hash)
-        decision[:pages] = decision[:pages].to_i + 1
-        decision[:runs_matched] = decision[:runs_matched].to_i + delivered_count.to_i
-        decision
-      rescue StandardError
-        nil
-      end
-
       def self.merge_names!(decision, key, names)
         list = decision[key]
         list = decision[key] = [] unless list.is_a?(Array)
@@ -226,48 +323,260 @@ module BlueCollarSystems
       # the matched item objects (for provenance).
       def self.match_spans(placements_pdf, text_items, media_box)
         result = {
-          matched_items: [],
-          runs_matched: 0,
-          runs_unmatched: 0,
+          matched_items: [], placement_matches: [],
+          unmatched_source_runs: [], unmatched_placements: [],
+          coverage_failures: [], runs_matched: 0, runs_unmatched: 0,
           placements_unmatched: 0
         }
         pens = Array(placements_pdf)
-        pen_used = Array.new(pens.length, false)
-        base_x = media_box.is_a?(Array) && media_box.length >= 2 ? media_box[0].to_f : 0.0
-        base_y = media_box.is_a?(Array) && media_box.length >= 2 ? media_box[1].to_f : 0.0
+        base_x = media_box.is_a?(Array) && media_box.length >= 2 ?
+          media_box[0].to_f : 0.0
+        base_y = media_box.is_a?(Array) && media_box.length >= 2 ?
+          media_box[1].to_f : 0.0
         tol = SPAN_MATCH_TOLERANCE_PT
+        rows = []
+        invalid_items = []
 
-        Array(text_items).each do |item|
+        Array(text_items).each_with_index do |item, index|
           next if item_text(item).empty?
           box = item_bbox_media_relative(item, base_x, base_y)
           if box.nil?
-            result[:runs_unmatched] += 1
+            invalid_items << item
             next
           end
-          x0 = box[0] - tol
-          y0 = box[1] - tol
-          x1 = box[2] + tol
-          y1 = box[3] + tol
-          matched = false
-          pens.each_with_index do |pen, idx|
+          x0, x1 = [box[0].to_f, box[2].to_f].minmax
+          y0, y1 = [box[1].to_f, box[3].to_f].minmax
+          rows << {
+            item: item, index: index,
+            x0: x0 - tol, y0: y0 - tol,
+            x1: x1 + tol, y1: y1 + tol,
+            expected_count: visible_source_glyph_count(item),
+            candidates: []
+          }
+        end
+
+        pen_records = []
+        pens.each_with_index do |pen, enumerated_index|
+          begin
+            placement_index = if pen.is_a?(Hash) && pen.key?(:placement_index)
+                                pen[:placement_index].to_i
+                              else
+                                enumerated_index
+                              end
             px = pen[:x].to_f
             py = pen[:y].to_f
-            next if px < x0 || px > x1 || py < y0 || py > y1
-            matched = true
-            pen_used[idx] = true
-          end
-          if matched
-            result[:runs_matched] += 1
-            result[:matched_items] << item
-          else
-            result[:runs_unmatched] += 1
+            pen_records << {
+              :pen_index => enumerated_index,
+              :placement_index => placement_index,
+              :placement => pen
+            }
+            rows.each do |row|
+              next unless px >= row[:x0] && px <= row[:x1] &&
+                          py >= row[:y0] && py <= row[:y1]
+              width = [row[:x1] - row[:x0], 1.0].max
+              height = [row[:y1] - row[:y0], 1.0].max
+              dx = (px - ((row[:x0] + row[:x1]) * 0.5)) / width
+              dy = (py - ((row[:y0] + row[:y1]) * 0.5)) / height
+              row[:candidates] << {
+                :pen_index => enumerated_index,
+                :placement_index => placement_index,
+                :score => (dx * dx) + (dy * dy),
+                :assignment => {
+                  :placement_index => placement_index,
+                  :source_span_id => source_span_id_for(row[:item]),
+                  :item => row[:item], :placement => pen
+                }
+              }
+            end
+          rescue StandardError
+            pen_records << {
+              :pen_index => enumerated_index,
+              :placement_index => enumerated_index,
+              :placement => pen, :invalid => true
+            }
           end
         end
 
-        unmatched_pens = 0
-        pen_used.each { |used| unmatched_pens += 1 unless used }
-        result[:placements_unmatched] = pens.empty? ? 0 : unmatched_pens
+        rows.each do |row|
+          row[:candidates] = row[:candidates].sort_by do |candidate|
+            [candidate[:score], candidate[:placement_index]]
+          end
+        end
+
+        # Treat every visible source character as a capacity slot. An
+        # augmenting-path allocation can move a shared pen from a broad bbox to
+        # the narrow span that needs it. The old nearest-center greedy pass
+        # could falsely prove both spans impossible even when a complete,
+        # one-to-one page assignment existed.
+        rows_by_index = {}
+        rows.each { |row| rows_by_index[row[:index]] = row }
+        ordered_rows = rows.select do |row|
+          row[:expected_count].to_i > 0 &&
+            row[:candidates].length >= row[:expected_count].to_i
+        end.sort_by do |row|
+          [
+            row[:candidates].length - row[:expected_count].to_i,
+            row[:candidates].length, row[:index]
+          ]
+        end
+        accepted = {}
+        pen_slot = {}
+        slot_pen = {}
+        ordered_rows.each do |row|
+          if activate_complete_span_row!(
+            row, rows_by_index, pen_slot, slot_pen
+          )
+            accepted[row[:index]] = true
+          end
+        end
+
+        # Capacity fulfillment is necessary but not sufficient: an unowned
+        # pen still inside an accepted span's bbox is surplus physical ink, so
+        # the association is not one-to-one. Demotion may expose the same
+        # ambiguity in an overlapping peer, therefore close to a fixed point.
+        loop do
+          ambiguous = rows.select do |row|
+            accepted[row[:index]] && row[:candidates].any? do |candidate|
+              !pen_slot.key?(candidate[:pen_index])
+            end
+          end
+          break if ambiguous.empty?
+          ambiguous.each do |row|
+            accepted.delete(row[:index])
+            owned_slots = slot_pen.keys.select do |slot|
+              slot[0] == row[:index]
+            end
+            owned_slots.each do |slot|
+              pen_index = slot_pen.delete(slot)
+              pen_slot.delete(pen_index) if pen_slot[pen_index] == slot
+            end
+          end
+        end
+
+        rows.each do |row|
+          expected_count = row[:expected_count].to_i
+          if accepted[row[:index]]
+            pen_indices = slot_pen.select do |slot, _pen_index|
+              slot[0] == row[:index]
+            end.values.sort
+            assignments = pen_indices.map do |pen_index|
+              candidate = row[:candidates].find do |record|
+                record[:pen_index] == pen_index
+              end
+              candidate && candidate[:assignment]
+            end.compact.sort_by { |entry| entry[:placement_index] }
+            result[:runs_matched] += 1
+            result[:matched_items] << row[:item]
+            result[:placement_matches].concat(assignments)
+          else
+            result[:runs_unmatched] += 1
+            result[:unmatched_source_runs] << row[:item]
+            candidate_pen_indices = row[:candidates].map do |candidate|
+              candidate[:pen_index]
+            end.uniq
+            unless candidate_pen_indices.empty?
+              reason = candidate_pen_indices.length == expected_count ?
+                :source_ownership_conflict : :glyph_coverage_mismatch
+              evidence = {
+                :reason => reason,
+                :source_span_id => source_span_id_for(row[:item]),
+                :expected_glyph_count => expected_count,
+                :observed_glyph_count => candidate_pen_indices.length,
+                :placement_indices => row[:candidates].map do |candidate|
+                  candidate[:placement_index]
+                end.uniq.sort
+              }
+              result[:coverage_failures] << evidence
+              row[:coverage_evidence] = evidence
+            end
+          end
+        end
+
+        # Do not render a rejected span's partial ink anonymously beside its
+        # item fallback. Truly unassociated placements keep their independent
+        # page-scoped physical identity and remain eligible for source 3D.
+        reserved = {}
+        rows.reject { |row| accepted[row[:index]] }.each do |row|
+          evidence = row[:coverage_evidence]
+          next unless evidence
+          row[:candidates].each do |candidate|
+            pen_index = candidate[:pen_index]
+            next if pen_slot.key?(pen_index) || reserved.key?(pen_index)
+            reserved[pen_index] = evidence
+          end
+        end
+        pen_records.each do |record|
+          pen_index = record[:pen_index]
+          next if pen_slot.key?(pen_index)
+          result[:placements_unmatched] += 1
+          evidence = reserved[pen_index]
+          if evidence
+            result[:unmatched_placements] << evidence.merge(
+              :placement => record[:placement]
+            )
+          else
+            result[:unmatched_placements] << record[:placement]
+          end
+        end
+        result[:runs_unmatched] += invalid_items.length
+        result[:unmatched_source_runs].concat(invalid_items)
+        result[:placement_matches] = result[:placement_matches].sort_by do |entry|
+          entry[:placement_index]
+        end
         result
+      end
+
+      def self.activate_complete_span_row!(row, rows_by_index, pen_slot,
+                                           slot_pen)
+        owner_snapshot = pen_slot.dup
+        assignment_snapshot = slot_pen.dup
+        row[:expected_count].to_i.times do |slot_number|
+          slot = [row[:index], slot_number]
+          unless augment_span_slot!(
+            slot, rows_by_index, pen_slot, slot_pen, {}
+          )
+            pen_slot.replace(owner_snapshot)
+            slot_pen.replace(assignment_snapshot)
+            return false
+          end
+        end
+        true
+      end
+
+      def self.augment_span_slot!(slot, rows_by_index, pen_slot, slot_pen,
+                                  seen_pens)
+        row = rows_by_index[slot[0]]
+        return false unless row
+        row[:candidates].each do |candidate|
+          pen_index = candidate[:pen_index]
+          next if seen_pens[pen_index]
+          seen_pens[pen_index] = true
+          owner_slot = pen_slot[pen_index]
+          if owner_slot.nil? || augment_span_slot!(
+            owner_slot, rows_by_index, pen_slot, slot_pen, seen_pens
+          )
+            pen_slot[pen_index] = slot
+            slot_pen[slot] = pen_index
+            return true
+          end
+        end
+        false
+      end
+
+      # A bbox overlap proves only location. It does not prove that the
+      # renderer supplied every glyph belonging to the source item. Require a
+      # one-to-one physical placement for every visible source character; a
+      # short or overfull match remains explicit unmatched evidence. This is
+      # intentionally conservative for ligatures/combining sequences because
+      # an inferred equivalence would be a false success.
+      def self.visible_source_glyph_count(item)
+        count = 0
+        item_text(item).each_char do |character|
+          count += 1 unless character =~ /\s/
+        end
+        count
+      rescue StandardError
+        0
       end
 
       def self.item_text(item)
@@ -369,9 +678,13 @@ module BlueCollarSystems
         svg_path = SvgTextRenderer.temp_svg_path
         ok = false
         stderr = ''
+        attempt_number = 0
+        rendered_with_cropbox = false
         SvgTextRenderer.svg_render_arg_variants(
-          renderer, pdf_path, svg_path, page_num, false
+          renderer, pdf_path, svg_path, page_num,
+          opts[:use_cropbox] == true
         ).each do |args|
+          attempt_number += 1
           begin
             File.delete(svg_path) if File.exist?(svg_path)
           rescue StandardError
@@ -379,8 +692,34 @@ module BlueCollarSystems
           end
           run = CommandRunner.run(args, timeout_s: 90,
                                   context: 'CairoGlyphSource.headless')
-          if run[:ok] && File.exist?(svg_path)
+          attempt_ok = if renderer[:kind] == :pdftocairo
+                         validation = PopplerResultValidator.validate(
+                           run,
+                           :executable => renderer[:exe],
+                           :argv => args,
+                           :context => 'CairoGlyphSource.headless',
+                           :page => page_num,
+                           :attempt => attempt_number,
+                           :representation => :glyph_geometry,
+                           :artifacts => [svg_path],
+                           :artifact_policy => :all_nonempty
+                         )
+                         unless validation[:ok]
+                           PopplerResultValidator.log_rejection(
+                             validation, 'CairoGlyphSource'
+                           )
+                           failure_info[:reason] = validation[:reason].to_s if
+                             failure_info
+                         end
+                         validation[:ok]
+                       else
+                         run[:ok] && File.file?(svg_path) &&
+                           File.size(svg_path).to_i > 0
+                       end
+          if attempt_ok
             stderr = run[:stderr].to_s
+            rendered_with_cropbox = SvgTextRenderer.cropbox_args?(args)
+            failure_info.delete(:reason) if failure_info
             ok = true
             break
           end
@@ -399,6 +738,9 @@ module BlueCollarSystems
         {
           svg: svg,
           renderer: renderer[:kind],
+          render_box_used: rendered_with_cropbox ? :crop_box : :media_box,
+          cropbox_fallback: opts[:use_cropbox] == true &&
+            !rendered_with_cropbox,
           missing_fonts: SvgTextRenderer.missing_display_fonts(stderr),
           missing_language_packs: SvgTextRenderer.missing_language_packs(stderr)
         }
@@ -436,7 +778,7 @@ module BlueCollarSystems
 
         defs = SvgTextRenderer.parse_glyph_defs(svg)
         pens = []
-        SvgTextRenderer.parse_use_placements(svg).each do |p|
+        SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
           next unless defs[p[:glyph_id]]
           m = p[:matrix]
           if m.is_a?(Array) && m.length >= 6
@@ -491,7 +833,7 @@ module BlueCollarSystems
         end
 
         out = []
-        SvgTextRenderer.parse_use_placements(svg).each do |p|
+        SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
           local = glyph_paths[p[:glyph_id]]
           next unless local
 
@@ -534,7 +876,14 @@ module BlueCollarSystems
 
           pen_x_pdf = (e - vb_min_x) + (svg_min_x - media_min_x)
           pen_y_pdf = (vb_h + vb_min_y - f) + (svg_min_y - media_min_y)
-          out << { glyph_id: p[:glyph_id], pen_pdf: [pen_x_pdf, pen_y_pdf], loops: loops }
+          out << {
+            glyph_id: p[:glyph_id],
+            placement_index: placement_index,
+            svg_matrix: m.is_a?(Array) ? m.map { |value| value.to_f } :
+              [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            pen_pdf: [pen_x_pdf, pen_y_pdf],
+            loops: loops
+          }
         end
         out
       end

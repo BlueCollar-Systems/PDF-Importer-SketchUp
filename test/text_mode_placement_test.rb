@@ -72,18 +72,95 @@ module Geom
       t.instance_variable_set(:@kind, :rotation)
       t
     end
+
+    def self.scaling(*args)
+      t = new(*args)
+      t.instance_variable_set(:@kind, :scaling)
+      t
+    end
+
+    def apply(point)
+      case @kind
+      when :scaling
+        pivot, sx, sy, sz = @args
+        Geom::Point3d.new(
+          pivot.x + ((point.x - pivot.x) * sx.to_f),
+          pivot.y + ((point.y - pivot.y) * sy.to_f),
+          pivot.z + ((point.z - pivot.z) * sz.to_f)
+        )
+      when :rotation
+        pivot, _axis, radians = @args
+        dx = point.x - pivot.x
+        dy = point.y - pivot.y
+        c = Math.cos(radians.to_f)
+        s = Math.sin(radians.to_f)
+        Geom::Point3d.new(
+          pivot.x + (dx * c) - (dy * s),
+          pivot.y + (dx * s) + (dy * c),
+          point.z
+        )
+      else
+        delta = @args.first || Geom::Vector3d.new
+        Geom::Point3d.new(point.x + delta.x, point.y + delta.y, point.z + delta.z)
+      end
+    end
   end
 end
 
 ORIGIN = Geom::Point3d.new(0, 0, 0)
 Z_AXIS = Geom::Vector3d.new(0, 0, 1)
 
+class DummyBounds
+  attr_reader :min, :max
+
+  def initialize(points)
+    @min = Geom::Point3d.new(points.map(&:x).min, points.map(&:y).min, points.map(&:z).min)
+    @max = Geom::Point3d.new(points.map(&:x).max, points.map(&:y).max, points.map(&:z).max)
+  end
+end
+
 class DummyTextEntity
   attr_accessor :layer, :display_leader, :vector
+  attr_reader :persistent_id, :point, :text
+
+  def initialize(id, text, point, vector)
+    @persistent_id = id
+    @text = text
+    @point = point
+    @vector = vector
+  end
+
+  def typename
+    'Text'
+  end
 end
 
 class DummyMeshEntity
   attr_accessor :layer
+
+  attr_reader :persistent_id
+
+  def initialize(id, width, height, depth)
+    @persistent_id = id
+    @points = [
+      Geom::Point3d.new(0, 0, 0),
+      Geom::Point3d.new(width, 0, 0),
+      Geom::Point3d.new(width, height, depth),
+      Geom::Point3d.new(0, height, 0)
+    ]
+  end
+
+  def typename
+    'Face'
+  end
+
+  def bounds
+    DummyBounds.new(@points)
+  end
+
+  def transform!(transformation)
+    @points = @points.map { |point| transformation.apply(point) }
+  end
 end
 
 class DummyEntities
@@ -95,6 +172,7 @@ class DummyEntities
     @entities = []
     @transforms = []
     @fail_text = false
+    @next_id = 100
   end
 
   def fail_add_text!
@@ -107,23 +185,31 @@ class DummyEntities
 
   def add_text(text, point, vector = nil)
     raise 'add_text forced failure' if @fail_text
-    ent = DummyTextEntity.new
-    ent.vector = vector
+    @next_id += 1
+    ent = DummyTextEntity.new(@next_id, text, point, vector)
+    @entities << ent
     @texts << { text: text, point: point, vector: vector, entity: ent }
     ent
   end
 
-  def add_3d_text(text, align, font, bold, italic, height, tol, extrusion, filled, z)
+  def add_3d_text(text, align, font, bold, italic, height, tol, z, filled, extrusion)
     @mesh_calls << {
       text: text, height: height, align: align, font: font
     }
-    ent = DummyMeshEntity.new
+    @next_id += 1
+    ent = DummyMeshEntity.new(@next_id, height.to_f * 3.0,
+                              height.to_f * 0.75, extrusion.to_f)
     @entities << ent
     true
   end
 
-  def transform_entities(*args)
-    @transforms << args
+  def transform_entities(transformation, *entities)
+    @transforms << [transformation, *entities]
+    entities.each { |entity| entity.transform!(transformation) }
+  end
+
+  def erase_entities(*entities)
+    entities.flatten.each { |entity| @entities.delete(entity) }
   end
 end
 
@@ -144,7 +230,16 @@ def make_builder(use_3d_text:)
     [0, 0, 612, 792],
     scale_factor: 1.0,
     import_text: true,
-    use_3d_text: use_3d_text
+    use_3d_text: use_3d_text,
+    native_font_identity_resolver: lambda { |source|
+      {
+        source_span_id: source.source_span_id,
+        pdf_font_identity: 'embedded:test-font',
+        installed_family: 'Test Exact Font',
+        exact_family_match: true,
+        verified: true
+      }
+    }
   )
 end
 
@@ -152,7 +247,8 @@ label_builder = make_builder(use_3d_text: false)
 mesh_builder = make_builder(use_3d_text: true)
 
 quan = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
-  'QUAN', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil, 90.0, 198.0, 130.0, 210.0
+  'QUAN', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil, 90.0, 198.0, 130.0, 210.0,
+  nil, 'text_span:1:0'
 )
 lx, ly, lang = label_builder.send(:text_insertion_pdf, quan)
 # Horizontal text: Labels and 3D Text share the same PDF anchor. Mesh placement
@@ -196,27 +292,26 @@ if label_call && mesh_point
 end
 
 rotated_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
-  'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil, 140.0, 250.0, 148.0, 292.0
+  'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil, 140.0, 250.0, 148.0, 292.0,
+  nil, 'text_span:1:1'
 )
 rotated_entities = DummyEntities.new
 label_builder.send(:place_text, rotated_entities, rotated_item, 0.0, 0.0, 792.0, 'TextLayer')
-assert_true(rotated_entities.texts.length == 1,
-            'rotated label-mode text should remain a native label')
+assert_true(rotated_entities.texts.empty?,
+            'leader vectors must not masquerade as rotated label glyphs')
 assert_true(rotated_entities.mesh_calls.empty?,
             'rotated label-mode text should not silently become 3D text')
-if rotated_entities.texts.first
-  rotated_vec = rotated_entities.texts.first[:vector]
-  assert_true(rotated_vec && rotated_vec.y.abs > 0.99,
-              'rotated label-mode text should use a rotated direction vector')
-  assert_true(rotated_entities.texts.first[:entity].vector &&
-              rotated_entities.texts.first[:entity].vector.y.abs > 0.99,
-              'rotated native labels should preserve their direction vector')
-  assert_true(rotated_entities.texts.first[:entity].display_leader == false,
-              'rotated native labels should hide SketchUp leader lines when possible')
-end
+rotated_failure = label_builder.text_delivery_failures.last
+assert_true(rotated_failure &&
+            rotated_failure[:reason] == 'label_rotation_unsupported_by_host',
+            'rotated Labels must record the honest host limitation')
+assert_true(rotated_failure && rotated_failure[:transition_proof] &&
+            rotated_failure[:transition_proof][:to_mode] == :text3d,
+            'rotated Labels may move only to the adjacent 3D Text rung')
 
 rotated_mesh_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
-  'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil, 140.0, 250.0, 148.0, 292.0
+  'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil, 140.0, 250.0, 148.0, 292.0,
+  nil, 'text_span:1:2'
 )
 rotated_mesh_entities = DummyEntities.new
 mesh_builder.send(:place_text, rotated_mesh_entities, rotated_mesh_item, 0.0, 0.0, 792.0, 'TextLayer')
@@ -225,12 +320,14 @@ assert_true(rotated_mesh_entities.mesh_calls.length == 1,
 assert_true(rotated_mesh_entities.texts.empty?,
             '3D text mode should not fall back to a native label')
 rotated_mesh_kinds = rotated_mesh_entities.transforms.map { |args| args.first.kind }
+assert_true(rotated_mesh_kinds.count(:scaling) == 1,
+            'rotated 3D text should be fitted once to the declared PDF width and height')
 assert_true(rotated_mesh_kinds.count(:translation) == 1,
             'rotated 3D text should move once to the mesh anchor')
 assert_true(rotated_mesh_kinds.count(:rotation) == 1,
             'rotated 3D text should rotate once around the anchor')
-assert_true(rotated_mesh_kinds.length == 2,
-            'rotated 3D text should not apply post-rotation nudge transforms')
+assert_true(rotated_mesh_kinds == [:scaling, :translation, :rotation],
+            'rotated 3D text should use only measured fit, anchor, and source rotation transforms')
 
 # Rotated mesh uses a half-height baseline offset (add_3d_text origin), not the
 # Labels 0.18*fs screen-space heuristic — lock both so a reintroduced nudge or
@@ -345,9 +442,9 @@ else
              it.text.to_s.strip.split(/\s+/).length - 1 : 0)
   end
   expected_labels = items.length + extra_placements
-  label_total = label_entities.texts.length + label_entities.mesh_calls.length
+  label_total = label_entities.texts.length
   assert_true(label_total == expected_labels,
-              "Labels mode should place #{expected_labels} annotations/mesh labels (got #{label_total})")
+              "Labels mode should place #{expected_labels} native annotations (got #{label_total})")
   assert_true(label_entities.mesh_calls.empty?,
               "Labels mode should not create 3D text while native labels succeed (got #{label_entities.mesh_calls.length})")
   assert_true(mesh_entities.mesh_calls.length == items.length,
@@ -359,12 +456,18 @@ else
 
   failing_entities = DummyEntities.new
   failing_entities.fail_add_text!
-  mesh_fallback_builder = make_builder(use_3d_text: false)
+  label_stop_builder = make_builder(use_3d_text: false)
   before_mesh = failing_entities.mesh_calls.length
-  mesh_fallback_builder.send(:place_annotation_label, failing_entities, quan_bom || quan,
-                             0.0, 0.0, 'TextLayer')
-  assert_true(failing_entities.mesh_calls.length == before_mesh + 1,
-              'Labels should fall back to mesh text only when add_text fails')
+  delivered = label_stop_builder.send(
+    :place_annotation_label, failing_entities, quan_bom || quan,
+    0.0, 0.0, 'TextLayer'
+  )
+  assert_true(!delivered,
+              'Labels must stop explicitly when native add_text fails')
+  assert_true(failing_entities.mesh_calls.length == before_mesh,
+              'Labels failure must not create substitute 3D text')
+  assert_true(!label_stop_builder.text_delivery_failures.empty?,
+              'Labels failure must be reported for the exact source span')
 
   puts "  PRIVATE-01 PDF: labels=#{label_entities.texts.length}, mesh=#{mesh_entities.mesh_calls.length}, items=#{items.length}"
 end

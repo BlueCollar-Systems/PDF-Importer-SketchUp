@@ -1,7 +1,8 @@
 # Third-Party Notices — SketchUp PDF Importer
 
-This extension bundles third-party software so it runs on any PC without
-separate installs. Full license texts ship inside the extension itself.
+The candidate Windows helper payload uses an extension-local Poppler runtime.
+Helper-bearing publication is fail-closed until a qualified licensing review
+approves the exact runtime manifest; source-only builds omit the payload.
 
 ## Bundled components
 
@@ -13,23 +14,24 @@ separate installs. Full license texts ship inside the extension itself.
 | OpenJPEG | JPEG 2000 decoding | BSD-2-Clause |
 | OpenSSL (`libcrypto`) / libcurl / libssh2 | Transitive Poppler dependencies | Apache-2.0 / curl / BSD-3-Clause |
 
-The bundled binaries (~29 files) live under
-`bc_pdf_vector_importer/bin/` in the installed extension and in release RBZs.
+The canonical binaries live under `bc_pdf_vector_importer/Library/bin/`, and
+Poppler character-map/data files live under
+`bc_pdf_vector_importer/share/poppler/`. A legacy direct `bin/` tree is rejected.
 
 ## Where the license texts are
 
-- `bc_pdf_vector_importer/bin/licenses/` — full license text per component.
-- `bc_pdf_vector_importer/bin/THIRD_PARTY_NOTICES.txt` — per-binary notice list.
+- `bc_pdf_vector_importer/Library/licenses/` — preserved runtime license texts.
+- `bc_pdf_vector_importer/Library/THIRD_PARTY_NOTICES.txt` — runtime provenance and publication status.
 
 ## Authoritative manifest
 
-The machine-readable inventory of every shipped binary (path, version,
-license, SHA-256) is produced by the private dependency-audit tooling used
-for release validation.
+`bc_pdf_vector_importer/poppler-runtime-manifest.json` is the machine-readable
+inventory of binaries, Poppler data, notices, licenses, sizes, SHA-256 values,
+source pins, semantic scope, and license-review state.
 
 ## Source availability
 
-Poppler and the other GPL/LGPL components are unmodified upstream builds.
-Sources are available from the respective upstream projects; see
-`bin/licenses/` for project URLs. For corresponding-source requests, contact
-support@bluecollar-systems.com.
+The manifest pins unmodified upstream binary and data archives. This notice is
+not by itself a source-offer or publication-approval claim. Publication remains
+blocked unless the exact dependency obligations are closed and the manifest's
+license review is approved with no missing items.

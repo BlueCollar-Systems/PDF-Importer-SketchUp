@@ -29,6 +29,8 @@ module BlueCollarSystems
           layers: Array(stats[:layers]).length,
           human_summary: stats[:human_summary].to_s,
           scale_crosscheck: stats[:scale_crosscheck],
+          import_contract_ready: stats[:import_contract_ready],
+          representation_fidelity: stats[:representation_fidelity],
           recorded_at: Time.now
         }
       end
@@ -55,6 +57,22 @@ module BlueCollarSystems
         lines << "Pages: #{snap[:pages]}  |  Time: #{snap[:elapsed_seconds]}s"
         lines << "Edges: #{snap[:edges]}  |  Text: #{snap[:text]}  |  Layers: #{snap[:layers]}"
         lines << "Text mode: #{snap[:text_mode].empty? ? 'n/a' : snap[:text_mode]}"
+
+        contract = snap[:import_contract_ready]
+        ready = contract.is_a?(Hash) &&
+          (contract[:ready] == true || contract['ready'] == true)
+        lines << "QA contract: #{ready ? 'READY' : 'NOT READY'}"
+        unless ready
+          fidelity = snap[:representation_fidelity]
+          errors = if fidelity.is_a?(Hash)
+                     fidelity[:errors] || fidelity['errors']
+                   end
+          errors = contract[:errors] || contract['errors'] if
+            Array(errors).empty? && contract.is_a?(Hash)
+          unless Array(errors).empty?
+            lines << "Fidelity errors: #{Array(errors).join(', ')}"
+          end
+        end
 
         entity_info = snap[:actual_text_entity_types]
         if entity_info.is_a?(Hash) && entity_info[:count].to_i > 0

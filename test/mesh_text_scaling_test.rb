@@ -43,6 +43,36 @@ module Geom
       t.instance_variable_set(:@kind, :scaling)
       t
     end
+
+    def transform_point(point)
+      case @kind
+      when :scaling
+        pivot, scale_x, scale_y, scale_z = @args
+        Geom::Point3d.new(
+          pivot.x + ((point.x - pivot.x) * scale_x.to_f),
+          pivot.y + ((point.y - pivot.y) * scale_y.to_f),
+          pivot.z + ((point.z - pivot.z) * scale_z.to_f)
+        )
+      when :rotation
+        pivot, _axis, radians = @args
+        dx = point.x - pivot.x
+        dy = point.y - pivot.y
+        cosine = Math.cos(radians.to_f)
+        sine = Math.sin(radians.to_f)
+        Geom::Point3d.new(
+          pivot.x + (dx * cosine) - (dy * sine),
+          pivot.y + (dx * sine) + (dy * cosine),
+          point.z
+        )
+      else
+        delta = @args[0]
+        Geom::Point3d.new(
+          point.x + delta.x,
+          point.y + delta.y,
+          point.z + delta.z
+        )
+      end
+    end
   end
 end
 ORIGIN  = Geom::Point3d.new(0,0,0)
@@ -63,6 +93,41 @@ ARCH_D  = [0, 0, 1728, 2592]  # 24"×36"
 ANSI_E  = [0, 0, 2448, 3168]  # 34"×44" — very large
 TALL_A1 = [0, 0, 1684, 2384]  # ISO A1
 
+module FidelityFixtureIdentity
+  @entity_id = 10_000
+  @span_index = 0
+
+  class << self
+    def next_entity_id
+      @entity_id += 1
+    end
+
+    def next_span_id
+      value = "text_span:1:#{@span_index}"
+      @span_index += 1
+      value
+    end
+  end
+end
+
+def identified_text_item(*args)
+  item = TI.new(*args)
+  item.source_span_id = FidelityFixtureIdentity.next_span_id
+  item
+end
+
+def exact_test_font_resolver
+  lambda do |source|
+    {
+      source_span_id: source.source_span_id,
+      pdf_font_identity: 'embedded:test-font',
+      installed_family: 'Test Exact Font',
+      exact_family_match: true,
+      verified: true
+    }
+  end
+end
+
 def make_builder(media_box, scale: 1.0)
   GB.new(
     Object.new,   # model stub — build() not called
@@ -71,7 +136,8 @@ def make_builder(media_box, scale: 1.0)
     media_box,
     scale_factor: scale,
     import_text: true,
-    use_3d_text: true
+    use_3d_text: true,
+    native_font_identity_resolver: exact_test_font_resolver
   )
 end
 
@@ -79,76 +145,109 @@ end
 def bbox_item(text, font_size_pts, bbox_h_pts, raw_fs: nil, bbox_w: 150.0)
   by0 = 100.0
   by1 = by0 + bbox_h_pts.to_f
-  TI.new(text, 50.0, by0, font_size_pts.to_f, 0.0, 'pdftotext',
-         raw_fs, 50.0, by0, 50.0 + bbox_w.to_f, by1)
+  identified_text_item(
+    text, 50.0, by0, font_size_pts.to_f, 0.0, 'pdftotext',
+    raw_fs, 50.0, by0, 50.0 + bbox_w.to_f, by1
+  )
 end
 
 # Text item without bbox (internal TextParser source)
 def no_bbox_item(text, matrix_scaled_fs_pts, raw_fs: nil)
-  TI.new(text, 50.0, 100.0, matrix_scaled_fs_pts.to_f, 0.0, 'Helvetica',
-         raw_fs, nil, nil, nil, nil)
+  identified_text_item(
+    text, 50.0, 100.0, matrix_scaled_fs_pts.to_f, 0.0, 'Helvetica',
+    raw_fs, nil, nil, nil, nil
+  )
 end
 
 class DummyBounds
   attr_reader :min, :max
-  def initialize(width, height)
-    @min = Geom::Point3d.new(0, 0, 0)
-    @max = Geom::Point3d.new(width, height, 0)
+  def initialize(width, height, min_x = 0.0, min_y = 0.0, min_z = 0.0,
+                 depth = 0.0)
+    @min = Geom::Point3d.new(min_x, min_y, min_z)
+    @max = Geom::Point3d.new(min_x + width, min_y + height, min_z + depth)
+  end
+
+  def transform!(transformation)
+    corners = [
+      Geom::Point3d.new(@min.x, @min.y, @min.z),
+      Geom::Point3d.new(@max.x, @min.y, @min.z),
+      Geom::Point3d.new(@max.x, @max.y, @max.z),
+      Geom::Point3d.new(@min.x, @max.y, @max.z)
+    ].map { |point| transformation.transform_point(point) }
+    xs = corners.map(&:x)
+    ys = corners.map(&:y)
+    zs = corners.map(&:z)
+    @min = Geom::Point3d.new(xs.min, ys.min, zs.min)
+    @max = Geom::Point3d.new(xs.max, ys.max, zs.max)
   end
 end
 
 class DummyRenderedTextEntity
   attr_accessor :layer
+  attr_reader :persistent_id
 
-  def initialize(width, height, typename: 'Edge')
-    @bounds = DummyBounds.new(width, height)
+  def initialize(width, height, typename: 'Edge', persistent_id: nil,
+                 depth: 0.0)
+    @bounds = DummyBounds.new(width, height, 0.0, 0.0, 0.0, depth)
     @typename = typename
+    @persistent_id = persistent_id || FidelityFixtureIdentity.next_entity_id
   end
   def bounds; @bounds; end
   def typename; @typename; end
+  def transform!(transformation); @bounds.transform!(transformation); end
 end
 
-class DummyFaceEntity
+class DummyFaceEntity < DummyRenderedTextEntity
   attr_accessor :layer, :material, :back_material
 
+  def initialize(width = 0.1, height = 0.1, persistent_id: nil, depth: 0.0)
+    super(width, height, typename: 'Face', persistent_id: persistent_id,
+          depth: depth)
+  end
+
   def typename; 'Face'; end
-  def bounds; DummyBounds.new(0.1, 0.1); end
 end
 
 class DummyTransformEntities
   attr_reader :transforms, :erased, :height_args, :tolerance_args
-  def initialize
-    @entities = []
+  def initialize(preexisting: [])
+    @entities = Array(preexisting).dup
     @transforms = []
     @erased = []
     @height_args = []
     @tolerance_args = []
   end
   def to_a; @entities.dup; end
-  def add_3d_text(_text, _align, _font, _bold, _italic, height, tol, _extrusion, _filled, _z)
+  def add_3d_text(_text, _align, _font, _bold, _italic, height, tol, _z, _filled, extrusion)
     @height_args << height
     @tolerance_args << tol
-    @entities << DummyRenderedTextEntity.new(height * 3.0, height, typename: 'Edge')
-    @entities << DummyFaceEntity.new
+    width = height * 3.0
+    @entities << DummyRenderedTextEntity.new(width, height, typename: 'Edge',
+                                              depth: extrusion)
+    @entities << DummyFaceEntity.new(width, height, depth: extrusion)
     true
   end
-  def transform_entities(*args); @transforms << args; end
-  def erase_entities(*args); @erased.concat(args.flatten); end
+  def transform_entities(*args)
+    @transforms << args
+    transformation = args[0]
+    Array(args[1..-1]).flatten.each { |entity| entity.transform!(transformation) }
+  end
+  def erase_entities(*args)
+    doomed = args.flatten
+    @erased.concat(doomed)
+    @entities.reject! { |entity| doomed.include?(entity) }
+  end
 end
 
 # ── Constants from geometry_builder.rb ───────────────────────────────────────
 # MESH_TEXT_BBOX_CAP_RATIO removed in Round 13: height = effective_font_size_pts * PT_TO_IN.
 PT_TO_IN  = GB::PDF_POINT_TO_INCH         # 1/72
-MIN_IN    = GB::MESH_TEXT_HEIGHT_MIN_IN   # 0.01
-MAX_IN    = GB::MESH_TEXT_HEIGHT_MAX_IN   # 1.5
 
 class MeshTextScalingTest < Minitest::Test
 
   # ── Constants ──────────────────────────────────────────────────────────────
-  def test_constants_sane
+  def test_pdf_point_conversion_is_exact
     assert_in_delta 1.0/72.0, PT_TO_IN, 1e-9
-    assert_equal 0.01, MIN_IN
-    assert_equal 1.5,  MAX_IN
   end
 
   # ── Letter page, bbox item (standard case) ─────────────────────────────────
@@ -158,8 +257,6 @@ class MeshTextScalingTest < Minitest::Test
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
     expected = 8.0 * PT_TO_IN   # Round 13: height = nominal effective_font_size_pts * PT_TO_IN
     assert_in_delta expected, h, 0.001
-    assert h >= MIN_IN
-    assert h <= MAX_IN
   end
 
   # ── Large format (D-size) must give SAME height as Letter for same bbox ────
@@ -220,36 +317,35 @@ class MeshTextScalingTest < Minitest::Test
     assert_in_delta h_no, h_tiny, 0.0001, "raw_font_size=1 must not shrink height (got #{h_tiny.round(5)})"
   end
 
-  # ── Tiny text must clamp to MIN ────────────────────────────────────────────
-  def test_tiny_font_clamped_to_min
+  # Every positive source height is authoritative.  Historical telemetry
+  # constants must never become delivery clamps again.
+  def test_tiny_font_preserves_exact_source_height
     b = make_builder(LETTER)
-    # 0.1pt font_size pdftotext item: mesh_text_readability_floor_inches applies the
-    # 6pt shop minimum (stream_fs<=2 guard) → h ≈ 6/72 ≈ 0.083". Must stay in MIN..MAX.
-    item = TI.new('x', 50.0, 100.0, 0.1, 0.0, 'pdftotext',
-                  nil, 50.0, 100.0, 50.1, 100.1)
+    item = identified_text_item(
+      'x', 50.0, 100.0, 0.1, 0.0, 'pdftotext',
+      nil, 50.0, 100.0, 50.1, 100.1
+    )
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert h >= MIN_IN,  "Tiny text must be >= MIN_IN (got #{h})"
-    assert h <= 0.12,    "Tiny text must not inflate beyond 0.12\" (got #{h})"
+    assert_in_delta 0.1 * PT_TO_IN, h, 1.0e-12,
+                    'tiny source text must not be inflated to a readability floor'
   end
 
-  # ── Giant bbox must clamp to MAX ───────────────────────────────────────────
-  def test_huge_bbox_clamped_to_max
+  def test_large_font_preserves_exact_source_height
     b = make_builder(LETTER)
-    # 300pt bbox height (title text)
     item = bbox_item('TITLE', 300.0, 300.0, bbox_w: 3000.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert_in_delta MAX_IN, h, 0.0001
+    assert_in_delta 300.0 * PT_TO_IN, h, 1.0e-12,
+                    'large source text must not be shrunk to a maximum height'
   end
 
-  def test_long_text_height_within_valid_range
+  def test_long_text_height_is_exactly_nominal
     b = make_builder(LETTER)
     # 24pt font, 20pt bbox_h, narrow 30pt bbox_w.
     # Round 13: height = effective_font_size_pts * PT_TO_IN — no width-based shrink.
     # effective_font_size_pts: ratio=20/24=0.833 (in 0.75-1.35 range) → fs=24
     item = bbox_item('LONG CALLOUT TEXT', 24.0, 20.0, bbox_w: 30.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert h >= MIN_IN, "Long text height must be >= MIN_IN (got #{h.round(5)})"
-    assert h <= MAX_IN, "Long text height must be <= MAX_IN (got #{h.round(5)})"
+    assert_in_delta 24.0 * PT_TO_IN, h, 1.0e-12
   end
 
   # ── import scale factor applied once ──────────────────────────────────────
@@ -287,7 +383,7 @@ class MeshTextScalingTest < Minitest::Test
   end
 
   # ── Reasonable range for typical shop drawing text ─────────────────────────
-  def test_typical_shop_text_in_reasonable_range
+  def test_typical_shop_text_preserves_each_source_height
     b = make_builder(ANSI_D)
     [
       ['piece mark',    8.0,  10.0],
@@ -297,8 +393,8 @@ class MeshTextScalingTest < Minitest::Test
     ].each do |label, fs, bh|
       item = bbox_item(label, fs, bh)
       h = b.send(:mesh_text_height_inches, item, 0.0, ANSI_D[3])
-      assert h >= 0.05, "#{label}: height #{h.round(4)} too small (< 0.05\")"
-      assert h <= 0.30, "#{label}: height #{h.round(4)} too large (> 0.30\")"
+      assert_in_delta fs * PT_TO_IN, h, 1.0e-12,
+                      "#{label}: source height must be preserved exactly"
     end
   end
 
@@ -313,23 +409,26 @@ class MeshTextScalingTest < Minitest::Test
     assert_in_delta expected, h, 0.001, "Negative MediaBox origin must not corrupt height"
   end
 
-  # ── Zero / nil font_size fallback ─────────────────────────────────────────
-  def test_zero_font_size_no_bbox_gives_min
+  # An unverifiable source height fails closed; inventing a minimum would make
+  # the representation look successful without matching the PDF.
+  def test_zero_font_size_is_unverifiable
     b = make_builder(LETTER)
     item = no_bbox_item('x', 0.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    # [0.0, 1.0].max = 1.0pt → 1/72" ≈ 0.01389" > MIN_IN
-    assert h >= MIN_IN
-    assert h <= MAX_IN
+    assert_nil h
   end
 
   # ── Vertical part mark: tall bbox + pdftotext angle 0 must use narrow axis ─
   def test_vertical_part_mark_infers_bbox_angle_when_raw_angle_zero
     b = make_builder(LETTER)
-    item0 = TI.new('a1001', 50.0, 100.0, 8.0, 0.0, 'pdftotext',
-                    nil, 50.0, 100.0, 58.0, 142.0)
-    item90 = TI.new('a1001', 50.0, 100.0, 8.0, 90.0, 'pdftotext',
-                     nil, 50.0, 100.0, 58.0, 142.0)
+    item0 = identified_text_item(
+      'a1001', 50.0, 100.0, 8.0, 0.0, 'pdftotext',
+      nil, 50.0, 100.0, 58.0, 142.0
+    )
+    item90 = identified_text_item(
+      'a1001', 50.0, 100.0, 8.0, 90.0, 'pdftotext',
+      nil, 50.0, 100.0, 58.0, 142.0
+    )
     h0  = b.send(:mesh_text_height_inches, item0, 0.0, LETTER[3])
     h90 = b.send(:mesh_text_height_inches, item90, 90.0, LETTER[3])
     assert_in_delta h0, h90, 0.0001,
@@ -354,13 +453,12 @@ class MeshTextScalingTest < Minitest::Test
   end
 
   # ── Existing golden: w1023 height must not blow up ────────────────────────
-  def test_w1023_like_item_height
+  def test_w1023_like_item_preserves_source_height
     b = make_builder(LETTER)
     # w1023: pdftotext item, bbox ~8pt tall
     item = bbox_item('w1023', 7.0, 8.5)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert h < 0.12, "w1023-like height must not blow up (got #{h.round(5)})"
-    assert h > 0.05, "w1023-like height must not be too small (got #{h.round(5)})"
+    assert_in_delta 7.0 * PT_TO_IN, h, 1.0e-12
   end
 
   def test_place_mesh_text_uses_nominal_height_without_bbox_scaling
@@ -369,38 +467,37 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(LETTER)
     item = bbox_item('W12X30', 8.0, 1.5, bbox_w: 3.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
-    assert h >= 8.0 * PT_TO_IN * 0.90,
-           "Microscopic bbox must not shrink 8pt text (got #{h.round(5)})"
-    assert h <= MAX_IN, "Height must be within MAX_IN (got #{h.round(5)})"
+    assert_in_delta 8.0 * PT_TO_IN, h, 1.0e-12,
+                    'bbox dimensions must not override the source text height'
   end
 
-  # ── Face entities from add_3d_text must survive for visual PDF parity ─────
-  # add_3d_text with fill=true creates glyph faces. Keeping those faces makes
-  # dimensions/marks readable at full-page zoom instead of reducing text to
-  # hairline outlines.
-  def test_face_entities_retained_after_place_mesh_text
+  # A successfully verified Text3D rung keeps exactly the owned edge/face set
+  # whose positive stable IDs are reported as its delivery evidence.
+  def test_verified_text3d_retains_exact_owned_edge_and_face_set
     b = make_builder(LETTER)
-    item = bbox_item('A', 8.0, 10.0, bbox_w: 50.0)
-    edge1 = DummyRenderedTextEntity.new(5.0 / 72.0, 8.0 / 72.0, typename: 'Edge')
-    face1 = DummyFaceEntity.new
-    face2 = DummyFaceEntity.new
-    ents  = DummyTransformEntities.new
+    item = bbox_item('A', 8.0, 10.0, bbox_w: 8.0)
+    ents = DummyTransformEntities.new
 
-    # Simulate the retained text geometry set place_mesh_text now preserves.
-    new_ents = [edge1, face1, face2]
-    faces = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
-    b.send(:apply_text_face_material, faces)
+    assert b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
+    live = ents.to_a
+    attempt = b.text_attempts.fetch(0)
+    live_ids = live.map { |entity| "persistent_id:#{entity.persistent_id}" }
 
-    assert_equal 0, ents.erased.length, 'Text faces must not be erased'
-    assert_equal 3, new_ents.length, 'Edges and filled glyph faces both survive'
-    assert_equal 2, faces.length, 'Both Face entities are retained for filled text'
+    assert_equal ['Edge', 'Face'], live.map(&:typename).sort
+    assert_equal live_ids.sort, attempt[:resulting_entity_ids].sort
+    assert attempt[:visual_fidelity_verified]
+    assert attempt[:width_verified]
+    assert attempt[:height_verified]
+    assert_empty ents.erased
   end
 
   # ── v3.7.83: nominal font_size must survive tiny pdftotext line bbox ───────
   def test_nominal_font_size_not_shrunk_by_microscopic_pdftotext_bbox
     b = make_builder(ANSI_D)
-    item = TI.new('W12X30', 50.0, 100.0, 10.0, 0.0, 'pdftotext',
-                  nil, 50.0, 100.0, 120.0, 101.5)
+    item = identified_text_item(
+      'W12X30', 50.0, 100.0, 10.0, 0.0, 'pdftotext',
+      nil, 50.0, 100.0, 120.0, 101.5
+    )
     h = b.send(:mesh_text_height_inches, item, 0.0, ANSI_D[3])
     expected = 10.0 * PT_TO_IN
     assert_in_delta expected, h, 0.002,
@@ -416,11 +513,13 @@ class MeshTextScalingTest < Minitest::Test
       ['dim string',  6.0,  0.8,  30.0],
       ['BOM header', 10.0,  1.0,  80.0],
     ].each do |label, nominal_pt, bbox_h_pt, bbox_w_pt|
-      item = TI.new(label, 50.0, 100.0, nominal_pt, 0.0, 'pdftotext',
-                    nil, 50.0, 100.0, 50.0 + bbox_w_pt, 100.0 + bbox_h_pt)
+      item = identified_text_item(
+        label, 50.0, 100.0, nominal_pt, 0.0, 'pdftotext',
+        nil, 50.0, 100.0, 50.0 + bbox_w_pt, 100.0 + bbox_h_pt
+      )
       h = b.send(:mesh_text_height_inches, item, 0.0, 1726.299)
-      assert h >= 0.06, "#{label}: height #{h.round(4)} too small for D-size shop drawing"
-      assert h <= 0.30, "#{label}: height #{h.round(4)} too large"
+      assert_in_delta nominal_pt * PT_TO_IN, h, 1.0e-12,
+                      "#{label}: page size and bbox must not alter source height"
     end
   end
 
@@ -442,7 +541,7 @@ class MeshTextScalingTest < Minitest::Test
   def test_height_fallback_is_counted_not_silent
     b = make_builder(LETTER)
     h = b.send(:mesh_text_height_inches, Object.new, 0.0, 792.0)
-    assert_in_delta MIN_IN, h, 1e-9, 'fallback must return the safety floor'
+    assert_nil h, 'unreadable source height must fail closed, not invent a floor'
     assert_equal 1, b.instance_variable_get(:@text_height_fallback_count),
                  'height fallback must increment the crosscheck counter'
     result = nil
@@ -459,15 +558,13 @@ class MeshTextScalingTest < Minitest::Test
   # same size/faces); the height is passed to add_3d_text directly with
   # tolerance 0.0.
   #
-  # Round 22 (owner-evidence width reopen): width fidelity may add ONE
-  # local-X-only scaling to the PDF-declared run width, applied BEFORE the
-  # placement translation. The height passed to add_3d_text, the recorded
-  # height samples, and the Y/Z scale factors (exactly 1.0) are unchanged.
-  def test_place_mesh_text_passes_faithful_height_with_zero_tolerance
+  # The final host bounds—not transform arguments alone—must prove the exact
+  # declared width, source height, placement, and rotation.
+  def test_place_mesh_text_verifies_exact_post_transform_visual_fidelity
     b = make_builder(ANSI_D)
     item = bbox_item('W12X30', 8.0, 10.0, bbox_w: 50.0)
     ents = DummyTransformEntities.new
-    b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
+    assert b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
 
     assert_equal 1, ents.height_args.length
     assert_in_delta 8.0 * PT_TO_IN, ents.height_args[0], 1e-9,
@@ -475,20 +572,36 @@ class MeshTextScalingTest < Minitest::Test
     assert_equal [0.0], ents.tolerance_args,
                  'add_3d_text tolerance must be 0.0 (R20-1 quality)'
     kinds = ents.transforms.map { |args| args[0].respond_to?(:kind) ? args[0].kind : nil }
-    assert_equal [:scaling, :translation], kinds,
-                 'R22: local-X width fidelity precedes the unchanged translation'
+    assert_equal [:scaling, :translation], kinds
     scaling_args = ents.transforms[0][0].args
-    assert_same ORIGIN, scaling_args[0],
-                'width fidelity must scale about ORIGIN (pre-placement)'
     # Declared 50pt bbox width -> 50/72". Stub renders 3x height = 24/72".
     assert_in_delta 50.0 / 24.0, scaling_args[1], 1e-9,
-                    'X factor must be declared/rendered (self-calibrating)'
-    assert_equal [1.0, 1.0], scaling_args[2..3],
-                 'height/depth scale factors must be exactly 1.0 (SIZE-1)'
+                    'X factor must be declared/rendered'
+    assert_in_delta 1.0, scaling_args[2], 1.0e-12,
+                    'generated height already equals the exact source height'
+    assert_in_delta 1.0, scaling_args[3], 1.0e-12
+
+    actual = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.bounds(ents.to_a)
+    x_pdf, y_pdf, angle = b.send(:mesh_text_insertion_pdf, item)
+    display_angle = b.send(:display_text_angle, item, angle)
+    anchor = b.send(:text_point_to_su, item, x_pdf, y_pdf, 0.0, 0.0)
+    expected = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.expected_rotated_bounds(
+      anchor, 50.0 * PT_TO_IN, 8.0 * PT_TO_IN, display_angle
+    )
+    [:min_x, :min_y, :max_x, :max_y, :width, :height].each do |key|
+      assert_in_delta expected[key], actual[key], 1.0e-8,
+                      "final #{key} must match the requested PDF geometry"
+    end
+
+    attempt = b.text_attempts.fetch(0)
+    assert attempt[:placement_verified]
+    assert attempt[:rotation_verified]
+    assert attempt[:width_verified]
+    assert attempt[:height_verified]
     samples = b.send(:text_height_samples)
     assert_equal 1, samples.length
     assert_in_delta 8.0 * PT_TO_IN, samples[0], 0.001
-    assert_equal 0, ents.erased.length
+    assert_empty ents.erased
   end
 
 end

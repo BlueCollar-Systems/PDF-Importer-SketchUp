@@ -29,7 +29,7 @@ Full geometry batch (SketchUp host required):
     -RubyStartup "path\to\tools\sketchup_batch_import.rb" ^
     -RubyStartupArg "C:\drawings\input.pdf"
 
-Use Compatibility Report inside SketchUp to verify bundled Poppler helpers.
+Use Compatibility Report inside SketchUp to verify free external helper detection.
 TEXT
 
       module_function

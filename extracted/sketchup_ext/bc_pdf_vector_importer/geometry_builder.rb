@@ -6,7 +6,7 @@
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
 require File.join(File.dirname(__FILE__), 'page_transform')
-require File.join(File.dirname(__FILE__), 'stroke_font')
+require File.join(File.dirname(__FILE__), 'representation_fidelity')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -15,7 +15,8 @@ module BlueCollarSystems
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
 
-      attr_reader :page_group, :text_group, :text_fallbacks, :text_delivery_failures
+      attr_reader :page_group, :text_group, :text_delivery_failures,
+                  :text_attempts
 
       def initialize(model, paths, text_items, media_box, opts = {})
         @model = model
@@ -41,17 +42,17 @@ module BlueCollarSystems
         @map_dashes      = opts[:map_dashes] || false
         @import_text     = opts[:import_text] || false
         @use_3d_text     = opts[:use_3d_text] || false
-        # R23 (F-1): the INTERNAL glyph-outline source for Glyphs mode —
-        # StrokeFont single-stroke lettering. Only set by the Glyphs-mode
-        # source fallback; never touches the Labels / 3D Text pipelines.
-        @glyph_outline_text = opts[:glyph_outline_text] || false
         @requested_text_mode = normalize_text_mode_symbol(opts[:requested_text_mode]) ||
                                (@use_3d_text ? :text3d : :labels)
         @strict_text_fidelity = opts[:strict_text_fidelity] || false
+        # Native add_3d_text is opt-in only. The resolver must independently
+        # prove that the installed family is the exact PDF source family.
+        @native_font_identity_resolver = opts[:native_font_identity_resolver]
         @target_entities = opts[:target_entities] || nil
         @y_offset        = opts[:y_offset] || 0.0
         @page_rotation   = PageTransform.normalize_rotation(opts[:page_rotation])
         @provenance_bucket = opts[:provenance_bucket]
+        @provenance_bucket = [] unless @provenance_bucket.is_a?(Array)
         @import_session_id = opts[:import_session_id].to_s
 
         @edge_count = 0
@@ -65,10 +66,10 @@ module BlueCollarSystems
         @text_width_out_of_bounds_count = 0
         @text_width_skipped_near_1_count = 0
         @text_width_error_count = 0
-        # TEXTMODE-1: a per-span native API failure must be passed upward so
-        # main.rb can make the delivered representation visible in the report.
-        @text_fallbacks = []
+        # A per-span requested-mode failure is passed upward for an atomic,
+        # explicit stop; it is never permission to substitute representations.
         @text_delivery_failures = []
+        @text_attempts = []
       end
 
       def build
@@ -195,8 +196,9 @@ module BlueCollarSystems
           text_width_out_of_bounds_count: @text_width_out_of_bounds_count.to_i,
           text_width_skipped_near_1_count: @text_width_skipped_near_1_count.to_i,
           text_width_error_count: @text_width_error_count.to_i,
-          text_fallbacks: Array(@text_fallbacks),
-          text_delivery_failures: Array(@text_delivery_failures)
+          text_delivery_failures: Array(@text_delivery_failures),
+          text_attempts: Array(@text_attempts),
+          source_provenance_objects: Array(@provenance_bucket)
         }
       end
 
@@ -522,9 +524,7 @@ module BlueCollarSystems
         return unless @import_text && item.text && !item.text.strip.empty?
 
         begin
-          if @glyph_outline_text
-            place_glyph_outline_text(entities, item, origin_x, origin_y, layer)
-          elsif @use_3d_text
+          if @use_3d_text
             place_mesh_text(
               entities, item, origin_x, origin_y, layer, @requested_text_mode
             )
@@ -534,12 +534,19 @@ module BlueCollarSystems
             )
           else
             place_annotation_label(
-              entities, item, origin_x, origin_y, layer, true, @requested_text_mode
+              entities, item, origin_x, origin_y, layer, @requested_text_mode
             )
           end
+        rescue RepresentationFidelity::ContractError => e
+          # Identity/snapshot failures make item ownership unknowable.  The
+          # enclosing SketchUp operation must abort; an item fallback here
+          # could leave an unowned partial artifact behind.
+          raise e
         rescue StandardError => e
           Logger.warn("GeometryBuilder", "place_text failed: #{e.message}")
-          record_text_delivery_failure(@requested_text_mode, 'text_placement_exception')
+          record_text_delivery_failure(
+            @requested_text_mode, 'text_placement_exception', item
+          )
           false
         end
       end
@@ -561,48 +568,52 @@ module BlueCollarSystems
         label_insertion_pdf(item, true)
       end
 
-      # Hard limits in inches, independent of page size.
-      MESH_TEXT_HEIGHT_MIN_IN = 0.01   # never smaller than 0.01" (~0.72pt)
-      MESH_TEXT_HEIGHT_MAX_IN = 1.5    # never larger than 1.5" (~108pt)
       TEXT_FACE_RGB = [0.0, 0.0, 0.0].freeze
 
-      # Round 22 — width-faithful 3D Text (owner-evidence reopen of SIZE-1's
-      # WIDTH dimension ONLY; the height ban stays absolute). Live-host
-      # measurements on condensed title-block text: spans render at the host
-      # font's natural width while the PDF declares condensed/anisotropic-Tm
-      # extents (measured run-width ratios 0.5864..0.7996 condensed, up to
-      # 1.4365 expanded), so long strings overlap. After generation at the
-      # faithful height, each run is scaled along its PRE-ROTATION run axis
-      # (local X) to the PDF's own declared span extent. The height axis
-      # factor is always exactly 1.0.
-      MESH_TEXT_WIDTH_FACTOR_MIN = 0.25
-      MESH_TEXT_WIDTH_FACTOR_MAX = 4.0
-      MESH_TEXT_WIDTH_SKIP_TOLERANCE = 0.02
-      MESH_TEXT_WIDTH_AXIS_TOL_DEG = 3.0
-
       def mesh_text_height_inches(item, _angle_deg, _page_h)
-        # Round 13 contract: TextItem#font_size is already the nominal PDF
-        # text height in points. Bboxes are placement hints only.
-        fs_pts = effective_font_size_pts(item)
+        fs_pts = item.font_size.to_f
+        return nil unless fs_pts.finite? && fs_pts > 0.0
         height = fs_pts * PDF_POINT_TO_INCH * @scale
-        # SketchUp Make 2017 runs Ruby 2.2, which has no Numeric#clamp (2.4+).
-        # A clamp call here raised NoMethodError on the live host, the rescue
-        # swallowed it, and EVERY item shipped at the 0.01" minimum (R20-2).
-        height = MESH_TEXT_HEIGHT_MIN_IN if height < MESH_TEXT_HEIGHT_MIN_IN
-        height = MESH_TEXT_HEIGHT_MAX_IN if height > MESH_TEXT_HEIGHT_MAX_IN
+        return nil unless height.finite? && height > 0.0
         height
       rescue StandardError => e
-        # R20-2: this rescue silently hid a NoMethodError for 9 releases and
-        # shipped 0.01" specks. Fallbacks must be LOUD (capped to avoid one
-        # warning per item on dense sheets) and counted for the import report.
         @text_height_fallback_count = @text_height_fallback_count.to_i + 1
-        if @text_height_fallback_count <= 3
-          Logger.warn("GeometryBuilder",
-                      "mesh_text_height_inches failed (#{e.class}: #{e.message}); " \
-                      "using #{MESH_TEXT_HEIGHT_MIN_IN}\" minimum " \
-                      "(occurrence #{@text_height_fallback_count})")
-        end
-        MESH_TEXT_HEIGHT_MIN_IN
+        Logger.warn('GeometryBuilder',
+                    "mesh text source height is unverifiable (#{e.class}: #{e.message})")
+        nil
+      end
+
+      def verified_native_font_identity(item)
+        resolver = @native_font_identity_resolver
+        return nil unless resolver.respond_to?(:call)
+        evidence = resolver.call(item)
+        return nil unless evidence.is_a?(Hash)
+        source_id = RepresentationFidelity.source_span_id(item)
+        return nil unless evidence[:source_span_id].to_s == source_id
+        return nil unless evidence[:verified] == true
+        return nil unless evidence[:exact_family_match] == true
+        source_font = evidence[:pdf_font_identity].to_s.strip
+        family = evidence[:installed_family].to_s.strip
+        return nil if source_font.empty? || family.empty?
+        {
+          :source_span_id => source_id,
+          :pdf_font_identity => source_font,
+          :installed_family => family,
+          :verified => true,
+          :exact_family_match => true
+        }
+      rescue StandardError => e
+        Logger.warn('GeometryBuilder',
+                    "native font identity proof failed: #{e.message}")
+        nil
+      end
+
+      def native_text_extrusion_depth(height)
+        value = [height.to_f * 0.08, 1.0e-4].max
+        return nil unless value.finite? && value > 0.0
+        value
+      rescue StandardError
+        nil
       end
 
       def record_mesh_text_height_sample(height)
@@ -619,17 +630,14 @@ module BlueCollarSystems
       end
 
       # ---------------------------------------------------------------
-      # Round 22: width-faithful 3D Text (condensed title-block parity).
-      # The PDF's own declared span extent (the extractor's span bbox) is the
-      # width target; the generated run is measured and compressed/expanded
-      # along its pre-rotation run axis only. Heights are never touched —
-      # mesh_text_height_inches stays the sole height authority (SIZE-1).
+      # The PDF's declared text run and source font size are the authoritative
+      # width and height targets. Fresh host geometry is measured, fitted on
+      # both axes, then measured again after placement and source rotation.
       # ---------------------------------------------------------------
 
-      # The PDF-declared run width in model inches for near-axis text, or nil
-      # when no trustworthy declared extent exists (missing/degenerate bbox,
-      # diagonal angle). Run axis follows the DISPLAY angle: ~0 deg reads the
-      # transformed bbox X extent, ~90 deg reads the Y extent.
+      # Recover the declared run length from the source AABB at any angle. The
+      # known PDF text height supplies the cross-axis extent; the least-squares
+      # projection is well-defined at diagonal angles (including 45 degrees).
       def mesh_text_declared_run_width_inches(item, display_angle)
         values = []
         [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1].each do |name|
@@ -646,66 +654,21 @@ module BlueCollarSystems
         box = PageTransform.transform_bbox(
           values[0], values[1], values[2], values[3], @media_box, @page_rotation
         )
-        angle = PageTransform.normalize_angle(display_angle).abs
-        # Ruby 2.2 host parser: an if-expression assignment with a `return`
-        # branch is a "void value expression" SyntaxError (2026-07-16 host
-        # incident). Guard returns must stay statements, never if-values.
-        if angle <= MESH_TEXT_WIDTH_AXIS_TOL_DEG
-          points = (box[2] - box[0]).abs
-        elsif (angle - 90.0).abs <= MESH_TEXT_WIDTH_AXIS_TOL_DEG
-          points = (box[3] - box[1]).abs
-        else
-          return nil
-        end
+        box_width = (box[2] - box[0]).abs
+        box_height = (box[3] - box[1]).abs
+        height_points = item.font_size.to_f
+        return nil unless height_points.finite? && height_points > 0.0
+        radians = PageTransform.normalize_angle(display_angle).to_f.abs * Math::PI / 180.0
+        cosine = Math.cos(radians).abs
+        sine = Math.sin(radians).abs
+        points = (cosine * (box_width - (sine * height_points))) +
+                 (sine * (box_height - (cosine * height_points)))
+        return nil unless points.finite? && points > 0.0
         width = points * PDF_POINT_TO_INCH * @scale
         return nil unless width.finite? && width > 0.0
         width
       rescue StandardError
         nil
-      end
-
-      # X extent (model inches) of the freshly generated, still-unplaced run.
-      # add_3d_text generates along the model X axis, so this is the run
-      # width BEFORE the placement translation/rotation transforms.
-      def mesh_text_rendered_run_width_inches(created)
-        min_x = nil
-        max_x = nil
-        Array(created).each do |entity|
-          next unless entity.respond_to?(:bounds)
-          bounds = entity.bounds
-          lo = bounds.min.x.to_f
-          hi = bounds.max.x.to_f
-          min_x = lo if min_x.nil? || lo < min_x
-          max_x = hi if max_x.nil? || hi > max_x
-        end
-        return nil if min_x.nil? || max_x.nil?
-        width = max_x - min_x
-        return nil unless width.finite? && width > 0.0
-        width
-      rescue StandardError
-        nil
-      end
-
-      # Self-calibrating factor = declared / rendered. Returns [factor, status]
-      # where status is :fit, :skipped_near_1, :out_of_bounds, or a skip
-      # reason with a nil factor when no comparison is possible.
-      def mesh_text_width_fidelity_factor(item, created, display_angle)
-        declared = mesh_text_declared_run_width_inches(item, display_angle)
-        return [nil, :no_declared_width] if declared.nil?
-        rendered = mesh_text_rendered_run_width_inches(created)
-        return [nil, :no_rendered_width] if rendered.nil?
-
-        factor = declared / rendered
-        return [nil, :invalid_factor] unless factor.finite? && factor > 0.0
-        # RB22/R20-2: explicit min/max comparisons — Numeric#clamp does not
-        # exist on the SketchUp Make 2017 Ruby 2.2 host.
-        if factor < MESH_TEXT_WIDTH_FACTOR_MIN || factor > MESH_TEXT_WIDTH_FACTOR_MAX
-          return [factor, :out_of_bounds]
-        end
-        delta = factor - 1.0
-        delta = -delta if delta < 0.0
-        return [factor, :skipped_near_1] if delta < MESH_TEXT_WIDTH_SKIP_TOLERANCE
-        [factor, :fit]
       end
 
       def record_text_width_factor_sample(factor)
@@ -715,237 +678,365 @@ module BlueCollarSystems
         nil
       end
 
-      # Applies the width-fidelity factor to the generated run along the
-      # pre-rotation run axis (local X). Height (Y) and depth (Z) factors are
-      # hard-coded 1.0 — this method must never change text height. Always
-      # returns true: width fidelity is best-effort and must never break
-      # placement of an already-generated mesh (no erase paths, FACE-1).
-      def apply_mesh_text_width_fidelity(entities, created, item, display_angle)
-        factor, status = mesh_text_width_fidelity_factor(item, created, display_angle)
-        if status == :fit
-          scale = Geom::Transformation.scaling(ORIGIN, factor, 1.0, 1.0)
-          entities.transform_entities(scale, *created)
-          record_text_width_factor_sample(factor)
-        elsif status == :skipped_near_1
-          @text_width_skipped_near_1_count = @text_width_skipped_near_1_count.to_i + 1
-        elsif status == :out_of_bounds
-          @text_width_out_of_bounds_count = @text_width_out_of_bounds_count.to_i + 1
-          if @text_width_out_of_bounds_count <= 3
-            Logger.warn('GeometryBuilder',
-                        "mesh text width factor #{factor.round(4)} outside " \
-                        "#{MESH_TEXT_WIDTH_FACTOR_MIN}..#{MESH_TEXT_WIDTH_FACTOR_MAX} " \
-                        "for #{item.text.inspect}; keeping natural width " \
-                        "(occurrence #{@text_width_out_of_bounds_count})")
-          end
-        end
-        true
-      rescue StandardError => e
-        # R20-2: never a silent rescue — count it for the report crosscheck
-        # and warn loudly (capped elsewhere by the single-span blast radius).
-        @text_width_error_count = @text_width_error_count.to_i + 1
-        Logger.warn('GeometryBuilder',
-                    "mesh text width fidelity failed (#{e.class}: #{e.message}); " \
-                    'keeping natural width')
+      # One attempt ledger per certified source span. A failed rung is never
+      # permission to change representation without separate affirmative,
+      # item-specific impossibility evidence.
+      def begin_text_attempt(item, requested_mode)
+        source_id = RepresentationFidelity.source_span_id(item)
+        attempt = {
+          source_span_id: source_id,
+          requested_mode: normalize_text_mode_symbol(requested_mode),
+          delivered_mode: nil,
+          resulting_entity_ids: [],
+          visual_fidelity_verified: false,
+          placement_verified: false,
+          rotation_verified: false,
+          width_verified: false,
+          height_verified: false,
+          content_verified: false,
+          entity_type_verified: false,
+          attempt_history: []
+        }
+        @text_attempts << attempt
+        attempt
+      rescue RepresentationFidelity::ContractError => e
+        record_text_delivery_failure(requested_mode, 'source_span_identity_unverified')
+        Logger.warn('GeometryBuilder', e.message)
+        nil
+      end
+
+      def append_text_rung(attempt, mode)
+        rung = {
+          mode: normalize_text_mode_symbol(mode), outcome: :attempting,
+          reason: nil, created_entity_ids: [], resulting_entity_ids: [],
+          cleaned_entity_ids: [], cleanup_outcome: :not_required,
+          visual_fidelity_verified: false
+        }
+        attempt[:attempt_history] << rung
+        rung
+      end
+
+      def fail_created_text_rung!(entities, created, rung, reason)
+        rung[:created_entity_ids] = RepresentationFidelity.stable_ids(created)
+        rung[:cleaned_entity_ids] = RepresentationFidelity.erase_owned!(entities, created)
+        rung[:cleanup_outcome] = :verified
+        rung[:resulting_entity_ids] = []
+        rung[:outcome] = :failed
+        rung[:reason] = reason.to_s
         true
       end
 
-      # ---------------------------------------------------------------
-      # R23 (F-1): INTERNAL glyph-outline source — Glyphs mode fallback
-      # when the SVG glyph source (bundled pdftocairo / mutool) is
-      # unavailable. Renders each extractor span as StrokeFont
-      # single-stroke lettering: outline edges in model space, i.e. the
-      # SAME representation type as the requested Glyphs mode (TEXTMODE-1
-      # source fallback, not a mode fallback). Height uses the nominal
-      # SIZE-1 contract (pt/72 x scale, same bounds as mesh text); the run
-      # is then compressed/expanded along its pre-rotation axis to the
-      # PDF-declared span extent (R22 width parity) with the same factor
-      # bounds. If the stroke engine delivers nothing for a span, the
-      # existing per-span mode ladder takes over (3D Text -> Labels),
-      # loudly, via place_mesh_text's fallback recording.
-      # ---------------------------------------------------------------
-      def place_glyph_outline_text(entities, item, origin_x, origin_y, layer)
-        requested_mode = @requested_text_mode || :glyphs
-        label_x, label_y, label_angle = mesh_label_anchor_pdf(item)
-        display_angle = display_text_angle(item, label_angle)
-        pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
-
-        page_h = PageTransform.effective_height(@media_box, @page_rotation)
-        page_h = 792.0 if page_h < 1
-        height = mesh_text_height_inches(item, display_angle, page_h)
-        if height <= 0
-          return place_mesh_text(
-            entities, item, origin_x, origin_y, layer, requested_mode,
-            'glyph_outline_height_unavailable'
-          )
-        end
-
-        # Same transform order as place_mesh_text (locked contract):
-        # generate at the origin, width-fit along the pre-rotation run axis
-        # via the SAME R22 width-fidelity method, then one translation to
-        # the anchor and one rotation about it.
-        count_before = entities.to_a.length
-        edges = StrokeFont.render(
-          entities, item.text, Geom::Point3d.new(0.0, 0.0, 0.0), height, 0
+      def cleanup_created_since_snapshot!(entities, before_snapshot, rung)
+        after_snapshot = RepresentationFidelity.snapshot(entities)
+        created = RepresentationFidelity.created_between(
+          before_snapshot, after_snapshot
         )
-        if edges.to_i <= 0
-          return place_mesh_text(
-            entities, item, origin_x, origin_y, layer, requested_mode,
-            'glyph_outline_empty'
-          )
-        end
+        return [] if created.empty?
+        created_ids = RepresentationFidelity.stable_ids(created)
+        cleaned_ids = RepresentationFidelity.erase_owned!(entities, created)
+        rung[:created_entity_ids] = (
+          Array(rung[:created_entity_ids]) + created_ids
+        ).uniq
+        rung[:cleaned_entity_ids] = (
+          Array(rung[:cleaned_entity_ids]) + cleaned_ids
+        ).uniq
+        rung[:cleanup_outcome] = :verified
+        created
+      end
 
-        new_ents = entities.to_a[count_before..-1] || []
-        apply_mesh_text_width_fidelity(entities, new_ents, item, display_angle)
-
-        move = Geom::Transformation.new(pt)
-        entities.transform_entities(move, *new_ents)
-        if display_angle.abs > 0.1
-          rot = Geom::Transformation.rotation(pt, Z_AXIS, display_angle.degrees)
-          entities.transform_entities(rot, *new_ents)
-        end
-
-        new_ents.each do |entity|
-          begin
-            set_layer(entity, layer)
-          rescue StandardError => e
-            Logger.warn("GeometryBuilder", "set_layer on glyph outline failed: #{e.message}")
-          end
-        end
-        @edge_count += edges.to_i
-        @text_count += 1
-        record_text_span_provenance(item, 'glyph_outline')
-        true
-      rescue StandardError => e
-        Logger.warn("GeometryBuilder", "glyph outline render failed: #{e.message}")
-        place_mesh_text(
-          entities, item, origin_x, origin_y, layer, requested_mode || :glyphs,
-          'glyph_outline_exception'
+      def fail_created_since_snapshot!(entities, before_snapshot, rung, reason)
+        created = cleanup_created_since_snapshot!(
+          entities, before_snapshot, rung
         )
+        if created.empty?
+          rung[:outcome] = :failed
+          rung[:reason] = reason.to_s
+          rung[:resulting_entity_ids] = []
+        else
+          rung[:outcome] = :failed
+          rung[:reason] = reason.to_s
+          rung[:resulting_entity_ids] = []
+        end
+        created
+      end
+
+      def complete_text_rung!(attempt, rung, mode, entity_ids, evidence)
+        normalized_mode = normalize_text_mode_symbol(mode)
+        ids = RepresentationFidelity.positive_entity_ids(entity_ids)
+        valid = evidence.is_a?(Hash) && ids &&
+                evidence[:placement_verified] == true &&
+                evidence[:rotation_verified] == true &&
+                evidence[:entity_type_verified] == true
+        if normalized_mode == :text3d
+          valid = valid && evidence[:width_verified] == true &&
+            evidence[:height_verified] == true &&
+            evidence[:depth_verified] == true &&
+            evidence[:font_identity_verified] == true
+        elsif normalized_mode == :labels
+          valid = valid && evidence[:content_verified] == true &&
+            evidence[:leader_verified] == true
+        else
+          valid = false
+        end
+        raise RepresentationFidelity::ContractError,
+              'requested text delivery evidence is incomplete' unless valid
+
+        rung[:outcome] = :complete
+        rung[:resulting_entity_ids] = ids
+        rung[:visual_fidelity_verified] = true
+        rung[:placement_verified] = true
+        rung[:rotation_verified] = true
+        rung[:width_verified] = evidence[:width_verified] == true
+        rung[:height_verified] = evidence[:height_verified] == true
+        rung[:depth_verified] = evidence[:depth_verified] == true
+        rung[:font_identity_verified] = evidence[:font_identity_verified] == true
+        rung[:content_verified] = evidence[:content_verified] == true
+        rung[:leader_verified] = evidence[:leader_verified] == true
+        rung[:entity_type_verified] = true
+        attempt[:delivered_mode] = normalized_mode
+        attempt[:resulting_entity_ids] = ids
+        attempt[:visual_fidelity_verified] = true
+        attempt[:placement_verified] = evidence[:placement_verified] == true
+        attempt[:rotation_verified] = evidence[:rotation_verified] == true
+        attempt[:width_verified] = evidence[:width_verified] == true
+        attempt[:height_verified] = evidence[:height_verified] == true
+        attempt[:depth_verified] = evidence[:depth_verified] == true
+        attempt[:font_identity_verified] = evidence[:font_identity_verified] == true
+        attempt[:content_verified] = evidence[:content_verified] == true
+        attempt[:leader_verified] = evidence[:leader_verified] == true
+        attempt[:entity_type_verified] = evidence[:entity_type_verified] == true
+      end
+
+      def stop_requested_text_delivery!(requested_mode, item, attempt, rung,
+                                        reason, transition_proof = nil)
+        rung[:outcome] = :failed
+        rung[:reason] = reason.to_s
+        rung[:resulting_entity_ids] = []
+        record_text_delivery_failure(
+          requested_mode, reason, item, attempt, transition_proof
+        )
+        false
+      end
+
+      def host_unsupported_label_rotation_proof(item, display_angle)
+        source_id = RepresentationFidelity.source_span_id(item)
+        binding = RepresentationFidelity.proof_binding(source_id)
+        {
+          :source_span_id => source_id,
+          :importer_id => binding[:importer_id],
+          :page_number => binding[:page_number],
+          :scope => :item,
+          :category => :exact_representation_impossible,
+          :affirmative_impossibility => true,
+          :generic_failure => false,
+          :from_mode => :labels,
+          :to_mode => :text3d,
+          :reason_code => :host_representation_unsupported,
+          :attempted_renderer => 'sketchup_native_text',
+          :created_entity_ids => [],
+          :cleaned_entity_ids => [],
+          :cleanup_outcome => :not_required,
+          :evidence => {
+            :source_rotation_degrees => display_angle.to_f,
+            :host_entity_type => 'Sketchup::Text',
+            :host_api_fact => 'Text vector controls the leader and does not rotate label glyphs',
+            :verification => 'source rotation is nonzero and native label orientation is unsupported'
+          }
+        }
+      end
+
+      def text_fit_tolerance(target_width, target_height)
+        largest = [target_width.to_f.abs, target_height.to_f.abs, 1.0].max
+        largest * 1.0e-5
+      end
+
+      def fit_created_text_entities!(entities, created, item, display_angle, anchor)
+        target_height = mesh_text_height_inches(item, display_angle, 0.0)
+        target_width = mesh_text_declared_run_width_inches(item, display_angle)
+        unless target_height && target_width && target_height > 0.0 && target_width > 0.0
+          raise RepresentationFidelity::ContractError,
+                'source width/height cannot be proven for visual fitting'
+        end
+
+        generated = RepresentationFidelity.bounds(created)
+        unless generated[:width] > 0.0 && generated[:height] > 0.0
+          raise RepresentationFidelity::ContractError, 'generated text bounds are degenerate'
+        end
+        generated_depth = generated[:max_z].to_f - generated[:min_z].to_f
+        unless generated_depth > 0.0
+          raise RepresentationFidelity::ContractError,
+                'generated native 3D text has no positive Z depth'
+        end
+        factor_x = target_width / generated[:width]
+        factor_y = target_height / generated[:height]
+        unless factor_x.finite? && factor_y.finite? && factor_x > 0.0 && factor_y > 0.0
+          raise RepresentationFidelity::ContractError, 'text fit factors are invalid'
+        end
+
+        pivot = Geom::Point3d.new(generated[:min_x], generated[:min_y], generated[:min_z])
+        scale = Geom::Transformation.scaling(pivot, factor_x, factor_y, 1.0)
+        entities.transform_entities(scale, *created)
+        scaled = RepresentationFidelity.bounds(created)
+        tolerance = text_fit_tolerance(target_width, target_height)
+        width_ok = RepresentationFidelity.close?(scaled[:width], target_width, tolerance)
+        height_ok = RepresentationFidelity.close?(scaled[:height], target_height, tolerance)
+        raise RepresentationFidelity::ContractError, 'post-scale width/height verification failed' unless width_ok && height_ok
+
+        anchor_point = RepresentationFidelity.numeric_point(anchor)
+        raise RepresentationFidelity::ContractError, 'text anchor is unreadable' unless anchor_point
+        delta = Geom::Vector3d.new(
+          anchor_point[0] - scaled[:min_x],
+          anchor_point[1] - scaled[:min_y],
+          anchor_point[2] - scaled[:min_z]
+        )
+        entities.transform_entities(Geom::Transformation.new(delta), *created)
+        if display_angle.to_f.abs > 1.0e-12
+          rotation = Geom::Transformation.rotation(anchor, Z_AXIS, display_angle.to_f.degrees)
+          entities.transform_entities(rotation, *created)
+        end
+
+        final_bounds = RepresentationFidelity.bounds(created)
+        final_depth = final_bounds[:max_z].to_f - final_bounds[:min_z].to_f
+        expected = RepresentationFidelity.expected_rotated_bounds(
+          anchor, target_width, target_height, display_angle
+        )
+        placement_ok = RepresentationFidelity.close?(final_bounds[:min_x], expected[:min_x], tolerance) &&
+                       RepresentationFidelity.close?(final_bounds[:min_y], expected[:min_y], tolerance)
+        final_size_ok = RepresentationFidelity.close?(final_bounds[:width], expected[:width], tolerance) &&
+                        RepresentationFidelity.close?(final_bounds[:height], expected[:height], tolerance)
+        raise RepresentationFidelity::ContractError, 'post-transform placement/rotation verification failed' unless placement_ok && final_size_ok
+        unless final_depth > 0.0 &&
+               RepresentationFidelity.close?(final_depth, generated_depth,
+                                              text_fit_tolerance(generated_depth, generated_depth))
+          raise RepresentationFidelity::ContractError,
+                'post-transform positive Z depth verification failed'
+        end
+        entity_types_ok = created.all? do |entity|
+          type = if entity.respond_to?(:typename)
+                   entity.typename.to_s
+                 else
+                   entity.class.name.to_s.split('::').last
+                 end
+          type == 'Edge' || type == 'Face'
+        end
+        raise RepresentationFidelity::ContractError,
+              'created 3D Text entity type is not observable' unless entity_types_ok
+        record_text_width_factor_sample(factor_x)
+
+        {
+          target_width_in: target_width, target_height_in: target_height,
+          scale_x: factor_x, scale_y: factor_y,
+          placement_verified: true, rotation_verified: true,
+          width_verified: true, height_verified: true,
+          depth_verified: true,
+          entity_type_verified: true
+        }
       end
 
       def place_mesh_text(entities, item, origin_x, origin_y, layer,
-                          requested_mode = nil, fallback_reason = nil)
+                          requested_mode = nil, attempt = nil)
         requested_mode = @requested_text_mode if requested_mode.nil?
+        attempt ||= begin_text_attempt(item, requested_mode)
+        return false unless attempt
+        rung = append_text_rung(attempt, :text3d)
         label_x, label_y, label_angle = mesh_label_anchor_pdf(item)
         display_angle = display_text_angle(item, label_angle)
-        pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
-
-        page_h = PageTransform.effective_height(@media_box, @page_rotation)
-        page_h = 792.0 if page_h < 1
-        height = mesh_text_height_inches(item, display_angle, page_h)
-        if height <= 0
-          return fallback_mesh_text_to_label(
-            entities, item, origin_x, origin_y, layer, requested_mode,
-            mesh_failure_reason(requested_mode, 'text3d_mesh_height_unavailable')
+        anchor = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
+        height = mesh_text_height_inches(item, display_angle, 0.0)
+        unless height
+          return stop_requested_text_delivery!(
+            requested_mode, item, attempt, rung,
+            'text3d_source_height_unavailable'
           )
         end
 
-        count_before = entities.to_a.length
-        # add_3d_text tolerance is absolute inches; 0.0 = highest curve
-        # quality (R20-1, quality only — live probes showed the legacy 0.6
-        # merely coarsened curves; the Round 20 speck bug was the Ruby 2.2
-        # clamp fallback fixed in mesh_text_height_inches, R20-2).
+        font_identity = verified_native_font_identity(item)
+        unless font_identity
+          return stop_requested_text_delivery!(
+            requested_mode, item, attempt, rung,
+            'text3d_native_font_identity_unverified'
+          )
+        end
+        extrusion_depth = native_text_extrusion_depth(height)
+        unless extrusion_depth
+          return stop_requested_text_delivery!(
+            requested_mode, item, attempt, rung,
+            'text3d_positive_depth_unavailable'
+          )
+        end
+
+        before = RepresentationFidelity.snapshot(entities)
         success = entities.add_3d_text(
-          item.text,
-          TextAlignLeft,
-          "Arial",
-          false,
-          false,
-          height,
-          0.0,
-          0.0,
-          true,
-          0.0
+          item.text, TextAlignLeft, font_identity[:installed_family], false, false,
+          height, 0.0, 0.0, true, extrusion_depth
         )
-
         unless success
-          return fallback_mesh_text_to_label(
-            entities, item, origin_x, origin_y, layer, requested_mode,
-            mesh_failure_reason(requested_mode, 'text3d_mesh_unavailable')
+          fail_created_since_snapshot!(
+            entities, before, rung, 'text3d_mesh_unavailable'
+          )
+          return stop_requested_text_delivery!(
+            requested_mode, item, attempt, rung, 'text3d_mesh_unavailable'
           )
         end
 
-        new_ents = entities.to_a[count_before..-1] || []
-        if new_ents.empty?
-          return fallback_mesh_text_to_label(
-            entities, item, origin_x, origin_y, layer, requested_mode,
-            mesh_failure_reason(requested_mode, 'text3d_mesh_empty')
+        after = RepresentationFidelity.snapshot(entities)
+        created = RepresentationFidelity.created_between(before, after)
+        if created.empty?
+          return stop_requested_text_delivery!(
+            requested_mode, item, attempt, rung, 'text3d_mesh_empty'
+          )
+        end
+        rung[:created_entity_ids] = RepresentationFidelity.stable_ids(created)
+
+        begin
+          evidence = fit_created_text_entities!(entities, created, item,
+                                                 display_angle, anchor)
+          evidence[:font_identity_verified] = true
+          evidence[:pdf_font_identity] = font_identity[:pdf_font_identity]
+          evidence[:installed_family] = font_identity[:installed_family]
+        rescue RepresentationFidelity::ContractError => e
+          reason = "text3d_visual_fidelity_unverified: #{e.message}"
+          fail_created_text_rung!(entities, created, rung, reason)
+          return stop_requested_text_delivery!(
+            requested_mode, item, attempt, rung, reason
           )
         end
 
-        # Round 22: compress/expand the run to the PDF-declared span extent
-        # along the pre-rotation run axis (local X only), AFTER generation at
-        # the faithful height and BEFORE the placement/rotation transforms.
-        apply_mesh_text_width_fidelity(entities, new_ents, item, display_angle)
-
-        move = Geom::Transformation.new(pt)
-        entities.transform_entities(move, *new_ents)
-        if display_angle.abs > 0.1
-          rot = Geom::Transformation.rotation(pt, Z_AXIS, display_angle.degrees)
-          entities.transform_entities(rot, *new_ents)
+        text_faces = created.select do |entity|
+          entity.respond_to?(:typename) && entity.typename == 'Face'
         end
-        text_faces = new_ents.select { |e| e.respond_to?(:typename) && e.typename == 'Face' }
         apply_text_face_material(text_faces)
         @face_count += text_faces.length
-
-        new_ents.each do |entity|
-          begin
-            set_layer(entity, layer)
-          rescue StandardError => e
-            Logger.warn("GeometryBuilder", "set_layer on text geometry failed: #{e.message}")
-          end
-        end
+        created.each { |entity| set_layer(entity, layer) }
+        entity_ids = RepresentationFidelity.stable_ids(created)
         @text_count += 1
         record_mesh_text_height_sample(height)
-        record_text_span_provenance(item, 'native_3d_text')
-        record_text_mode_fallback(requested_mode, :text3d, fallback_reason) if fallback_reason
+        record_text_span_provenance(item, 'native_3d_text', entity_ids, :text3d)
+        complete_text_rung!(attempt, rung, :text3d, entity_ids, evidence)
         true
-      rescue StandardError => e
-        Logger.warn("GeometryBuilder", "add_3d_text failed: #{e.message}")
-        fallback_mesh_text_to_label(
-          entities, item, origin_x, origin_y, layer, requested_mode,
-          mesh_failure_reason(requested_mode, 'text3d_exception')
-        )
-      end
-
-      # The final SketchUp per-span 3D Text rung is Labels.  The optional
-      # false flag prevents the reverse Labels -> 3D Text rescue from cycling
-      # back into this method if both host APIs are unavailable.
-      def fallback_mesh_text_to_label(entities, item, origin_x, origin_y, layer,
-                                      requested_mode, reason)
-        if normalize_text_mode_symbol(requested_mode) == :labels
-          record_text_delivery_failure(requested_mode, "#{reason}_labels_unavailable")
-          Logger.warn(
-            'GeometryBuilder',
-            "3D text fallback also failed for #{item.text.inspect}; " \
-            'the page-level raster terminal rung is required.'
+      rescue RepresentationFidelity::ContractError => e
+        # Once creation occurred without a verifiable snapshot/ownership map,
+        # an item-level fallback cannot prove it owns the partial artifacts.
+        # Escalate so the enclosing SketchUp operation aborts atomically.
+        if defined?(before) && before && defined?(rung) && rung
+          fail_created_since_snapshot!(
+            entities, before, rung, "text3d_contract_error: #{e.message}"
           )
-          return false
         end
-
-        Logger.warn(
-          'GeometryBuilder',
-          "3D text unavailable for #{item.text.inspect} — falling back to Labels (#{reason})"
-        )
-        delivered = place_annotation_label(
-          entities, item, origin_x, origin_y, layer, false, requested_mode
-        )
-        if delivered
-          record_text_mode_fallback(requested_mode, :labels, reason)
-          return true
-        end
-
-        Logger.warn(
-          'GeometryBuilder',
-          "3D text fallback to Labels also failed for #{item.text.inspect}; " \
-          'the page-level raster terminal rung is required.'
-        )
-        record_text_delivery_failure(requested_mode, "#{reason}_labels_unavailable")
-        false
+        raise e
       rescue StandardError => e
-        Logger.warn('GeometryBuilder', "3D text fallback failed: #{e.message}")
-        record_text_delivery_failure(requested_mode, "#{reason}_label_exception")
-        false
+        Logger.warn('GeometryBuilder', "add_3d_text failed: #{e.message}")
+        if defined?(before) && before && defined?(rung) && rung
+          fail_created_since_snapshot!(
+            entities, before, rung, 'text3d_exception'
+          )
+        elsif defined?(rung) && rung
+          rung[:outcome] = :failed
+          rung[:reason] = 'text3d_exception'
+        end
+        stop_requested_text_delivery!(
+          requested_mode, item, attempt, rung, 'text3d_exception'
+        )
       end
 
       def apply_text_face_material(faces)
@@ -991,9 +1082,12 @@ module BlueCollarSystems
           sub_item = sub_dimension_text_item(item, token, bx0, bx1, sub_by0, sub_by1)
           place_annotation_label(entities, sub_item, origin_x, origin_y, layer)
         end
+      rescue RepresentationFidelity::ContractError
+        raise
       rescue StandardError => e
         Logger.warn("GeometryBuilder", "stacked vertical dimension placement failed: #{e.message}")
-        place_annotation_label(entities, item, origin_x, origin_y, layer)
+        raise RepresentationFidelity::ContractError,
+              "stacked label delivery failed atomically: #{e.message}"
       end
 
       # CAD drawings leave a visible gap between stacked dimension numerals inside
@@ -1041,26 +1135,33 @@ module BlueCollarSystems
         item
       end
 
-      def try_add_annotation_text(entities, text, pt, dir_vec)
-        begin
-          ent = entities.add_text(text, pt, dir_vec)
-          return ent if ent
-        rescue StandardError => e
-          Logger.warn("GeometryBuilder", "add_text with vector failed: #{e.message}")
-        end
+      def try_annotation_add(entities, rung, description)
+        before = RepresentationFidelity.snapshot(entities)
+        entity = yield
+        cleanup_created_since_snapshot!(entities, before, rung) unless entity
+        entity
+      rescue RepresentationFidelity::ContractError
+        raise
+      rescue StandardError => e
+        Logger.warn('GeometryBuilder', "#{description} failed: #{e.message}")
+        cleanup_created_since_snapshot!(entities, before, rung) if before
+        nil
+      end
 
-        begin
-          ent = entities.add_text(text, pt, Geom::Vector3d.new(0, 0, 0))
-          return ent if ent
-        rescue StandardError => e
-          Logger.warn("GeometryBuilder", "add_text with zero vector failed: #{e.message}")
+      def try_add_annotation_text(entities, text, pt, leader_vector,
+                                  rung = nil)
+        ent = try_annotation_add(entities, rung, 'add_text with hidden leader vector') do
+          entities.add_text(text, pt, leader_vector)
         end
+        return ent if ent
 
-        begin
+        ent = try_annotation_add(entities, rung, 'add_text with zero vector') do
+          entities.add_text(text, pt, Geom::Vector3d.new(0, 0, 0))
+        end
+        return ent if ent
+
+        try_annotation_add(entities, rung, 'add_text') do
           entities.add_text(text, pt)
-        rescue StandardError => e
-          Logger.warn("GeometryBuilder", "add_text failed: #{e.message}")
-          nil
         end
       end
 
@@ -1087,73 +1188,193 @@ module BlueCollarSystems
         end
       end
 
+      def cleanup_unverified_label!(entities, text, before_snapshot, rung, reason)
+        ids = []
+        begin
+          ids = [RepresentationFidelity.stable_entity_id(text)]
+        rescue RepresentationFidelity::ContractError
+          # The exact pre/post entity-set proof below still permits cleanup of
+          # a host object that failed to expose a stable identity.
+        end
+        entities.erase_entities(text)
+        after_cleanup = RepresentationFidelity.snapshot(entities)
+        unless before_snapshot[:by_id].keys.sort == after_cleanup[:by_id].keys.sort
+          raise RepresentationFidelity::ContractError,
+                'unverified label cleanup did not restore the pre-creation entity set'
+        end
+        rung[:outcome] = :failed
+        rung[:reason] = reason.to_s
+        rung[:cleanup_outcome] = :verified
+        rung[:created_entity_ids] = ids
+        rung[:cleaned_entity_ids] = ids
+        rung[:resulting_entity_ids] = []
+        true
+      rescue RepresentationFidelity::ContractError
+        raise
+      rescue StandardError => e
+        raise RepresentationFidelity::ContractError,
+              "unverified label cleanup failed: #{e.message}"
+      end
+
+      def verify_annotation_label(text, expected_text, expected_point,
+                                  display_angle,
+                                  verify_leader = false)
+        type = if text.respond_to?(:typename)
+                 text.typename.to_s
+               else
+                 text.class.name.to_s.split('::').last
+               end
+        raise RepresentationFidelity::ContractError,
+              'created label is not a native Text entity' unless type == 'Text'
+        raise RepresentationFidelity::ContractError,
+              'label text content is not observable' unless text.respond_to?(:text)
+        raise RepresentationFidelity::ContractError,
+              'label text content verification failed' unless
+          text.text.to_s == expected_text.to_s
+        actual_point = text.respond_to?(:point) ?
+          RepresentationFidelity.numeric_point(text.point) : nil
+        target_point = RepresentationFidelity.numeric_point(expected_point)
+        raise RepresentationFidelity::ContractError, 'label point is not observable' unless actual_point && target_point
+        tolerance = 1.0e-6
+        placement_ok = [0, 1, 2].all? do |axis|
+          RepresentationFidelity.close?(
+            actual_point[axis], target_point[axis], tolerance
+          )
+        end
+        raise RepresentationFidelity::ContractError, 'label anchor verification failed' unless placement_ok
+
+        # SketchUp::Text#vector is the leader vector, not a text-orientation
+        # axis. Native labels therefore cannot represent non-horizontal PDF
+        # text, and that known host limitation must be handled before add_text
+        # is called. A zero source angle is the only label orientation that can
+        # be certified here; the leader vector is verified separately below.
+        unless display_angle.to_f.abs <= 1.0e-12
+          raise RepresentationFidelity::ContractError,
+                'native SketchUp Text cannot preserve source text rotation'
+        end
+        leader_verified = false
+        if verify_leader
+          leader_observable = false
+          leader_visible = nil
+          if text.respond_to?(:display_leader?)
+            leader_observable = true
+            leader_visible = text.display_leader?
+          elsif text.respond_to?(:display_leader)
+            leader_observable = true
+            leader_visible = text.display_leader
+          end
+          raise RepresentationFidelity::ContractError,
+                'label leader visibility is not observable' unless leader_observable
+          raise RepresentationFidelity::ContractError,
+                'label leader visibility verification failed' unless
+            leader_visible == false
+          leader_verified = true
+        end
+        {
+          placement_verified: true,
+          rotation_verified: true,
+          width_verified: false,
+          height_verified: false,
+          content_verified: true,
+          leader_verified: leader_verified,
+          entity_type_verified: true,
+          display_angle: display_angle.to_f
+        }
+      end
+
       def place_annotation_label(entities, item, origin_x, origin_y, layer,
-                                 allow_mesh_fallback = true, requested_mode = nil)
+                                 requested_mode = nil, attempt = nil)
         requested_mode = @requested_text_mode if requested_mode.nil?
+        attempt ||= begin_text_attempt(item, requested_mode)
+        return false unless attempt
+        rung = append_text_rung(attempt, :labels)
         label_x, label_y, label_angle = label_insertion_pdf(item)
         display_angle = display_text_angle(item, label_angle)
         pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
-        dir_vec = label_direction_vector(display_angle, item)
-        text = try_add_annotation_text(entities, item.text, pt, dir_vec)
+        rotated = display_angle.to_f.abs > 1.0e-12
+        if rotated
+          proof = host_unsupported_label_rotation_proof(item, display_angle)
+          rung[:transition_proof] = proof
+          return stop_requested_text_delivery!(
+            requested_mode, item, attempt, rung,
+            'label_rotation_unsupported_by_host', proof
+          )
+        end
+        leader_vector = zero_label_leader_vector
+        before = RepresentationFidelity.snapshot(entities)
+        text = try_add_annotation_text(
+          entities, item.text, pt, leader_vector, rung
+        )
         if text
-          preserve_vector = angle_needs_geometry_text?(display_angle, part_mark_label?(item.text) ? 8.0 : 12.0)
-          hide_annotation_leader(text, preserve_vector)
-          set_layer(text, layer)
-          @text_count += 1
-          record_text_span_provenance(item, 'native_label')
-          return true
+          begin
+            identity = RepresentationFidelity.stable_entity_id(text)
+            evidence = verify_annotation_label(
+              text, item.text, pt, display_angle
+            )
+            hide_annotation_leader(text)
+            # Re-read after mutating the host entity: the final point/content
+            # and hidden-leader state are the delivery evidence. Text#vector
+            # is never interpreted as text orientation.
+            evidence = verify_annotation_label(
+              text, item.text, pt, display_angle, true
+            )
+            set_layer(text, layer)
+            entity_ids = [identity]
+            @text_count += 1
+            record_text_span_provenance(item, 'native_label', entity_ids, :labels)
+            complete_text_rung!(attempt, rung, :labels, entity_ids, evidence)
+            return true
+          rescue RepresentationFidelity::ContractError => e
+            cleanup_unverified_label!(
+              entities, text, before, rung,
+              "label_visual_fidelity_unverified: #{e.message}"
+            )
+          rescue StandardError => e
+            cleanup_unverified_label!(
+              entities, text, before, rung,
+              "label_delivery_exception: #{e.message}"
+            )
+          end
+        else
+          rung[:outcome] = :failed
+          rung[:reason] = 'label_native_api_unavailable'
         end
 
-        return false unless allow_mesh_fallback
-
-        Logger.warn("GeometryBuilder",
-          "add_text unavailable for #{item.text.inspect} — falling back to 3D text (Labels mode unachievable)")
-        place_mesh_text(
-          entities, item, origin_x, origin_y, layer, requested_mode,
-          'add_text_unavailable'
+        stop_requested_text_delivery!(
+          requested_mode, item, attempt, rung,
+          rung[:reason] || 'label_native_api_unavailable'
         )
+      rescue RepresentationFidelity::ContractError => e
+        raise e
       end
 
-      def record_text_mode_fallback(requested, delivered, reason)
-        requested_mode = normalize_text_mode_symbol(requested)
-        delivered_mode = normalize_text_mode_symbol(delivered)
-        return if requested_mode.nil? || delivered_mode.nil?
-        return if requested_mode == delivered_mode
-
-        @text_fallbacks ||= []
-        @text_fallbacks << {
-          requested: requested_mode,
-          delivered: delivered_mode,
-          reason: reason.to_s,
-          count: 1
-        }
-      rescue StandardError => e
-        Logger.warn('GeometryBuilder', "text fallback record failed: #{e.message}")
-      end
-
-      def record_text_delivery_failure(requested, reason)
+      def record_text_delivery_failure(requested, reason, item = nil,
+                                       attempt = nil, transition_proof = nil)
         requested_mode = normalize_text_mode_symbol(requested)
         return if requested_mode.nil?
 
         @text_delivery_failures ||= []
-        @text_delivery_failures << {
+        entry = {
           requested: requested_mode,
           reason: reason.to_s,
-          count: 1
+          count: 1,
+          attempt_history: attempt ? Array(attempt[:attempt_history]) : []
         }
+        begin
+          entry[:source_span_id] = RepresentationFidelity.source_span_id(item) if item
+        rescue RepresentationFidelity::ContractError
+          # The explicit missing-identity reason is itself the evidence.
+        end
+        entry[:transition_proof] = transition_proof if transition_proof
+        @text_delivery_failures << entry
       rescue StandardError => e
         Logger.warn('GeometryBuilder', "text delivery failure record failed: #{e.message}")
-      end
-
-      def mesh_failure_reason(requested_mode, reason)
-        return reason unless normalize_text_mode_symbol(requested_mode) == :labels
-        "add_text_unavailable_then_#{reason}"
       end
 
       def normalize_text_mode_symbol(mode)
         case mode.to_s.strip.downcase
         when 'text3d', '3d_text', '3d text', 'add_3d_text' then :text3d
-        when 'labels', 'label', 'add_text' then :labels
+        when 'labels', 'label', 'text', 'add_text' then :labels
         when 'glyphs', 'glyph' then :glyphs
         when 'geometry', 'outlines', 'outline' then :geometry
         when 'raster', 'image' then :raster
@@ -1161,34 +1382,36 @@ module BlueCollarSystems
         end
       end
 
-      def record_text_span_provenance(item, delivered_entity_type = nil)
-        return unless @provenance_bucket.is_a?(Array)
-
+      def record_text_span_provenance(item, delivered_entity_type = nil,
+                                      resulting_entity_ids = [],
+                                      delivered_mode = nil)
+        raise RepresentationFidelity::ContractError,
+              'provenance bucket is unavailable' unless @provenance_bucket.is_a?(Array)
+        span_id = RepresentationFidelity.source_span_id(item)
+        ids = RepresentationFidelity.positive_entity_ids(resulting_entity_ids)
+        raise RepresentationFidelity::ContractError,
+              'resulting entity identities are missing or malformed' unless ids
         entity_type = delivered_entity_type ||
                       (@use_3d_text ? 'native_3d_text' : 'native_label')
         idx = @provenance_bucket.length
         entry = {
-          object_id: "text_span:#{@page_number}:#{idx}",
+          object_id: "text_delivery:#{@page_number}:#{idx}",
           page: @page_number,
           source_kind: 'text_span',
-          created_entity_type: entity_type
+          span_id: span_id,
+          created_entity_type: entity_type,
+          delivered_mode: normalize_text_mode_symbol(delivered_mode),
+          resulting_entity_ids: ids
         }
         # Corrective 2026-07-12 §1 (RB-01): span_id is the SAME deterministic
         # source-span identity that PartsBootstrap emits in row span_ids
         # (TextSourceIdentity "text_span:<page>:<index>"), so the two sidecars
-        # join. object_id above stays a separate created-entity label. When an
-        # item carries no assigned identity (legacy/out-of-pipeline callers
-        # only), span_id is OMITTED — never fabricate a bucket-index id that
-        # cannot join (the shipped v3.7.92 defect); consumers fall back to an
-        # explicit page-level result.
-        if item && item.respond_to?(:source_span_id) && item.source_span_id
-          entry[:span_id] = item.source_span_id
-        end
+        # join. object_id above stays a separate created-entity label. Missing
+        # source or resulting-entity identities are rejected before this point;
+        # partial provenance is never emitted or repaired with fabricated IDs.
         bbox = item_source_bbox_pdf(item)
         entry[:source_bbox_pdf] = bbox if bbox
         @provenance_bucket << entry
-      rescue StandardError => e
-        Logger.warn("GeometryBuilder", "provenance record failed: #{e.message}")
       end
 
       def item_source_bbox_pdf(item)
@@ -1902,9 +2125,7 @@ module BlueCollarSystems
       # SketchUp 2017 label text expects a zero direction vector for horizontal
       # annotation text. Non-zero unit vectors are reserved for rotated labels.
       def label_direction_vector(angle_deg, item = nil)
-        text = item ? item.text : nil
-        tol = part_mark_label?(text) ? 8.0 : 12.0
-        return Geom::Vector3d.new(0, 0, 0) unless angle_needs_geometry_text?(angle_deg, tol)
+        return Geom::Vector3d.new(0, 0, 0) if angle_deg.to_f.abs <= 1.0e-12
         label_text_vector(angle_deg)
       rescue StandardError
         Geom::Vector3d.new(0, 0, 0)
@@ -1922,19 +2143,10 @@ module BlueCollarSystems
       # Name is historical — it does NOT switch Labels → mesh/geometry.
       # Tunable via BC_SU_ROTATED_LABEL_DEG for troubleshooting.
       def angle_needs_geometry_text?(angle_deg, tol_deg = 12.0)
-        env = ENV['BC_SU_ROTATED_LABEL_DEG']
-        if env && !env.to_s.strip.empty?
-          begin
-            parsed = env.to_f
-            tol_deg = parsed if parsed >= 0.0 && parsed <= 89.0
-          rescue StandardError
-            # keep default tolerance
-          end
-        end
         a = angle_deg.to_f % 180.0
         a += 180.0 if a < 0.0
         a = 180.0 - a if a > 90.0
-        a > tol_deg.to_f
+        a > 1.0e-12
       rescue StandardError
         false
       end

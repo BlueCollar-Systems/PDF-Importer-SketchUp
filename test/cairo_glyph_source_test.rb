@@ -197,13 +197,13 @@ class CairoGlyphSourceTest < Minitest::Test
     end
   end
 
-  def test_decision_falls_back_internal_when_no_svg_renderer
+  def test_decision_is_unavailable_when_no_svg_renderer
     with_renderer_stub(nil) do
       stats = {}
       decision = CGS.import_decision(stats)
-      assert_equal 'internal', decision[:source]
+      assert_equal 'unavailable', decision[:source]
       assert_equal 'pdftocairo_missing', decision[:fallback_reason]
-      assert CGS.internal_source?(decision)
+      assert CGS.unavailable_source?(decision)
       refute CGS.svg_source?(decision)
     end
   end
@@ -217,20 +217,64 @@ class CairoGlyphSourceTest < Minitest::Test
     end
   end
 
-  def test_demotion_is_visible_and_refused_after_a_delivered_page
+  def test_svg_failure_marks_source_unavailable_even_after_a_delivered_page
     with_renderer_stub(kind: :pdftocairo, exe: 'x') do
       decision = CGS.import_decision({})
-      assert CGS.demote_to_internal!(decision, 'pdftocairo_timeout')
-      assert_equal 'internal', decision[:source]
+      assert CGS.mark_unavailable!(decision, 'pdftocairo_timeout')
+      assert_equal 'unavailable', decision[:source]
       assert_equal 'pdftocairo_timeout', decision[:fallback_reason]
+      assert_equal 'cairo_svg', decision[:attempted_source]
 
-      # A decision that already delivered an SVG page must NOT demote
-      # (single per-import decision — never mix sources mid-import).
       delivered = CGS.import_decision({})
       delivered[:pages] = 1
-      refute CGS.demote_to_internal!(delivered, 'pdftocairo_failed')
-      assert_equal 'cairo_svg', delivered[:source]
+      assert CGS.mark_unavailable!(delivered, 'pdftocairo_failed')
+      assert_equal 'unavailable', delivered[:source]
+      assert_equal 1, delivered[:pages]
     end
+  end
+
+  def test_cropbox_retry_success_clears_stale_failure_and_reports_actual_media_box
+    path = File.join(Dir.tmpdir, "bc_crop_retry_#{Process.pid}.svg")
+    failure = {}
+    runner = lambda do |args, _opts|
+      File.open(path, 'wb') do |file|
+        file.write('<svg width="100pt" height="100pt" viewBox="0 0 100 100"/>')
+      end
+      { ok: true, timed_out: false, stderr: '', stdout: '', argv: args }
+    end
+    validator = lambda do |_run, opts|
+      if opts[:argv].first == 'crop-attempt'
+        { ok: false, reason: :cropbox_rejected, diagnostics: {} }
+      else
+        { ok: true, reason: nil, diagnostics: {} }
+      end
+    end
+
+    result = SVG_R.stub(:find_svg_renderer, { kind: :pdftocairo, exe: 'x' }) do
+      SVG_R.stub(:temp_svg_path, path) do
+        SVG_R.stub(:svg_render_arg_variants,
+                   [['crop-attempt'], ['media-attempt']]) do
+          BlueCollarSystems::PDFVectorImporter::CommandRunner.stub(:run, runner) do
+            BlueCollarSystems::PDFVectorImporter::PopplerResultValidator.stub(
+              :validate, validator
+            ) do
+              CGS.render_page_svg(
+                'fixture.pdf', 1,
+                failure_info: failure, use_cropbox: true
+              )
+            end
+          end
+        end
+      end
+    end
+
+    refute_nil result
+    assert_equal :media_box, result[:render_box_used]
+    assert_equal true, result[:cropbox_fallback]
+    refute failure.key?(:reason),
+           'a successful retry must not retain a failed prior-attempt reason'
+  ensure
+    File.delete(path) if path && File.exist?(path)
   end
 
   def test_failure_reasons_map_to_recorded_vocabulary
@@ -260,7 +304,7 @@ class CairoGlyphSourceTest < Minitest::Test
 
   def test_match_spans_counts_and_provenance_span_ids
     spans = [
-      SpanItem.new('CUSTOMER', 'pdftotext', 'text_span:1:0',
+      SpanItem.new('AB', 'pdftotext', 'text_span:1:0',
                    100.0, 100.0, 150.0, 110.0),
       SpanItem.new('ORPHAN', 'pdftotext', 'text_span:1:1',
                    400.0, 200.0, 440.0, 210.0)
@@ -274,7 +318,12 @@ class CairoGlyphSourceTest < Minitest::Test
     assert_equal 1, match[:runs_matched]
     assert_equal 1, match[:runs_unmatched]
     assert_equal 1, match[:placements_unmatched]
-    assert_equal ['CUSTOMER'], match[:matched_items].map { |i| i.text }
+    assert_equal ['AB'], match[:matched_items].map { |i| i.text }
+    assert_equal [0, 1], match[:placement_matches].map { |m| m[:placement_index] }
+    assert_equal ['text_span:1:0', 'text_span:1:0'],
+                 match[:placement_matches].map { |m| m[:source_span_id] }
+    assert_same spans[0], match[:placement_matches][0][:item]
+    assert_equal pens[2], match[:unmatched_placements][0]
 
     bucket = []
     CGS.record_span_provenance(bucket, 1, match[:matched_items], 'cairo_svg')
@@ -290,12 +339,142 @@ class CairoGlyphSourceTest < Minitest::Test
     # Internal (content-stream) items carry absolute user-space coords;
     # a shifted media box must not break matching.
     media = [10.0, 20.0, 622.0, 416.0]
-    internal_item = SpanItem.new('W12X30', 'ArialNarrow', 'text_span:1:0',
+    internal_item = SpanItem.new('A', 'ArialNarrow', 'text_span:1:0',
                                  110.0, 120.0, 160.0, 130.0)
     pens = [{ x: 101.0, y: 101.0 }] # media-relative pen == absolute - origin
     match = CGS.match_spans(pens, [internal_item], media)
     assert_equal 1, match[:runs_matched]
     assert_equal 0, match[:runs_unmatched]
+  end
+
+  def test_match_spans_never_reuses_one_glyph_pen_to_certify_two_source_items
+    spans = [
+      SpanItem.new('A', 'pdftotext', 'text_span:1:0',
+                   100.0, 100.0, 150.0, 110.0),
+      SpanItem.new('B', 'pdftotext', 'text_span:1:1',
+                   100.0, 100.0, 150.0, 110.0)
+    ]
+
+    match = CGS.match_spans([{ x: 110.0, y: 105.0 }], spans,
+                            FIXTURE_MEDIA_BOX)
+
+    assert_equal 1, match[:runs_matched]
+    assert_equal 1, match[:runs_unmatched]
+    assert_equal 0, match[:placements_unmatched]
+    assert_equal ['A'], match[:matched_items].map { |item| item.text }
+    assert_equal 1, match[:placement_matches].length
+    assert_equal 'text_span:1:0', match[:placement_matches][0][:source_span_id]
+    assert_same spans[0], match[:placement_matches][0][:item]
+  end
+
+  def test_match_spans_reassigns_overlap_pen_to_complete_both_source_items
+    # A nearest-center greedy assignment gives all three pens to the broad
+    # first box and falsely reports both spans as incomplete. The allocator
+    # must reserve the only shared pen for the narrow span while using the two
+    # broad-only pens for the first span.
+    spans = [
+      SpanItem.new('AA', 'pdftotext', 'text_span:1:0',
+                   0.0, 0.0, 20.0, 10.0),
+      SpanItem.new('B', 'pdftotext', 'text_span:1:1',
+                   8.0, 0.0, 12.0, 10.0)
+    ]
+    pens = [
+      { x: 1.0, y: 5.0, placement_index: 10 },
+      { x: 10.0, y: 5.0, placement_index: 11 },
+      { x: 19.0, y: 5.0, placement_index: 12 }
+    ]
+
+    match = CGS.match_spans(pens, spans, FIXTURE_MEDIA_BOX)
+
+    assert_equal 2, match[:runs_matched]
+    assert_equal 0, match[:runs_unmatched]
+    assert_equal 0, match[:placements_unmatched]
+    by_span = match[:placement_matches].group_by do |entry|
+      entry[:source_span_id]
+    end
+    broad_indices = by_span['text_span:1:0'].map do |entry|
+      entry[:placement_index]
+    end.sort
+    narrow_indices = by_span['text_span:1:1'].map do |entry|
+      entry[:placement_index]
+    end
+    assert_equal [10, 12], broad_indices
+    assert_equal [11], narrow_indices
+  end
+
+  def test_one_glyph_pen_cannot_certify_a_long_source_span
+    span = SpanItem.new(
+      'ABCDEFGHIJ', 'pdftotext', 'text_span:1:0',
+      100.0, 100.0, 200.0, 120.0
+    )
+
+    match = CGS.match_spans(
+      [{ x: 110.0, y: 110.0, placement_index: 7 }],
+      [span], FIXTURE_MEDIA_BOX
+    )
+
+    assert_equal 0, match[:runs_matched]
+    assert_equal 1, match[:runs_unmatched]
+    assert_equal 1, match[:placements_unmatched]
+    assert_empty match[:placement_matches]
+    failure = match[:coverage_failures].first
+    assert_equal 'text_span:1:0', failure[:source_span_id]
+    assert_equal 10, failure[:expected_glyph_count]
+    assert_equal 1, failure[:observed_glyph_count]
+    assert_equal :glyph_coverage_mismatch, failure[:reason]
+  end
+
+  def test_surplus_pen_inside_one_span_prevents_false_exact_association
+    span = SpanItem.new(
+      'A', 'pdftotext', 'text_span:1:0',
+      100.0, 100.0, 200.0, 120.0
+    )
+    pens = [
+      { x: 110.0, y: 110.0, placement_index: 7 },
+      { x: 120.0, y: 110.0, placement_index: 8 }
+    ]
+
+    match = CGS.match_spans(pens, [span], FIXTURE_MEDIA_BOX)
+
+    assert_equal 0, match[:runs_matched]
+    assert_equal 1, match[:runs_unmatched]
+    assert_equal 2, match[:placements_unmatched]
+    assert_empty match[:placement_matches]
+    failure = match[:coverage_failures].first
+    assert_equal 1, failure[:expected_glyph_count]
+    assert_equal 2, failure[:observed_glyph_count]
+  end
+
+  def test_each_visible_source_character_requires_one_owned_glyph_placement
+    span = SpanItem.new(
+      'A B', 'pdftotext', 'text_span:1:0',
+      100.0, 100.0, 200.0, 120.0
+    )
+    pens = [
+      { x: 110.0, y: 110.0, placement_index: 3 },
+      { x: 150.0, y: 110.0, placement_index: 4 }
+    ]
+
+    match = CGS.match_spans(pens, [span], FIXTURE_MEDIA_BOX)
+
+    assert_equal 1, match[:runs_matched]
+    assert_equal 0, match[:runs_unmatched]
+    assert_equal 0, match[:placements_unmatched]
+    placement_indices = match[:placement_matches].map do |entry|
+      entry[:placement_index]
+    end
+    assert_equal [3, 4], placement_indices
+    assert_empty match[:coverage_failures]
+  end
+
+  def test_model_space_loops_keep_deterministic_svg_placement_indices
+    placed = CGS.model_space_loops(fixture_svg, FIXTURE_MEDIA_BOX)
+    indices = placed.map { |entry| entry[:placement_index] }
+    assert_equal indices.sort, indices
+    assert_equal indices.uniq, indices
+    assert_equal 0, indices.first
+    assert_operator indices.last, :>=, placed.length - 1,
+                    'empty glyph definitions may leave intentional index gaps'
   end
 
   def test_fixture_end_to_end_all_runs_match_their_pens
@@ -342,21 +521,24 @@ class CairoGlyphSourceTest < Minitest::Test
     assert_equal 0, block[:runs_unmatched]
     signals = report[:extra][:diagnostics][:signals]
     refute_includes signals, 'glyph_source_internal_fallback'
+    refute_includes signals, 'glyph_source_unavailable'
     refute_includes signals, 'glyph_runs_unmatched'
   end
 
-  def test_report_shows_internal_fallback_and_unmatched_runs_loudly
+  def test_report_shows_unavailable_source_and_unmatched_runs_loudly
     report = QAR.build_from_stats('x.pdf', {}, base_stats(
-      source: 'internal', fallback_reason: 'pdftocairo_missing', pages: 1,
+      source: 'unavailable', attempted_source: 'cairo_svg',
+      fallback_reason: 'pdftocairo_missing', pages: 1,
       runs_matched: 5, runs_unmatched: 2, placements_unmatched: 0,
       missing_language_packs: ['Adobe-GB1']
     ))
     block = report[:extra][:glyph_source]
-    assert_equal 'internal', block[:source]
+    assert_equal 'unavailable', block[:source]
     assert_equal 'pdftocairo_missing', block[:fallback_reason]
     assert_equal ['Adobe-GB1'], block[:missing_language_packs]
     signals = report[:extra][:diagnostics][:signals]
-    assert_includes signals, 'glyph_source_internal_fallback'
+    assert_includes signals, 'glyph_source_unavailable'
+    refute_includes signals, 'glyph_source_internal_fallback'
     assert_includes signals, 'glyph_runs_unmatched'
     assert_includes signals, 'glyph_missing_language_packs'
   end

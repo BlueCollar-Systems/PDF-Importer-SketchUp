@@ -36,13 +36,14 @@ pf = JSON.parse(pf_out) rescue nil
 check.call('--preflight emits ready_check JSON', pf && pf['schema'] == 'bcs.ready_check/1.0')
 check.call('--preflight without input reports fail', pf && pf['status'] == 'fail')
 
-# Shelved 3D shape extrusion must not be advertised as a usable headless option.
+# Disabled closed-shape extrusion must not be advertised as a usable headless option.
 help_out, help_status = Open3.capture2(RbConfig.ruby, CLI, '--help')
 check.call('--help exits 0', help_status.success?)
-check.call('--help omits shelved extrusion flags', help_out !~ /extrude-to-3d|extrude-depth-mm/)
+check.call('--help omits disabled closed-shape extrusion flags', help_out !~ /extrude-to-3d|extrude-depth-mm/)
 _, extrude_err, extrude_status = Open3.capture3(RbConfig.ruby, CLI, '--extrude-to-3d')
-check.call('--extrude-to-3d exits nonzero while shelved', !extrude_status.success?)
-check.call('--extrude-to-3d explains shelved state', extrude_err.include?('currently shelved'), extrude_err)
+check.call('--extrude-to-3d exits nonzero while disabled', !extrude_status.success?)
+check.call('--extrude-to-3d explains independent disabled state',
+           extrude_err.include?('disabled independently of 3D text'), extrude_err)
 
 unless File.file?(TEST_PDF)
   puts "SKIP (visible): corpus synthetic PDF not found at #{TEST_PDF} -- " \
@@ -73,8 +74,17 @@ Dir.mktmpdir('su_cli_test_') do |tmp|
     meta = report['report_meta'] || {}
     check.call('report_meta.host is sketchup or sketchup-cli', %w[sketchup sketchup-cli].include?(meta['host']))
     check.call('report_meta.semver present', meta['semver'].to_s =~ /\A(\d+\.\d+\.\d+|unknown)\z/)
-    check.call('unified CLI emits actual_text_entity_types',
-               (report['extra'] || {})['actual_text_entity_types'].is_a?(Hash))
+    extra = report['extra'] || {}
+    check.call('unified CLI identifies extraction-only scope',
+               extra['execution_scope'] == 'extraction_only', extra['execution_scope'])
+    check.call('extraction-only CLI does not claim SketchUp text entities',
+               (report['result'] || {})['text_entities'].to_i == 0)
+    check.call('extraction-only CLI does not fabricate actual_text_entity_types',
+               !extra.key?('actual_text_entity_types'))
+    check.call('extraction-only CLI keeps extracted text count separately',
+               extra['extracted_text_items'].to_i > 0)
+    check.call('host import contract is explicitly not ready',
+               (extra['import_contract_ready'] || {})['ready'] == false)
     check.call('model_3d intent present',
                (report['extra'] || {})['model_3d_intent'].is_a?(Hash))
     check.call('model_3d block present', (report['extra'] || {})['model_3d'].is_a?(Hash))

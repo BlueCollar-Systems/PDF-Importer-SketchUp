@@ -51,10 +51,12 @@ module BlueCollarSystems
     require File.join(dir, 'model_3d_extruder')
     require File.join(dir, 'geometry_cleanup')
     require File.join(dir, 'hatch_detector')
-    require File.join(dir, 'stroke_font')
+    require File.join(dir, 'poppler_result_validator')
+    require File.join(dir, 'poppler_semantic_proof')
     require File.join(dir, 'svg_text_renderer')
     require File.join(dir, 'cairo_glyph_source')
-    require File.join(dir, 'svg_geometry_renderer')
+    require File.join(dir, 'svg_3d_text_renderer')
+    require File.join(dir, 'svg_item_representation_renderer')
     require File.join(dir, 'metadata')
     # Tools & UI
     require File.join(dir, 'scale_tool')
@@ -72,8 +74,8 @@ module BlueCollarSystems
     DEFAULT_AUTO_RECOGNITION_PRIMITIVE_LIMIT = 20_000
     DEFAULT_AUTO_RECOGNITION_PATH_LIMIT = 12_000
     DEFAULT_AUTO_RECOGNITION_STREAM_MB_LIMIT = 24.0
-    # Shelved for go-live: keep the retained extrusion helpers inert until the
-    # 3D-model workflow is explicitly revived.
+    # Closed-shape page extrusion is intentionally disabled. It is independent
+    # from source-glyph 3D text, whose positive depth is always allowed.
     SHAPE_EXTRUSION_ENABLED = false
 
     def self.env_numeric(name, fallback)
@@ -133,6 +135,52 @@ module BlueCollarSystems
       nil
     end
 
+    # A missing SVG helper may block only a page that actually needs it. The
+    # old import-wide preflight stopped Geometry/Glyphs/3D Text even when every
+    # selected page had no text and already had ordinary vector/image content.
+    # That was a false roadblock: there is no requested text artifact to render
+    # on such a page. Empty pages still require SVG source inspection so hidden
+    # renderer-visible content is never silently omitted.
+    def self.svg_renderer_required_for_page?(requested_mode, import_text,
+                                             text_items,
+                                             source_inspection_required = false)
+      return false unless import_text == true
+      mode = normalize_text_renderer_mode(requested_mode)
+      return false unless [:geometry, :glyphs, :text3d].include?(mode)
+
+      !Array(text_items).empty? || source_inspection_required == true
+    end
+
+    def self.enforce_svg_renderer_available!(model, stats, requested_text_mode)
+      return true if SvgTextRenderer.svg_renderer_available?
+
+      stats[:svg_renderer_missing] = true if stats.is_a?(Hash)
+      requested_label = case normalize_text_renderer_mode(requested_text_mode)
+                        when :glyphs then 'Glyphs'
+                        when :text3d then '3D Text'
+                        else 'Geometry'
+                        end
+      Logger.warn(
+        'Pipeline',
+        "#{requested_label} text was requested, but a free Poppler/MuPDF SVG " \
+        'renderer is unavailable. The requested representation will not be substituted.'
+      )
+      if defined?(UI) && UI.respond_to?(:messagebox)
+        UI.messagebox(
+          "#{requested_label} text requires a free Poppler/MuPDF SVG " \
+          "renderer, which is unavailable.\n\nThe import is stopping without " \
+          "changing the requested representation. Install Poppler or MuPDF " \
+          "and expose it on PATH, or configure BC_PDFTOCAIRO_PATH / " \
+          "BC_MUTOOL_PATH. Then open Extensions > PDF Vector Importer > " \
+          'Compatibility Report to verify detection.'
+        )
+      end
+      safe_abort_operation(model, 'Pipeline')
+      raise RepresentationFidelity::ContractError,
+            "requested #{requested_label} renderer is unavailable; no " \
+            'representation fallback is authorized'
+    end
+
     def self.record_text_renderer(stats, page_num, attrs)
       stats[:text_renderers] ||= []
       stats[:page_text_sources] ||= {}
@@ -144,54 +192,1295 @@ module BlueCollarSystems
       stats[:text_renderers] << entry
     end
 
-    # TEXTMODE-1: GeometryBuilder records native per-span substitutions.  Make
-    # them first-class renderer records so the report contains requested mode,
-    # delivered mode, and the genuine host/API failure reason.
-    def self.merge_text_mode_fallbacks!(stats, page_num, fallbacks)
-      Array(fallbacks).each do |fallback|
-        next unless fallback.respond_to?(:[])
-
-        requested = normalize_text_renderer_mode(
-          fallback[:requested] || fallback['requested']
-        )
-        delivered = normalize_text_renderer_mode(
-          fallback[:delivered] || fallback['delivered']
-        )
-        next if requested.nil? || delivered.nil? || requested == delivered
-
-        count = (fallback[:count] || fallback['count']).to_i
-        count = 1 if count < 1
-        reason = (fallback[:reason] || fallback['reason']).to_s
-        renderer = delivered == :text3d ? :add_3d_text : :labels
-        existing = Array(stats[:text_renderers]).find do |entry|
-          entry[:page].to_i == page_num.to_i &&
-            entry[:degraded] &&
-            entry[:requested_mode] == requested &&
-            entry[:delivered_mode] == delivered &&
-            entry[:reason].to_s == reason
-        end
-        if existing
-          existing[:count] = existing[:count].to_i + count
-          next
-        end
-        record_text_renderer(stats, page_num,
-          renderer: renderer,
-          mode: delivered,
-          requested_mode: requested,
-          delivered_mode: delivered,
-          degraded: true,
-          reason: reason,
-          count: count,
-          note: "Text-mode fallback: #{requested} -> #{delivered} (#{reason})")
+    def self.merge_text_attempts!(stats, attempts)
+      stats[:text_attempts] ||= []
+      Array(attempts).each do |attempt|
+        raise RepresentationFidelity::ContractError,
+              'text attempt is not a Hash' unless attempt.is_a?(Hash)
+        stats[:text_attempts] << attempt
       end
+      true
+    end
+
+    def self.record_fallback_transitions!(stats, page_num, transitions)
+      stats[:fallback_transitions] ||= []
+      Array(transitions).each do |transition|
+        raise RepresentationFidelity::ContractError,
+              'fallback transition is not a Hash' unless transition.is_a?(Hash)
+        entry = transition.dup
+        entry[:page] = page_num.to_i
+        stats[:fallback_transitions] << entry
+        Logger.warn(
+          'RepresentationFidelity',
+          "Page #{page_num} #{entry[:source_span_id]}: " \
+          "#{entry[:from_mode]} -> #{entry[:to_mode]} " \
+          "(#{entry[:reason_code]}; affirmative item proof)"
+        )
+      end
+      true
+    end
+
+    def self.svg_source_context(svg_document, page_num, failure_info = {})
+      document = svg_document.is_a?(Hash) ? svg_document : {}
+      failures = []
+      reason = failure_info.is_a?(Hash) ? failure_info[:reason].to_s.strip : ''
+      unless reason.empty?
+        failures << {
+          :scope => :page, :page_number => page_num.to_i,
+          :reason_code => :renderer_runtime_error, :detail => reason
+        }
+      end
+      missing_fonts = Array(document[:missing_fonts]).map { |value| value.to_s }
+      missing_languages = Array(document[:missing_language_packs]).map do |value|
+        value.to_s
+      end
+      unless missing_fonts.empty? && missing_languages.empty?
+        failures << {
+          :scope => :page, :page_number => page_num.to_i,
+          :reason_code => :font_inventory_runtime_error,
+          :missing_fonts => missing_fonts,
+          :missing_language_packs => missing_languages
+        }
+      end
+      {
+        :importer_id => RepresentationFidelity::IMPORTER_ID,
+        :page_number => page_num.to_i,
+        :renderer => document[:renderer],
+        :render_status => document[:svg].to_s.empty? ? :failed : :complete,
+        :font_inventory_status => failures.empty? ? :complete : :failed,
+        :page_failures => failures
+      }
+    end
+
+    def self.failed_item_rung_from_transition(proof)
+      raise RepresentationFidelity::ContractError,
+            'item fallback transition proof is missing' unless proof.is_a?(Hash)
+      {
+        :mode => RepresentationFidelity.normalize_mode(proof[:from_mode]),
+        :outcome => :failed,
+        :reason => proof[:reason_code].to_s,
+        :created_entity_ids => Array(proof[:created_entity_ids]),
+        :cleaned_entity_ids => Array(proof[:cleaned_entity_ids]),
+        :resulting_entity_ids => [],
+        :cleanup_outcome => proof[:cleanup_outcome],
+        :visual_fidelity_verified => false,
+        :transition_proof => proof
+      }
+    end
+
+    def self.append_failed_item_rung!(history, proof)
+      rung = failed_item_rung_from_transition(proof)
+      mode = rung[:mode]
+      raise RepresentationFidelity::ContractError,
+            'item fallback transition mode is invalid' unless mode
+      existing = Array(history).find do |entry|
+        RepresentationFidelity.normalize_mode(entry[:mode]) == mode
+      end
+      if existing
+        unless existing[:outcome].to_s == 'failed'
+          raise RepresentationFidelity::ContractError,
+                "#{mode} item rung was already completed"
+        end
+        existing[:transition_proof] ||= proof
+        existing[:reason] = rung[:reason] if existing[:reason].to_s.empty?
+        existing[:created_entity_ids] ||= rung[:created_entity_ids]
+        existing[:cleaned_entity_ids] ||= rung[:cleaned_entity_ids]
+        existing[:resulting_entity_ids] = []
+        existing[:cleanup_outcome] ||= rung[:cleanup_outcome]
+        existing[:visual_fidelity_verified] = false
+        return existing
+      end
+      history << rung
+      rung
+    end
+
+    def self.record_item_vector_delivery!(stats, page_num, item,
+                                          requested_mode, result, history,
+                                          transitions)
+      source_id = RepresentationFidelity.source_span_id(item)
+      delivered_mode = RepresentationFidelity.normalize_mode(result[:mode])
+      unless [:glyphs, :geometry].include?(delivered_mode) &&
+             result[:source_span_id].to_s == source_id &&
+             result[:visual_fidelity_verified] == true &&
+             result[:identity_verified] == true &&
+             result[:placement_verified] == true &&
+             result[:rotation_verified] == true &&
+             result[:size_verified] == true &&
+             result[:entity_type_verified] == true &&
+             result[:visibility_verified] == true
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: item vector delivery evidence is incomplete"
+      end
+      entity_id = result[:group_entity_id].to_s
+      unless RepresentationFidelity.positive_entity_ids([entity_id])
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: item vector group identity is invalid"
+      end
+      completed = {
+        :mode => delivered_mode,
+        :outcome => :complete,
+        :resulting_entity_ids => [entity_id],
+        :cleanup_outcome => :not_required,
+        :visual_fidelity_verified => true,
+        :identity_verified => true,
+        :placement_verified => true,
+        :rotation_verified => true,
+        :width_verified => true,
+        :height_verified => true,
+        :entity_type_verified => true,
+        :visibility_verified => true,
+        :physical_entity_ids => Array(result[:physical_entity_ids])
+      }
+      history << completed
+      requested = RepresentationFidelity.normalize_mode(requested_mode)
+      attempt = {
+        :source_span_id => source_id,
+        :requested_mode => requested,
+        :delivered_mode => delivered_mode,
+        :resulting_entity_ids => [entity_id],
+        :visual_fidelity_verified => true,
+        :placement_verified => true,
+        :rotation_verified => true,
+        :width_verified => true,
+        :height_verified => true,
+        :entity_type_verified => true,
+        :visibility_verified => true,
+        :attempt_history => history
+      }
+      created_type = delivered_mode == :glyphs ? 'glyph_outline' :
+        'page_path_geometry'
+      renderer = result[:renderer].to_s
+      stats[:text_attempts] ||= []
+      stats[:text_attempts] << attempt
+      stats[:source_provenance_objects] ||= []
+      stats[:source_provenance_objects] << {
+        :object_id => source_id,
+        :span_id => source_id,
+        :page => page_num.to_i,
+        :source_kind => 'text_span',
+        :created_entity_type => created_type,
+        :renderer => renderer,
+        :resulting_entity_ids => [entity_id],
+        :physical_entity_ids => Array(result[:physical_entity_ids]),
+        :source_placement_indices => Array(result[:placement_indices]),
+        :source_glyph_ids => Array(result[:glyph_ids]),
+        :placement_verified => true,
+        :rotation_verified => true,
+        :width_verified => true,
+        :height_verified => true,
+        :entity_type_verified => true,
+        :visibility_verified => true,
+        :visual_fidelity_verified => true
+      }
+      record_fallback_transitions!(stats, page_num, transitions)
+      record_text_renderer(
+        stats, page_num,
+        :renderer => result[:renderer],
+        :mode => delivered_mode,
+        :requested_mode => requested,
+        :delivered_mode => delivered_mode,
+        :degraded => requested != delivered_mode,
+        :reason => 'affirmative item-specific requested-representation impossibility',
+        :count => 1,
+        :resulting_entity_ids => [entity_id],
+        :physical_entity_ids => Array(result[:physical_entity_ids]),
+        :visual_fidelity_verified => true
+      )
+      stats[:text] = stats[:text].to_i + 1
+      stats[:edges] = stats[:edges].to_i + result[:edge_count].to_i
+      true
+    end
+
+    def self.record_item_raster_delivery!(stats, page_num, item,
+                                          requested_mode, raster, history,
+                                          transitions)
+      source_id = RepresentationFidelity.source_span_id(item)
+      entity_id = raster[:entity_id].to_s
+      artifact = raster[:artifact_evidence]
+      unless RepresentationFidelity.positive_entity_ids([entity_id]) &&
+             raster[:real_raster_verified] == true &&
+             raster[:visual_fidelity_verified] == true &&
+             artifact.is_a?(Hash) &&
+             artifact[:source_span_id].to_s == source_id &&
+             artifact[:page_number].to_i == page_num.to_i &&
+             artifact[:source_crop_binding_verified] == true
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: terminal item raster evidence is incomplete"
+      end
+      completed = {
+        :mode => :raster,
+        :outcome => :complete,
+        :resulting_entity_ids => [entity_id],
+        :cleanup_outcome => :not_required,
+        :visual_fidelity_verified => true,
+        :real_raster_verified => true,
+        :source_crop_binding_verified => true,
+        :entity_type_verified => true,
+        :artifact_evidence => artifact
+      }
+      history << completed
+      requested = RepresentationFidelity.normalize_mode(requested_mode)
+      attempt = {
+        :source_span_id => source_id,
+        :requested_mode => requested,
+        :delivered_mode => :raster,
+        :resulting_entity_ids => [entity_id],
+        :visual_fidelity_verified => true,
+        :real_raster_verified => true,
+        :source_crop_binding_verified => true,
+        :entity_type_verified => true,
+        :attempt_history => history
+      }
+      record = {
+        :page => page_num.to_i,
+        :source_span_ids => [source_id],
+        :requested_mode => requested,
+        :delivered_mode => :raster,
+        :created_entity_type => 'raster_image',
+        :resulting_entity_ids => [entity_id],
+        :real_raster_verified => true,
+        :visual_fidelity_verified => true,
+        :source_crop_binding_verified => true,
+        :artifact_evidence => artifact,
+        :cleanup_outcome => :not_required,
+        :delivery_scope => :item_raster
+      }
+      stats[:text_attempts] ||= []
+      stats[:text_attempts] << attempt
+      stats[:terminal_text_delivery_records] ||= []
+      stats[:terminal_text_delivery_records] << record
+      stats[:raster_delivery_records] ||= []
+      stats[:raster_delivery_records] << record.dup
+      stats[:raster_fallback_used] = true
+      stats[:text] = stats[:text].to_i + 1
+      record_fallback_transitions!(stats, page_num, transitions)
+      record_text_renderer(
+        stats, page_num,
+        :renderer => :pdftocairo_real_item_raster,
+        :mode => :raster,
+        :requested_mode => requested,
+        :delivered_mode => :raster,
+        :degraded => requested != :raster,
+        :reason => 'affirmative item-specific vector representation impossibility',
+        :count => 1,
+        :resulting_entity_ids => [entity_id],
+        :real_raster_verified => true,
+        :source_crop_binding_verified => true,
+        :artifact_evidence => artifact
+      )
+      true
+    end
+
+    def self.complete_item_representation_ladder!(
+      stats, model, target_entities, pdf_path, page_num, item,
+      requested_mode, controller, history, media_box, render_box,
+      page_rotation, opts, import_start, y_offset, svg_document,
+      text_layer = nil, peer_items = []
+    )
+      source_id = RepresentationFidelity.source_span_id(item)
+      context = svg_source_context(svg_document, page_num, {})
+      while [:glyphs, :geometry].include?(controller.current_mode)
+        mode = controller.current_mode
+        result = SvgItemRepresentationRenderer.render_svg(
+          target_entities, svg_document[:svg], media_box, item, mode,
+          :scale => opts[:scale],
+          :svg_page_box => render_box,
+          :y_offset => 0.0,
+          :layer => text_layer,
+          :peer_items => peer_items,
+          :source_context => context
+        )
+        unless result.is_a?(Hash) && Array(result[:failures]).empty?
+          raise RepresentationFidelity::ContractError,
+                "#{source_id}: #{mode} item renderer failed generically"
+        end
+        if result[:ok] == true
+          begin
+            transformed = apply_and_verify_page_representation_transform(
+              result[:group], media_box, opts[:scale], page_rotation, y_offset
+            )
+            unless transformed &&
+                   SvgItemRepresentationRenderer.verify_transformed_delivery!(
+                     result
+                   )
+              raise RepresentationFidelity::ContractError,
+                    "#{source_id}: #{mode} item page transform was not verified"
+            end
+            return record_item_vector_delivery!(
+              stats, page_num, item, requested_mode, result, history,
+              controller.transitions
+            )
+          rescue StandardError => error
+            cleanup = RepresentationFidelity.erase_owned!(
+              target_entities, [result[:group]]
+            )
+            raise RepresentationFidelity::ContractError,
+                  "#{source_id}: #{mode} item delivery failed after creation: " \
+                  "#{error.message}; cleaned #{cleanup.join(', ')}"
+          end
+        end
+        proof = result[:transition_proof]
+        controller.advance!(proof)
+        append_failed_item_rung!(history, proof)
+      end
+
+      unless controller.current_mode == :raster && controller.terminal?
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: item representation ladder did not reach Raster"
+      end
+      raster = verified_item_raster_entity!(
+        model, target_entities, pdf_path, page_num, item, media_box, opts,
+        import_start, y_offset, page_rotation
+      )
+      begin
+        record_item_raster_delivery!(
+          stats, page_num, item, requested_mode, raster, history,
+          controller.transitions
+        )
+      rescue StandardError => error
+        cleanup = RepresentationFidelity.erase_owned!(
+          target_entities, [raster[:entity]]
+        )
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: terminal item Raster recording failed: " \
+              "#{error.message}; cleaned #{cleanup.join(', ')}"
+      end
+    end
+
+    def self.item_raster_crop_geometry(item, media_box, page_rotation, dpi,
+                                       padding_points = 1.5)
+      unless media_box.is_a?(Array) && media_box.length >= 4
+        raise RepresentationFidelity::ContractError,
+              'item raster MediaBox is unavailable'
+      end
+      base_x = media_box[0].to_f
+      base_y = media_box[1].to_f
+      relative = CairoGlyphSource.item_bbox_media_relative(item, base_x, base_y)
+      unless relative && relative.length >= 4
+        raise RepresentationFidelity::ContractError,
+              'item raster source bbox is unavailable'
+      end
+      x0 = relative[0].to_f + base_x
+      y0 = relative[1].to_f + base_y
+      x1 = relative[2].to_f + base_x
+      y1 = relative[3].to_f + base_y
+      x0, x1 = [x0, x1].minmax
+      y0, y1 = [y0, y1].minmax
+      pad = [padding_points.to_f, 0.0].max
+      min_x, max_x = [media_box[0].to_f, media_box[2].to_f].minmax
+      min_y, max_y = [media_box[1].to_f, media_box[3].to_f].minmax
+      source_box = [
+        [x0 - pad, min_x].max, [y0 - pad, min_y].max,
+        [x1 + pad, max_x].min, [y1 + pad, max_y].min
+      ]
+      display_box = PageTransform.transform_bbox(
+        source_box[0], source_box[1], source_box[2], source_box[3],
+        media_box, page_rotation
+      )
+      display_width = display_box[2] - display_box[0]
+      display_height = display_box[3] - display_box[1]
+      unless display_width > 0.0 && display_height > 0.0
+        raise RepresentationFidelity::ContractError,
+              'item raster source bbox is empty'
+      end
+      page_height = PageTransform.effective_height(media_box, page_rotation)
+      pixels_per_point = dpi.to_f / 72.0
+      raise RepresentationFidelity::ContractError,
+            'item raster DPI must be positive' unless pixels_per_point > 0.0
+      pixel_x0 = (display_box[0] * pixels_per_point).floor
+      pixel_y0 = ((page_height - display_box[3]) * pixels_per_point).floor
+      pixel_x1 = (display_box[2] * pixels_per_point).ceil
+      pixel_y1 = ((page_height - display_box[1]) * pixels_per_point).ceil
+      {
+        :source_box => source_box,
+        :display_box => display_box,
+        :display_width => display_width,
+        :display_height => display_height,
+        :page_rotation => PageTransform.normalize_rotation(page_rotation),
+        :dpi => dpi.to_i,
+        :pixel_crop => [
+          pixel_x0, pixel_y0,
+          [pixel_x1 - pixel_x0, 1].max,
+          [pixel_y1 - pixel_y0, 1].max
+        ]
+      }
+    end
+
+    def self.complete_text3d_item_fallbacks!(
+      stats, model, target_entities, pdf_path, page_num, text_items,
+      media_box, render_box, page_rotation, opts, import_start, y_offset,
+      svg_document, initial_proofs
+    )
+      items_by_id = {}
+      Array(text_items).each do |item|
+        items_by_id[RepresentationFidelity.source_span_id(item)] = item
+      end
+      proofs_by_id = {}
+      Array(initial_proofs).each do |proof|
+        source_id = RepresentationFidelity.source_span_id(proof[:source_span_id])
+        raise RepresentationFidelity::ContractError,
+              "duplicate initial fallback proof for #{source_id}" if
+          proofs_by_id.key?(source_id)
+        proofs_by_id[source_id] = proof
+      end
+
+      proofs_by_id.each do |source_id, initial_proof|
+        item = items_by_id[source_id]
+        raise RepresentationFidelity::ContractError,
+              "fallback proof has no source item #{source_id}" unless item
+        controller = RepresentationFidelity::FallbackController.new(
+          :text3d, source_id
+        )
+        controller.advance!(initial_proof)
+        history = []
+        append_failed_item_rung!(history, initial_proof)
+        complete_item_representation_ladder!(
+          stats, model, target_entities, pdf_path, page_num, item, :text3d,
+          controller, history, media_box, render_box, page_rotation, opts,
+          import_start, y_offset, svg_document, nil,
+          Array(text_items).reject do |peer|
+            RepresentationFidelity.source_span_id(peer) == source_id
+          end
+        )
+      end
+      true
+    end
+
+    def self.complete_label_item_fallbacks!(
+      stats, model, target_entities, pdf_path, page_num, text_items,
+      media_box, render_box, page_rotation, opts, import_start, y_offset,
+      svg_document, failures, prior_attempts, text_layer,
+      all_page_text_items = nil
+    )
+      items_by_id = {}
+      Array(text_items).each do |item|
+        items_by_id[RepresentationFidelity.source_span_id(item)] = item
+      end
+      attempts_by_id = {}
+      Array(prior_attempts).each do |attempt|
+        attempts_by_id[attempt[:source_span_id].to_s] = attempt
+      end
+      controllers = {}
+      failed_items = []
+      Array(failures).each do |failure|
+        source_id = RepresentationFidelity.source_span_id(
+          failure[:source_span_id]
+        )
+        item = items_by_id[source_id]
+        proof = failure[:transition_proof]
+        unless item && proof.is_a?(Hash)
+          raise RepresentationFidelity::ContractError,
+                "#{source_id} Labels failure lacks an item-bound transition proof"
+        end
+        controller = RepresentationFidelity::FallbackController.new(
+          :labels, source_id
+        )
+        controller.advance!(proof)
+        controllers[source_id] = controller
+        failed_items << item
+      end
+      return true if failed_items.empty?
+
+      depth = opts[:text_3d_depth]
+      depth = Svg3DTextRenderer::DEFAULT_DEPTH_INCHES if depth.nil?
+      result = Svg3DTextRenderer.render_svg(
+        target_entities, svg_document[:svg], media_box, failed_items,
+        :scale => opts[:scale], :svg_page_box => render_box,
+        :y_offset => 0.0, :depth => depth, :layer => text_layer,
+        :page_number => page_num,
+        :preserve_unmatched_source_placements => false,
+        :source_context => svg_source_context(svg_document, page_num, {})
+      )
+      unless Array(result[:failures]).empty?
+        details = result[:failures].map do |failure|
+          "#{failure[:source_span_id]}:#{failure[:reason_code]}"
+        end
+        raise RepresentationFidelity::ContractError,
+              "Labels -> 3D Text fallback failed generically: #{details.join(', ')}"
+      end
+
+      rows = Array(result[:span_results])
+      transforms_ok = rows.all? do |row|
+        apply_and_verify_page_representation_transform(
+          row[:group], media_box, opts[:scale], page_rotation, y_offset
+        )
+      end
+      unless transforms_ok
+        rows.each do |row|
+          RepresentationFidelity.erase_owned!(
+            target_entities, [row[:group]]
+          ) if row[:group]
+        end
+        raise RepresentationFidelity::ContractError,
+              'Labels -> 3D Text page transform was not verified'
+      end
+
+      delivered_ids = rows.map { |row| row[:source_span_id].to_s }
+      delivered_items = failed_items.select do |item|
+        delivered_ids.include?(RepresentationFidelity.source_span_id(item))
+      end
+      delivered_items.each do |item|
+        source_id = RepresentationFidelity.source_span_id(item)
+        record_fallback_transitions!(
+          stats, page_num, controllers[source_id].transitions
+        )
+      end
+      unless delivered_items.empty?
+        record_svg_3d_text_delivery!(
+          stats, page_num, delivered_items, result, :labels, attempts_by_id
+        )
+        stats[:text] = stats[:text].to_i + rows.length
+        stats[:faces] = stats[:faces].to_i + rows.inject(0) do |sum, row|
+          sum + row[:face_count].to_i
+        end
+      end
+
+      transition_by_id = {}
+      Array(result[:transition_proofs]).each do |proof|
+        transition_by_id[proof[:source_span_id].to_s] = proof
+      end
+      undelivered = failed_items.reject do |item|
+        delivered_ids.include?(RepresentationFidelity.source_span_id(item))
+      end
+      undelivered.each do |item|
+        source_id = RepresentationFidelity.source_span_id(item)
+        controller = controllers[source_id]
+        text3d_proof = transition_by_id[source_id]
+        unless text3d_proof
+          raise RepresentationFidelity::ContractError,
+                "#{source_id} has neither 3D Text delivery nor proof"
+        end
+        controller.advance!(text3d_proof)
+        prior = attempts_by_id[source_id]
+        history = prior.is_a?(Hash) ?
+          Array(prior[:attempt_history]).map { |entry| entry.dup } : []
+        append_failed_item_rung!(history, controller.transitions.first)
+        append_failed_item_rung!(history, text3d_proof)
+        complete_item_representation_ladder!(
+          stats, model, target_entities, pdf_path, page_num, item, :labels,
+          controller, history, media_box, render_box, page_rotation, opts,
+          import_start, y_offset, svg_document, text_layer,
+          Array(all_page_text_items || text_items).reject do |peer|
+            RepresentationFidelity.source_span_id(peer) == source_id
+          end
+        )
+      end
+      true
+    end
+
+    def self.verified_raster_entity!(model, pdf_path, page_num, media_box, opts,
+                                     import_start, y_offset, render_box,
+                                     page_rotation = 0)
+      parent = nil
+      before = nil
+      parent = model.active_entities
+      before = RepresentationFidelity.snapshot(parent)
+      delivery = import_page_as_raster(
+        model, pdf_path, page_num, media_box, opts, import_start, y_offset,
+        render_box, page_rotation
+      )
+      unless delivery.is_a?(Hash) && delivery[:entity] &&
+             delivery[:artifact_evidence].is_a?(Hash)
+        raise RepresentationFidelity::ContractError,
+              'terminal raster lacks verified PNG/page/box evidence'
+      end
+      image = delivery[:entity]
+      artifact = delivery[:artifact_evidence]
+      required_artifact_checks = [
+        :png_signature_verified, :page_binding_verified,
+        :box_binding_verified, :aspect_verified
+      ]
+      unless required_artifact_checks.all? { |key| artifact[key] == true } &&
+             artifact[:page_number].to_i == page_num.to_i &&
+             artifact[:page_rotation].to_i ==
+               PageTransform.normalize_rotation(page_rotation)
+        raise RepresentationFidelity::ContractError,
+              'terminal raster artifact evidence is incomplete or misbound'
+      end
+      raise RepresentationFidelity::ContractError,
+            'terminal raster renderer did not create an image' unless image
+      after = RepresentationFidelity.snapshot(parent)
+      created = RepresentationFidelity.created_between(before, after)
+      image_id = RepresentationFidelity.stable_entity_id(image)
+      created_ids = RepresentationFidelity.stable_ids(created)
+      unless created_ids == [image_id]
+        raise RepresentationFidelity::ContractError,
+              'terminal raster must own exactly one top-level image'
+      end
+      type = representation_entity_type(image)
+      unless type.to_s.downcase.include?('image')
+        raise RepresentationFidelity::ContractError,
+              "terminal raster entity type is #{type}, not Image"
+      end
+      bounds = RepresentationFidelity.bounds([image])
+      unless bounds[:width].to_f > 0.0 && bounds[:height].to_f > 0.0
+        raise RepresentationFidelity::ContractError,
+              'terminal raster image has empty placement bounds'
+      end
+      {
+        :entity => image,
+        :entity_id => image_id,
+        :created_entities => created,
+        :created_entity_ids => created_ids,
+        :bounds => bounds,
+        :artifact_evidence => artifact,
+        :visual_fidelity_verified => true,
+        :real_raster_verified => true
+      }
     rescue StandardError => e
-      Logger.warn('Pipeline', "text fallback report merge failed: #{e.message}")
+      if parent && before
+        begin
+          current = RepresentationFidelity.snapshot(parent)
+          owned = RepresentationFidelity.created_between(before, current)
+          RepresentationFidelity.erase_owned!(parent, owned) unless owned.empty?
+        rescue StandardError => cleanup_error
+          raise RepresentationFidelity::ContractError,
+                "terminal raster verification failed: #{e.message}; " \
+                "owned cleanup failed: #{cleanup_error.message}"
+        end
+      end
+      raise e if e.is_a?(RepresentationFidelity::ContractError)
+      raise RepresentationFidelity::ContractError,
+            "terminal raster verification failed: #{e.message}"
+    end
+
+    def self.verified_item_raster_entity!(model, target_entities, pdf_path,
+                                          page_num, item, media_box, opts,
+                                          import_start, y_offset,
+                                          page_rotation = 0)
+      parent = target_entities
+      before = RepresentationFidelity.snapshot(parent)
+      delivery = import_item_as_raster(
+        model, parent, pdf_path, page_num, item, media_box, opts,
+        import_start, y_offset, page_rotation
+      )
+      unless delivery.is_a?(Hash) && delivery[:entity] &&
+             delivery[:artifact_evidence].is_a?(Hash)
+        raise RepresentationFidelity::ContractError,
+              'terminal item raster lacks verified source-crop evidence'
+      end
+      image = delivery[:entity]
+      artifact = delivery[:artifact_evidence]
+      source_id = RepresentationFidelity.source_span_id(item)
+      required = [
+        :png_signature_verified, :page_binding_verified,
+        :source_crop_binding_verified, :aspect_verified
+      ]
+      unless required.all? { |key| artifact[key] == true } &&
+             artifact[:source_span_id].to_s == source_id &&
+             artifact[:page_number].to_i == page_num.to_i &&
+             artifact[:page_rotation].to_i ==
+               PageTransform.normalize_rotation(page_rotation)
+        raise RepresentationFidelity::ContractError,
+              'terminal item raster evidence is incomplete or misbound'
+      end
+      after = RepresentationFidelity.snapshot(parent)
+      created = RepresentationFidelity.created_between(before, after)
+      image_id = RepresentationFidelity.stable_entity_id(image)
+      created_ids = RepresentationFidelity.stable_ids(created)
+      unless created_ids == [image_id]
+        raise RepresentationFidelity::ContractError,
+              'terminal item raster must own exactly one top-level image'
+      end
+      type = representation_entity_type(image)
+      unless type.to_s.downcase.include?('image')
+        raise RepresentationFidelity::ContractError,
+              "terminal item raster entity type is #{type}, not Image"
+      end
+      bounds = RepresentationFidelity.bounds([image])
+      unless bounds[:width].to_f > 0.0 && bounds[:height].to_f > 0.0
+        raise RepresentationFidelity::ContractError,
+              'terminal item raster has empty placement bounds'
+      end
+      {
+        :entity => image,
+        :entity_id => image_id,
+        :created_entities => created,
+        :created_entity_ids => created_ids,
+        :bounds => bounds,
+        :artifact_evidence => artifact,
+        :visual_fidelity_verified => true,
+        :real_raster_verified => true
+      }
+    rescue StandardError => e
+      if parent && before
+        begin
+          current = RepresentationFidelity.snapshot(parent)
+          owned = RepresentationFidelity.created_between(before, current)
+          RepresentationFidelity.erase_owned!(parent, owned) unless owned.empty?
+        rescue StandardError => cleanup_error
+          raise RepresentationFidelity::ContractError,
+                "terminal item raster verification failed: #{e.message}; " \
+                "owned cleanup failed: #{cleanup_error.message}"
+        end
+      end
+      raise e if e.is_a?(RepresentationFidelity::ContractError)
+      raise RepresentationFidelity::ContractError,
+            "terminal item raster verification failed: #{e.message}"
+    end
+
+    # Classify renderer-visible source material on a page whose semantic/path
+    # extractors returned nothing. Glyph placements remain eligible for their
+    # exact requested renderer; image/non-text marks authorize a verified page
+    # raster only when no requested-representation artifact exists.
+    def self.svg_page_source_summary(svg, media_box, opts = {})
+      source = svg.to_s
+      placed = CairoGlyphSource.model_space_loops(source, media_box, opts)
+      definitions = source.scan(/<defs\b.*?<\/defs>/im).join
+      visible_body = source.gsub(/<defs\b.*?<\/defs>/im, '')
+      image_ids = definitions.scan(
+        /<image\b[^>]*\bid=["']([^"']+)["']/i
+      ).flatten.map { |value| value.to_s }
+      image_definitions = image_ids.length
+      use_refs = visible_body.scan(
+        /<use\b[^>]*(?:xlink:href|href)=["']#([^"']+)["']/i
+      ).flatten.map { |value| value.to_s }
+      referenced_image_placements = use_refs.count do |reference|
+        image_ids.include?(reference)
+      end
+      direct_image_placements = visible_body.scan(/<image\b/i).length
+      image_placements = direct_image_placements + referenced_image_placements
+      source_uses = use_refs.count do |reference|
+        reference !~ /\Aglyph-/i
+      end
+      direct_nontext_marks = visible_body.scan(
+        /<(?:path|rect|circle|ellipse|polygon|polyline|line)\b/i
+      ).length
+      {
+        :source_glyph_placements => placed.length,
+        :source_uses => source_uses,
+        :image_definitions => image_definitions,
+        :direct_image_placements => direct_image_placements,
+        :referenced_image_placements => referenced_image_placements,
+        :image_placements => image_placements,
+        :direct_nontext_marks => direct_nontext_marks,
+        :visible_nontext_source => image_placements > 0 || source_uses > 0 ||
+          direct_nontext_marks > 0,
+        :visible_source => !placed.empty? || image_placements > 0 ||
+          source_uses > 0 ||
+          direct_nontext_marks > 0
+      }
+    rescue StandardError => e
+      {
+        :source_glyph_placements => 0,
+        :source_uses => 0,
+        :image_definitions => 0,
+        :direct_image_placements => 0,
+        :referenced_image_placements => 0,
+        :image_placements => 0,
+        :direct_nontext_marks => 0,
+        :visible_nontext_source => false,
+        :visible_source => false,
+        :inspection_error => e.message.to_s
+      }
+    end
+
+    def self.record_svg_3d_text_delivery!(stats, page_num, text_items,
+                                          render_result,
+                                          requested_mode = :text3d,
+                                          prior_attempts = {})
+      requested_mode = RepresentationFidelity.normalize_mode(requested_mode)
+      requested_mode = :text3d unless requested_mode
+      rows = Array(render_result[:span_results])
+      physical_rows = Array(render_result[:unmatched_source_results])
+      expected = Array(text_items).map do |item|
+        RepresentationFidelity.source_span_id(item)
+      end
+      delivered = rows.map { |row| row[:source_span_id].to_s }
+      unless delivered.sort == expected.sort
+        raise RepresentationFidelity::ContractError,
+              '3D text delivered source set does not equal the requested source set'
+      end
+      rows.each do |row|
+        required = [
+          :identity_verified, :placement_verified, :rotation_verified,
+          :size_verified, :depth_verified
+        ]
+        unless required.all? { |key| row[key] == true }
+          raise RepresentationFidelity::ContractError,
+                "#{row[:source_span_id]} 3D text evidence is incomplete"
+        end
+        unless row[:depth].to_f > 0.0 && row[:extruded_face_count].to_i > 0
+          raise RepresentationFidelity::ContractError,
+                "#{row[:source_span_id]} is flat, not 3D text"
+        end
+        prior = prior_attempts[row[:source_span_id].to_s]
+        history = prior.is_a?(Hash) ?
+          Array(prior[:attempt_history]).map { |entry| entry.dup } : []
+        history << {
+          :mode => :text3d, :outcome => :complete,
+          :resulting_entity_ids => [row[:group_entity_id]],
+          :cleanup_outcome => :not_required,
+          :placement_verified => true,
+          :rotation_verified => true,
+          :width_verified => true,
+          :height_verified => true,
+          :entity_type_verified => true,
+          :source_glyph_identity_verified => true,
+          :positive_z_depth_verified => true,
+          :visual_fidelity_verified => true
+        }
+        stats[:text_attempts] ||= []
+        stats[:text_attempts] << {
+          :source_span_id => row[:source_span_id],
+          :requested_mode => requested_mode,
+          :delivered_mode => :text3d,
+          :renderer => :svg_source_3d_text,
+          :resulting_entity_ids => [row[:group_entity_id]],
+          :visual_fidelity_verified => true,
+          :placement_verified => true,
+          :rotation_verified => true,
+          :width_verified => true,
+          :height_verified => true,
+          :entity_type_verified => true,
+          :source_glyph_identity_verified => true,
+          :positive_z_depth_verified => true,
+          :width => row[:width], :height => row[:height], :depth => row[:depth],
+          :attempt_history => history
+        }
+        stats[:source_provenance_objects] ||= []
+        stats[:source_provenance_objects] << {
+          :object_id => row[:source_span_id],
+          :span_id => row[:source_span_id],
+          :page => page_num.to_i,
+          :source_kind => 'text_span',
+          :created_entity_type => 'source_glyph_3d_text',
+          :renderer => 'svg_source_3d_text',
+          :resulting_entity_ids => [row[:group_entity_id]],
+          :placement_verified => true,
+          :rotation_verified => true,
+          :width_verified => true,
+          :height_verified => true,
+          :entity_type_verified => true,
+          :source_glyph_identity_verified => true,
+          :positive_z_depth_verified => true,
+          :width => row[:width], :height => row[:height], :depth => row[:depth]
+        }
+      end
+      physical_rows.each do |row|
+        required = [
+          :identity_verified, :placement_verified, :rotation_verified,
+          :size_verified, :depth_verified,
+          :physical_source_identity_verified
+        ]
+        unless row[:source_kind] == :svg_glyph_placement &&
+               !row[:source_unit_id].to_s.empty? &&
+               required.all? { |key| row[key] == true } &&
+               row[:source_span_id].nil? &&
+               row[:depth].to_f > 0.0 &&
+               row[:extruded_face_count].to_i > 0 &&
+               !Array(row[:placement_indices]).empty?
+          raise RepresentationFidelity::ContractError,
+                'unjoined SVG source-glyph 3D evidence is incomplete'
+        end
+        stats[:source_provenance_objects] ||= []
+        stats[:source_provenance_objects] << {
+          :object_id => row[:source_unit_id],
+          :span_id => nil,
+          :page => page_num.to_i,
+          :source_kind => 'svg_glyph_placement',
+          :semantic_identity_available => false,
+          :created_entity_type => 'source_glyph_3d_text',
+          :renderer => 'svg_source_3d_text',
+          :resulting_entity_ids => [row[:group_entity_id]],
+          :source_placement_indices => row[:placement_indices],
+          :source_glyph_identity_verified => true,
+          :positive_z_depth_verified => true,
+          :width => row[:width], :height => row[:height], :depth => row[:depth]
+        }
+        stats[:source_glyph_physical_deliveries] ||= []
+        stats[:source_glyph_physical_deliveries] << {
+          :page => page_num.to_i,
+          :source_unit_id => row[:source_unit_id],
+          :placement_indices => row[:placement_indices],
+          :resulting_entity_ids => [row[:group_entity_id]],
+          :delivered_mode => :text3d,
+          :visual_fidelity_verified => true,
+          :source_glyph_identity_verified => true,
+          :positive_z_depth_verified => true
+        }
+      end
+      physical_count = physical_rows.inject(0) do |sum, row|
+        sum + row[:source_placement_count].to_i
+      end
+      record_text_renderer(
+        stats, page_num,
+        :renderer => :svg_source_3d_text,
+        :mode => :text3d,
+        :requested_mode => requested_mode,
+        :delivered_mode => :text3d,
+        :degraded => requested_mode != :text3d,
+        :reason => requested_mode == :text3d ? nil :
+          'affirmative item-specific requested-representation impossibility',
+        :count => rows.length + physical_count,
+        :semantic_span_count => rows.length,
+        :unjoined_source_glyph_placement_count => physical_count,
+        :source_glyph_identity_verified => true,
+        :positive_z_depth_verified => true,
+        :depths => (rows + physical_rows).map { |row| row[:depth] }
+      )
+      true
+    end
+
+    def self.record_page_representation_delivery!(stats, page_num, text_items,
+                                                  page_group, mode,
+                                                  created_entity_type,
+                                                  renderer, svg_result,
+                                                  media_box,
+                                                  record_renderer = true)
+      normalized_mode = RepresentationFidelity.normalize_mode(mode)
+      allowed_types = {
+        geometry: 'page_path_geometry',
+        glyphs: 'glyph_outline'
+      }
+      unless allowed_types[normalized_mode] == created_entity_type.to_s
+        raise RepresentationFidelity::ContractError,
+              'Page representation mode and entity type are inconsistent'
+      end
+      raise RepresentationFidelity::ContractError,
+            'Page representation delivery must be a distinct group' unless
+        page_group && page_group.respond_to?(:entities)
+      unless svg_page_visual_fidelity_verified?(
+               svg_result, text_items, media_box, normalized_mode, page_group
+             )
+        raise RepresentationFidelity::ContractError,
+              'Page representation type/visual/source evidence is incomplete'
+      end
+      source_ids = Array(text_items).map do |item|
+        RepresentationFidelity.source_span_id(item)
+      end
+      raise RepresentationFidelity::ContractError,
+            'Page representation delivery source set is empty' if source_ids.empty?
+      raise RepresentationFidelity::ContractError,
+            'Page representation delivery source IDs are duplicated' unless
+        source_ids.uniq.length == source_ids.length
+      entity_ids = [RepresentationFidelity.stable_entity_id(page_group)]
+      record = {
+        page: page_num.to_i,
+        source_span_ids: source_ids,
+        requested_mode: normalized_mode,
+        delivered_mode: normalized_mode,
+        created_entity_type: created_entity_type.to_s,
+        resulting_entity_ids: entity_ids,
+        visual_fidelity_verified: true
+      }
+      stats[:page_text_delivery_records] ||= []
+      stats[:page_text_delivery_records] << record
+      stats[:text_attempts] ||= []
+      stats[:text_attempts] << {
+        source_span_ids: source_ids,
+        requested_mode: normalized_mode,
+        delivered_mode: normalized_mode,
+        resulting_entity_ids: entity_ids,
+        visual_fidelity_verified: true,
+        attempt_history: [{
+          mode: normalized_mode, outcome: :complete,
+          resulting_entity_ids: entity_ids,
+          cleanup_outcome: :not_required,
+          visual_fidelity_verified: true
+        }]
+      }
+      if record_renderer
+        record_text_renderer(
+          stats, page_num,
+          renderer: renderer, mode: normalized_mode,
+          requested_mode: normalized_mode, delivered_mode: normalized_mode,
+          degraded: false, count: source_ids.length,
+          resulting_entity_ids: entity_ids
+        )
+      end
+      true
+    end
+
+    def self.record_page_geometry_delivery!(stats, page_num, text_items,
+                                            page_group, svg_result, media_box)
+      record_page_representation_delivery!(
+        stats, page_num, text_items, page_group, :geometry,
+        'page_path_geometry', :svg_raw_path_geometry, svg_result, media_box,
+        false
+      )
+    end
+
+    def self.record_page_glyph_delivery!(stats, page_num, text_items,
+                                         page_group, svg_result, media_box)
+      record_page_representation_delivery!(
+        stats, page_num, text_items, page_group, :glyphs,
+        'glyph_outline', :svg_glyph_components, svg_result, media_box, false
+      )
+    end
+
+    def self.representation_entity_type(entity)
+      return '' unless entity
+      if entity.respond_to?(:typename)
+        value = entity.typename.to_s
+        return value unless value.empty?
+      end
+      entity.class.name.to_s.split('::').last
+    rescue StandardError
+      ''
+    end
+
+    def self.representation_entity_members(value)
+      collection = value.respond_to?(:entities) ? value.entities : value
+      return nil unless collection && collection.respond_to?(:to_a)
+      Array(collection.to_a)
+    rescue StandardError
+      nil
+    end
+
+    def self.svg_page_representation_type_verified?(svg_result, requested_mode,
+                                                    page_group)
+      return false unless svg_result.is_a?(Hash)
+      members = representation_entity_members(page_group)
+      return false unless members && !members.empty?
+      mode = normalize_text_renderer_mode(requested_mode)
+
+      if mode == :geometry
+        return false unless svg_result[:raw_edge_glyphs] == true
+        return false unless svg_result[:component_container] == false
+        return false unless svg_result[:glyph_instances].to_i == 0
+        return false unless svg_result[:flattened_glyph_instances].to_i == 0
+        return false unless svg_result[:edges].to_i > 0
+        return false unless members.length == svg_result[:edges].to_i
+        return members.all? do |entity|
+          representation_entity_type(entity) == 'Edge'
+        end
+      end
+
+      if mode == :glyphs
+        return false unless svg_result[:raw_edge_glyphs] == false
+        return false unless svg_result[:component_container] == true
+        return false unless svg_result[:flattened_glyph_instances].to_i == 0
+        return false unless svg_result[:glyph_instances].to_i > 0
+        return false unless svg_result[:glyph_instances].to_i ==
+                            svg_result[:glyphs].to_i
+        return false unless members.length == 1
+        container = members.first
+        return false unless representation_entity_type(container) == 'Group'
+        instances = representation_entity_members(container)
+        return false unless instances &&
+                            instances.length == svg_result[:glyph_instances].to_i
+        return instances.all? do |entity|
+          representation_entity_type(entity) == 'ComponentInstance'
+        end
+      end
+
+      false
+    rescue StandardError
+      false
+    end
+
+    def self.svg_page_visual_fidelity_verified?(svg_result, text_items,
+                                                media_box, requested_mode,
+                                                page_group)
+      return false unless svg_result.is_a?(Hash)
+      return false unless svg_result[:glyphs].to_i > 0
+      return false unless svg_result[:skipped_glyphs].to_i == 0
+      return false unless svg_result[:missing_glyphs].to_i == 0
+      return false unless svg_result[:placement_failures].to_i == 0
+      unoutlined = svg_result[:unoutlined_placement_evidence]
+      return false if !unoutlined.nil? && !unoutlined.is_a?(Array)
+      unoutlined_ids = Array(unoutlined).map do |entry|
+        entry.is_a?(Hash) ? entry[:glyph_id].to_s : ''
+      end.uniq.sort
+      certified_unoutlined = Array(
+        svg_result[:certified_unoutlined_glyph_ids]
+      ).map { |glyph_id| glyph_id.to_s }.uniq.sort
+      return false unless (unoutlined_ids - certified_unoutlined).empty?
+      return false unless svg_page_representation_type_verified?(
+        svg_result, requested_mode, page_group
+      )
+
+      source_ids = Array(text_items).map do |item|
+        RepresentationFidelity.source_span_id(item)
+      end
+      return false if source_ids.empty? || source_ids.uniq.length != source_ids.length
+      match = CairoGlyphSource.match_spans(
+        svg_result[:placements_pdf], text_items, media_box
+      )
+      matched_ids = Array(match[:matched_items]).map do |item|
+        RepresentationFidelity.source_span_id(item)
+      end
+      matched_ids.sort == source_ids.sort &&
+        match[:runs_unmatched].to_i == 0 &&
+        match[:placements_unmatched].to_i == 0
+    rescue RepresentationFidelity::ContractError
+      raise
+    rescue StandardError
+      false
+    end
+
+    # A known return-code-zero Poppler diagnostic may remain deferred only
+    # until the current page's created glyphs have been matched to every real
+    # extractor source span and host placement failures are known. Production
+    # owns the exact fixture certificate; callers cannot supply a blanket true.
+    def self.finalize_svg_poppler_semantics(svg_result, pdf_path, page_num,
+                                            text_items, media_box)
+      return false unless svg_result.is_a?(Hash)
+      transport = svg_result[:poppler_transport_validation]
+      if svg_result[:renderer] == :pdftocairo && !transport.is_a?(Hash)
+        return false
+      end
+      deferred = transport.is_a?(Hash) &&
+        transport[:semantic_completion_deferred] == true
+      unoutlined_present = !svg_result.key?(:unoutlined_placement_evidence) ||
+        !svg_result[:unoutlined_placement_evidence].is_a?(Array) ||
+        !svg_result[:unoutlined_placement_evidence].empty?
+      return true unless deferred || unoutlined_present
+
+      proof = PopplerSemanticProof.for_svg_page(pdf_path, page_num)
+      allowed_unoutlined = proof.respond_to?(:call) ?
+        PopplerSemanticProof::ADOBE_GB1_PAGE_CERTIFICATE[
+          :allowed_unoutlined_glyph_ids
+        ] : []
+      evidence = CairoGlyphSource.semantic_completion_evidence(
+        svg_result, text_items, media_box, allowed_unoutlined
+      )
+      semantic_ok = if deferred
+                      SvgTextRenderer.finalize_deferred_semantic_validation(
+                        svg_result, proof, evidence
+                      )
+                    else
+                      proof.respond_to?(:call) &&
+                        PopplerSemanticProof.complete_failure_evidence?(
+                          evidence
+                        ) && proof.call(evidence) == true
+                    end
+      if semantic_ok
+        svg_result[:certified_unoutlined_glyph_ids] =
+          Array(allowed_unoutlined).map { |glyph_id| glyph_id.to_s }.uniq.sort
+      end
+      semantic_ok
+    rescue StandardError => e
+      Logger.warn('PopplerSemanticProof',
+        "Page #{page_num}: final semantic proof failed: #{e.message}")
+      false
+    end
+
+    def self.create_owned_page_representation_group!(parent_entities, name)
+      before = RepresentationFidelity.snapshot(parent_entities)
+      group = nil
+      begin
+        group = parent_entities.add_group
+        raise RepresentationFidelity::ContractError,
+              'Page representation group was not created' unless group
+        group.name = name.to_s if group.respond_to?(:name=)
+        after = RepresentationFidelity.snapshot(parent_entities)
+        created = RepresentationFidelity.created_between(before, after)
+        unless created.length == 1 && created.first.equal?(group)
+          raise RepresentationFidelity::ContractError,
+                'Page representation group ownership is ambiguous'
+        end
+        group
+      rescue RepresentationFidelity::ContractError => e
+        restore_page_representation_snapshot!(parent_entities, before, group) if group
+        raise e
+      rescue StandardError => e
+        restore_page_representation_snapshot!(parent_entities, before, group) if group
+        raise RepresentationFidelity::ContractError,
+              "Page representation group creation failed: #{e.message}"
+      end
+    end
+
+    def self.restore_page_representation_snapshot!(parent_entities,
+                                                   before_snapshot, group)
+      created_id = nil
+      begin
+        created_id = RepresentationFidelity.stable_entity_id(group)
+      rescue RepresentationFidelity::ContractError
+        # A stable ID is not required to erase the exact object reference.  The
+        # before/after snapshot equality below is the fail-closed proof.
+      end
+      raise RepresentationFidelity::ContractError,
+            'Page representation target cannot erase its owned group' unless
+        parent_entities.respond_to?(:erase_entities)
+      parent_entities.erase_entities(group)
+      after = RepresentationFidelity.snapshot(parent_entities)
+      unless after[:by_id].keys.sort == before_snapshot[:by_id].keys.sort
+        raise RepresentationFidelity::ContractError,
+              'Page representation group cleanup did not restore the exact snapshot'
+      end
+      created_id ? [created_id] : []
+    rescue RepresentationFidelity::ContractError
+      raise
+    rescue StandardError => e
+      raise RepresentationFidelity::ContractError,
+            "Page representation group cleanup failed: #{e.message}"
+    end
+
+    def self.page_representation_transform(media_box, scale, rotation, y_offset)
+      width = PageTransform.box_width(media_box) * (1.0 / 72.0) * scale.to_f
+      height = PageTransform.box_height(media_box) * (1.0 / 72.0) * scale.to_f
+      y = y_offset.to_f
+      zaxis = Geom::Vector3d.new(0.0, 0.0, 1.0)
+      case PageTransform.normalize_rotation(rotation)
+      when 90
+        origin = Geom::Point3d.new(0.0, width + y, 0.0)
+        xaxis = Geom::Vector3d.new(0.0, -1.0, 0.0)
+        yaxis = Geom::Vector3d.new(1.0, 0.0, 0.0)
+      when 180
+        origin = Geom::Point3d.new(width, height + y, 0.0)
+        xaxis = Geom::Vector3d.new(-1.0, 0.0, 0.0)
+        yaxis = Geom::Vector3d.new(0.0, -1.0, 0.0)
+      when 270
+        origin = Geom::Point3d.new(height, y, 0.0)
+        xaxis = Geom::Vector3d.new(0.0, 1.0, 0.0)
+        yaxis = Geom::Vector3d.new(-1.0, 0.0, 0.0)
+      else
+        origin = Geom::Point3d.new(0.0, y, 0.0)
+        xaxis = Geom::Vector3d.new(1.0, 0.0, 0.0)
+        yaxis = Geom::Vector3d.new(0.0, 1.0, 0.0)
+      end
+      Geom::Transformation.axes(origin, xaxis, yaxis, zaxis)
+    end
+
+    def self.apply_and_verify_page_representation_transform(group, media_box,
+                                                            scale, rotation,
+                                                            y_offset)
+      expected = page_representation_transform(
+        media_box, scale, rotation, y_offset
+      )
+      return false unless group.respond_to?(:transform!)
+      group.transform!(expected)
+      return false unless group.respond_to?(:transformation)
+      actual = group.transformation
+      return false unless actual.respond_to?(:to_a) && expected.respond_to?(:to_a)
+      expected_values = expected.to_a
+      actual_values = actual.to_a
+      return false unless expected_values.length == actual_values.length
+      expected_values.each_with_index.all? do |value, index|
+        (value.to_f - actual_values[index].to_f).abs <= 1.0e-8
+      end
+    rescue StandardError
+      false
+    end
+
+    def self.erase_owned_glyph_definitions!(model, definitions)
+      doomed = Array(definitions).compact
+      return true if doomed.empty?
+      collection = model && model.respond_to?(:definitions) ? model.definitions : nil
+      raise RepresentationFidelity::ContractError,
+            'Glyph definition collection is unavailable for cleanup' unless
+        collection && collection.respond_to?(:remove) && collection.respond_to?(:to_a)
+      doomed.each do |definition|
+        collection.remove(definition) if collection.to_a.include?(definition)
+      end
+      remaining = collection.to_a
+      live = doomed.select { |definition| remaining.include?(definition) }
+      raise RepresentationFidelity::ContractError,
+            'Owned glyph definition cleanup is unverifiable' unless live.empty?
+      true
+    rescue RepresentationFidelity::ContractError
+      raise
+    rescue StandardError => e
+      raise RepresentationFidelity::ContractError,
+            "Owned glyph definition cleanup failed: #{e.message}"
     end
 
     def self.normalize_text_renderer_mode(mode)
       case mode.to_s.strip.downcase
       when 'text3d', '3d_text', '3d text', 'add_3d_text' then :text3d
-      when 'labels', 'label', 'add_text' then :labels
+      when 'labels', 'label', 'text', 'add_text' then :labels
       when 'glyphs', 'glyph' then :glyphs
       when 'geometry', 'outlines', 'outline' then :geometry
       when 'raster', 'image' then :raster
@@ -199,120 +1488,97 @@ module BlueCollarSystems
       end
     end
 
-    def self.text_fallback_event_count(fallbacks)
-      Array(fallbacks).inject(0) do |total, fallback|
-        next total unless fallback.respond_to?(:[])
-        count = (fallback[:count] || fallback['count']).to_i
-        total + (count > 0 ? count : 1)
+    # Representation changes are fail-closed.  A missing helper, host/API
+    # failure, exception, empty artifact, or failed visual check is evidence
+    # that this attempt failed; it is not affirmative proof that this source
+    # span can never be delivered in the requested representation.
+    def self.enforce_requested_text_delivery!(page_num, requested_mode, failures)
+      rows = Array(failures)
+      return true if rows.empty?
+
+      mode = normalize_text_renderer_mode(requested_mode)
+      label = case mode
+              when :labels then 'Labels'
+              when :text3d then '3D Text'
+              when :glyphs then 'Glyphs'
+              when :geometry then 'Geometry'
+              when :raster then 'Raster'
+              else requested_mode.to_s
+              end
+      details = rows.map do |failure|
+        next 'unidentified source span: unreported failure' unless failure.respond_to?(:[])
+        source_id = (failure[:source_span_id] || failure['source_span_id']).to_s
+        source_id = 'unidentified source span' if source_id.empty?
+        reason = (failure[:reason] || failure['reason']).to_s
+        reason = 'unreported failure' if reason.empty?
+        "#{source_id}: #{reason}"
       end
-    rescue StandardError
-      0
+      raise RepresentationFidelity::ContractError,
+            "Page #{page_num}: requested #{label} representation was not " \
+            "certified (#{details.join('; ')}); no representation fallback " \
+             'is authorized without affirmative, item-specific impossibility evidence.'
     end
 
-    # A builder's text_objects total includes both requested-mode entities and
-    # successful per-span rescues.  Keep the non-degraded renderer entry honest
-    # by reporting only spans actually delivered in its native requested mode.
-    def self.native_text_delivery_count(total, fallbacks)
-      native = total.to_i - text_fallback_event_count(fallbacks)
-      native > 0 ? native : 0
-    rescue StandardError
-      0
+    # If the SVG renderer found real glyph placements but neither source
+    # extractor produced spans, cleaning the unverifiable page group and then
+    # continuing would silently omit detected text. Pages with no detected SVG
+    # glyphs remain valid no-text pages; detected-but-unmatched text stops.
+    def self.enforce_detected_svg_text_delivery!(page_num, requested_mode,
+                                                 failure_info, text_items)
+      return true unless Array(text_items).empty?
+      info = failure_info.is_a?(Hash) ? failure_info : {}
+      detected = info[:detected_svg_placements]
+      detected = info['detected_svg_placements'] if detected.nil?
+      return true unless detected.to_i > 0
+
+      mode = normalize_text_renderer_mode(requested_mode)
+      label = case mode
+              when :glyphs then 'Glyphs'
+              when :geometry then 'Geometry'
+              else requested_mode.to_s
+              end
+      raise RepresentationFidelity::ContractError,
+            "Page #{page_num}: requested #{label} renderer detected " \
+            "#{detected.to_i} glyph placement(s), but no certified source " \
+             'spans were available; the detected text was not silently omitted.'
     end
 
-    def self.text_delivery_failure_count(failures)
-      Array(failures).inject(0) do |total, failure|
-        next total unless failure.respond_to?(:[])
-        count = (failure[:count] || failure['count']).to_i
-        total + (count > 0 ? count : 1)
-      end
-    rescue StandardError
-      0
-    end
+    # A zero-span extractor result is only a valid no-text page when the page
+    # and its referenced Form XObjects also contain no nonempty PDF text-show
+    # operands. This detector does not deliver a substitute representation; it
+    # prevents undecodable text from being silently omitted in any text mode.
+    def self.enforce_extracted_text_presence!(page_num, requested_mode,
+                                              text_items, page_streams,
+                                              form_streams)
+      return true unless Array(text_items).empty?
 
-    # TEXTMODE-1 terminal rung.  This is intentionally independent of the
-    # normal raster_fallback option: a readable PDF whose requested/native text
-    # APIs are both impossible must still receive a visible page representation.
-    def self.promote_text_delivery_failures_to_raster!(model, pdf_path, page_num,
-                                                        media_box, opts, import_start,
-                                                        y_offset, render_box, page_group,
-                                                        requested_mode, stats, failures,
-                                                        page_vector_entities = nil)
-      count = text_delivery_failure_count(failures)
-      return false if count <= 0
+      detector_streams = Array(page_streams) + Array(form_streams)
+      detected = TextParser.new(
+        detector_streams, {}, { strict_text_fidelity: true,
+                                merge_text_runs: false }
+      ).nonempty_text_show_operation_count
+      return true unless detected.to_i > 0
 
-      vector_entities = Array(page_vector_entities).compact
-      if page_group && !page_group.respond_to?(:hidden=)
-        Logger.warn('Pipeline', "Page #{page_num}: page group cannot be hidden for terminal raster fallback.")
-        return false
-      end
-      if page_group.nil? && !vector_entities.empty? &&
-         (!model || !model.respond_to?(:active_entities) ||
-          !model.active_entities.respond_to?(:erase_entities))
-        Logger.warn('Pipeline', "Page #{page_num}: ungrouped vector entities cannot be removed for terminal raster fallback.")
-        return false
-      end
-
-      reason = Array(failures).map do |failure|
-        failure[:reason] || failure['reason'] if failure.respond_to?(:[])
-      end.compact.map(&:to_s).reject(&:empty?).first
-      reason = 'text_native_api_unavailable' if reason.to_s.empty?
-      raster_ok = import_page_as_raster(
-        model, pdf_path, page_num, media_box, opts, import_start, y_offset, render_box
-      )
-      return false unless raster_ok
-
-      begin
-        if page_group
-          page_group.hidden = true
-        elsif !vector_entities.empty?
-          model.active_entities.erase_entities(*vector_entities)
-        end
-      rescue StandardError => e
-        Logger.warn('Pipeline', "Page #{page_num}: remove vector page before raster fallback failed: #{e.message}")
-        return false
-      end
-      stats[:text_renderers] = Array(stats[:text_renderers]).reject do |entry|
-        entry.respond_to?(:[]) && entry[:page].to_i == page_num.to_i
-      end
-      record_text_renderer(stats, page_num,
-        renderer: :raster,
-        mode: :raster,
-        requested_mode: requested_mode,
-        delivered_mode: :raster,
-        degraded: true,
-        reason: reason,
-        count: count,
-        note: "Text-mode terminal raster fallback: #{reason}")
-      stats[:raster_fallback_used] = true
-      Logger.warn(
-        'Pipeline',
-        "Page #{page_num}: #{count} text span(s) exhausted native text rungs; delivered page raster fallback."
-      )
-      true
+      mode = normalize_text_renderer_mode(requested_mode)
+      label = case mode
+              when :labels then 'Labels'
+              when :text3d then '3D Text'
+              when :glyphs then 'Glyphs'
+              when :geometry then 'Geometry'
+              when :raster then 'Raster'
+              else requested_mode.to_s
+              end
+      raise RepresentationFidelity::ContractError,
+            "Page #{page_num}: #{detected.to_i} nonempty PDF text-show " \
+            "operation(s) were detected, but requested #{label} had no " \
+            'certified source spans; the detected text was not silently omitted.'
+    rescue RepresentationFidelity::ContractError
+      raise
     rescue StandardError => e
-      Logger.warn('Pipeline', "Page #{page_num}: terminal text raster fallback failed: #{e.message}")
-      false
-    end
-
-    def self.discard_hidden_page_vector_result!(stats, page_counts, provenance_start)
-      [:edges, :faces, :arcs, :text].each do |key|
-        stats[key] = page_counts[key].to_i
-      end
-      objects = stats[:source_provenance_objects]
-      if objects.is_a?(Array) && objects.length > provenance_start.to_i
-        objects.slice!(provenance_start.to_i, objects.length - provenance_start.to_i)
-      end
-    rescue StandardError => e
-      Logger.warn('Pipeline', "discard hidden vector page result failed: #{e.message}")
-    end
-
-    def self.page_entities_created_since(model, before_entities)
-      return [] unless model && model.respond_to?(:active_entities)
-      entities = model.active_entities
-      return [] unless entities && entities.respond_to?(:to_a)
-      Array(entities.to_a) - Array(before_entities)
-    rescue StandardError
-      []
+      raise RepresentationFidelity::ContractError,
+            "Page #{page_num}: no-text proof failed for requested " \
+            "#{requested_mode} (#{e.message}); import stopped instead of " \
+            'silently omitting possible text.'
     end
 
     # Round 20: accumulate faithful mesh-text target heights (inches) for
@@ -636,6 +1902,19 @@ module BlueCollarSystems
       :spread
     end
 
+    def self.normalized_requested_pages(requested, page_count)
+      total = page_count.to_i
+      return [] if total <= 0
+      values = requested == :all ? (1..total).to_a : Array(requested)
+      seen = {}
+      values.each_with_object([]) do |value, pages|
+        page = value.to_i
+        next if page < 1 || page > total || seen[page]
+        seen[page] = true
+        pages << page
+      end
+    end
+
     def self.normalize_page_gap_ratio(raw)
       val = begin
         Float(raw)
@@ -908,51 +2187,202 @@ module BlueCollarSystems
       end
     end
 
+    def self.import_contract_ready?(stats)
+      contract = stats[:import_contract_ready]
+      return contract if contract == true || contract == false
+      return false unless contract.is_a?(Hash)
+      contract[:ready] == true || contract['ready'] == true
+    end
+
+    def self.finalize_import_diagnostics!(path, opts, stats)
+      report = QAReport.build_from_stats(path, opts, stats)
+      parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
+      if parts_payload && parts_payload[:row_count].to_i > 0
+        report_target = QAReport.default_output_path(path)
+        sidecar_base = File.join(
+          File.dirname(report_target),
+          File.basename(path.to_s, File.extname(path.to_s))
+        )
+        parts_path = PartsBootstrap.write_sidecar(parts_payload, sidecar_base)
+        if parts_path
+          parts_payload[:sidecar_path] = parts_path
+          report[:extra][:parts_bootstrap] = parts_payload
+          stats[:parts_bootstrap_sidecar_path] = parts_path
+        end
+      end
+      extra = report[:extra] || {}
+      stats[:human_summary] = extra[:human_summary]
+      stats[:scale_crosscheck] = extra[:scale_crosscheck]
+      stats[:performance_hint] = extra[:performance_hint]
+      stats[:actual_text_entity_types] = extra[:actual_text_entity_types]
+      stats[:model_3d_intent] = extra[:model_3d_intent]
+      stats[:representation_fidelity] = extra[:representation_fidelity] ||
+        extra['representation_fidelity'] || { :ready => false }
+      stats[:import_contract_ready] = extra[:import_contract_ready] ||
+        extra['import_contract_ready'] || { :ready => false }
+      report_path = QAReport.write_json(report, QAReport.default_output_path(path))
+      stats[:import_report_path] = report_path if report_path
+      sidecar_path = write_source_provenance_sidecar(path, opts, stats)
+      stats[:source_provenance_sidecar_path] = sidecar_path if sidecar_path
+      ImportHealth.record!(stats, path)
+      stats[:import_contract_ready]
+    rescue StandardError => e
+      stats[:import_contract_ready] = {
+        :ready => false,
+        :checks => { :diagnostics_generated => false },
+        :errors => ["diagnostics_error:#{e.class}:#{e.message}"]
+      }
+      Logger.error('Pipeline', "import diagnostics failed: #{e.message}", e)
+      stats[:import_contract_ready]
+    end
+
+    def self.run_forced_raster_pipeline(model, path, opts)
+      dpi = opts[:raster_dpi] || 300
+      Logger.info('Pipeline', "Explicit Raster mode at #{dpi} DPI")
+      parser = PDFParser.new(path)
+      parser.parse
+      if parser.page_count.to_i <= 0
+        raise RepresentationFidelity::ContractError,
+              'PDF parser returned zero pages; Raster delivery is impossible.'
+      end
+
+      pages = normalized_requested_pages(opts[:pages], parser.page_count)
+      if pages.empty?
+        raise RepresentationFidelity::ContractError,
+              'No valid selected PDF pages remain for Raster delivery.'
+      end
+
+      pre_import_entities = model.active_entities.to_a
+      import_start = Time.now
+      page_fit_bounds = Geom::BoundingBox.new
+      arrangement = normalize_page_arrangement(opts[:page_arrangement])
+      gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
+      running_y_offset = 0.0
+      operation_open = false
+      stats = {
+        :pages => 0, :primitives => 0, :edges => 0, :faces => 0,
+        :arcs => 0, :text => 0, :components => 0, :layers => [],
+        :cleanup => {}, :generic => nil, :mode_used => :raster,
+        :xobjects => 0, :embedded_images => 0,
+        :embedded_images_placed => 0, :embedded_image_paths => [],
+        :embedded_image_dir => nil, :extruded_faces => 0,
+        :text_mode => :raster, :match_pdf_layers => false,
+        :text_renderers => [], :page_text_sources => {}, :peak_mb => 0.0,
+        :model_3d_texts => [], :page_text_map => {},
+        :recognition_skipped_pages => [],
+        :import_session_id => new_import_session_id,
+        :source_provenance_objects => [], :text_source_span_ids => [],
+        :text_attempts => [], :page_text_delivery_records => [],
+        :terminal_text_delivery_records => [],
+        :terminal_cleanup_events => [], :fallback_transitions => [],
+        :page_representation_fallbacks => [],
+        :empty_page_source_inspections => [],
+        :representation_ownership_group_forced_pages => [],
+        :raster_delivery_records => [], :raster_fallback_used => false
+      }
+
+      model.start_operation('Import PDF Raster', true)
+      operation_open = true
+      pages.each_with_index do |page_num, index|
+        raw = parser.page_data(page_num)
+        unless raw.is_a?(Hash)
+          raise RepresentationFidelity::ContractError,
+                "Page #{page_num}: parser returned no page data for Raster delivery."
+        end
+        media_box = raw[:media_box]
+        media_box = [0, 0, 612, 792] unless
+          media_box.is_a?(Array) && media_box.length >= 4
+        crop_box = raw[:crop_box]
+        crop_box = nil unless crop_box.is_a?(Array) && crop_box.length >= 4
+        render_box = crop_box || media_box
+        page_rotation = PageTransform.normalize_rotation(raw[:rotation])
+        pct = pages.length > 1 ?
+          " (#{((index.to_f / pages.length) * 100).round}%)" : ''
+        Sketchup.status_text =
+          "PDF Raster Import#{pct} — Page #{page_num}/#{parser.page_count}"
+
+        raster = verified_raster_entity!(
+          model, path, page_num, media_box, opts, import_start,
+          running_y_offset, render_box, page_rotation
+        )
+        artifact_evidence = raster[:artifact_evidence]
+        record = {
+          :page => page_num,
+          :source_span_ids => [],
+          :requested_mode => :raster,
+          :delivered_mode => :raster,
+          :resulting_entity_ids => [raster[:entity_id]],
+          :created_entity_type => 'raster_image',
+          :real_raster_verified => true,
+          :visual_fidelity_verified => true,
+          :artifact_evidence => artifact_evidence,
+          :cleanup_outcome => :not_required,
+          :delivery_scope => :page_raster,
+          :no_semantic_text => true
+        }
+        stats[:terminal_text_delivery_records] << record
+        stats[:raster_delivery_records] << record.dup
+        record_text_renderer(
+          stats, page_num,
+          :renderer => :pdftocairo_real_raster,
+          :mode => :raster,
+          :requested_mode => :raster,
+          :delivered_mode => :raster,
+          :degraded => false,
+          :count => 1,
+          :resulting_entity_ids => [raster[:entity_id]],
+          :real_raster_verified => true,
+          :artifact_evidence => artifact_evidence
+        )
+        add_page_fit_bounds(
+          page_fit_bounds, media_box, render_box, opts[:scale],
+          running_y_offset, page_rotation
+        )
+        _display_width, display_height = raster_display_dimensions(
+          render_box, page_rotation
+        )
+        scale = opts[:scale].to_f
+        scale = 1.0 if scale <= 0.0
+        height_in = display_height.to_f * (1.0 / 72.0) * scale
+        running_y_offset += page_stack_step(height_in, arrangement, gap_ratio)
+        stats[:pages] += 1
+      end
+
+      model.commit_operation
+      operation_open = false
+      stats[:elapsed_seconds] = (Time.now - import_start).round(1)
+      stats[:log_path] = Logger.log_path
+      imported_entities = model.active_entities.to_a - pre_import_entities
+      apply_top_view_fit(model, page_fit_bounds, imported_entities)
+      finalize_import_diagnostics!(path, opts, stats)
+      ready = import_contract_ready?(stats)
+      Sketchup.status_text = if ready
+        "PDF Raster Import complete — #{stats[:pages]} page(s) — " \
+          "#{stats[:elapsed_seconds]}s"
+      else
+        "PDF Raster Import finished, but QA contract is NOT READY — " \
+          "#{stats[:pages]} page(s)"
+      end
+      stats
+    rescue StandardError => e
+      safe_abort_operation(model, 'Raster Pipeline') if operation_open
+      raise e
+    ensure
+      begin
+        parser.release if parser
+      rescue StandardError => e
+        Logger.warn('Raster Pipeline', "parser.release failed: #{e.message}")
+      end
+    end
+
     def self.run_pipeline(model, path, opts)
       Logger.reset
       config = RecognitionConfig.default
 
-      # ── Force raster: skip all vector parsing, render as image ──
+      # ── Explicit Raster request: deliver verified images for every selected
+      # page. This is a requested representation, not a fallback. ──
       if opts[:force_raster]
-        dpi = opts[:raster_dpi] || 300
-        Logger.warn("Pipeline", "Force-raster mode at #{dpi} DPI")
-        model.start_operation("Import PDF Raster", true)
-        media_box = [0, 0, 612, 792]  # default; overridden per-page below
-        crop_box = nil
-        import_start = Time.now
-        # Try to get actual page size from parser
-        begin
-          p = PDFParser.new(path)
-          p.parse
-          if p.page_count > 0
-            pg = p.pages.first
-            media_box = pg[:media_box] if pg && pg[:media_box]
-            if pg && pg[:crop_box].is_a?(Array) && pg[:crop_box].length >= 4
-              crop_box = pg[:crop_box]
-            end
-          end
-        rescue StandardError => e
-          Logger.warn("Pipeline", "Could not read page size: #{e.message}")
-        end
-        raster_box = crop_box || media_box
-        raster_ok = import_page_as_raster(
-          model, path, 1, media_box, opts, import_start, 0.0, raster_box
-        )
-        if raster_ok
-          model.commit_operation
-          fit_bb = Geom::BoundingBox.new
-          add_page_fit_bounds(fit_bb, media_box, raster_box, opts[:scale], 0.0)
-          apply_top_view_fit(model, fit_bb)
-          return { pages: 1, primitives: 0, edges: 0, faces: 0, arcs: 0,
-                   text: 0, components: 0, layers: [], cleanup: {},
-                   generic: nil, mode_used: nil, xobjects: 0,
-                   raster_fallback_used: true,
-                   log_path: Logger.log_path }
-        else
-          model.abort_operation
-          UI.messagebox("Force-raster import failed.\n\nMake sure pdftocairo (from Poppler) is installed.")
-          return nil
-        end
+        return run_forced_raster_pipeline(model, path, opts)
       end
 
       # ── File size warning for very large PDFs ──
@@ -987,31 +2417,12 @@ module BlueCollarSystems
       parser = PDFParser.new(path)
       parser.parse
       if parser.page_count == 0
-        # Parser failed (compressed xref, unsupported features, etc.)
-        # Try raster fallback before giving up
-        if opts[:raster_fallback]
-          Logger.warn("Pipeline", "PDF parser found 0 pages — attempting raster fallback")
-          model.start_operation("Import PDF Raster", true)
-          media_box = [0, 0, 612, 792]  # default letter size
-          import_start = Time.now
-          raster_ok = import_page_as_raster(model, path, 1, media_box, opts, import_start)
-          if raster_ok
-            model.commit_operation
-            fit_bb = Geom::BoundingBox.new
-            add_page_fit_bounds(fit_bb, media_box, media_box, opts[:scale], 0.0)
-            apply_top_view_fit(model, fit_bb)
-            return { pages: 1, primitives: 0, edges: 0, faces: 0, arcs: 0,
-                     text: 0, components: 0, layers: [], cleanup: {},
-                     generic: nil, mode_used: nil, xobjects: 0,
-                     text_mode: :none,
-                     elapsed_seconds: (Time.now - import_start).round(1),
-                     raster_fallback_used: true,
-                     log_path: Logger.log_path }
-          else
-            safe_abort_operation(model, "Pipeline")
-          end
-        end
-        return nil
+        Logger.warn(
+          'Pipeline',
+          'PDF parser returned zero pages; stopping without raster substitution.'
+        )
+        raise RepresentationFidelity::ContractError,
+              'PDF parser returned zero pages; requested representation was not changed.'
       end
 
       ocg = OCGParser.new(parser)
@@ -1051,7 +2462,14 @@ module BlueCollarSystems
                 model_3d_texts: [], page_text_map: {},
                 recognition_skipped_pages: [],
                 import_session_id: new_import_session_id,
-                source_provenance_objects: [] }
+                 source_provenance_objects: [], text_source_span_ids: [],
+                 text_attempts: [], page_text_delivery_records: [],
+                 terminal_text_delivery_records: [],
+                 terminal_cleanup_events: [], fallback_transitions: [],
+                 page_representation_fallbacks: [],
+                 empty_page_source_inspections: [],
+                 representation_ownership_group_forced_pages: [],
+                 raster_fallback_used: false }
 
       image_extractor = nil
       if opts[:extract_embedded_images] != false && opts[:import_mode].to_s != 'vector'
@@ -1059,40 +2477,6 @@ module BlueCollarSystems
         image_extractor = EmbeddedImageExtractor.new(parser, stats[:embedded_image_dir])
       end
 
-      svg_text_mode = [:geometry, :glyphs].include?(requested_text_mode)
-      if svg_text_mode && opts[:import_text] && !SvgTextRenderer.svg_renderer_available?
-        stats[:svg_renderer_missing] = true
-        # R23 (F-1): Glyphs mode keeps its outline representation via the
-        # internal StrokeFont source (a recorded SOURCE fallback inside the
-        # mode); Geometry mode keeps the existing 3D Text mode ladder.
-        if requested_text_mode == :glyphs
-          degrade_log = 'text will degrade to internal stroke-outline lettering ' \
-                        '(glyph source fallback, reported in extra.glyph_source).'
-          degrade_msg = 'Without one of these helpers, text will import as simplified ' \
-                        'stroke-outline lettering (internal glyph source, degraded ' \
-                        'fidelity) instead of exact glyph outlines.'
-        else
-          degrade_log = 'text will degrade to 3D Text (then Labels only if mesh is ' \
-                        'unavailable) — mode-fidelity fallback.'
-          degrade_msg = 'Without one of these helpers, text will import as SketchUp ' \
-                        '3D Text (closest free model-space fallback) instead of ' \
-                        'outline geometry.'
-        end
-        Logger.warn(
-          "Pipeline",
-          "Geometry/Glyphs text requested but Poppler (pdftocairo) and MuPDF (mutool) were not found; " +
-          degrade_log
-        )
-        if defined?(UI) && UI.respond_to?(:messagebox)
-          choice = UI.messagebox(
-            "Geometry/Glyphs text mode needs Poppler (pdftocairo) or MuPDF (mutool).\n\n" +
-            degrade_msg + "\n\n" \
-            "Install Poppler or open Extensions > PDF Vector Importer > Compatibility Report.\n\n" \
-            "Continue with degraded text?",
-            MB_OKCANCEL)
-          return nil unless choice == IDOK
-        end
-      end
       page_fit_bounds = Geom::BoundingBox.new
 
       import_start = Time.now
@@ -1108,7 +2492,11 @@ module BlueCollarSystems
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num}/#{parser.page_count} — Parsing... [#{elapsed}s]"
 
         raw = parser.page_data(page_num)
-        next unless raw
+        unless raw
+          raise RepresentationFidelity::ContractError,
+                "Page #{page_num}: parser returned no page data; requested " \
+                'representation was not changed.'
+        end
         media_box = raw[:media_box] || [0, 0, 612, 792]
         page_rotation = PageTransform.normalize_rotation(raw[:rotation])
         crop_box = raw[:crop_box]
@@ -1121,25 +2509,15 @@ module BlueCollarSystems
           "crop_box=#{crop_box ? crop_box.inspect : 'nil'}, rotation=#{page_rotation}, " \
           "text_offset_pts=(#{text_offset_x.round(3)},#{text_offset_y.round(3)})")
         stack_box = svg_page_box
+        source_svg_document = nil
         curr_page_height_in = PageTransform.effective_height(stack_box, page_rotation) * (1.0 / 72.0) * opts[:scale].to_f
         curr_page_height_in = 11.0 * opts[:scale].to_f if curr_page_height_in <= 0.0
         page_y_offset = running_y_offset
         streams = raw[:content_streams]
         if streams.nil? || streams.empty?
-          # No content streams — try raster fallback instead of skipping
-          if opts[:raster_fallback]
-            Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — No streams, trying raster... [#{elapsed}s]"
-            raster_ok = import_page_as_raster(
-              model, path, page_num, media_box, opts, import_start, page_y_offset, svg_page_box
-            )
-            if raster_ok
-              stats[:pages] += 1
-              stats[:raster_fallback_used] = true
-              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
-              running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
-            end
-          end
-          next
+          raise RepresentationFidelity::ContractError,
+                "Page #{page_num}: parser returned no content streams; " \
+                'requested representation was not changed.'
         end
 
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Reading paths... [#{elapsed}s]"
@@ -1148,41 +2526,20 @@ module BlueCollarSystems
         paths = cs.parse
         force_import_fills_for_page = false
 
-        # Smart auto-raster override for fill-art flood pages.
+        # Diagnostic only. Content-density heuristics may never substitute a
+        # requested representation before its item/page renderer is attempted.
         flood_hit, flood_stats = looks_like_fill_art_flood?(paths, media_box)
         if flood_hit
           fill_pct = (flood_stats[:fill_only_ratio] * 100.0).round
           stroke_pct = (flood_stats[:stroke_ratio] * 100.0).round
           Logger.warn(
             "Pipeline",
-            "Page #{page_num}: smart mode override — fill-art flood — " \
+            "Page #{page_num}: fill-art density warning — " \
             "#{flood_stats[:total]} groups, fill-only=#{fill_pct}%, " \
             "strokes=#{stroke_pct}% (map/decorative PDF — vectors would be unusable geometry)"
           )
-
-          if opts[:raster_fallback]
-            Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Fill-art flood, rendering raster... [#{(Time.now - import_start).round(1)}s]"
-            raster_ok = import_page_as_raster(
-              model, path, page_num, media_box, opts, import_start, page_y_offset, svg_page_box
-            )
-            if raster_ok
-              stats[:pages] += 1
-              stats[:raster_fallback_used] = true
-              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
-              running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
-              next
-            end
-            Logger.warn("Pipeline", "Page #{page_num}: fill-art raster fallback failed; continuing with vectors.")
-            if !opts[:import_fills]
-              force_import_fills_for_page = true
-              Logger.warn(
-                "Pipeline",
-                "Page #{page_num}: enabling fill import for this page because raster fallback failed."
-              )
-            end
-          else
-            Logger.warn("Pipeline", "Page #{page_num}: fill-art flood detected but raster fallback is disabled.")
-          end
+          Logger.warn('Pipeline',
+                      "Page #{page_num}: preserving the requested vector/text representation; no heuristic raster substitution was made.")
         end
 
         xobj = XObjectParser.new(parser)
@@ -1288,6 +2645,10 @@ module BlueCollarSystems
           # objects below. This is what makes parts_bootstrap row span_ids and
           # source_provenance span_id join.
           TextSourceIdentity.assign!(text_items, page_num)
+          TextSourceIdentity.validate!(text_items, page_num)
+          stats[:text_source_span_ids].concat(
+            Array(text_items).map { |item| item.source_span_id.to_s }
+          )
           Logger.info("Pipeline", "Page #{page_num}: text extractor=#{text_source}, items=#{text_items ? text_items.length : 0}")
           stats[:page_text_sources][page_num] = text_source if text_source
           stats[:page_text_map][page_num] = text_items if text_items && !text_items.empty?
@@ -1304,43 +2665,127 @@ module BlueCollarSystems
           end
         end
 
-        # Opt-in page strategy (raster_fallback): text-dominant OCR/geospatial
-        # pages may take a full-page raster path. This is NOT a text-mode switch
-        # and must not run unless the caller enabled raster_fallback.
-        if opts[:raster_fallback] && paths.length <= 10 && text_items.length >= 200
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Text-heavy page, using raster fallback... [#{(Time.now - import_start).round(1)}s]"
-          Logger.warn("Pipeline",
-            "Page #{page_num}: text-dominant content (paths=#{paths.length}, text=#{text_items.length}) — raster fallback")
-          raster_ok = import_page_as_raster(
-            model, path, page_num, media_box, opts, import_start, page_y_offset, svg_page_box
+        if opts[:import_text] && Array(text_items).empty?
+          referenced_form_streams = xobj.form_xobjects.values.select do |form|
+            form.respond_to?(:usage_count) && form.usage_count.to_i > 0
+          end.map do |form|
+            form.respond_to?(:stream_data) ? form.stream_data : nil
+          end.compact
+          enforce_extracted_text_presence!(
+            page_num, requested_text_mode, text_items, streams,
+            referenced_form_streams
           )
-          if raster_ok
-            stats[:pages] += 1
-            stats[:raster_fallback_used] = true
-            add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
-            running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
-            next
-          end
-          Logger.warn("Pipeline", "Page #{page_num}: text-dominant raster fallback failed; continuing with vectors/text.")
+        end
+
+        if svg_renderer_required_for_page?(
+          requested_text_mode, opts[:import_text], text_items, false
+        )
+          enforce_svg_renderer_available!(model, stats, requested_text_mode)
         end
 
         if paths.empty? && text_items.empty? && embedded_assets.empty?
-          if opts[:raster_fallback]
-            Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering raster image... [#{(Time.now - import_start).round(1)}s]"
-            raster_ok = import_page_as_raster(
-              model, path, page_num, media_box, opts, import_start, page_y_offset, svg_page_box
-            )
-            if raster_ok
-              stats[:pages] += 1
-              stats[:edges] += 0
-              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
-              running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
-            else
-              Logger.warn("Pipeline",
-                "Page #{page_num}: no vector content and raster render failed; page skipped.")
-            end
+          if svg_renderer_required_for_page?(
+            requested_text_mode, opts[:import_text], text_items, true
+          )
+            enforce_svg_renderer_available!(model, stats, requested_text_mode)
           end
-          next
+          svg_failure = {}
+          use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
+            (a.to_f - b.to_f).abs > 0.01
+          end
+          source_svg_document = CairoGlyphSource.render_page_svg(
+            path, page_num,
+            :failure_info => svg_failure,
+            :use_cropbox => use_cropbox == true
+          )
+          unless source_svg_document &&
+                 source_svg_document[:svg].to_s.length > 0
+            reason = svg_failure[:reason].to_s
+            reason = 'source_svg_inspection_failed' if reason.empty?
+            raise RepresentationFidelity::ContractError,
+                  "Page #{page_num}: no requested-representation artifacts " \
+                  "were certified and source inspection failed: #{reason}"
+          end
+          source_summary = svg_page_source_summary(
+            source_svg_document[:svg], media_box,
+            :svg_page_box => svg_page_box
+          )
+          stats[:empty_page_source_inspections] << source_summary.merge(
+            :page => page_num
+          )
+
+          if requested_text_mode == :text3d &&
+             source_summary[:source_glyph_placements].to_i > 0
+            Logger.info(
+              'Pipeline',
+              "Page #{page_num}: semantic extraction found no text, but " \
+              "#{source_summary[:source_glyph_placements]} exact SVG source " \
+              'glyph placement(s) remain eligible for 3D Text.'
+            )
+          elsif source_summary[:visible_nontext_source] == true
+            raster = verified_raster_entity!(
+              model, path, page_num, media_box, opts, import_start,
+              page_y_offset, svg_page_box, page_rotation
+            )
+            stats[:pages] += 1
+            stats[:xobjects] += xobj.form_xobjects.length
+            stats[:mode_used] = :raster
+            stats[:raster_fallback_used] = true
+            stats[:text_mode] = :raster unless requested_text_mode == :none
+            stats[:page_representation_fallbacks] << {
+              :page => page_num,
+              :scope => :page,
+              :reason_code => :visible_nontext_source_only,
+              :affirmative_impossibility => true,
+              :requested_text_mode => requested_text_mode,
+              :source_text_items => 0,
+              :source_summary => source_summary,
+              :delivered_mode => :raster,
+              :resulting_entity_ids => [raster[:entity_id]],
+              :real_raster_verified => true,
+              :visual_fidelity_verified => true
+            }
+            unless requested_text_mode == :none
+              stats[:terminal_text_delivery_records] << {
+                :page => page_num,
+                :source_span_ids => [],
+                :requested_mode => requested_text_mode,
+                :delivered_mode => :raster,
+                :no_semantic_text => true,
+                :resulting_entity_ids => [raster[:entity_id]],
+                :real_raster_verified => true,
+                :visual_fidelity_verified => true,
+                :cleanup_outcome => :not_required,
+                :delivery_scope => :page_raster
+              }
+              record_text_renderer(
+                stats, page_num,
+                :renderer => :pdftocairo_real_raster,
+                :mode => :raster,
+                :requested_mode => requested_text_mode,
+                :delivered_mode => :raster,
+                :degraded => true,
+                :reason => 'visible page source has no semantic or exact source-glyph text representation',
+                :count => 0,
+                :resulting_entity_ids => [raster[:entity_id]],
+                :real_raster_verified => true
+              )
+            end
+            add_page_fit_bounds(
+              page_fit_bounds, media_box, stack_box, opts[:scale],
+              page_y_offset, page_rotation
+            )
+            running_y_offset += page_stack_step(
+              curr_page_height_in, page_arrangement, page_gap_ratio
+            )
+            next
+          else
+            detail = source_summary[:inspection_error].to_s
+            detail = 'renderer SVG contains no visible source material' if detail.empty?
+            raise RepresentationFidelity::ContractError,
+                  "Page #{page_num}: no requested-representation artifacts " \
+                  "were certified (#{detail})."
+          end
         end
 
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — #{paths.length} paths, #{text_items.length} text items... [#{(Time.now - import_start).round(1)}s]"
@@ -1416,40 +2861,52 @@ module BlueCollarSystems
           end
         end
 
-        # Glyph/Geometry modes use SVG glyph outlines for model-space visual
-        # fidelity. Labels and 3D Text must stay native to the selected SketchUp
-        # mode; otherwise a clean-PC import can appear to ignore the text-mode
-        # dropdown by showing glyph outlines.
+        # Geometry text uses raw transformed path edges in one owned group;
+        # Glyphs uses reusable component instances in a different owned group.
+        # The ordinary PDF vectors remain on GeometryBuilder's established
+        # parser path.  The unsafe dormant full-page SVG renderer is not loaded.
         # Labels with layer matching use internal parsing so each span lands on its OCG tag.
-        use_svg_text = [:geometry, :glyphs].include?(requested_text_mode) && opts[:import_text]
+        use_svg_text = [:geometry, :glyphs].include?(requested_text_mode) &&
+                       opts[:import_text]
+        use_svg_3d_text = requested_text_mode == :text3d && opts[:import_text]
         if match_pdf_layers && !ocg.layer_list.empty? && requested_text_mode == :labels
           use_svg_text = false
         end
-        builder_use_3d_text = (requested_text_mode == :text3d)
-        builder_text_items = use_svg_text ? [] : text_items
+        # Native add_3d_text cannot certify embedded PDF font identity. Exact
+        # 3D text therefore uses the renderer's own glyph outlines; native 3D
+        # text remains available only behind GeometryBuilder's explicit font
+        # identity proof gate.
+        builder_use_3d_text = false
+        builder_text_items = (use_svg_text || use_svg_3d_text) ? [] : text_items
+        representation_renderer = if use_svg_3d_text
+                                    :svg_3d_text
+                                  elsif use_svg_text
+                                    :svg_text
+                                  end
+        group_policy = RepresentationFidelity.owned_page_group_policy(
+          opts[:group_per_page], representation_renderer
+        )
+        if group_policy[:forced]
+          stats[:representation_ownership_group_forced_pages] << {
+            :page => page_num,
+            :requested_text_mode => requested_text_mode,
+            :requested_group_per_page => false,
+            :effective_group_per_page => true,
+            :reason_code => group_policy[:reason_code]
+          }
+        end
         provenance_opts = {
           provenance_bucket: stats[:source_provenance_objects],
           import_session_id: stats[:import_session_id]
         }
-        page_counts_before_builder = {
-          edges: stats[:edges], faces: stats[:faces], arcs: stats[:arcs], text: stats[:text]
-        }
-        page_provenance_before_builder = Array(stats[:source_provenance_objects]).length
-        page_entities_before_builder = begin
-          model && model.active_entities && model.active_entities.respond_to?(:to_a) ?
-            Array(model.active_entities.to_a) : []
-        rescue StandardError
-          []
-        end
-
         builder = GeometryBuilder.new(model, paths, builder_text_items, media_box,
           scale_factor: opts[:scale], bezier_segments: opts[:bezier_segments],
           import_as: opts[:import_as], layer_name: opts[:layer_name],
-          group_per_page: opts[:group_per_page], page_number: page_num,
+          group_per_page: group_policy[:effective_group_per_page], page_number: page_num,
           flatten_to_2d: true, merge_tolerance: opts[:merge_tolerance],
           import_fills: (opts[:import_fills] || force_import_fills_for_page), group_by_color: opts[:group_by_color],
           detect_arcs: opts[:detect_arcs], map_dashes: opts[:map_dashes],
-          import_text: use_svg_text ? false : opts[:import_text],
+          import_text: (use_svg_text || use_svg_3d_text) ? false : opts[:import_text],
           use_3d_text: builder_use_3d_text,
           strict_text_fidelity: opts[:strict_text_fidelity],
           requested_text_mode: requested_text_mode,
@@ -1461,39 +2918,192 @@ module BlueCollarSystems
         result = builder.build
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
-        merge_text_mode_fallbacks!(stats, page_num, result[:text_fallbacks])
         merge_text_height_samples!(stats, result[:text_height_samples])
         stats[:text_height_fallback_count] =
           stats[:text_height_fallback_count].to_i + result[:text_height_fallback_count].to_i
         merge_text_width_crosscheck!(stats, result)
 
-        if !Array(result[:text_delivery_failures]).empty?
-          terminal_raster = promote_text_delivery_failures_to_raster!(
-            model, path, page_num, media_box, opts, import_start, page_y_offset,
-            svg_page_box, builder.page_group, requested_text_mode, stats,
-            result[:text_delivery_failures],
-            page_entities_created_since(model, page_entities_before_builder)
-          )
-          unless terminal_raster
-            raise "Page #{page_num}: native text ladder was exhausted and the terminal raster fallback failed."
+        builder_failures = Array(result[:text_delivery_failures])
+        label_fallback_failures = []
+        if requested_text_mode == :labels
+          label_fallback_failures = builder_failures.select do |failure|
+            failure[:transition_proof].is_a?(Hash)
           end
-          discard_hidden_page_vector_result!(
-            stats, page_counts_before_builder, page_provenance_before_builder
+        end
+        hard_builder_failures = builder_failures - label_fallback_failures
+        unless hard_builder_failures.empty?
+          enforce_requested_text_delivery!(
+            page_num, requested_text_mode, hard_builder_failures
           )
-          add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
-          running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
-          next
         end
 
-        native_text_objects = native_text_delivery_count(
-          result[:text_objects], result[:text_fallbacks]
-        )
-        if opts[:import_text] && !use_svg_text && native_text_objects > 0
+        fallback_source_ids = label_fallback_failures.map do |failure|
+          failure[:source_span_id].to_s
+        end
+        completed_builder_attempts = Array(result[:text_attempts]).reject do |attempt|
+          fallback_source_ids.include?(attempt[:source_span_id].to_s)
+        end
+        merge_text_attempts!(stats, completed_builder_attempts)
+
+        if opts[:import_text] && !use_svg_text && !use_svg_3d_text &&
+           result[:text_objects].to_i > 0
           renderer = builder_use_3d_text ? :add_3d_text : :labels
+          delivered_mode = requested_text_mode
           record_text_renderer(stats, page_num,
-            renderer: renderer, mode: requested_text_mode,
-            requested_mode: requested_text_mode, degraded: false,
-            count: native_text_objects)
+            renderer: renderer, mode: delivered_mode,
+            requested_mode: requested_text_mode,
+            delivered_mode: delivered_mode,
+            degraded: false,
+            count: result[:text_objects].to_i)
+        end
+
+        unless label_fallback_failures.empty?
+          label_svg_failure = {}
+          use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
+            (a.to_f - b.to_f).abs > 0.01
+          end
+          label_svg_document = CairoGlyphSource.render_page_svg(
+            path, page_num, :failure_info => label_svg_failure,
+            :use_cropbox => use_cropbox == true
+          )
+          unless label_svg_document &&
+                 !label_svg_document[:svg].to_s.empty?
+            raise RepresentationFidelity::ContractError,
+                  "Page #{page_num}: Labels fallback source inspection failed: " \
+                  "#{label_svg_failure[:reason]}"
+          end
+          fallback_items = text_items.select do |item|
+            fallback_source_ids.include?(
+              RepresentationFidelity.source_span_id(item)
+            )
+          end
+          fallback_parent = builder.page_group ?
+            builder.page_group.entities : model.active_entities
+          complete_label_item_fallbacks!(
+            stats, model, fallback_parent, path, page_num, fallback_items,
+            media_box, svg_page_box, page_rotation, opts, import_start,
+            page_y_offset, label_svg_document, label_fallback_failures,
+            result[:text_attempts], layer_mgr.text_fallback_layer, text_items
+          )
+        end
+
+        # Exact 3D Text: build filled solids from the PDF renderer's own glyph
+        # outlines. Arial/native-font substitution is never used as a visual
+        # correction. Each source span owns one independently verified group.
+        if use_svg_3d_text && builder.page_group
+          svg_failure = {}
+          use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
+            (a.to_f - b.to_f).abs > 0.01
+          end
+          svg_document = source_svg_document ||
+            CairoGlyphSource.render_page_svg(
+              path, page_num,
+              :failure_info => svg_failure,
+              :use_cropbox => use_cropbox == true
+            )
+          unless svg_document && svg_document[:svg].to_s.length > 0
+            reason = svg_failure[:reason].to_s
+            reason = 'svg_3d_text_renderer_failed' if reason.empty?
+            if text_items.empty?
+              raise RepresentationFidelity::ContractError,
+                    "Page #{page_num}: exact 3D text source inspection failed: #{reason}"
+            end
+            failures = text_items.map do |item|
+              {
+                :source_span_id => RepresentationFidelity.source_span_id(item),
+                :reason => reason
+              }
+            end
+            enforce_requested_text_delivery!(page_num, :text3d, failures)
+          end
+
+          representation_parent = builder.page_group.entities
+          depth = opts[:text_3d_depth]
+          depth = Svg3DTextRenderer::DEFAULT_DEPTH_INCHES if depth.nil?
+          text3d_result = Svg3DTextRenderer.render_svg(
+            representation_parent, svg_document[:svg], media_box, text_items,
+            :scale => opts[:scale],
+            :svg_page_box => svg_page_box,
+            :y_offset => 0.0,
+            :depth => depth,
+            :layer => layer_mgr.text_fallback_layer,
+            :page_number => page_num,
+            :source_context => svg_source_context(
+              svg_document, page_num, svg_failure
+            )
+          )
+
+          unless Array(text3d_result[:failures]).empty?
+            failures = text3d_result[:failures].map do |failure|
+              {
+                :source_span_id => failure[:source_span_id],
+                :reason => failure[:reason_code].to_s
+              }
+            end
+            enforce_requested_text_delivery!(page_num, :text3d, failures)
+          end
+
+          transition_proofs = Array(text3d_result[:transition_proofs])
+          if text3d_result[:no_semantic_text] == true
+            record_text_renderer(
+              stats, page_num,
+              :renderer => :no_semantic_text,
+              :mode => :text3d,
+              :requested_mode => :text3d,
+              :delivered_mode => :text3d,
+              :degraded => false,
+              :count => 0,
+              :no_semantic_text => true,
+              :source_svg_inspected => true
+            )
+          else
+            all_source_rows = Array(text3d_result[:span_results]) +
+              Array(text3d_result[:unmatched_source_results])
+            transforms_ok = all_source_rows.all? do |row|
+              apply_and_verify_page_representation_transform(
+                row[:group], media_box, opts[:scale], page_rotation,
+                page_y_offset
+              )
+            end
+            unless transforms_ok
+              all_source_rows.each do |row|
+                group = row[:group]
+                RepresentationFidelity.erase_owned!(
+                  representation_parent, [group]
+                ) if group
+              end
+              raise RepresentationFidelity::ContractError,
+                    "Page #{page_num}: exact 3D text page transform was not verified"
+            end
+            delivered_ids = Array(text3d_result[:span_results]).map do |row|
+              row[:source_span_id].to_s
+            end
+            delivered_items = Array(text_items).select do |item|
+              delivered_ids.include?(
+                RepresentationFidelity.source_span_id(item)
+              )
+            end
+            unless all_source_rows.empty?
+              record_svg_3d_text_delivery!(
+                stats, page_num, delivered_items, text3d_result
+              )
+            end
+            # QA text_entities counts created host text-representation groups;
+            # the placement count remains explicit in renderer/provenance data.
+            stats[:text] += text3d_result[:span_results].length +
+              Array(text3d_result[:unmatched_source_results]).length
+            stats[:faces] += all_source_rows.inject(0) do |sum, row|
+              sum + row[:face_count].to_i
+            end
+            unless transition_proofs.empty?
+              complete_text3d_item_fallbacks!(
+                stats, model, representation_parent, path, page_num,
+                text_items, media_box, svg_page_box, page_rotation, opts,
+                import_start, page_y_offset, svg_document,
+                transition_proofs
+              )
+            end
+          end
         end
 
         # Build hatching on separate layer if group mode
@@ -1527,29 +3137,94 @@ module BlueCollarSystems
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
           text_layer = layer_mgr.text_fallback_layer
 
-          # R23 (F-1): Glyphs mode goes through the glyph SOURCE decision —
-          # SVG glyph outlines preferred, internal stroke outlines as the
-          # recorded per-import fallback (TEXTMODE-1: a source change inside
-          # the delivered Glyphs mode, never a mode change). Geometry mode is
-          # untouched.
+          # Geometry and Glyphs share only the free SVG extraction step.
+          # Geometry is forced to raw path edges; Glyphs is forced to reusable
+          # component instances.  Each lives in one exact owned group.
           glyph_decision = nil
           glyph_decision = CairoGlyphSource.import_decision(stats) if requested_text_mode == :glyphs
           svg_failure = {}
           svg_result = nil
-          if glyph_decision.nil? || CairoGlyphSource.svg_source?(glyph_decision)
+          geometry_group = nil
+          glyph_group = nil
+          representation_parent = builder.page_group ?
+            builder.page_group.entities : model.active_entities
+          if requested_text_mode == :geometry
+            geometry_group = create_owned_page_representation_group!(
+              representation_parent,
+              "PDF Page #{page_num} - Raw Text Path Geometry"
+            )
+            svg_failure[:created_entity_ids] = [
+              RepresentationFidelity.stable_entity_id(geometry_group)
+            ]
             svg_result = SvgTextRenderer.render(
-              builder.page_group.entities, path, page_num, media_box,
-              scale: opts[:scale], layer: text_layer, y_offset: page_y_offset,
+              geometry_group.entities, path, page_num, media_box,
+              scale: opts[:scale], layer: text_layer, y_offset: 0.0,
               svg_page_box: svg_page_box,
-              page_rotation: page_rotation,
+              page_rotation: 0,
+              raw_edge_glyphs: true,
+              flatten_glyph_instances: true,
               failure_info: svg_failure)
+          elsif glyph_decision && CairoGlyphSource.svg_source?(glyph_decision)
+            glyph_group = create_owned_page_representation_group!(
+              representation_parent,
+              "PDF Page #{page_num} - Glyph Components"
+            )
+            svg_failure[:created_entity_ids] = [
+              RepresentationFidelity.stable_entity_id(glyph_group)
+            ]
+            svg_result = SvgTextRenderer.render(
+              glyph_group.entities, path, page_num, media_box,
+              scale: opts[:scale], layer: text_layer, y_offset: 0.0,
+              svg_page_box: svg_page_box,
+              page_rotation: 0,
+              raw_edge_glyphs: false,
+               flatten_glyph_instances: false,
+               failure_info: svg_failure)
           end
-          if glyph_decision && svg_result &&
-             CairoGlyphSource.zero_placement_false_green?(svg_result, text_items)
-            # No glyph ink although the extractor found spans: a "success"
-            # here would be a false green (pinned-review forward fix).
-            svg_failure[:reason] = 'svg_zero_placements'
+          if svg_result
+            placements = svg_result[:semantic_svg_placements]
+            svg_failure[:detected_svg_placements] =
+              placements.is_a?(Array) ? placements.length : 0
+          end
+          if svg_result && !finalize_svg_poppler_semantics(
+               svg_result, path, page_num, text_items, media_box
+             )
+            final_validation = svg_result[:poppler_final_validation]
+            reason = final_validation.is_a?(Hash) ?
+              final_validation[:reason].to_s : ''
+            reason = 'poppler_semantic_evidence_incomplete' if reason.empty?
+            svg_failure[:reason] = reason
+            svg_failure[:created_definitions] = svg_result[:created_definitions]
             svg_result = nil
+          end
+          if svg_result && !svg_page_visual_fidelity_verified?(
+               svg_result, text_items, media_box, requested_text_mode,
+               geometry_group || glyph_group
+              )
+            svg_failure[:reason] = 'svg_visual_evidence_incomplete'
+            svg_failure[:created_definitions] = svg_result[:created_definitions]
+            svg_result = nil
+          end
+          if svg_result && !apply_and_verify_page_representation_transform(
+               geometry_group || glyph_group, media_box, opts[:scale],
+               page_rotation, page_y_offset
+             )
+            svg_failure[:reason] = 'text_page_transform_unverified'
+            svg_failure[:created_definitions] = svg_result[:created_definitions]
+            svg_result = nil
+          end
+          failed_group = geometry_group || glyph_group
+          unless svg_result || failed_group.nil?
+            cleaned_ids = RepresentationFidelity.erase_owned!(
+              representation_parent, [failed_group]
+            )
+            erase_owned_glyph_definitions!(
+              model, svg_failure[:created_definitions]
+            )
+            svg_failure[:cleaned_entity_ids] = cleaned_ids
+            svg_failure[:cleanup_outcome] = :verified
+            geometry_group = nil
+            glyph_group = nil
           end
 
           if svg_result
@@ -1571,146 +3246,51 @@ module BlueCollarSystems
               text_performance_mode: svg_result[:text_performance_mode],
               component_container: svg_result[:component_container]
             }
-            if glyph_decision
+            if requested_text_mode == :geometry
+              record_page_geometry_delivery!(
+                stats, page_num, text_items, geometry_group, svg_result,
+                media_box
+              )
+            elsif glyph_decision
               CairoGlyphSource.record_svg_page!(
                 glyph_decision, page_num, svg_result, text_items, media_box,
-                stats[:source_provenance_objects]
+                nil
+              )
+              record_page_glyph_delivery!(
+                stats, page_num, text_items, glyph_group, svg_result,
+                media_box
               )
               renderer_attrs[:glyph_source] = glyph_decision[:source]
             end
             record_text_renderer(stats, page_num, renderer_attrs)
           else
-            # R23 (F-1): in Glyphs mode a failed SVG source demotes the whole
-            # import (single per-import decision) to the INTERNAL glyph-outline
-            # source — StrokeFont lettering, same outline representation,
-            # recorded in stats[:glyph_source]. Demotion is refused once the
-            # SVG source has delivered a page (never mix sources mid-import);
-            # then the existing per-page mode ladder below runs instead.
-            internal_result = nil
-            if glyph_decision
-              if CairoGlyphSource.svg_source?(glyph_decision)
-                CairoGlyphSource.demote_to_internal!(
-                  glyph_decision, CairoGlyphSource.failure_reason(svg_failure))
-              end
-              if CairoGlyphSource.internal_source?(glyph_decision)
-                Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering internal glyph outlines... [#{(Time.now - import_start).round(1)}s]"
-                internal_builder = GeometryBuilder.new(model, [], text_items, media_box,
-                  scale_factor: opts[:scale], layer_name: opts[:layer_name],
-                  group_per_page: false, page_number: page_num,
-                  flatten_to_2d: true, import_text: true, use_3d_text: false,
-                  glyph_outline_text: true,
-                  strict_text_fidelity: opts[:strict_text_fidelity],
-                  requested_text_mode: :glyphs,
-                  layer_manager: layer_mgr,
-                  y_offset: page_y_offset,
-                  page_rotation: page_rotation,
-                  target_entities: builder.page_group.entities,
-                  provenance_bucket: provenance_opts[:provenance_bucket],
-                  import_session_id: provenance_opts[:import_session_id])
-                internal_result = internal_builder.build
-              end
-            end
-
-            if internal_result
-              stats[:text] += internal_result[:text_objects]
-              merge_text_mode_fallbacks!(stats, page_num, internal_result[:text_fallbacks])
-              merge_text_height_samples!(stats, internal_result[:text_height_samples])
-              stats[:text_height_fallback_count] =
-                stats[:text_height_fallback_count].to_i + internal_result[:text_height_fallback_count].to_i
-              merge_text_width_crosscheck!(stats, internal_result)
-              if !Array(internal_result[:text_delivery_failures]).empty?
-                terminal_raster = promote_text_delivery_failures_to_raster!(
-                  model, path, page_num, media_box, opts, import_start, page_y_offset,
-                  svg_page_box, builder.page_group, requested_text_mode, stats,
-                  internal_result[:text_delivery_failures],
-                  page_entities_created_since(model, page_entities_before_builder)
-                )
-                unless terminal_raster
-                  raise "Page #{page_num}: internal glyph source ladder was exhausted and the terminal raster fallback failed."
-                end
-                discard_hidden_page_vector_result!(
-                  stats, page_counts_before_builder, page_provenance_before_builder
-                )
-                add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
-                running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
-                next
-              end
-              outline_count = native_text_delivery_count(
-                internal_result[:text_objects], internal_result[:text_fallbacks]
-              )
-              if outline_count > 0
-                record_text_renderer(stats, page_num,
-                  renderer: :stroke_font, mode: :glyphs, requested_mode: :glyphs,
-                  degraded: true, reason: glyph_decision[:fallback_reason].to_s,
-                  count: outline_count,
-                  glyph_source: CairoGlyphSource::SOURCE_INTERNAL,
-                  note: 'Internal stroke-outline glyph source (SVG glyph source unavailable)')
-              end
-              CairoGlyphSource.record_internal_page!(glyph_decision, outline_count)
-            else
-            # SVG outline path unavailable. Glyphs↔Geometry are peer SVG modes, so
-            # the next free representation is 3D Text (model-space), then Labels.
-            # Do NOT skip 3D Text to paper over mesh transform bugs (mode fidelity).
-            Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Fallback text rendering... [#{(Time.now - import_start).round(1)}s]"
-            fallback_use_3d = [:text3d, :geometry, :glyphs].include?(requested_text_mode)
-            fallback_mode = fallback_use_3d ? "3D text" : "labels"
-            missing_renderer_note = if stats[:svg_renderer_missing]
-                                      'Poppler/MuPDF not found'
-                                    else
-                                      'SVG text unavailable'
-                                    end
-            Logger.warn(
-              "Pipeline",
-              "#{missing_renderer_note} — falling back to #{fallback_mode} text (degraded fidelity)"
+            enforce_detected_svg_text_delivery!(
+              page_num, requested_text_mode, svg_failure, text_items
             )
-            fallback_builder = GeometryBuilder.new(model, [], text_items, media_box,
-              scale_factor: opts[:scale], layer_name: opts[:layer_name],
-              group_per_page: false, page_number: page_num,
-              flatten_to_2d: true, import_text: true, use_3d_text: fallback_use_3d,
-              strict_text_fidelity: opts[:strict_text_fidelity],
-              requested_text_mode: requested_text_mode,
-              layer_manager: layer_mgr,
-              y_offset: page_y_offset,
-              page_rotation: page_rotation,
-              target_entities: builder.page_group.entities,
-              provenance_bucket: provenance_opts[:provenance_bucket],
-              import_session_id: provenance_opts[:import_session_id])
-            fb_result = fallback_builder.build
-            stats[:text] += fb_result[:text_objects]
-            merge_text_mode_fallbacks!(stats, page_num, fb_result[:text_fallbacks])
-            merge_text_height_samples!(stats, fb_result[:text_height_samples])
-            stats[:text_height_fallback_count] =
-              stats[:text_height_fallback_count].to_i + fb_result[:text_height_fallback_count].to_i
-            merge_text_width_crosscheck!(stats, fb_result)
-            if !Array(fb_result[:text_delivery_failures]).empty?
-              terminal_raster = promote_text_delivery_failures_to_raster!(
-                model, path, page_num, media_box, opts, import_start, page_y_offset,
-                svg_page_box, builder.page_group, requested_text_mode, stats,
-                fb_result[:text_delivery_failures],
-                page_entities_created_since(model, page_entities_before_builder)
-              )
-              unless terminal_raster
-                raise "Page #{page_num}: fallback text ladder was exhausted and the terminal raster fallback failed."
+            unless text_items.empty?
+              reason = svg_failure[:reason].to_s
+              reason = 'requested_svg_representation_unavailable' if reason.empty?
+              failures = text_items.map do |source_item|
+                {
+                  source_span_id: RepresentationFidelity.source_span_id(source_item),
+                  requested: requested_text_mode,
+                  reason: reason,
+                  count: 1,
+                  attempt_history: [{
+                    mode: requested_text_mode,
+                    outcome: :failed,
+                    reason: reason,
+                    created_entity_ids: Array(svg_failure[:created_entity_ids]),
+                    cleaned_entity_ids: Array(svg_failure[:cleaned_entity_ids]),
+                    resulting_entity_ids: [],
+                    cleanup_outcome: svg_failure[:cleanup_outcome] || :not_required,
+                    visual_fidelity_verified: false
+                  }]
+                }
               end
-              discard_hidden_page_vector_result!(
-                stats, page_counts_before_builder, page_provenance_before_builder
+              enforce_requested_text_delivery!(
+                page_num, requested_text_mode, failures
               )
-              add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
-              running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
-              next
-            end
-            native_fb_text_objects = native_text_delivery_count(
-              fb_result[:text_objects], fb_result[:text_fallbacks]
-            )
-            if native_fb_text_objects > 0
-              delivered_mode = fallback_use_3d ? :text3d : :labels
-              record_text_renderer(stats, page_num,
-                renderer: (fallback_use_3d ? :add_3d_text : :labels),
-                mode: delivered_mode, requested_mode: requested_text_mode,
-                delivered_mode: delivered_mode,
-                degraded: true, reason: 'svg_text_unavailable',
-                count: native_fb_text_objects, note: missing_renderer_note)
-            end
             end
           end
         end
@@ -1741,7 +3321,7 @@ module BlueCollarSystems
           )
         end
 
-        # ── 3D Extrude (SketchUp-only, currently shelved) ───────────────
+        # ── Closed-shape extrusion (disabled; independent of 3D text) ───
         if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0 && builder.page_group &&
            opts[:import_mode].to_s != 'raster'
           begin
@@ -1761,13 +3341,17 @@ module BlueCollarSystems
         # Advance the running page stack only after a successful import.
         running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
 
+      rescue RepresentationFidelity::ContractError => e
+        Logger.error(
+          'Pipeline',
+          "Page #{page_num} ownership/identity proof failed: #{e.message}", e
+        )
+        safe_abort_operation(model, 'Pipeline')
+        raise e
       rescue StandardError => e
         Logger.error("Pipeline", "Page #{page_num} failed: #{e.message}", e)
-        stats[:failed_pages] ||= []
-        stats[:failed_pages] << { page: page_num, error: e.message }
-        # Continue to next page instead of aborting the entire operation.
-        # Previously this called safe_abort_operation + raise, which
-        # destroyed all geometry from successfully imported pages.
+        safe_abort_operation(model, 'Pipeline')
+        raise e
       end
       end
 
@@ -1789,8 +3373,6 @@ module BlueCollarSystems
       end
 
       elapsed = (Time.now - import_start).round(1)
-      Sketchup.status_text = "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text items — #{elapsed}s"
-
       stats[:elapsed_seconds] = elapsed
 
       # ── Auto fit view to newly imported geometry (not model-wide extents) ──
@@ -1803,31 +3385,13 @@ module BlueCollarSystems
       apply_top_view_fit(model, page_fit_bounds, imported_entities)
 
       stats[:log_path] = Logger.log_path
-      begin
-        report = QAReport.build_from_stats(path, opts, stats)
-        parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
-        if parts_payload && parts_payload[:row_count].to_i > 0
-          report_target = QAReport.default_output_path(path)
-          sidecar_base = File.join(File.dirname(report_target), File.basename(path.to_s, File.extname(path.to_s)))
-          parts_path = PartsBootstrap.write_sidecar(parts_payload, sidecar_base)
-          if parts_path
-            parts_payload[:sidecar_path] = parts_path
-            report[:extra][:parts_bootstrap] = parts_payload
-            stats[:parts_bootstrap_sidecar_path] = parts_path
-          end
-        end
-        stats[:human_summary] = report[:extra][:human_summary] if report[:extra]
-        stats[:scale_crosscheck] = report[:extra][:scale_crosscheck] if report[:extra]
-        stats[:performance_hint] = report[:extra][:performance_hint] if report[:extra]
-        stats[:actual_text_entity_types] = report[:extra][:actual_text_entity_types] if report[:extra]
-        stats[:model_3d_intent] = report[:extra][:model_3d_intent] if report[:extra]
-        report_path = QAReport.write_json(report, QAReport.default_output_path(path))
-        stats[:import_report_path] = report_path if report_path
-        sidecar_path = write_source_provenance_sidecar(path, opts, stats)
-        stats[:source_provenance_sidecar_path] = sidecar_path if sidecar_path
-        ImportHealth.record!(stats, path)
-      rescue StandardError => e
-        Logger.warn("Pipeline", "import_report.json write failed: #{e.message}")
+      finalize_import_diagnostics!(path, opts, stats)
+      Sketchup.status_text = if import_contract_ready?(stats)
+        "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text " \
+          "items — #{elapsed}s"
+      else
+        "PDF Import finished, but QA contract is NOT READY — " \
+          "#{stats[:edges]} edges, #{stats[:text]} text items"
       end
       stats
     ensure
@@ -1913,6 +3477,198 @@ module BlueCollarSystems
     # ================================================================
     # RASTER FALLBACK — render scanned page as positioned image
     # ================================================================
+    def self.raster_command_value(arguments, option)
+      args = Array(arguments).map { |value| value.to_s }
+      index = args.index(option.to_s)
+      return nil unless index && index + 1 < args.length
+      args[index + 1]
+    end
+
+    def self.distinct_page_box?(left, right)
+      return false unless left.is_a?(Array) && right.is_a?(Array)
+      return false unless left.length >= 4 && right.length >= 4
+      4.times.any? do |index|
+        (left[index].to_f - right[index].to_f).abs > 0.01
+      end
+    rescue StandardError
+      false
+    end
+
+    def self.raster_display_dimensions(render_box, page_rotation)
+      width = PageTransform.box_width(render_box).to_f
+      height = PageTransform.box_height(render_box).to_f
+      raise RepresentationFidelity::ContractError,
+            'raster render box is empty' unless width > 0.0 && height > 0.0
+      if [90, 270].include?(PageTransform.normalize_rotation(page_rotation))
+        [height, width]
+      else
+        [width, height]
+      end
+    end
+
+    def self.raster_placement_geometry(media_box, render_box, page_rotation,
+                                       scale, y_offset)
+      transformed = PageTransform.transform_bbox(
+        render_box[0], render_box[1], render_box[2], render_box[3],
+        media_box, page_rotation
+      )
+      factor = (1.0 / 72.0) * scale.to_f
+      {
+        :x => transformed[0].to_f * factor,
+        :y => y_offset.to_f + (transformed[1].to_f * factor),
+        :width => (transformed[2].to_f - transformed[0].to_f).abs * factor,
+        :height => (transformed[3].to_f - transformed[1].to_f).abs * factor
+      }
+    rescue RepresentationFidelity::ContractError
+      raise
+    rescue StandardError => e
+      raise RepresentationFidelity::ContractError,
+            "raster placement geometry failed: #{e.message}"
+    end
+
+    def self.verify_raster_artifact!(png_path, page_num, media_box, render_box,
+                                     page_rotation, arguments)
+      raise RepresentationFidelity::ContractError,
+            'raster artifact file is missing' unless
+        png_path && File.file?(png_path)
+      header = File.open(png_path, 'rb') { |file| file.read(24) }
+      signature = "\x89PNG\r\n\x1a\n".dup
+      signature.force_encoding(Encoding::BINARY) if signature.respond_to?(:force_encoding)
+      unless header && header.bytesize >= 24 && header[0, 8] == signature &&
+             header[12, 4] == 'IHDR'
+        raise RepresentationFidelity::ContractError,
+              'raster artifact is not a PNG with an IHDR header'
+      end
+      pixel_width, pixel_height = header[16, 8].unpack('N2')
+      unless pixel_width.to_i > 0 && pixel_height.to_i > 0
+        raise RepresentationFidelity::ContractError,
+              'raster PNG dimensions are empty'
+      end
+
+      requested_page = page_num.to_i
+      first_page = raster_command_value(arguments, '-f').to_i
+      last_page = raster_command_value(arguments, '-l').to_i
+      unless requested_page > 0 && first_page == requested_page &&
+             last_page == requested_page &&
+             Array(arguments).map { |value| value.to_s }.include?('-singlefile')
+        raise RepresentationFidelity::ContractError,
+              'raster command is not bound to exactly the requested page'
+      end
+
+      crop_expected = distinct_page_box?(render_box, media_box)
+      crop_used = Array(arguments).map { |value| value.to_s.downcase }.include?('-cropbox')
+      unless crop_expected == crop_used
+        raise RepresentationFidelity::ContractError,
+              'raster command box does not match the placement box'
+      end
+
+      display_width, display_height = raster_display_dimensions(
+        render_box, page_rotation
+      )
+      expected_aspect = display_width / display_height
+      pixel_aspect = pixel_width.to_f / pixel_height.to_f
+      aspect_tolerance = [0.01, 2.0 / [pixel_width, pixel_height].min.to_f].max
+      unless (pixel_aspect - expected_aspect).abs <= aspect_tolerance
+        raise RepresentationFidelity::ContractError,
+              "raster PNG aspect #{pixel_aspect} does not match page aspect #{expected_aspect}"
+      end
+
+      {
+        :png_path => png_path.to_s,
+        :pixel_width => pixel_width.to_i,
+        :pixel_height => pixel_height.to_i,
+        :page_number => requested_page,
+        :page_rotation => PageTransform.normalize_rotation(page_rotation),
+        :render_box_used => crop_used ? :crop_box : :media_box,
+        :render_box => render_box.map { |value| value.to_f },
+        :png_signature_verified => true,
+        :page_binding_verified => true,
+        :box_binding_verified => true,
+        :aspect_verified => true
+      }
+    rescue RepresentationFidelity::ContractError
+      raise
+    rescue StandardError => e
+      raise RepresentationFidelity::ContractError,
+            "raster artifact verification failed: #{e.message}"
+    end
+
+    def self.verify_item_raster_artifact!(png_path, item, page_num,
+                                          crop_geometry, arguments)
+      source_id = RepresentationFidelity.source_span_id(item)
+      binding = RepresentationFidelity.proof_binding(source_id)
+      unless binding[:page_number] == page_num.to_i
+        raise RepresentationFidelity::ContractError,
+              'item raster source identity belongs to a different page'
+      end
+      raise RepresentationFidelity::ContractError,
+            'item raster artifact file is missing' unless
+        png_path && File.file?(png_path)
+      header = File.open(png_path, 'rb') { |file| file.read(24) }
+      signature = "\x89PNG\r\n\x1a\n".dup
+      signature.force_encoding(Encoding::BINARY) if
+        signature.respond_to?(:force_encoding)
+      unless header && header.bytesize >= 24 && header[0, 8] == signature &&
+             header[12, 4] == 'IHDR'
+        raise RepresentationFidelity::ContractError,
+              'item raster artifact is not a PNG with an IHDR header'
+      end
+      pixel_width, pixel_height = header[16, 8].unpack('N2')
+      expected_crop = Array(crop_geometry[:pixel_crop]).map { |value| value.to_i }
+      unless expected_crop.length == 4 && expected_crop[2] > 0 &&
+             expected_crop[3] > 0
+        raise RepresentationFidelity::ContractError,
+              'item raster expected crop is invalid'
+      end
+      actual_crop = ['-x', '-y', '-W', '-H'].map do |option|
+        value = raster_command_value(arguments, option)
+        raise RepresentationFidelity::ContractError,
+              "item raster command is missing #{option}" if value.nil?
+        value.to_i
+      end
+      unless actual_crop == expected_crop
+        raise RepresentationFidelity::ContractError,
+              'item raster command crop is not bound to the source bbox'
+      end
+      requested_page = page_num.to_i
+      args = Array(arguments).map { |value| value.to_s }
+      unless raster_command_value(args, '-f').to_i == requested_page &&
+             raster_command_value(args, '-l').to_i == requested_page &&
+             args.include?('-singlefile') && !args.include?('-cropbox')
+        raise RepresentationFidelity::ContractError,
+              'item raster command is not bound to exactly one MediaBox page'
+      end
+      unless raster_command_value(args, '-r').to_i == crop_geometry[:dpi].to_i
+        raise RepresentationFidelity::ContractError,
+              'item raster command DPI is not bound to crop geometry'
+      end
+      unless pixel_width.to_i == expected_crop[2] &&
+             pixel_height.to_i == expected_crop[3]
+        raise RepresentationFidelity::ContractError,
+              'item raster PNG dimensions do not equal its source crop'
+      end
+      {
+        :png_path => png_path.to_s,
+        :source_span_id => source_id,
+        :page_number => requested_page,
+        :page_rotation => crop_geometry[:page_rotation].to_i,
+        :source_box => Array(crop_geometry[:source_box]).map { |value| value.to_f },
+        :display_box => Array(crop_geometry[:display_box]).map { |value| value.to_f },
+        :pixel_crop => expected_crop,
+        :pixel_width => pixel_width.to_i,
+        :pixel_height => pixel_height.to_i,
+        :png_signature_verified => true,
+        :page_binding_verified => true,
+        :source_crop_binding_verified => true,
+        :aspect_verified => true
+      }
+    rescue RepresentationFidelity::ContractError
+      raise
+    rescue StandardError => e
+      raise RepresentationFidelity::ContractError,
+            "item raster artifact verification failed: #{e.message}"
+    end
+
     def self.compute_effective_raster_dpi(opts, page_w_pts, page_h_pts)
       requested = (opts[:raster_dpi] || 300).to_i
       requested = 300 if requested <= 0
@@ -1949,16 +3705,141 @@ module BlueCollarSystems
       { requested: 300, desired: 300, effective: 300, cap: 300, pixel_budget: 120_000_000 }
     end
 
-    def self.import_page_as_raster(model, pdf_path, page_num, media_box, opts, import_start, y_offset = 0.0, render_box = nil)
+    def self.import_item_as_raster(model, target_entities, pdf_path, page_num,
+                                   item, media_box, opts, import_start,
+                                   y_offset = 0.0, page_rotation = 0)
+      exe = safe_find_pdftocairo
+      return false unless exe
+      source_id = RepresentationFidelity.source_span_id(item)
+      initial = item_raster_crop_geometry(
+        item, media_box, page_rotation, (opts[:raster_dpi] || 300).to_i
+      )
+      dpi_plan = compute_effective_raster_dpi(
+        opts, initial[:display_width], initial[:display_height]
+      )
+      crop = item_raster_crop_geometry(
+        item, media_box, page_rotation, dpi_plan[:effective]
+      )
+      pixel_x, pixel_y, pixel_width, pixel_height = crop[:pixel_crop]
+      png_path = File.join(
+        Dir.tmpdir,
+        "bc_item_raster_#{Process.pid}_#{(Time.now.to_f * 1_000_000).to_i}_" \
+          "p#{page_num}.png"
+      )
+      candidates = [
+        png_path, png_path.sub(/\.png$/, "-#{page_num}.png"),
+        png_path.sub(/\.png$/, '-01.png'), png_path.sub(/\.png$/, '-1.png')
+      ]
+      candidates.each do |candidate|
+        begin
+          File.delete(candidate) if File.exist?(candidate)
+        rescue StandardError
+          # Stale artifacts are rejected below.
+        end
+      end
+      args = [
+        exe, '-png', '-singlefile', '-r', crop[:dpi].to_s,
+        '-x', pixel_x.to_s, '-y', pixel_y.to_s,
+        '-W', pixel_width.to_s, '-H', pixel_height.to_s,
+        '-f', page_num.to_s, '-l', page_num.to_s,
+        pdf_path, png_path.sub(/\.png$/, '')
+      ]
+      run = CommandRunner.run(
+        args, :timeout_s => 180, :context => 'Raster.item.pdftocairo'
+      )
+      validation = PopplerResultValidator.validate(
+        run,
+        :executable => exe,
+        :argv => args,
+        :context => 'Raster.item.pdftocairo',
+        :page => page_num,
+        :attempt => 1,
+        :representation => :item_raster,
+        :span_id => source_id,
+        :artifacts => candidates,
+        :artifact_policy => :any_nonempty
+      )
+      PopplerResultValidator.log_rejection(
+        validation, 'Raster'
+      ) unless validation[:ok]
+      return false unless validation[:ok] && !run[:timed_out]
+      actual_png = candidates.find { |candidate| File.file?(candidate) }
+      return false unless actual_png
+      artifact = verify_item_raster_artifact!(
+        actual_png, item, page_num, crop, args
+      )
+      scale = opts[:scale].to_f
+      scale = 1.0 if scale <= 0.0
+      factor = (1.0 / 72.0) * scale
+      display_box = crop[:display_box]
+      placement = {
+        :x => display_box[0].to_f * factor,
+        :y => y_offset.to_f + (display_box[1].to_f * factor),
+        :width => crop[:display_width].to_f * factor,
+        :height => crop[:display_height].to_f * factor
+      }
+      point = Geom::Point3d.new(placement[:x], placement[:y], 0.0)
+      image = target_entities.add_image(
+        actual_png, point, placement[:width], placement[:height]
+      )
+      return false unless image
+      begin
+        layer = model.layers['PDF Import: Text Fallback'] ||
+          model.layers.add('PDF Import: Text Fallback')
+        image.layer = layer if layer
+      rescue StandardError => e
+        Logger.warn('Raster', "item image layer assignment failed: #{e.message}")
+      end
+      begin
+        if image.respond_to?(:set_attribute)
+          dictionary = 'BC_PDF_Importer'
+          image.set_attribute(dictionary, 'source_span_id', source_id)
+          image.set_attribute(dictionary, 'raster_page_number', page_num.to_i)
+          image.set_attribute(
+            dictionary, 'raster_page_rotation',
+            PageTransform.normalize_rotation(page_rotation)
+          )
+          image.set_attribute(dictionary, 'raster_source_box', artifact[:source_box])
+          image.set_attribute(dictionary, 'raster_pixel_crop', artifact[:pixel_crop])
+        end
+      rescue StandardError => e
+        Logger.warn('Raster', "item image evidence attributes unavailable: #{e.message}")
+      end
+      Logger.info(
+        'Raster',
+        "Page #{page_num} #{source_id}: placed verified item raster " \
+          "#{artifact[:pixel_width]}x#{artifact[:pixel_height]} px at " \
+          "#{crop[:dpi]} DPI [#{(Time.now - import_start).round(1)}s]"
+      )
+      {
+        :entity => image,
+        :artifact_evidence => artifact,
+        :placement => placement,
+        :command => args
+      }
+    rescue StandardError => e
+      Logger.warn('Raster', "Item raster failed: #{e.message}")
+      false
+    ensure
+      if defined?(candidates) && candidates
+        candidates.each do |candidate|
+          begin
+            File.delete(candidate) if File.exist?(candidate)
+          rescue StandardError => e
+            Logger.warn('Raster', "item temp PNG cleanup failed: #{e.message}")
+          end
+        end
+      end
+    end
+
+    def self.import_page_as_raster(model, pdf_path, page_num, media_box, opts,
+                                   import_start, y_offset = 0.0,
+                                   render_box = nil, page_rotation = 0)
       exe = safe_find_pdftocairo
       return false unless exe
 
       # Render/placement box (usually CropBox when available, else MediaBox).
       render_box = media_box unless render_box.is_a?(Array) && render_box.length >= 4
-      media_min_x = media_box[0].to_f
-      media_min_y = media_box[1].to_f
-      render_min_x = render_box[0].to_f
-      render_min_y = render_box[1].to_f
       page_w_pts = (render_box[2] - render_box[0]).abs
       page_h_pts = (render_box[3] - render_box[1]).abs
       page_w_pts = 612.0 if page_w_pts < 1
@@ -1966,93 +3847,167 @@ module BlueCollarSystems
       dpi_plan = compute_effective_raster_dpi(opts, page_w_pts, page_h_pts)
       dpi = dpi_plan[:effective]
 
-      use_cropbox = false
-      begin
-        if media_box.is_a?(Array) && media_box.length >= 4 &&
-           render_box.is_a?(Array) && render_box.length >= 4
-          use_cropbox = render_box.zip(media_box).any? { |a, b| (a.to_f - b.to_f).abs > 0.01 }
-        end
-      rescue StandardError => e
-        Logger.warn("Raster", "cropbox compare failed: #{e.message}")
-      end
+      use_cropbox = distinct_page_box?(render_box, media_box)
 
       # Render page to PNG
       png_path = File.join(Dir.tmpdir,
-        "bc_raster_#{Process.pid}_#{Time.now.to_i}_p#{page_num}.png")
-
-      args = [exe, '-png', '-singlefile', '-r', dpi.to_s]
-      args << '-cropbox' if use_cropbox
-      args += [
-              '-f', page_num.to_s, '-l', page_num.to_s,
-              pdf_path, png_path.sub(/\.png$/, '')]
-      run = CommandRunner.run(
-        args,
-        timeout_s: 180,
-        context: "Raster.pdftocairo"
-      )
-
-      # With -singlefile, output should be exactly png_path.
-      # Keep legacy candidates for compatibility with older Poppler builds.
-      actual_png = nil
-      [png_path,
+        "bc_raster_#{Process.pid}_#{(Time.now.to_f * 1_000_000).to_i}_p#{page_num}.png")
+      candidates = [png_path,
        png_path.sub(/\.png$/, "-#{page_num}.png"),
        png_path.sub(/\.png$/, "-01.png"),
        png_path.sub(/\.png$/, "-1.png")
-      ].each do |candidate|
-        if File.exist?(candidate)
+      ]
+      variants = []
+      variants << { :cropbox => true, :render_box => render_box } if use_cropbox
+      variants << { :cropbox => false, :render_box => media_box }
+      actual_png = nil
+      actual_box = nil
+      artifact_evidence = nil
+      successful_args = nil
+
+      variants.each_with_index do |variant, variant_index|
+        candidates.each do |candidate|
+          begin
+            File.delete(candidate) if File.exist?(candidate)
+          rescue StandardError
+            # verification below rejects a stale/missing artifact
+          end
+        end
+        args = [exe, '-png', '-singlefile', '-r', dpi.to_s]
+        args << '-cropbox' if variant[:cropbox]
+        args += [
+          '-f', page_num.to_s, '-l', page_num.to_s,
+          pdf_path, png_path.sub(/\.png$/, '')
+        ]
+        run = CommandRunner.run(
+          args,
+          timeout_s: 180,
+          context: "Raster.pdftocairo"
+        )
+        validation = PopplerResultValidator.validate(
+          run,
+          :executable => exe,
+          :argv => args,
+          :context => 'Raster.pdftocairo',
+          :page => page_num,
+          :attempt => variant_index + 1,
+          :representation => :page_raster,
+          :artifacts => candidates,
+          :artifact_policy => :any_nonempty
+        )
+        PopplerResultValidator.log_rejection(
+          validation, 'Raster'
+        ) unless validation[:ok]
+        attempt_ok = validation[:ok] && !run[:timed_out]
+        unless attempt_ok
+          candidates.each do |path|
+            begin
+              File.delete(path) if File.exist?(path)
+            rescue StandardError => e
+              Logger.warn('Raster', "cleanup rejected PNG failed: #{e.message}")
+            end
+          end
+        end
+        break if run[:timed_out]
+        next unless attempt_ok
+        candidate = candidates.find { |path| File.file?(path) }
+        next unless candidate
+        begin
+          proof = verify_raster_artifact!(
+            candidate, page_num, media_box, variant[:render_box],
+            page_rotation, args
+          )
           actual_png = candidate
+          actual_box = variant[:render_box]
+          artifact_evidence = proof
+          successful_args = args
           break
+        rescue RepresentationFidelity::ContractError => e
+          Logger.warn('Raster', "artifact rejected: #{e.message}")
+          candidates.each do |path|
+            begin
+              File.delete(path) if File.exist?(path)
+            rescue StandardError => cleanup_error
+              Logger.warn(
+                'Raster',
+                "cleanup invalid PNG failed: #{cleanup_error.message}"
+              )
+            end
+          end
         end
       end
+      return false unless actual_png && artifact_evidence && actual_box
 
-      return false unless run[:ok] && actual_png && File.exist?(actual_png)
-
+      scale = opts[:scale] || 1.0
+      placement = raster_placement_geometry(
+        media_box, actual_box, page_rotation, scale, y_offset
+      )
+      pt = Geom::Point3d.new(placement[:x], placement[:y], 0)
+      begin
+        img = model.active_entities.add_image(
+          actual_png, pt, placement[:width], placement[:height]
+        )
+        return false unless img
+        layer = model.layers['PDF Import'] || model.layers.add('PDF Import')
         begin
-          scale = opts[:scale] || 1.0
-          # Image size in inches = page pts / 72
-          img_w = page_w_pts / 72.0 * scale
-          img_h = page_h_pts / 72.0 * scale
-        box_offset_x = (render_min_x - media_min_x) / 72.0 * scale
-        box_offset_y = (render_min_y - media_min_y) / 72.0 * scale
-
-        # Match vector page stacking so raster fallback pages do not overlap.
-        pt = Geom::Point3d.new(box_offset_x, y_offset.to_f + box_offset_y, 0)
+          img.layer = layer if layer
+        rescue StandardError => e
+          Logger.warn("Raster", "Image layer assignment failed: #{e.message}")
+        end
         begin
-          # add_image available in SketchUp 2017+
-          img = model.active_entities.add_image(actual_png, pt, img_w, img_h)
-          if img
-            layer = model.layers['PDF Import'] || model.layers.add('PDF Import')
-            begin
-              img.layer = layer if layer
-            rescue StandardError => e
-              Logger.warn("Raster", "Image layer assignment failed: #{e.message}")
-            end
-            box_msg = use_cropbox ? "cropbox" : "mediabox"
-            req = dpi_plan[:requested]
-            cap = dpi_plan[:cap]
-            sharpened = dpi > req
-            status_suffix = sharpened ? " (enhanced)" : ""
-            Sketchup.status_text = "PDF Import — Page #{page_num} — Raster image placed at #{dpi} DPI#{status_suffix} [#{(Time.now - import_start).round(1)}s]"
-            Logger.info(
-              "Raster",
-              "Page #{page_num}: placed #{box_msg} raster #{img_w.round(3)}x#{img_h.round(3)} in at " \
-              "(#{pt.x.round(3)},#{pt.y.round(3)}), dpi req=#{req}, eff=#{dpi}, cap=#{cap}, budget=#{dpi_plan[:pixel_budget]}"
-            )
-            return true
+          if img.respond_to?(:set_attribute)
+            dictionary = 'BC_PDF_Importer'
+            img.set_attribute(dictionary, 'raster_page_number', page_num.to_i)
+            img.set_attribute(dictionary, 'raster_page_rotation',
+                              PageTransform.normalize_rotation(page_rotation))
+            img.set_attribute(dictionary, 'raster_render_box',
+                              artifact_evidence[:render_box])
+            img.set_attribute(dictionary, 'raster_pixel_width',
+                              artifact_evidence[:pixel_width])
+            img.set_attribute(dictionary, 'raster_pixel_height',
+                              artifact_evidence[:pixel_height])
           end
         rescue StandardError => e
-          Logger.warn("Raster", "add_image failed: #{e.message}")
+          Logger.warn('Raster', "image evidence attributes unavailable: #{e.message}")
         end
+        box_msg = artifact_evidence[:render_box_used] == :crop_box ?
+          'cropbox' : 'mediabox'
+        req = dpi_plan[:requested]
+        cap = dpi_plan[:cap]
+        sharpened = dpi > req
+        status_suffix = sharpened ? " (enhanced)" : ""
+        Sketchup.status_text = "PDF Import — Page #{page_num} — Raster image placed at #{dpi} DPI#{status_suffix} [#{(Time.now - import_start).round(1)}s]"
+        Logger.info(
+          "Raster",
+          "Page #{page_num}: placed verified #{box_msg} raster " \
+          "#{placement[:width].round(3)}x#{placement[:height].round(3)} in at " \
+          "(#{pt.x.round(3)},#{pt.y.round(3)}), rotation=#{artifact_evidence[:page_rotation]}, " \
+          "pixels=#{artifact_evidence[:pixel_width]}x#{artifact_evidence[:pixel_height]}, " \
+          "dpi req=#{req}, eff=#{dpi}, cap=#{cap}, budget=#{dpi_plan[:pixel_budget]}"
+        )
+        {
+          :entity => img,
+          :artifact_evidence => artifact_evidence,
+          :placement => placement,
+          :command => successful_args
+        }
       rescue StandardError => e
-        Logger.warn("Raster", "Failed: #{e.message}")
-      ensure
-        begin
-          File.delete(actual_png) if actual_png && File.exist?(actual_png)
-        rescue StandardError => e
-          Logger.warn("Main", "cleanup temp png failed: #{e.message}")
+        Logger.warn("Raster", "add_image failed: #{e.message}")
+        false
+      end
+    rescue StandardError => e
+      Logger.warn("Raster", "Failed: #{e.message}")
+      false
+    ensure
+      if defined?(candidates) && candidates
+        candidates.each do |candidate|
+          begin
+            File.delete(candidate) if File.exist?(candidate)
+          rescue StandardError => e
+            Logger.warn("Main", "cleanup temp png failed: #{e.message}")
+          end
         end
       end
-      false
     end
 
     # ================================================================

@@ -13,7 +13,7 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 
 | Host | Status |
 |------|--------|
-| SketchUp Make 2017 | ⚠️ Expected — Ruby 2.2 CI gate; **field retest required** (use **v3.7.90+**, latest **v3.7.95**) |
+| SketchUp Make 2017 | ⚠️ Expected — Ruby 2.2 CI gate; **field retest required** (use **v3.7.90+**, latest **v3.7.97**) |
 | SketchUp 2018–2023 | ⚠️ Expected |
 | Current SketchUp Pro | ⚠️ Expected |
 
@@ -27,15 +27,16 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 | Ruby 2.5–3.2.x | SketchUp 2018 through current Pro |
 | Python | **Not required** for core vector import |
 
-## Bundled dependencies
+## External dependencies
 
 | Dependency | Shipped in Windows RBZ? |
 |------------|-------------------------|
-| Poppler (`pdftocairo`, `pdftotext`, `pdffonts`) | ✅ Yes |
-| MuPDF `mutool` | Optional helper if on PATH |
+| Poppler (`pdftocairo`, `pdftotext`, `pdffonts`) | ❌ Not bundled — free optional helper |
+| MuPDF `mutool` | ❌ Not bundled — free optional helper |
 | Ghostscript | ❌ Not bundled — optional font repair |
 
-Release build fails if bundled Poppler helpers are missing.
+Every release RBZ is source-only. The builder rejects embedded helper
+executables, DLL/data trees, and runtime manifests.
 
 ## Legacy hardware notes
 
@@ -47,7 +48,7 @@ Release build fails if bundled Poppler helpers are missing.
 
 ## Offline install
 
-Windows **RBZ** from GitHub Releases works without internet after download (Poppler bundled). Ghostscript remains an optional separate download.
+The Windows **RBZ** installs without internet and core vector import works offline. Poppler, MuPDF, and Ghostscript are not bundled; helper-dependent text, raster, SVG, or font-repair paths need a free helper installed or configured separately.
 
 ## Enterprise / multi-user
 

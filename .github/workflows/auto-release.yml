@@ -28,7 +28,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  poppler-smoke-windows:
+  ruby22-exact-parse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install exact-Ruby source build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl
+      - name: Exact Ruby 2.2.4-p230 parse gate — every shipped extension file
+        run: bash tools/run_ruby22_exact_source.sh --parse
+
+  source-only-build-windows:
+    needs: ruby22-exact-parse
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -36,17 +46,15 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Poppler PE prune lock (R21-7/R21-8)
-        run: python tools/test_prune_poppler_bundle.py -v
-      - name: Poppler helper smoke unit tests (R21-8)
-        run: python tools/test_smoke_poppler_helpers.py -v
+      - name: Source-only release contract tests
+        run: python tools/test_build_release.py -v
       - name: Release safety unit tests (R21-5)
         run: python tools/test_release_safety.py
-      - name: Build release with required Poppler smoke (R21-8)
-        run: python build_release.py --require-poppler-smoke --out "$env:RUNNER_TEMP\su-rbz"
+      - name: Build source-only release in temporary output
+        run: python build_release.py --out "$env:RUNNER_TEMP\su-rbz"
 
   release:
-    needs: poppler-smoke-windows
+    needs: [ruby22-exact-parse, source-only-build-windows]
     if: "!startsWith(github.event.head_commit.message, 'chore: bump version to') && !contains(github.event.head_commit.message, 'automation/version-bump') && !contains(github.event.head_commit.message, '[skip release]')"
     runs-on: ubuntu-latest
     steps:
@@ -92,25 +100,12 @@ jobs:
           ruby test/source_provenance_test.rb
           ruby test/textmode1_invariant_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
-          # R22 incident class: 2.2-parser-only errors (e.g. value-if with a
-          # `return` branch) are invisible to the regex compat checker. The
-          # dedicated PARSE gate below runs FIRST inside ruby:2.2 on every
-          # shipped extension file; nothing mints without it.
-          docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
-            set -e
-            echo "=== Ruby 2.2 PARSE gate: every extension file (R22) ==="
-            find extracted/sketchup_ext -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
-            find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
-            ruby test/smoke_test.rb
-            ruby test/ruby22_compat_test.rb
-            ruby test/import_health_test.rb
-            ruby test/mesh_text_scaling_test.rb
-            ruby test/mesh_text_width_fidelity_test.rb
-            ruby test/condensed_text_width_regression_test.rb
-            ruby test/all_modes_placement_contract_test.rb
-            ruby test/textmode1_invariant_test.rb
-            ruby test/geometry_builder_text_fallback_test.rb
-          '
+
+      - name: Exact Ruby 2.2.4-p230 source-built parse and smoke gates
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl zlib1g-dev libyaml-dev libffi-dev
+          bash tools/run_ruby22_exact_source.sh --smoke
 
       - name: Read committed version
         id: version
@@ -168,12 +163,23 @@ jobs:
               "bc_pdf_vector_importer.rb",
               "bc_pdf_vector_importer/main.rb",
               "bc_pdf_vector_importer/metadata.rb",
-              "bc_pdf_vector_importer/bin/pdftocairo.exe",
           }
           missing = sorted(required - names)
           if missing:
               raise SystemExit(f"RBZ missing required files: {missing}")
-          print(f"PASS: {rbzs[0].name} contains required extension files")
+          forbidden_runtime = sorted(
+              name for name in names
+              if name == "bc_pdf_vector_importer/poppler-runtime-manifest.json"
+              or name.startswith("bc_pdf_vector_importer/bin/")
+              or name.startswith("bc_pdf_vector_importer/Library/")
+              or name.startswith("bc_pdf_vector_importer/share/poppler/")
+          )
+          if forbidden_runtime:
+              raise SystemExit(
+                  "Source-only RBZ contains forbidden runtime payload: "
+                  + ", ".join(forbidden_runtime)
+              )
+          print(f"PASS: {rbzs[0].name} is source-only and contains required extension files")
           PY
 
       - name: Create or update release

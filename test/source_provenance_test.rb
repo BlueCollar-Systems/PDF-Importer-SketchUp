@@ -99,23 +99,28 @@ class SourceProvenanceTest < Minitest::Test
     def item.bbox_y1; 40.0; end
     def item.source_span_id; 'text_span:2:7'; end
 
-    builder.send(:record_text_span_provenance, item)
+    builder.send(
+      :record_text_span_provenance, item, 'native_label',
+      ['persistent_id:501'], :labels
+    )
     assert_equal 1, bucket.length
     entry = bucket[0]
     assert_equal 'text_span:2:7', entry[:span_id]
-    assert_equal 'text_span:2:0', entry[:object_id],
+    assert_equal 'text_delivery:2:0', entry[:object_id],
                  'object_id stays a separate created-entity label'
     assert_equal [10.0, 20.0, 30.0, 40.0], entry[:source_bbox_pdf]
 
-    builder.send(:record_text_span_provenance, item)
+    builder.send(
+      :record_text_span_provenance, item, 'native_label',
+      ['persistent_id:502'], :labels
+    )
     assert_equal 'text_span:2:7', bucket[1][:span_id]
-    assert_equal 'text_span:2:1', bucket[1][:object_id]
+    assert_equal 'text_delivery:2:1', bucket[1][:object_id]
   end
 
-  # An item with no assigned identity (legacy callers only) must not get a
-  # fabricated bucket-index span_id — absence is honest and lets consumers
-  # fall back to an explicit page-level result.
-  def test_record_text_span_provenance_omits_span_id_when_unassigned
+  # Missing source or resulting-entity identity cannot be emitted as partial
+  # provenance: it must fail closed before contaminating the exact join set.
+  def test_record_text_span_provenance_rejects_missing_source_identity
     bucket = []
     builder = GB.allocate
     builder.instance_variable_set(:@provenance_bucket, bucket)
@@ -128,10 +133,32 @@ class SourceProvenanceTest < Minitest::Test
     def item.bbox_x1; 30.0; end
     def item.bbox_y1; 40.0; end
 
-    builder.send(:record_text_span_provenance, item)
-    assert_equal 1, bucket.length
-    refute bucket[0].key?(:span_id),
-           'no fabricated span_id for unassigned items (RB-01)'
-    assert_equal 'text_span:1:0', bucket[0][:object_id]
+    assert_raises(
+      BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError
+    ) do
+      builder.send(
+        :record_text_span_provenance, item, 'native_label',
+        ['persistent_id:503'], :labels
+      )
+    end
+    assert_empty bucket
+  end
+
+  def test_record_text_span_provenance_rejects_missing_result_identity
+    bucket = []
+    builder = GB.allocate
+    builder.instance_variable_set(:@provenance_bucket, bucket)
+    builder.instance_variable_set(:@page_number, 1)
+    builder.instance_variable_set(:@use_3d_text, false)
+
+    item = Object.new
+    def item.source_span_id; 'text_span:1:0'; end
+
+    assert_raises(
+      BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError
+    ) do
+      builder.send(:record_text_span_provenance, item, 'native_label', [], :labels)
+    end
+    assert_empty bucket
   end
 end

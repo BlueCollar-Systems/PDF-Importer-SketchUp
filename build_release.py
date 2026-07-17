@@ -18,8 +18,9 @@ Usage:
   python build_release.py --out /path/to/output_dir
   python build_release.py --require-poppler-smoke --out /path/to/output_dir
 
-Optional (Windows release with bundled Poppler):
-  powershell -ExecutionPolicy Bypass -File tools/fetch_third_party_binaries.ps1
+Every RBZ is source-only. Current and legacy Poppler runtime payloads are
+always excluded; installed extensions use only explicitly approved environment
+or system helper paths discovered by the importer.
 
 Output:
   SketchUp-PDF-Importer_v<VERSION>.rbz
@@ -43,16 +44,6 @@ EXCLUDE_SUFFIXES = {".bak", ".swp", ".pyo", ".pyc"}
 
 SMOKE_SCRIPT = REPO_ROOT / "tools" / "smoke_poppler_helpers.py"
 
-BUNDLED_HELPERS = {
-    "pdftocairo.exe",
-    "pdftotext.exe",
-    "pdffonts.exe",
-    "poppler.dll",
-    "THIRD_PARTY_NOTICES.txt",
-    "licenses/README.txt",
-}
-
-
 def _should_exclude(rel: Path) -> bool:
     for part in rel.parts:
         if part in EXCLUDE_DIRS:
@@ -64,6 +55,20 @@ def _should_exclude(rel: Path) -> bool:
     return False
 
 
+def _is_poppler_payload(rel: Path) -> bool:
+    """Identify runtime members that a source-only RBZ must never contain."""
+    parts = rel.parts
+    if len(parts) < 2 or parts[0] != SUPPORT_DIR.name:
+        return False
+
+    payload = parts[1:]
+    if payload == ("poppler-runtime-manifest.json",):
+        return True
+    if payload[0] in {"bin", "Library"}:
+        return True
+    return len(payload) >= 2 and payload[:2] == ("share", "poppler")
+
+
 def _read_version() -> str:
     if LOADER_FILE.exists():
         text = LOADER_FILE.read_text(encoding="utf-8", errors="replace")
@@ -71,23 +76,6 @@ def _read_version() -> str:
         if m:
             return m.group(1).strip()
     return "0.0.0"
-
-
-def _verify_bundled_helpers(required: bool = True) -> None:
-    """Fail release builds that accidentally omit bundled Windows helpers."""
-    bin_dir = SUPPORT_DIR / "bin"
-    missing = sorted(name for name in BUNDLED_HELPERS if not (bin_dir / name).is_file())
-    if not missing:
-        return
-
-    message = (
-        "Bundled Poppler helper files are missing from "
-        f"{bin_dir}: {', '.join(missing)}. "
-        "Run tools/fetch_third_party_binaries.ps1 before building the release RBZ."
-    )
-    if required:
-        raise RuntimeError(message)
-    print(f"WARNING: {message}")
 
 
 def _run_poppler_smoke(*, required: bool = False) -> None:
@@ -106,7 +94,11 @@ def _run_poppler_smoke(*, required: bool = False) -> None:
     subprocess.run(command, check=True)
 
 
-def build(out_dir: Path, *, require_helpers: bool = True, require_poppler_smoke: bool = False) -> Path:
+def build(out_dir: Path, *, require_helpers: bool = False, require_poppler_smoke: bool = False) -> Path:
+    if require_helpers:
+        raise RuntimeError(
+            "RBZ builds are source-only; bundled runtime inclusion is forbidden"
+        )
     version  = _read_version()
     rbz_name = f"SketchUp-PDF-Importer_v{version}.rbz"
     rbz_path = out_dir / rbz_name
@@ -120,12 +112,10 @@ def build(out_dir: Path, *, require_helpers: bool = True, require_poppler_smoke:
         ],
         check=True,
     )
-    _verify_bundled_helpers(required=require_helpers)
-
-    # R21-8 empirical smoke. Visible-skip returns 0 (bin absent / non-Windows);
-    # a real helper failure must stop the build (check=True). Escape: fix bin/
-    # or re-run tools/fetch_third_party_binaries.ps1 — do not soft-ignore.
-    _run_poppler_smoke(required=require_poppler_smoke)
+    if require_poppler_smoke:
+        # An explicit smoke request remains authoritative for the approved
+        # system/development helper, but its payload is never archived.
+        _run_poppler_smoke(required=True)
 
     file_count = 0
     skipped    = 0
@@ -144,6 +134,9 @@ def build(out_dir: Path, *, require_helpers: bool = True, require_poppler_smoke:
             if _should_exclude(rel):
                 skipped += 1
                 continue
+            if _is_poppler_payload(rel):
+                skipped += 1
+                continue
             zf.write(abs_path, str(rel))
             file_count += 1
 
@@ -157,12 +150,12 @@ def main() -> None:
     parser.add_argument("--out", default=str(REPO_ROOT),
                         help="Output directory (default: repo root)")
     parser.add_argument("--allow-missing-bundled-poppler", action="store_true",
-                        help="Build without bundled Windows Poppler helpers (source/dev only).")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--require-poppler-smoke", action="store_true",
                         help="Require Poppler helper smoke to pass (Windows release gate).")
     args   = parser.parse_args()
     out    = Path(args.out).resolve()
-    rbz    = build(out, require_helpers=not args.allow_missing_bundled_poppler,
+    rbz    = build(out, require_helpers=False,
                    require_poppler_smoke=args.require_poppler_smoke)
     print(f"\nRelease ready: {rbz}")
 

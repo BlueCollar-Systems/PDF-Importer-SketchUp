@@ -6,7 +6,7 @@
 #
 # BCS-ARCH-001 Rule 5 sweep: quality-tier dials (arc_mode, cleanup_level,
 # lineweight_mode, hatch_mode, bezier_segments, merge_tolerance, raster_dpi,
-# detect_arcs, map_dashes, force_raster, raster_fallback) are no longer
+# detect_arcs, map_dashes, force_raster) are no longer
 # UI-adjustable. The MODES table below holds only the per-mode strategy
 # choices; quality parameters are baked into the consolidated defaults
 # applied uniformly in initialize().
@@ -164,7 +164,10 @@ module BlueCollarSystems
         @detect_arcs      = attrs[:detect_arcs]      || (is_raster ? 'No' : 'Yes')
         @map_dashes       = attrs[:map_dashes]       || (is_raster ? 'No' : 'Yes')
         @hatch_mode       = attrs[:hatch_mode]       || (is_raster ? 'Skip' : 'Group')
-        @raster_fallback  = attrs[:raster_fallback]  || (@import_mode == 'auto' || @import_mode == 'hybrid' || is_raster ? 'Yes' : 'No')
+        # Retained in the serialized config for backward compatibility, but
+        # implicit page-raster substitution is not an authorized mode. Raster
+        # is delivered only when the user explicitly selects Raster.
+        @raster_fallback  = 'No'
         @force_raster     = attrs[:force_raster]     || (is_raster ? 'Yes' : 'No')
         @lineweight_mode  = attrs[:lineweight_mode]  || (is_raster ? 'Ignore' : 'Preserve visually')
       end

@@ -11,6 +11,7 @@ require File.join(File.dirname(__FILE__), 'metadata')
 require File.join(File.dirname(__FILE__), 'model_3d_extruder')
 require File.join(File.dirname(__FILE__), 'model_3d_intent')
 require File.join(File.dirname(__FILE__), 'parts_bootstrap')
+require File.join(File.dirname(__FILE__), 'representation_fidelity')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -98,6 +99,8 @@ module BlueCollarSystems
             '). The importer never executes these; flagged for awareness ' \
             'to match the Python hosts (R2-6).'
         end
+        report[:extra][:representation_fidelity] =
+          validate_representation_fidelity(stats)
         enrich_report_extras!(report)
         attach_source_provenance!(report, stats)
         report
@@ -270,6 +273,10 @@ module BlueCollarSystems
         {
           text_renderers: renderers,
           delivered_text_entity_counts: delivered_text_entity_counts(stats),
+          execution_scope: (stats[:execution_scope] ||
+                            stats['execution_scope'] || :host_import).to_s,
+          extracted_text_items: (stats[:extracted_text_items] ||
+                                 stats['extracted_text_items']).to_i,
           edges: stats[:edges].to_i,
           arcs: stats[:arcs].to_i,
           text_mode: stats[:text_mode].to_s,
@@ -281,6 +288,13 @@ module BlueCollarSystems
           embedded_images_placed: stats[:embedded_images_placed].to_i,
           embedded_image_dir: stats[:embedded_image_dir],
           embedded_image_paths: Array(stats[:embedded_image_paths] || stats[:embedded_image_files]).map(&:to_s),
+          fallback_transitions: Array(stats[:fallback_transitions]).map { |entry| normalize_json(entry) },
+          terminal_text_delivery_records: Array(stats[:terminal_text_delivery_records]).map { |entry| normalize_json(entry) },
+          terminal_cleanup_events: Array(stats[:terminal_cleanup_events]).map { |entry| normalize_json(entry) },
+          page_representation_fallbacks: Array(stats[:page_representation_fallbacks]).map { |entry| normalize_json(entry) },
+          empty_page_source_inspections: Array(stats[:empty_page_source_inspections]).map { |entry| normalize_json(entry) },
+          representation_ownership_group_forced_pages: Array(stats[:representation_ownership_group_forced_pages]).map { |entry| normalize_json(entry) },
+          source_glyph_physical_deliveries: Array(stats[:source_glyph_physical_deliveries]).map { |entry| normalize_json(entry) },
           scale_hints: scale_hints_block(stats),
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers),
           model_3d_intent: model_3d_intent_block(stats),
@@ -296,8 +310,8 @@ module BlueCollarSystems
       # (TEXTMODE-1: the delivered mode stays Glyphs; the source is reported,
       # never silently swapped). Present only when a Glyphs-mode import ran.
       #   source                 cairo_svg (bundled pdftocairo), mupdf_svg
-      #                          (installed mutool), or internal (StrokeFont
-      #                          lettering fallback).
+      #                          (installed mutool), or unavailable (requested
+      #                          glyph delivery stopped without substitution).
       #   fallback_reason        why the preferred cairo source was not used
       #                          (pdftocairo_missing/_failed/_timeout,
       #                          svg_zero_placements) or null.
@@ -314,6 +328,8 @@ module BlueCollarSystems
         reason = src[:fallback_reason] || src['fallback_reason']
         out = {
           source: (src[:source] || src['source']).to_s,
+          attempted_source: (src[:attempted_source] ||
+                             src['attempted_source']).to_s,
           fallback_reason: reason.nil? ? nil : reason.to_s,
           pages: (src[:pages] || src['pages']).to_i,
           runs_matched: (src[:runs_matched] || src['runs_matched']).to_i,
@@ -321,8 +337,8 @@ module BlueCollarSystems
           placements_unmatched: (src[:placements_unmatched] ||
                                  src['placements_unmatched']).to_i,
           note: 'Glyphs-mode outline source (R23). cairo_svg/mupdf_svg stamp ' \
-                'the PDF fonts\' own glyph outlines; internal is StrokeFont ' \
-                'lettering (degraded, reported). runs_* position-match ' \
+                'the PDF fonts\' own glyph outlines; unavailable means the ' \
+                'requested delivery stopped without substitution. runs_* position-match ' \
                 'extractor spans to rendered glyph ink (R17-3).'
         }
         fonts = Array(src[:missing_fonts] || src['missing_fonts']).map { |v| v.to_s }
@@ -421,11 +437,11 @@ module BlueCollarSystems
       end
 
       def model_3d_block(_stats, _opts = {})
-        # 3D shape extrusion is shelved pending 3D-text scaling resolution.
-        # The UI and CLI both hardcode extrude_to_3d=false; always report disabled
-        # regardless of any legacy stats payload that may have been populated.
+        # Closed-shape page extrusion is an unrelated disabled feature. It must
+        # never gate source-glyph 3D text or imply that text depth is disabled.
         normalize_json(
-          enabled: false, supported: false, faces_extruded: 0, skipped_reason: 'shelved_by_owner'
+          enabled: false, supported: false, faces_extruded: 0,
+          skipped_reason: 'closed_shape_extrusion_disabled'
         )
       rescue StandardError
         { 'enabled' => false, 'supported' => false, 'skipped_reason' => 'report_error' }
@@ -475,17 +491,586 @@ module BlueCollarSystems
         text_count = (report[:result] || {})[:text_entities].to_i
         has_entity_types = extra.key?(:actual_text_entity_types) || extra.key?('actual_text_entity_types')
         text_ok = text_count <= 0 || has_entity_types
-        ready = has_stamp && has_crosscheck && text_ok && open_failure.nil?
+        execution_scope = (extra[:execution_scope] ||
+                           extra['execution_scope']).to_s
+        host_delivery_ok = execution_scope != 'extraction_only'
+        fidelity = extra[:representation_fidelity] ||
+                   extra['representation_fidelity'] || {}
+        # Requested-representation fidelity is an independent contract. An
+        # empty host text count can mean "no source text", but it can also mean
+        # every requested item was dropped; it must never bypass the ledger.
+        fidelity_ok = fidelity[:ready] == true || fidelity['ready'] == true
+        ready = has_stamp && has_crosscheck && text_ok && fidelity_ok &&
+                host_delivery_ok &&
+                open_failure.nil?
         {
           ready: ready,
           checks: {
             build_stamp: has_stamp,
             scale_crosscheck: has_crosscheck,
             actual_text_entity_types: text_ok,
+            host_entity_delivery: host_delivery_ok,
+            requested_representation_fidelity: fidelity_ok,
             no_open_failure: open_failure.nil?
           },
           note: 'diagnostics stub — Report Doctor may recompute client-side'
         }
+      end
+
+      def telemetry_value(hash, key)
+        return nil unless hash.respond_to?(:[])
+        if hash.respond_to?(:key?)
+          return hash[key] if hash.key?(key)
+          string_key = key.to_s
+          return hash[string_key] if hash.key?(string_key)
+          return nil
+        end
+        value = hash[key]
+        value.nil? ? hash[key.to_s] : value
+      end
+
+      def symbolized_transition_proof(entry)
+        return nil unless entry.is_a?(Hash)
+        proof = {}
+        [
+          :source_span_id, :importer_id, :page_number,
+          :affirmative_impossibility, :generic_failure,
+          :attempted_renderer, :created_entity_ids, :cleaned_entity_ids,
+          :evidence
+        ].each { |key| proof[key] = telemetry_value(entry, key) }
+        proof[:scope] = telemetry_value(entry, :scope).to_s.to_sym
+        proof[:category] = telemetry_value(entry, :category).to_s.to_sym
+        proof[:from_mode] = telemetry_value(entry, :from_mode)
+        proof[:to_mode] = telemetry_value(entry, :to_mode)
+        proof[:reason_code] = telemetry_value(entry, :reason_code).to_s.to_sym
+        proof[:cleanup_outcome] =
+          telemetry_value(entry, :cleanup_outcome).to_s.to_sym
+        proof
+      rescue StandardError
+        nil
+      end
+
+      def transition_signature(entry)
+        proof = symbolized_transition_proof(entry)
+        return nil unless proof
+        [
+          proof[:source_span_id].to_s,
+          RepresentationFidelity.normalize_mode(proof[:from_mode]),
+          RepresentationFidelity.normalize_mode(proof[:to_mode]),
+          proof[:reason_code], proof[:importer_id].to_s,
+          proof[:page_number].to_i,
+          Array(proof[:created_entity_ids]).map { |value| value.to_s }.sort,
+          Array(proof[:cleaned_entity_ids]).map { |value| value.to_s }.sort,
+          proof[:cleanup_outcome]
+        ]
+      end
+
+      def text_mode_delivery_evidence_complete?(entry, mode)
+        return false unless entry.is_a?(Hash)
+
+        common = telemetry_value(entry, :placement_verified) == true &&
+                 telemetry_value(entry, :rotation_verified) == true &&
+                 telemetry_value(entry, :entity_type_verified) == true
+        return false unless common
+
+        case RepresentationFidelity.normalize_mode(mode)
+        when :text3d
+          telemetry_value(entry, :width_verified) == true &&
+            telemetry_value(entry, :height_verified) == true
+        when :labels
+          telemetry_value(entry, :content_verified) == true &&
+            telemetry_value(entry, :leader_verified) == true
+        else
+          false
+        end
+      end
+
+      def validate_representation_fidelity(stats)
+        execution_scope = (stats[:execution_scope] ||
+                           stats['execution_scope']).to_s
+        if execution_scope == 'extraction_only'
+          return {
+            ready: false,
+            not_applicable: true,
+            checks: { host_entity_delivery: false },
+            errors: ['host_representation_delivery_not_performed']
+          }
+        end
+        source_ids = Array(
+          stats[:text_source_span_ids] || stats['text_source_span_ids']
+        ).map { |value| value.to_s.strip }
+        attempts = Array(stats[:text_attempts] || stats['text_attempts'])
+        provenance = Array(
+          stats[:source_provenance_objects] || stats['source_provenance_objects']
+        )
+        terminal = Array(
+          stats[:terminal_text_delivery_records] ||
+          stats['terminal_text_delivery_records']
+        )
+        page_deliveries = Array(
+          stats[:page_text_delivery_records] ||
+          stats['page_text_delivery_records']
+        )
+        fallback_transitions = Array(
+          stats[:fallback_transitions] || stats['fallback_transitions']
+        )
+        physical_deliveries = Array(
+          stats[:source_glyph_physical_deliveries] ||
+          stats['source_glyph_physical_deliveries']
+        )
+        errors = []
+
+        if source_ids.uniq.length != source_ids.length ||
+           !source_ids.all? { |identity| identity =~ RepresentationFidelity::SOURCE_ID }
+          errors << 'source_span_ledger_invalid'
+        end
+
+        provenance_by_span = {}
+        provenance_types_by_span = {}
+        physical_provenance = {}
+        live_id_owner = {}
+        provenance.each do |entry|
+          next unless entry.is_a?(Hash)
+          source_kind = telemetry_value(entry, :source_kind).to_s
+          entity_type = telemetry_value(entry, :created_entity_type).to_s
+          if source_kind == 'svg_glyph_placement'
+            unit_id = telemetry_value(entry, :object_id).to_s.strip
+            page = telemetry_value(entry, :page).to_i
+            ids = RepresentationFidelity.positive_entity_ids(
+              telemetry_value(entry, :resulting_entity_ids)
+            )
+            placements = telemetry_value(entry, :source_placement_indices)
+            placements = placements.is_a?(Array) ?
+              placements.map { |value| value.to_i } : []
+            valid_physical = !unit_id.empty? && page > 0 && ids &&
+              entity_type == 'source_glyph_3d_text' &&
+              telemetry_value(entry, :span_id).to_s.strip.empty? &&
+              telemetry_value(entry, :semantic_identity_available) == false &&
+              telemetry_value(entry, :source_glyph_identity_verified) == true &&
+              telemetry_value(entry, :positive_z_depth_verified) == true &&
+              !placements.empty? && placements.uniq.length == placements.length &&
+              !physical_provenance.key?(unit_id)
+            unless valid_physical
+              errors << 'physical_glyph_provenance_invalid'
+              next
+            end
+            ids.each do |identity|
+              if live_id_owner.key?(identity)
+                errors << "duplicate_live_entity_id:#{identity}"
+              else
+                live_id_owner[identity] = unit_id
+              end
+            end
+            physical_provenance[unit_id] = {
+              :page => page, :ids => ids.sort,
+              :placements => placements.sort
+            }
+            next
+          end
+          next unless source_kind == 'text_span' ||
+                      %w[native_label native_3d_text source_glyph_3d_text glyph_outline page_path_geometry raster_image].include?(entity_type)
+          span_id = telemetry_value(entry, :span_id).to_s.strip
+          ids = RepresentationFidelity.positive_entity_ids(
+            telemetry_value(entry, :resulting_entity_ids)
+          )
+          unless source_ids.include?(span_id) && ids
+            errors << "provenance_invalid:#{span_id}"
+            next
+          end
+          ids.each do |identity|
+            if live_id_owner.key?(identity)
+              errors << "duplicate_live_entity_id:#{identity}"
+            else
+              live_id_owner[identity] = span_id
+            end
+          end
+          provenance_by_span[span_id] ||= []
+          provenance_by_span[span_id].concat(ids)
+          provenance_types_by_span[span_id] ||= []
+          provenance_types_by_span[span_id] << entity_type
+        end
+
+        seen_physical_units = {}
+        physical_deliveries.each do |entry|
+          unless entry.is_a?(Hash)
+            errors << 'physical_glyph_delivery_invalid'
+            next
+          end
+          unit_id = telemetry_value(entry, :source_unit_id).to_s.strip
+          ids = RepresentationFidelity.positive_entity_ids(
+            telemetry_value(entry, :resulting_entity_ids)
+          )
+          placements = telemetry_value(entry, :placement_indices)
+          placements = placements.is_a?(Array) ?
+            placements.map { |value| value.to_i }.sort : []
+          expected = physical_provenance[unit_id]
+          valid = expected && !seen_physical_units.key?(unit_id) && ids &&
+            expected[:page] == telemetry_value(entry, :page).to_i &&
+            expected[:ids] == ids.sort && expected[:placements] == placements &&
+            RepresentationFidelity.normalize_mode(
+              telemetry_value(entry, :delivered_mode)
+            ) == :text3d &&
+            telemetry_value(entry, :visual_fidelity_verified) == true &&
+            telemetry_value(entry, :positive_z_depth_verified) == true &&
+            telemetry_value(entry, :source_glyph_identity_verified) == true
+          unless valid
+            errors << 'physical_glyph_delivery_crosslink_invalid'
+            next
+          end
+          seen_physical_units[unit_id] = true
+        end
+        unless seen_physical_units.keys.sort == physical_provenance.keys.sort
+          errors << 'physical_glyph_delivery_set_mismatch'
+        end
+
+        terminal_by_span = {}
+        terminal_no_semantic_pages = {}
+        terminal.each do |entry|
+          unless entry.is_a?(Hash)
+            errors << 'terminal_record_not_hash'
+            next
+          end
+          span_ids = telemetry_value(entry, :source_span_ids)
+          span_ids = span_ids.is_a?(Array) ?
+            span_ids.map { |value| value.to_s.strip } : []
+          ids = RepresentationFidelity.positive_entity_ids(
+            telemetry_value(entry, :resulting_entity_ids)
+          )
+          cleanup = telemetry_value(entry, :cleanup_outcome).to_s
+          delivered = RepresentationFidelity.normalize_mode(
+            telemetry_value(entry, :delivered_mode)
+          )
+          no_semantic_text = telemetry_value(entry, :no_semantic_text) == true
+          if span_ids.empty? && no_semantic_text
+            page_number = telemetry_value(entry, :page).to_i
+            valid_page_raster = page_number > 0 &&
+              !terminal_no_semantic_pages.key?(page_number) && ids &&
+              cleanup == 'not_required' && delivered == :raster &&
+              telemetry_value(entry, :delivery_scope).to_s == 'page_raster' &&
+              telemetry_value(entry, :real_raster_verified) == true &&
+              telemetry_value(entry, :visual_fidelity_verified) == true
+            unless valid_page_raster
+              errors << 'terminal_no_semantic_page_record_invalid'
+              next
+            end
+            ids.each do |identity|
+              if live_id_owner.key?(identity)
+                errors << "duplicate_live_entity_id:#{identity}"
+              else
+                live_id_owner[identity] = "no_semantic_page_raster:#{page_number}"
+              end
+            end
+            terminal_no_semantic_pages[page_number] = ids
+            next
+          end
+          scope = telemetry_value(entry, :delivery_scope).to_s
+          artifact = telemetry_value(entry, :artifact_evidence)
+          page_number = telemetry_value(entry, :page).to_i
+          page_raster_valid = scope == 'page_raster' && cleanup == 'verified'
+          item_raster_valid = scope == 'item_raster' &&
+            cleanup == 'not_required' && span_ids.length == 1 &&
+            telemetry_value(entry, :source_crop_binding_verified) == true &&
+            artifact.is_a?(Hash) &&
+            telemetry_value(artifact, :source_span_id).to_s == span_ids[0] &&
+            telemetry_value(artifact, :page_number).to_i == page_number &&
+            telemetry_value(artifact, :source_crop_binding_verified) == true
+          valid = !span_ids.empty? && span_ids.uniq.length == span_ids.length &&
+                  span_ids.all? { |span_id| source_ids.include?(span_id) } &&
+                  span_ids.none? { |span_id| terminal_by_span.key?(span_id) } &&
+                  ids && delivered == :raster && page_number > 0 &&
+                  (page_raster_valid || item_raster_valid) &&
+                  telemetry_value(entry, :real_raster_verified) == true &&
+                  telemetry_value(entry, :visual_fidelity_verified) == true
+          unless valid
+            errors << 'terminal_page_record_invalid'
+            next
+          end
+          ids.each do |identity|
+            if live_id_owner.key?(identity)
+              errors << "duplicate_live_entity_id:#{identity}"
+            else
+              live_id_owner[identity] = span_ids.join(',')
+            end
+          end
+          span_ids.each { |span_id| terminal_by_span[span_id] = ids }
+        end
+
+        page_delivery_by_span = {}
+        page_deliveries.each do |entry|
+          unless entry.is_a?(Hash)
+            errors << 'page_delivery_not_hash'
+            next
+          end
+          span_ids = telemetry_value(entry, :source_span_ids)
+          span_ids = span_ids.is_a?(Array) ?
+            span_ids.map { |value| value.to_s.strip } : []
+          ids = RepresentationFidelity.positive_entity_ids(
+            telemetry_value(entry, :resulting_entity_ids)
+          )
+          requested = RepresentationFidelity.normalize_mode(
+            telemetry_value(entry, :requested_mode)
+          )
+          delivered = RepresentationFidelity.normalize_mode(
+            telemetry_value(entry, :delivered_mode)
+          )
+          entity_type = telemetry_value(entry, :created_entity_type).to_s
+          page_entity_types = {
+            geometry: 'page_path_geometry',
+            glyphs: 'glyph_outline'
+          }
+          valid = !span_ids.empty? && span_ids.uniq.length == span_ids.length &&
+                  span_ids.all? { |span_id| source_ids.include?(span_id) } &&
+                  ids && requested == delivered &&
+                  page_entity_types[delivered] == entity_type &&
+                  telemetry_value(entry, :visual_fidelity_verified) == true
+          unless valid
+            errors << 'page_representation_delivery_invalid'
+            next
+          end
+          ids.each do |identity|
+            if live_id_owner.key?(identity)
+              errors << "duplicate_live_entity_id:#{identity}"
+            else
+              live_id_owner[identity] = span_ids.join(',')
+            end
+          end
+          span_ids.each { |span_id| page_delivery_by_span[span_id] = ids }
+        end
+
+        attempt_by_span = {}
+        cleaned_ids = {}
+        attempt_transition_signatures = []
+        attempts.each do |attempt|
+          unless attempt.is_a?(Hash)
+            errors << 'attempt_not_hash'
+            next
+          end
+          page_span_ids = telemetry_value(attempt, :source_span_ids)
+          if page_span_ids.is_a?(Array)
+            page_span_ids = page_span_ids.map { |value| value.to_s.strip }
+            requested = RepresentationFidelity.normalize_mode(
+              telemetry_value(attempt, :requested_mode)
+            )
+            delivered = RepresentationFidelity.normalize_mode(
+              telemetry_value(attempt, :delivered_mode)
+            )
+            ids = RepresentationFidelity.positive_entity_ids(
+              telemetry_value(attempt, :resulting_entity_ids)
+            )
+            history = telemetry_value(attempt, :attempt_history)
+            terminal_rung = history.is_a?(Array) ? history.last : nil
+            rung_ids = terminal_rung && RepresentationFidelity.positive_entity_ids(
+              telemetry_value(terminal_rung, :resulting_entity_ids)
+            )
+            page_modes = [:geometry, :glyphs]
+            valid_page_attempt = !page_span_ids.empty? &&
+              page_span_ids.uniq.length == page_span_ids.length &&
+              page_span_ids.all? { |identity| source_ids.include?(identity) } &&
+              requested == delivered && page_modes.include?(delivered) && ids &&
+              telemetry_value(attempt, :visual_fidelity_verified) == true &&
+              history.is_a?(Array) && history.length == 1 &&
+              terminal_rung.is_a?(Hash) &&
+              RepresentationFidelity.normalize_mode(
+                telemetry_value(terminal_rung, :mode)
+              ) == delivered &&
+              telemetry_value(terminal_rung, :outcome).to_s == 'complete' &&
+              telemetry_value(
+                terminal_rung, :visual_fidelity_verified
+              ) == true &&
+              telemetry_value(
+                terminal_rung, :cleanup_outcome
+              ).to_s == 'not_required' &&
+              rung_ids && rung_ids.sort == ids.sort
+            unless valid_page_attempt
+              errors << 'page_representation_attempt_invalid'
+              next
+            end
+            page_span_ids.each do |identity|
+              attempt_by_span[identity] ||= []
+              attempt_by_span[identity].concat(ids)
+            end
+            next
+          end
+
+          span_id = telemetry_value(attempt, :source_span_id).to_s.strip
+          requested = RepresentationFidelity.normalize_mode(
+            telemetry_value(attempt, :requested_mode)
+          )
+          delivered = RepresentationFidelity.normalize_mode(
+            telemetry_value(attempt, :delivered_mode)
+          )
+          ids = RepresentationFidelity.positive_entity_ids(
+            telemetry_value(attempt, :resulting_entity_ids)
+          )
+          history = telemetry_value(attempt, :attempt_history)
+          scalar_modes = RepresentationFidelity::MODES
+          unless source_ids.include?(span_id) && requested && delivered &&
+                 scalar_modes.include?(delivered) && ids &&
+                 history.is_a?(Array) && !history.empty?
+            errors << "attempt_fields_invalid:#{span_id}"
+            next
+          end
+          ladder = RepresentationFidelity.ladder_for(requested)
+          delivered_index = ladder.index(delivered)
+          expected_history_modes = delivered_index ?
+            ladder[0..delivered_index] : []
+          if expected_history_modes.empty?
+            errors << "attempt_delivery_outside_ladder:#{span_id}"
+          end
+          unless telemetry_value(attempt, :visual_fidelity_verified) == true
+            errors << "visual_fidelity_unverified:#{span_id}"
+          end
+          if delivered == :raster &&
+             (telemetry_value(attempt, :real_raster_verified) != true ||
+              telemetry_value(attempt, :source_crop_binding_verified) != true)
+            errors << "attempt_item_raster_evidence_invalid:#{span_id}"
+          end
+          if [:text3d, :labels].include?(delivered) &&
+             !text_mode_delivery_evidence_complete?(attempt, delivered)
+            errors << "attempt_mode_evidence_invalid:#{span_id}"
+          end
+          if delivered == :labels
+            types = provenance_types_by_span[span_id]
+            unless types && types.uniq == ['native_label']
+              errors << "attempt_provenance_type_mismatch:#{span_id}"
+            end
+          elsif delivered == :text3d
+            types = provenance_types_by_span[span_id]
+            allowed = ['native_3d_text', 'source_glyph_3d_text']
+            unless types && types.uniq.length == 1 &&
+                   allowed.include?(types.uniq[0])
+              errors << "attempt_provenance_type_mismatch:#{span_id}"
+            end
+          end
+          seen_modes = {}
+          completed = []
+          observed_history_modes = []
+          controller = RepresentationFidelity::FallbackController.new(
+            requested, span_id
+          )
+          history.each_with_index do |rung, rung_index|
+            unless rung.is_a?(Hash)
+              errors << "rung_not_hash:#{span_id}"
+              next
+            end
+            mode = RepresentationFidelity.normalize_mode(
+              telemetry_value(rung, :mode)
+            )
+            outcome = telemetry_value(rung, :outcome).to_s
+            rung_ids_raw = telemetry_value(rung, :resulting_entity_ids)
+            rung_ids = rung_ids_raw.is_a?(Array) ?
+              rung_ids_raw.map { |value| value.to_s.strip } : nil
+            if mode.nil? || seen_modes.key?(mode)
+              errors << "rung_mode_invalid_or_duplicate:#{span_id}"
+            else
+              seen_modes[mode] = true
+              observed_history_modes << mode
+            end
+            if outcome == 'complete'
+              valid_ids = RepresentationFidelity.positive_entity_ids(rung_ids_raw)
+              if valid_ids
+                completed << [mode, valid_ids]
+              else
+                errors << "completed_rung_ids_invalid:#{span_id}"
+              end
+              if [:text3d, :labels].include?(mode) &&
+                 !text_mode_delivery_evidence_complete?(rung, mode)
+                errors << "completed_rung_mode_evidence_invalid:#{span_id}"
+              end
+              if [:text3d, :labels].include?(mode) &&
+                 telemetry_value(rung, :visual_fidelity_verified) != true
+                errors << "completed_rung_visual_fidelity_unverified:#{span_id}"
+              end
+              if [:text3d, :labels].include?(mode) &&
+                 telemetry_value(rung, :cleanup_outcome).to_s != 'not_required'
+                errors << "completed_rung_cleanup_invalid:#{span_id}"
+              end
+            elsif outcome == 'failed'
+              errors << "failed_rung_has_live_ids:#{span_id}" unless rung_ids == []
+              created = telemetry_value(rung, :created_entity_ids)
+              created = [] unless created.is_a?(Array)
+              cleaned = telemetry_value(rung, :cleaned_entity_ids)
+              cleaned = [] unless cleaned.is_a?(Array)
+              unless created.empty?
+                created_ids = RepresentationFidelity.positive_entity_ids(created)
+                cleaned_valid = RepresentationFidelity.positive_entity_ids(cleaned)
+                cleanup = telemetry_value(rung, :cleanup_outcome).to_s
+                unless created_ids && cleaned_valid &&
+                       created_ids.sort == cleaned_valid.sort && cleanup == 'verified'
+                  errors << "failed_rung_cleanup_invalid:#{span_id}"
+                end
+                Array(cleaned_valid).each { |identity| cleaned_ids[identity] = true }
+              end
+              transition = telemetry_value(rung, :transition_proof)
+              proof = symbolized_transition_proof(transition)
+              begin
+                raise RepresentationFidelity::ContractError,
+                      'failed rung transition proof is missing' unless proof
+                advanced = controller.advance!(proof)
+                unless advanced == expected_history_modes[rung_index + 1]
+                  raise RepresentationFidelity::ContractError,
+                        'failed rung transition does not match the ladder'
+                end
+                attempt_transition_signatures << transition_signature(proof)
+              rescue StandardError
+                errors << "failed_rung_transition_invalid:#{span_id}"
+              end
+            else
+              errors << "rung_outcome_invalid:#{span_id}"
+            end
+          end
+          unless observed_history_modes == expected_history_modes
+            errors << "attempt_history_ladder_mismatch:#{span_id}"
+          end
+          if completed.length != 1 || completed[0][0] != delivered ||
+             completed[0][1].sort != ids.sort
+            errors << "attempt_terminal_crosslink_invalid:#{span_id}"
+          end
+          attempt_by_span[span_id] ||= []
+          attempt_by_span[span_id].concat(ids)
+        end
+
+        global_transition_signatures = fallback_transitions.map do |entry|
+          transition_signature(entry)
+        end
+        if global_transition_signatures.any? { |signature| signature.nil? } ||
+           global_transition_signatures.map { |signature| signature.inspect }.sort !=
+             attempt_transition_signatures.map { |signature| signature.inspect }.sort
+          errors << 'fallback_transition_ledger_mismatch'
+        end
+
+        expected_set = source_ids.sort
+        delivered_set = (provenance_by_span.keys + terminal_by_span.keys +
+                         page_delivery_by_span.keys).uniq.sort
+        attempt_set = attempt_by_span.keys.sort
+        errors << 'source_delivery_set_mismatch' unless delivered_set == expected_set
+        errors << 'source_attempt_set_mismatch' unless attempt_set == expected_set
+        source_ids.each do |span_id|
+          evidence_ids = provenance_by_span[span_id] ||
+                         terminal_by_span[span_id] ||
+                         page_delivery_by_span[span_id]
+          attempt_ids = attempt_by_span[span_id]
+          unless evidence_ids && attempt_ids && evidence_ids.sort == attempt_ids.sort
+            errors << "attempt_provenance_crosslink_invalid:#{span_id}"
+          end
+        end
+        cleaned_ids.each_key do |identity|
+          errors << "cleaned_entity_is_live:#{identity}" if live_id_owner.key?(identity)
+        end
+
+        {
+          ready: errors.empty?,
+          checks: {
+            source_span_set_equality: !errors.include?('source_delivery_set_mismatch') &&
+                                      !errors.include?('source_attempt_set_mismatch'),
+            positive_stable_entity_ids: errors.none? { |error| error.include?('ids_invalid') || error.include?('duplicate_live') },
+            attempt_provenance_crosslinks: errors.none? { |error| error.include?('crosslink') },
+            cleanup_integrity: errors.none? { |error| error.include?('cleanup') || error.include?('cleaned_entity_is_live') }
+          },
+          errors: errors.uniq
+        }
+      rescue StandardError => e
+        { ready: false, checks: {}, errors: ["validator_exception:#{e.class}:#{e.message}"] }
       end
 
       def attach_source_provenance!(report, stats)
@@ -528,39 +1113,13 @@ module BlueCollarSystems
                            extra['delivered_text_entity_counts']
         delivered_info = build_actual_text_entity_types_from_delivered_counts(delivered_counts)
         return delivered_info if delivered_info
-
-        stats_mode = extra[:text_mode] || extra['text_mode']
-        mode = stats_mode.to_s.strip.downcase
-        return nil if mode.empty? || mode == 'none'
-
-        result = report[:result] || {}
-        total = result[:text_entities].to_i
-        return nil if total <= 0
-
-        rendered = %w[labels label 3d_text text3d].include?(mode)
-        info = {
-          entity_type: mode,
-          count: total,
-          font_rendered: rendered,
-          examples: []
-        }
-        case mode
-        when 'labels', 'label'
-          info[:native_label] = total
-        when '3d_text', 'text3d'
-          info[:native_3d_text] = total
-        when 'glyphs', 'geometry', 'outlines'
-          info[:outline_curve_or_mesh] = total
-        else
-          info[:fallback_geometry] = total
-        end
-        info
+        nil
       end
 
       # Native builders append one source-provenance object for every text
       # entity they actually create.  Prefer those delivered types whenever
       # available: the requested text-mode string cannot describe a legitimate
-      # TEXTMODE-1 fallback such as 3D Text -> Labels.
+      # finite item fallback such as Labels -> source-glyph 3D Text.
       def delivered_text_entity_counts(stats)
         counts = {}
         Array(stats[:source_provenance_objects] || stats['source_provenance_objects']).each do |entry|
@@ -569,17 +1128,62 @@ module BlueCollarSystems
           next if kind.empty?
           counts[kind] = counts.fetch(kind, 0).to_i + 1
         end
+        # An item-level raster is terminal delivery for one source text span,
+        # but it deliberately has no source-provenance object: the resulting
+        # entity is an image, not a fabricated text entity. Count it only from
+        # the same self-contained evidence the fidelity validator accepts.
+        Array(stats[:terminal_text_delivery_records] ||
+              stats['terminal_text_delivery_records']).each do |entry|
+          next unless verified_item_raster_delivery_record?(entry)
+          counts['raster_image'] = counts.fetch('raster_image', 0).to_i + 1
+        end
         counts
       rescue StandardError
         {}
+      end
+
+      def verified_item_raster_delivery_record?(entry)
+        return false unless entry.is_a?(Hash)
+        return false unless telemetry_value(entry, :created_entity_type).to_s ==
+                            'raster_image'
+        return false unless telemetry_value(entry, :delivery_scope).to_s ==
+                            'item_raster'
+        return false unless RepresentationFidelity.normalize_mode(
+          telemetry_value(entry, :delivered_mode)
+        ) == :raster
+        return false unless telemetry_value(entry, :cleanup_outcome).to_s ==
+                            'not_required'
+        return false unless telemetry_value(entry, :real_raster_verified) == true
+        return false unless telemetry_value(
+          entry, :source_crop_binding_verified
+        ) == true
+        return false unless telemetry_value(entry, :visual_fidelity_verified) == true
+
+        spans = telemetry_value(entry, :source_span_ids)
+        return false unless spans.is_a?(Array) && spans.length == 1
+        source_id = spans[0].to_s.strip
+        return false unless source_id =~ RepresentationFidelity::SOURCE_ID
+        ids = RepresentationFidelity.positive_entity_ids(
+          telemetry_value(entry, :resulting_entity_ids)
+        )
+        return false unless ids && ids.length == 1
+        page = telemetry_value(entry, :page).to_i
+        return false unless page > 0
+        artifact = telemetry_value(entry, :artifact_evidence)
+        artifact.is_a?(Hash) &&
+          telemetry_value(artifact, :source_span_id).to_s == source_id &&
+          telemetry_value(artifact, :page_number).to_i == page &&
+          telemetry_value(artifact, :source_crop_binding_verified) == true
+      rescue StandardError
+        false
       end
 
       def build_actual_text_entity_types_from_delivered_counts(raw_counts)
         return nil unless raw_counts.respond_to?(:each)
 
         supported = %w[
-          native_label native_3d_text outline_curve_or_mesh raw_geometry_edges
-          dxf_text fallback_geometry
+          native_label native_3d_text source_glyph_3d_text glyph_outline page_path_geometry
+          outline_curve_or_mesh raw_geometry_edges dxf_text fallback_geometry raster_image
         ]
         counts = {}
         raw_counts.each do |kind, value|
@@ -596,19 +1200,27 @@ module BlueCollarSystems
                         'mixed'
                       elsif counts['native_label']
                         'labels'
-                      elsif counts['native_3d_text']
+                      elsif counts['native_3d_text'] || counts['source_glyph_3d_text']
                         '3d_text'
+                      elsif counts['glyph_outline']
+                        'glyphs'
+                      elsif counts['page_path_geometry']
+                        'geometry'
                       elsif counts['outline_curve_or_mesh'] || counts['raw_geometry_edges']
                         'geometry'
                       elsif counts['dxf_text']
                         'dxf_text'
+                      elsif counts['raster_image']
+                        'raster'
                       else
                         'fallback_geometry'
                       end
         info = {
           entity_type: entity_type,
           count: total,
-          font_rendered: !!(counts['native_label'] || counts['native_3d_text']),
+          font_rendered: !!(counts['native_label'] || counts['native_3d_text'] ||
+                            counts['source_glyph_3d_text']),
+          source_glyph_identity_verified: !!counts['source_glyph_3d_text'],
           examples: []
         }
         counts.each { |kind, value| info[kind.to_sym] = value }
@@ -740,13 +1352,13 @@ module BlueCollarSystems
         end
 
         # Round 23 (F-1): Glyphs-mode source telemetry must fail VISIBLE —
-        # an internal-source delivery, unmatched runs, or a dropped CID
+        # an unavailable source, unmatched runs, or a dropped CID
         # language pack are signals, never silent passes.
         glyph_source = glyph_source_block(stats)
         if glyph_source
-          if glyph_source[:source] == 'internal'
-            signals << 'glyph_source_internal_fallback'
-            actions << "Glyphs mode delivered internal stroke-outline lettering (#{glyph_source[:fallback_reason]}) — restore the bundled Poppler pdftocairo for embedded-font glyph outlines."
+          if glyph_source[:source] == 'unavailable'
+            signals << 'glyph_source_unavailable'
+            actions << "Glyphs mode stopped without substituting another representation (#{glyph_source[:fallback_reason]}) — install or configure the free Poppler/MuPDF renderer and retry."
           end
           if glyph_source[:runs_unmatched].to_i > 0
             signals << 'glyph_runs_unmatched'

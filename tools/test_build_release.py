@@ -7,7 +7,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from unittest import mock
 
 REPO_TOOLS = Path(__file__).resolve().parent
 if str(REPO_TOOLS) not in sys.path:
@@ -21,6 +23,94 @@ import build_release as br  # noqa: E402
 
 
 class BuildReleaseTest(unittest.TestCase):
+    def test_source_only_build_excludes_current_and_legacy_runtime_payloads(self):
+        original_ext_root = br.EXT_ROOT
+        original_loader = br.LOADER_FILE
+        original_support = br.SUPPORT_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                ext_root = root / "extracted" / "sketchup_ext"
+                support = ext_root / "bc_pdf_vector_importer"
+                support.mkdir(parents=True)
+                loader = ext_root / "bc_pdf_vector_importer.rb"
+                loader.write_text("PLUGIN_VERSION = 'test'\n", encoding="utf-8")
+                (support / "safe_source.rb").write_text("# source\n", encoding="utf-8")
+
+                payloads = [
+                    support / "bin" / "pdftocairo.exe",
+                    support / "Library" / "bin" / "pdftocairo.exe",
+                    support / "share" / "poppler" / "cidToUnicode" / "Adobe-GB1",
+                    support / "poppler-runtime-manifest.json",
+                ]
+                for payload in payloads:
+                    payload.parent.mkdir(parents=True, exist_ok=True)
+                    payload.write_bytes(b"runtime payload")
+
+                br.EXT_ROOT = ext_root
+                br.LOADER_FILE = loader
+                br.SUPPORT_DIR = support
+                with mock.patch.object(br.subprocess, "run"), mock.patch.object(
+                    br, "_run_poppler_smoke"
+                ):
+                    archive = br.build(root / "out")
+
+                with zipfile.ZipFile(archive) as built:
+                    names = set(built.namelist())
+
+                self.assertIn("bc_pdf_vector_importer.rb", names)
+                self.assertIn("bc_pdf_vector_importer/safe_source.rb", names)
+                for payload in payloads:
+                    relative = payload.relative_to(ext_root).as_posix()
+                    self.assertNotIn(relative, names)
+        finally:
+            br.EXT_ROOT = original_ext_root
+            br.LOADER_FILE = original_loader
+            br.SUPPORT_DIR = original_support
+
+    def test_auto_release_rejects_runtime_payload_members(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn(
+            '"bc_pdf_vector_importer/bin/pdftocairo.exe"', workflow
+        )
+        self.assertIn("forbidden_runtime", workflow)
+        self.assertIn("Source-only RBZ contains forbidden runtime payload", workflow)
+        self.assertIn("source-only-build-windows", workflow)
+        self.assertIn("test_build_release.py", workflow)
+        self.assertNotIn("poppler-smoke-windows", workflow)
+        self.assertNotIn("--require-poppler-smoke", workflow)
+        self.assertNotIn("Build release with required Poppler smoke", workflow)
+
+    def test_release_docs_match_source_only_archive_contract(self):
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        compatibility = (REPO_ROOT / "COMPATIBILITY.md").read_text(
+            encoding="utf-8"
+        )
+
+        for name, document in (
+            ("README.md", readme),
+            ("COMPATIBILITY.md", compatibility),
+        ):
+            normalized = document.lower()
+            self.assertIn("source-only", normalized, name)
+            self.assertNotIn("poppler helpers are bundled", normalized, name)
+            self.assertNotIn("poppler bundled", normalized, name)
+            self.assertNotIn("release rbz files also bundle poppler", normalized, name)
+            self.assertNotIn("release rbz files include poppler", normalized, name)
+            self.assertNotIn("release build fails if bundled poppler", normalized, name)
+
+    def test_shipped_ruby_guidance_does_not_claim_poppler_is_bundled(self):
+        support = REPO_ROOT / "extracted" / "sketchup_ext" / "bc_pdf_vector_importer"
+        sources = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(support.glob("*.rb"))
+        ).lower()
+
+        self.assertNotIn("bundled poppler", sources)
+
     def test_run_poppler_smoke_required_missing_script(self):
         original = br.SMOKE_SCRIPT
         try:

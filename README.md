@@ -3,17 +3,17 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.96-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.97-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
-Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support. Core vector import uses the built-in Ruby parser; current Windows release RBZ files also bundle Poppler helpers for better text/raster/SVG fidelity. Ghostscript remains optional for non-embedded font repair.
+Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support. Core vector import uses the built-in Ruby parser. Release RBZ files are source-only; higher-fidelity text/raster/SVG paths use separately installed free Poppler or MuPDF helpers when available. Ghostscript remains optional for non-embedded font repair.
 
 ---
 
 ## Overview
 
-PDF Vector Importer parses PDF content streams directly in Ruby and reconstructs vector geometry as native SketchUp edges. The core vector path does not require Ruby gems, C extensions, or external binaries. Higher-fidelity helper paths can use MuPDF (`mutool`), Poppler (`pdftocairo`, `pdftotext`) and Ghostscript when present, and degrade to built-in parsing when they are missing. It runs on supported SketchUp PCs from SketchUp 2017 Make (Ruby 2.2) through the current Pro release.
+PDF Vector Importer parses PDF content streams directly in Ruby and reconstructs vector geometry as native SketchUp edges. The core vector path does not require Ruby gems, C extensions, or external binaries. Higher-fidelity helper paths can use MuPDF (`mutool`), Poppler (`pdftocairo`, `pdftotext`) and Ghostscript when present. A missing helper may change the available source inside the same requested representation, but never by itself authorizes a different representation. Only affirmative item-specific impossibility can enter the finite closest fallback ladder. It runs on supported SketchUp PCs from SketchUp 2017 Make (Ruby 2.2) through the current Pro release.
 
 The importer profiles each PDF document to identify its origin (fabrication drawings, CAD exports, architectural plans, vector art, or raster scans) and adapts its import strategy accordingly.
 
@@ -36,12 +36,12 @@ assets, checksums, license, and notes.
   Vector, Raster, Hybrid. Every mode targets maximum fidelity.
 - **4 Text Rendering Options** — Geometry, Glyphs, Labels, 3D Text
   (orthogonal to mode) + separate Import text toggle. The dialog reopens
-  with the last text rendering option used; first-run fallback is 3D Text for
+  with the last text rendering option used; the first-run default is 3D Text for
   full-page visual parity.
 
   | Mode | Editability | Glyph rotation | Model-space size |
   |------|-------------|----------------|------------------|
-  | **Labels** | Editable `Sketchup::Text` | Horizontal only (host API) | Screen-space (zoom-invariant) |
+  | **Labels** | Editable `Sketchup::Text` | Faithful when final host-vector readback matches | Screen-space (zoom-invariant) |
   | **3D Text** | Not editable | Faithful to PDF | Faithful (nominal pt × scale) |
   | **Glyphs** / **Geometry** | Not editable | Faithful to PDF | Faithful (nominal pt × scale) |
 
@@ -52,20 +52,26 @@ assets, checksums, license, and notes.
   not switch representation to paper over alignment/rotation/scale bugs
   just to make a defect less visible.
 
-  ### Text-mode fidelity and fallbacks
+  ### Text-mode fidelity and failure handling
 
-  The selected text representation is delivered whenever SketchUp and the PDF
-  make it possible. A fallback is used only for a genuine per-file/API failure,
-  is recorded in `import_report.json` as `fallback.text`, and never changes a
-  mode merely to hide alignment, rotation, or scaling defects.
+  The selected text representation is always attempted first and verified in
+  that exact type. Placement, rotation, width, and height are read back after
+  the final transform. A generic failed proof cleans its exact partial artifacts
+  and stops; it cannot trigger a representation change.
 
-  - **3D Text:** Labels → page raster.
-  - **Glyphs / Geometry:** peer outline family (same SVG engine today) → 3D Text → Labels → page raster.
-  - **Labels:** 3D Text → page raster.
-  - **Raster:** terminal visual representation.
+  Missing helpers, generic host/API failures, exceptions, empty artifacts, and
+  currently broken transform code are not proof that a representation is
+  impossible. They therefore cannot enter or skip through the fallback ladder.
 
-  Every ladder preserves the closest usable representation first and ends in a
-  visible result; no paid component is required for a fallback.
+  When an exact item-specific source/host inventory affirmatively proves the
+  current representation impossible, the declared order is Labels → 3D Text →
+  Glyphs → Geometry → item Raster. Requested Raster renders all selected pages
+  directly. Each adjacent rung must have a distinct item renderer and its own
+  ownership/visual proof. The current implementation can deliver the verified
+  Labels → 3D Text item transition; if the next distinct Glyphs/Geometry item
+  renderer is unavailable, it stops truthfully instead of relabeling an earlier
+  query or skipping to Raster. The finite controller never cycles or erases
+  successful peer spans/page geometry, and requires no paid component.
 - **Built-in Ruby vector parser** — core vector import requires no gems or C extensions
 - **Adaptive Bezier subdivision** with configurable flatness tolerance
 - **Kasa algebraic circle fitting** for arc reconstruction from point sequences
@@ -96,7 +102,7 @@ assets, checksums, license, and notes.
 
 The extension registers under **File > Import** and adds a PDF Vector Importer toolbar.
 
-**Offline install:** The GitHub Release `.rbz` works without internet after download — Poppler helpers are bundled. Ghostscript is optional and may require a separate download for non-embedded font repair.
+**Offline install:** The source-only GitHub Release `.rbz` installs without internet and its built-in vector parser works offline. Poppler, MuPDF, and Ghostscript are not in the RBZ. Helper-dependent text, raster, and SVG paths require a free helper to be installed or configured separately.
 
 For SketchUp 2025 users: native PDF import discoverability changed in SketchUp UI,
 but this extension still provides dedicated PDF import menu and toolbar commands.
@@ -109,26 +115,32 @@ Install the latest `.rbz` from Releases via Extension Manager (overwrites the pr
 
 Install the RBZ **per Windows user** on each PC where SketchUp runs. Avoid roaming only the `Plugins` folder across PCs with different SketchUp years. **Compatibility Report** logs the extension directory for IT support tickets.
 
-## Bundled Helpers / Any-PC Behavior
+## External Helpers / Any-PC Behavior
 
 The importer must run on a supported PC without hardcoded local paths. Optional
 helpers are detected at runtime and reported through **Extensions > PDF Vector
 Importer > Compatibility Report**.
 
-Current Windows release RBZ files include Poppler `pdftocairo`, `pdftotext`,
-`pdffonts`, and PE-reachable required DLLs under the extension `bin/` folder.
-Source builds must run `tools/fetch_third_party_binaries.ps1` before
-`python build_release.py` (the fetch script prunes unused sibling DLLs via
-`tools/prune_poppler_bundle.py`); the build fails if the bundled helper set is
-missing.
+Every release RBZ is source-only. The release builder and workflow reject
+Poppler/MuPDF executables, DLL trees, data trees, and runtime manifests inside
+the archive. Install a free system or portable Poppler/MuPDF package separately,
+then expose the executable on `PATH` or set the environment override below.
+Use **Compatibility Report** to verify the exact helper path before importing.
 
 | Helper | Used for | If missing |
 |--------|----------|------------|
-| MuPDF `mutool` | SVG/glyph text geometry when Poppler is not installed | Poppler or built-in text fallback is used |
-| Poppler `pdftocairo` | SVG/glyph text geometry, raster page rendering, and SVG-assisted geometry recovery | Built-in Ruby parser remains available; SVG/raster helper paths are disabled |
+| MuPDF `mutool` | Same-representation SVG/glyph text geometry when Poppler is not installed | Poppler may supply the same representation; otherwise that requested SVG representation stops |
+| Poppler `pdftocairo` | SVG/glyph text geometry and explicit raster page rendering | A separately verified same-representation source may be tried; otherwise that requested helper path stops |
 | Poppler `pdftotext` | Higher-fidelity text bounding boxes and line reconstruction | Internal text parser fallback is used |
 | Poppler `pdffonts` | Detecting non-embedded fonts before SVG text rendering | Font preflight is unavailable |
-| Ghostscript | Embedding non-embedded fonts into a temporary render copy when needed | Text still imports, but unresolved symbols may be skipped or approximated |
+| Ghostscript | Embedding non-embedded fonts into a temporary render copy when needed | An outline attempt with unresolved or skipped glyphs fails its fidelity proof; it is not silently approximated |
+
+Poppler return code zero and a nonempty output file do not prove complete text.
+The one qualified Adobe-GB1 diagnostic exception is tied to an exact public
+fixture PDF, page, and SVG fingerprint, and is finalized only after real
+source-span matching and host placement. All five failure collections must be
+present arrays and empty; missing evidence is a rejection. This does not claim
+general CID completeness.
 
 Environment overrides are supported for managed PCs: `BC_PDFTOCAIRO_PATH`,
 `BC_MUTOOL_PATH`, `BC_PDFTOTEXT_PATH`, and `BC_GHOSTSCRIPT_PATH`.
@@ -260,9 +272,10 @@ bc_pdf_vector_importer/
   primitives.rb                      # Primitive data structures
   recognizer.rb                      # Pattern recognizer
   hatch_detector.rb                  # Hatch pattern detection
-  stroke_font.rb                     # Single-stroke font rendering
-  svg_geometry_renderer.rb           # SVG geometry path renderer
   svg_text_renderer.rb               # SVG text path renderer
+  svg_3d_text_renderer.rb            # Source-glyph 3D text extrusion
+  representation_fidelity.rb         # Finite representation/fallback contract
+  poppler_result_validator.rb        # Fail-closed helper result validation
   external_text_extractor.rb         # External text extraction support
   validator.rb                       # Input validation
   xobject_parser.rb                  # Form XObject recursion
@@ -278,7 +291,7 @@ bc_pdf_vector_importer/
 |-----------|---------|
 | **Encrypted PDFs** | Password-protected PDFs cannot be imported. Remove encryption first using Adobe Acrobat, Preview (macOS), or qpdf. |
 | **Compression filters** | FlateDecode is supported. LZWDecode, ASCII85Decode, ASCIIHexDecode, and RunLengthDecode streams are not fully supported and may be skipped. |
-| **Font-dependent text** | Text rendered with embedded subset fonts, non-embedded fonts, or platform-missing display fonts may require Poppler and Ghostscript for maximum fidelity. Without those helpers, the importer falls back to internal parsing and reports the reduced capability. |
+| **Font-dependent text** | Text rendered with embedded subset fonts, non-embedded fonts, or platform-missing display fonts may require Poppler and Ghostscript for maximum fidelity. Without a source that can certify the requested representation, the importer reports the unavailable capability and stops that representation instead of silently substituting another one. |
 | **Clipped/XObject-heavy PDFs** | Deeply nested form XObjects and aggressive clipping can lead to partial geometry recovery. |
 | **Raster-only scans** | Pure image/scanned PDFs with no vector operators will not produce SketchUp edges. |
 | **Very large PDFs** | Files over 500 MB are rejected. Dense drawings with over 1 million path operators per stream are truncated. Split large documents before importing. |

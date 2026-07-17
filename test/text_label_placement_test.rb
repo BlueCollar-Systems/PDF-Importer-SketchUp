@@ -80,6 +80,13 @@ Z_AXIS = Geom::Vector3d.new(0, 0, 1)
 
 class DummyTextEntity
   attr_accessor :layer, :display_leader, :vector
+  attr_reader :persistent_id, :point
+
+  def initialize(id, point, vector)
+    @persistent_id = id
+    @point = point
+    @vector = vector
+  end
 end
 
 class DummyMeshEntity
@@ -94,6 +101,7 @@ class DummyEntities
     @mesh_calls = []
     @entities = []
     @transforms = []
+    @next_id = 100
   end
 
   def to_a
@@ -101,8 +109,9 @@ class DummyEntities
   end
 
   def add_text(text, point, vector = nil)
-    ent = DummyTextEntity.new
-    ent.vector = vector
+    @next_id += 1
+    ent = DummyTextEntity.new(@next_id, point, vector)
+    @entities << ent
     @texts << [text, point, vector, ent]
     ent
   end
@@ -116,6 +125,10 @@ class DummyEntities
 
   def transform_entities(*args)
     @transforms << args
+  end
+
+  def erase_entities(*entities)
+    entities.flatten.each { |entity| @entities.delete(entity) }
   end
 end
 
@@ -139,7 +152,8 @@ builder = BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
 )
 
 center_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
-  'QUAN', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil, 90.0, 198.0, 130.0, 210.0
+  'QUAN', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil,
+  90.0, 198.0, 130.0, 210.0, nil, 'text_span:1:0'
 )
 x, y, angle = builder.send(:label_insertion_pdf, center_item)
 assert_true(builder.send(:should_center_label?, 'QUAN', 40.0, 8.0, 0.0),
@@ -200,13 +214,6 @@ horiz_vec = builder.send(:label_direction_vector, 0.0)
 assert_true(horiz_vec.x.abs < 0.01 && horiz_vec.y.abs < 0.01,
             'horizontal labels should use zero direction vector for SU 2017')
 
-frac_vec = builder.send(:label_direction_vector, -6.4)
-assert_true(frac_vec.x.abs < 0.01 && frac_vec.y.abs < 0.01,
-            'mild fraction kerning tilt should keep zero direction vector')
-
-rot_vec = builder.send(:label_direction_vector, 90.0)
-assert_true(rot_vec.y.abs > 0.99, 'vertical labels should use rotated direction vector')
-
 dummy_entities = DummyEntities.new
 builder.send(:place_text, dummy_entities, center_item, 0.0, 0.0, 792.0, 'TextLayer')
 assert_true(dummy_entities.texts.length == 1,
@@ -219,7 +226,8 @@ assert_true(placed_vector.respond_to?(:x) && placed_vector.respond_to?(:y),
             'placed label should receive a direction vector')
 
 rotated_label = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
-  'p1052', 150.0, 220.0, 8.0, 90.0, 'pdftotext', nil, 148.0, 210.0, 158.0, 246.0
+  'p1052', 150.0, 220.0, 8.0, 90.0, 'pdftotext', nil,
+  148.0, 210.0, 158.0, 246.0, nil, 'text_span:1:1'
 )
 rotated_entities = DummyEntities.new
 rotated_builder = BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
@@ -232,15 +240,19 @@ rotated_builder = BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
   use_3d_text: false
 )
 rotated_builder.send(:place_annotation_label, rotated_entities, rotated_label, 0.0, 0.0, 'TextLayer')
-assert_true(rotated_entities.texts.length == 1,
-            "Labels mode must create a native SketchUp label for rotated text (got #{rotated_entities.texts.length})")
+assert_true(rotated_entities.texts.empty?,
+            'SketchUp Text leader vectors must not be misreported as label rotation')
+assert_true(rotated_entities.to_a.empty?,
+            'known rotated-label host impossibility must leave no artifact')
 assert_true(rotated_entities.mesh_calls.empty?,
             'Labels mode must not silently create 3D text/geometry for rotated text')
-if rotated_entities.texts.first
-  rotated_entity = rotated_entities.texts.first[3]
-  assert_true(rotated_entity.vector && rotated_entity.vector.y.abs > 0.99,
-              'rotated native label should preserve its direction vector while hiding the leader')
-end
+rotated_failure = rotated_builder.text_delivery_failures.first
+assert_true(rotated_failure &&
+            rotated_failure[:reason] == 'label_rotation_unsupported_by_host',
+            'rotated Labels must emit the affirmative host-limitation reason')
+assert_true(rotated_failure && rotated_failure[:transition_proof] &&
+            rotated_failure[:transition_proof][:to_mode] == :text3d,
+            'rotated Labels may advance only to the adjacent verified rung')
 
 if File.exist?(PDF_TIER1_USER)
   # 342 = 346 raw pdftotext words minus 2 angle-mark stitch merges (a1+00+5 → a1005/a1006).

@@ -13,7 +13,7 @@
 #   1. Anisotropic Tm must NEVER shrink the height driver — font_size comes
 #      from the vertical matrix component only (Round 13 contract).
 #   2. Long condensed strings, the measured cluster, an expanded case, and
-#      a near-1 control must all deliver a final run width within 3% of the
+#      a near-1 control must all prove exact final host bounds against the
 #      PDF-declared extent.
 
 require_relative 'mesh_text_scaling_test'
@@ -26,11 +26,12 @@ class NaturalWidthEntities < DummyTransformEntities
     @natural_width_in = natural_width_in.to_f
   end
 
-  def add_3d_text(_text, _align, _font, _bold, _italic, height, tol, _extrusion, _filled, _z)
+  def add_3d_text(_text, _align, _font, _bold, _italic, height, tol, _z, _filled, extrusion)
     @height_args << height
     @tolerance_args << tol
-    @entities << DummyRenderedTextEntity.new(@natural_width_in, height, typename: 'Edge')
-    @entities << DummyFaceEntity.new
+    @entities << DummyRenderedTextEntity.new(@natural_width_in, height,
+                                              typename: 'Edge', depth: extrusion)
+    @entities << DummyFaceEntity.new(@natural_width_in, height, depth: extrusion)
     true
   end
 end
@@ -44,6 +45,7 @@ class CondensedTextWidthRegressionTest < Minitest::Test
     item = TP.new([stream], {}, strict_text_fidelity: true).parse.first
 
     refute_nil item
+    item.source_span_id = FidelityFixtureIdentity.next_span_id
     assert_equal 'STD. SHOP PRIMER U.N.O.', item.text
     assert_in_delta 10.2, item.font_size, 1e-6,
                     'font_size must come from the VERTICAL Tm component only — ' \
@@ -51,12 +53,11 @@ class CondensedTextWidthRegressionTest < Minitest::Test
     assert_in_delta 0.0, item.angle, 1e-6
   end
 
-  # ── 2. Declared-vs-final run width within 3% across the measured cases ───
+  # ── 2. Declared-vs-final run width exact across the measured cases ───────
   # Each case models a measured span: the host font would render the run at
   # its natural width; the PDF declares natural * ratio. After width
-  # fidelity the FINAL width (rendered * applied factor) must be within 3%
-  # of the declared extent — including the near-1 control, which skips the
-  # transform and passes on natural width alone.
+  # fidelity the FINAL host bounds must match the declared extent — including
+  # the near-1 control, which must not be hidden behind a skip heuristic.
   MEASURED_CASES = [
     # [label,                          text,                       ratio ]
     ['worst condensed (0.5864)',       'STD. SHOP PRIMER U.N.O.',  0.5864],
@@ -65,52 +66,66 @@ class CondensedTextWidthRegressionTest < Minitest::Test
     ['control dimension (0.9950)',     "3'-6 1/2\"",               0.9950]
   ].freeze
 
-  def test_condensed_title_block_strings_land_within_3_percent_of_declared
+  def test_condensed_title_block_strings_match_declared_host_bounds
     MEASURED_CASES.each do |label, text, ratio|
       font_pts = 8.0
       natural_in = text.length * 0.55 * font_pts / 72.0
       declared_in = natural_in * ratio
       declared_pts = declared_in * 72.0
 
-      item = TI.new(text, 50.0, 100.0, font_pts, 0.0, 'pdftotext', nil,
-                    50.0, 100.0, 50.0 + declared_pts, 100.0 + font_pts * 1.2)
+      item = identified_text_item(
+        text, 50.0, 100.0, font_pts, 0.0, 'pdftotext', nil,
+        50.0, 100.0, 50.0 + declared_pts, 100.0 + font_pts * 1.2
+      )
       ents = NaturalWidthEntities.new(natural_in)
       b = make_builder(LETTER)
       assert b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil),
              "#{label}: mesh must be delivered"
 
       fits = ents.transforms.select { |args| args[0].kind == :scaling }
-      applied = fits.empty? ? 1.0 : fits[0][0].args[1]
-      final_in = natural_in * applied
-      deviation = (final_in - declared_in).abs / declared_in
-      assert_operator deviation, :<=, 0.03,
-                      "#{label}: final width must be within 3% of the " \
-                      "declared extent (got #{(deviation * 100).round(2)}%)"
+      assert_equal 1, fits.length, "#{label}: the width fit must be observable"
+      assert_in_delta ratio, fits[0][0].args[1], 1.0e-9
+      final_bounds = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.bounds(
+        ents.to_a
+      )
+      assert_in_delta declared_in, final_bounds[:width], 1.0e-8,
+                      "#{label}: final host width must equal the declared extent"
+      assert_in_delta font_pts / 72.0, final_bounds[:height], 1.0e-8,
+                      "#{label}: final host height must equal source font height"
 
       # The height side of every case stays the faithful nominal.
       assert_in_delta font_pts / 72.0, ents.height_args[0], 1e-9,
                       "#{label}: height must stay the faithful nominal"
-      unless fits.empty?
-        assert_equal [1.0, 1.0], fits[0][0].args[2..3],
-                     "#{label}: height/depth factors must be exactly 1.0"
-      end
+      assert_equal [1.0, 1.0], fits[0][0].args[2..3],
+                   "#{label}: fixture height/depth factors must be exactly 1.0"
+      attempt = b.text_attempts.fetch(0)
+      assert_equal item.source_span_id, attempt[:source_span_id]
+      assert attempt[:visual_fidelity_verified]
+      assert attempt[:width_verified]
+      assert attempt[:height_verified]
     end
   end
 
-  # The control case must take the skip path, proving the 3% acceptance is
-  # not achieved by force-fitting well-matched runs.
-  def test_near_1_control_uses_the_skip_path
+  def test_near_1_control_is_fitted_and_verified_exactly
     text = "3'-6 1/2\""
     font_pts = 8.0
     natural_in = text.length * 0.55 * font_pts / 72.0
     declared_pts = natural_in * 0.9950 * 72.0
-    item = TI.new(text, 50.0, 100.0, font_pts, 0.0, 'pdftotext', nil,
-                  50.0, 100.0, 50.0 + declared_pts, 100.0 + font_pts * 1.2)
+    item = identified_text_item(
+      text, 50.0, 100.0, font_pts, 0.0, 'pdftotext', nil,
+      50.0, 100.0, 50.0 + declared_pts, 100.0 + font_pts * 1.2
+    )
     ents = NaturalWidthEntities.new(natural_in)
     b = make_builder(LETTER)
-    b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
+    assert b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
 
-    assert_empty ents.transforms.select { |args| args[0].kind == :scaling }
-    assert_equal 1, b.instance_variable_get(:@text_width_skipped_near_1_count)
+    fits = ents.transforms.select { |args| args[0].kind == :scaling }
+    assert_equal 1, fits.length
+    assert_in_delta 0.9950, fits[0][0].args[1], 1.0e-9
+    final_bounds = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.bounds(
+      ents.to_a
+    )
+    assert_in_delta declared_pts / 72.0, final_bounds[:width], 1.0e-8
+    assert b.text_attempts.fetch(0)[:visual_fidelity_verified]
   end
 end

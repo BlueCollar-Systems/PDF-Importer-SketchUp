@@ -246,7 +246,7 @@ class QAReportTest < Minitest::Test
     assert_includes extra[:diagnostics][:signals], 'semantic_recognition_skipped_for_speed'
   end
 
-  def test_emits_actual_text_entity_types_for_labels
+  def test_does_not_fabricate_actual_text_entity_types_from_requested_mode
     stats = {
       pages: 1,
       primitives: 40,
@@ -261,12 +261,162 @@ class QAReportTest < Minitest::Test
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('text.pdf', {}, stats)
     extra = report[:extra]
     entity = extra[:actual_text_entity_types]
-    refute_nil entity
-    assert_equal 'labels', entity['entity_type']
-    assert_equal 12, entity['count']
-    assert_equal 12, entity['native_label']
+    assert_nil entity
+    assert_equal false,
+                 extra[:import_contract_ready][:checks][:actual_text_entity_types]
     refute_nil report[:report_meta]
     assert_includes report[:report_meta][:build_stamp].to_s, 'sketchup'
+  end
+
+  def test_extraction_only_report_never_claims_host_entity_delivery
+    stats = {
+      pages: 1, primitives: 12, edges: 0, text: 0, layers: [],
+      execution_scope: :extraction_only, extracted_text_items: 2,
+      text_mode: :text3d, text_renderers: [],
+      text_source_span_ids: ['text_span:1:0', 'text_span:1:1']
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'extract-only.pdf', { text_mode: :text3d }, stats
+    )
+    extra = report[:extra]
+    assert_equal 'extraction_only', extra[:execution_scope]
+    assert_equal 2, extra[:extracted_text_items]
+    assert_equal 0, report[:result][:text_entities]
+    assert_nil extra[:actual_text_entity_types]
+    assert_equal false, extra[:representation_fidelity][:ready]
+    assert_equal true, extra[:representation_fidelity][:not_applicable]
+    assert_includes extra[:representation_fidelity][:errors],
+                    'host_representation_delivery_not_performed'
+    contract = extra[:import_contract_ready]
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:host_entity_delivery]
+  end
+
+  def qa_transition(source_id, from_mode, to_mode)
+    {
+      source_span_id: source_id,
+      importer_id: 'sketchup_pdf_vector_importer',
+      page_number: source_id.split(':')[1].to_i,
+      scope: :item,
+      category: :exact_representation_impossible,
+      affirmative_impossibility: true,
+      generic_failure: false,
+      from_mode: from_mode,
+      to_mode: to_mode,
+      reason_code: :source_item_identity_unavailable,
+      attempted_renderer: "#{from_mode}_source_renderer",
+      created_entity_ids: [],
+      cleaned_entity_ids: [],
+      cleanup_outcome: :not_required,
+      evidence: { fresh_inventory_evaluation: true }
+    }
+  end
+
+  def test_source_glyph_3d_text_requires_and_accepts_complete_host_evidence
+    id = 'text_span:1:0'
+    entity_id = 'persistent_id:101'
+    evidence = {
+      placement_verified: true, rotation_verified: true,
+      width_verified: true, height_verified: true,
+      entity_type_verified: true, visual_fidelity_verified: true,
+      source_glyph_identity_verified: true,
+      positive_z_depth_verified: true
+    }
+    stats = {
+      pages: 1, primitives: 1, edges: 0, text: 1, layers: [],
+      text_mode: :text3d, text_source_span_ids: [id],
+      source_provenance_objects: [{
+        span_id: id, source_kind: 'text_span',
+        created_entity_type: 'source_glyph_3d_text',
+        resulting_entity_ids: [entity_id]
+      }.merge(evidence)],
+      text_attempts: [{
+        source_span_id: id, requested_mode: :text3d,
+        delivered_mode: :text3d, resulting_entity_ids: [entity_id],
+        attempt_history: [{
+          mode: :text3d, outcome: :complete,
+          resulting_entity_ids: [entity_id], cleanup_outcome: :not_required
+        }.merge(evidence)]
+      }.merge(evidence)]
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'text3d.pdf', { text_mode: :text3d }, stats
+    )
+    fidelity = report[:extra][:representation_fidelity]
+    assert_equal true, fidelity[:ready], fidelity[:errors].join(', ')
+    assert_equal '3d_text',
+                 report[:extra][:actual_text_entity_types]['entity_type']
+
+    stats[:text_attempts][0].delete(:rotation_verified)
+    failed = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'text3d.pdf', { text_mode: :text3d }, stats
+    )
+    assert_equal false, failed[:extra][:representation_fidelity][:ready]
+  end
+
+  def test_item_raster_fallback_requires_exact_adjacent_transition_ledger
+    id = 'text_span:1:0'
+    entity_id = 'persistent_id:901'
+    transitions = [
+      qa_transition(id, :text3d, :glyphs),
+      qa_transition(id, :glyphs, :geometry),
+      qa_transition(id, :geometry, :raster)
+    ]
+    history = transitions.map do |transition|
+      {
+        mode: transition[:from_mode], outcome: :failed,
+        reason: transition[:reason_code], transition_proof: transition,
+        created_entity_ids: [], cleaned_entity_ids: [],
+        resulting_entity_ids: [], cleanup_outcome: :not_required,
+        visual_fidelity_verified: false
+      }
+    end
+    history << {
+      mode: :raster, outcome: :complete,
+      resulting_entity_ids: [entity_id], cleanup_outcome: :not_required,
+      real_raster_verified: true, source_crop_binding_verified: true,
+      visual_fidelity_verified: true
+    }
+    stats = {
+      pages: 1, primitives: 1, edges: 0, text: 1, layers: [],
+      text_mode: :text3d, text_source_span_ids: [id],
+      fallback_transitions: transitions,
+      source_provenance_objects: [],
+      text_attempts: [{
+        source_span_id: id, requested_mode: :text3d,
+        delivered_mode: :raster, resulting_entity_ids: [entity_id],
+        real_raster_verified: true, source_crop_binding_verified: true,
+        visual_fidelity_verified: true, attempt_history: history
+      }],
+      terminal_text_delivery_records: [{
+        page: 1, source_span_ids: [id], requested_mode: :text3d,
+        delivered_mode: :raster, resulting_entity_ids: [entity_id],
+        created_entity_type: 'raster_image',
+        real_raster_verified: true, source_crop_binding_verified: true,
+        visual_fidelity_verified: true, cleanup_outcome: :not_required,
+        delivery_scope: :item_raster,
+        artifact_evidence: { source_span_id: id, page_number: 1,
+                             source_crop_binding_verified: true }
+      }]
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'fallback.pdf', { text_mode: :text3d }, stats
+    )
+    fidelity = report[:extra][:representation_fidelity]
+    assert_equal true, fidelity[:ready], fidelity[:errors].join(', ')
+    actual = report[:extra][:actual_text_entity_types]
+    assert_equal 'raster', actual['entity_type']
+    assert_equal 1, actual['raster_image']
+    assert_equal 1, actual['count']
+
+    stats[:fallback_transitions] = transitions.values_at(0, 2)
+    broken = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'fallback.pdf', { text_mode: :text3d }, stats
+    )
+    assert_equal false, broken[:extra][:representation_fidelity][:ready]
+    assert_includes broken[:extra][:representation_fidelity][:errors],
+                    'fallback_transition_ledger_mismatch'
   end
 
   def test_actual_text_entity_types_follow_delivered_provenance_not_requested_mode
@@ -344,7 +494,7 @@ class QAReportTest < Minitest::Test
     assert_equal 1, prov[:object_count]
   end
 
-  def test_model_3d_payload_reports_shelved_state
+  def test_closed_shape_extrusion_is_disabled_without_blocking_3d_text
     stats = {
       pages: 1,
       primitives: 8,
@@ -369,7 +519,164 @@ class QAReportTest < Minitest::Test
     assert_equal false, report[:extra][:model_3d]['enabled']
     assert_equal false, report[:extra][:model_3d]['supported']
     assert_equal 0, report[:extra][:model_3d]['faces_extruded']
-    assert_equal 'shelved_by_owner', report[:extra][:model_3d]['skipped_reason']
+    assert_equal 'closed_shape_extrusion_disabled',
+                 report[:extra][:model_3d]['skipped_reason']
+    refute_match(/3D.text|text/i,
+                 report[:extra][:model_3d]['skipped_reason'])
+  end
+
+  def test_fallback_transition_proofs_and_terminal_cleanup_are_loud
+    stats = {
+      pages: 1, primitives: 1, edges: 0, text: 0, layers: [],
+      text_renderers: [{
+        page: 1, renderer: :pdftocairo_real_raster, mode: :raster,
+        requested_mode: :text3d, delivered_mode: :raster,
+        degraded: true, reason: 'affirmative item-specific impossibility',
+        count: 1, real_raster_verified: true
+      }],
+      raster_fallback_used: true,
+      fallback_transitions: [{
+        page: 1, source_span_id: 'text_span:1:0', from_mode: :text3d,
+        to_mode: :glyphs, reason_code: :source_item_identity_unavailable,
+        importer_id: 'sketchup_pdf_vector_importer', page_number: 1,
+        affirmative_impossibility: true, generic_failure: false,
+        cleanup_outcome: :not_required
+      }],
+      terminal_text_delivery_records: [{
+        page: 1, source_span_ids: ['text_span:1:0'],
+        requested_mode: :text3d, delivered_mode: :raster,
+        real_raster_verified: true, visual_fidelity_verified: true,
+        cleanup_outcome: :verified, delivery_scope: :page_raster
+      }],
+      terminal_cleanup_events: [{
+        page: 1, cleanup_outcome: :verified,
+        terminal_raster_entity_id: 'persistent_id:77'
+      }]
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'fallback.pdf', { text_mode: :text3d }, stats
+    )
+
+    assert report[:fallback][:used]
+    assert_equal '3d_text', report[:fallback][:text][:requested]
+    assert_equal 'raster', report[:fallback][:text][:delivered]
+    assert_equal 1, report[:extra][:fallback_transitions].length
+    assert_equal true,
+                 report[:extra][:fallback_transitions][0]['affirmative_impossibility']
+    assert_equal 'sketchup_pdf_vector_importer',
+                 report[:extra][:fallback_transitions][0]['importer_id']
+    assert_equal 1, report[:extra][:fallback_transitions][0]['page_number']
+    assert_equal 1, report[:extra][:terminal_text_delivery_records].length
+    assert_equal true,
+                 report[:extra][:terminal_text_delivery_records][0]['real_raster_verified']
+    assert_equal 'verified',
+                 report[:extra][:terminal_text_delivery_records][0]['cleanup_outcome']
+    assert_equal 'page_raster',
+                 report[:extra][:terminal_text_delivery_records][0]['delivery_scope']
+    assert_equal 'verified',
+                 report[:extra][:terminal_cleanup_events][0]['cleanup_outcome']
+  end
+
+
+  def test_image_only_terminal_raster_is_valid_without_fabricating_text_span_ids
+    stats = {
+      pages: 1, primitives: 0, edges: 0, text: 0, layers: [],
+      text_source_span_ids: [], text_attempts: [],
+      source_provenance_objects: [],
+      terminal_text_delivery_records: [{
+        page: 1, source_span_ids: [], no_semantic_text: true,
+        requested_mode: :text3d, delivered_mode: :raster,
+        resulting_entity_ids: ['persistent_id:91'],
+        real_raster_verified: true, visual_fidelity_verified: true,
+        cleanup_outcome: :not_required, delivery_scope: :page_raster
+      }]
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'image-only.pdf', { text_mode: :text3d }, stats
+    )
+    fidelity = report[:extra][:representation_fidelity]
+
+    assert_equal true, fidelity[:ready], fidelity[:errors].join(', ')
+    assert_empty fidelity[:errors]
+  end
+
+  def test_image_only_page_fallback_and_physical_glyph_delivery_are_loud
+    stats = {
+      pages: 1, primitives: 0, edges: 0, text: 1, layers: [],
+      text_renderers: [],
+      page_representation_fallbacks: [{
+        page: 1, scope: :page,
+        reason_code: :visible_nontext_source_only,
+        delivered_mode: :raster,
+        real_raster_verified: true
+      }],
+      empty_page_source_inspections: [{
+        page: 1, source_glyph_placements: 0,
+        source_uses: 1, visible_nontext_source: true
+      }],
+      representation_ownership_group_forced_pages: [{
+        page: 2, requested_text_mode: :text3d,
+        requested_group_per_page: false, effective_group_per_page: true,
+        reason_code: :representation_entity_ownership_required
+      }],
+      source_glyph_physical_deliveries: [{
+        page: 2,
+        source_unit_id: 'svg_glyph_placements:page:2',
+        placement_indices: [2027, 3059],
+        delivered_mode: :text3d,
+        positive_z_depth_verified: true
+      }]
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'source-pages.pdf', { text_mode: :text3d }, stats
+    )
+
+    assert_equal 'visible_nontext_source_only',
+      report[:extra][:page_representation_fallbacks][0]['reason_code']
+    assert_equal true,
+      report[:extra][:empty_page_source_inspections][0]['visible_nontext_source']
+    assert_equal 'representation_entity_ownership_required',
+      report[:extra][:representation_ownership_group_forced_pages][0]['reason_code']
+    assert_equal [2027, 3059],
+      report[:extra][:source_glyph_physical_deliveries][0]['placement_indices']
+  end
+
+  def test_physical_source_glyph_delivery_requires_provenance_crosslink
+    entity_id = 'persistent_id:701'
+    unit_id = 'svg_glyph_placements:page:2:0-3'
+    stats = {
+      pages: 1, primitives: 1, edges: 0, text: 1, layers: [],
+      text_source_span_ids: [], text_attempts: [],
+      source_provenance_objects: [{
+        object_id: unit_id, span_id: nil, page: 2,
+        source_kind: 'svg_glyph_placement', semantic_identity_available: false,
+        created_entity_type: 'source_glyph_3d_text',
+        resulting_entity_ids: [entity_id], source_placement_indices: [0, 3],
+        source_glyph_identity_verified: true,
+        positive_z_depth_verified: true
+      }],
+      source_glyph_physical_deliveries: [{
+        page: 2, source_unit_id: unit_id, placement_indices: [0, 3],
+        resulting_entity_ids: [entity_id], delivered_mode: :text3d,
+        visual_fidelity_verified: true, positive_z_depth_verified: true,
+        source_glyph_identity_verified: true
+      }]
+    }
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'physical.pdf', { text_mode: :text3d }, stats
+    )
+    fidelity = report[:extra][:representation_fidelity]
+    assert_equal true, fidelity[:ready], fidelity[:errors].join(', ')
+
+    stats[:source_glyph_physical_deliveries][0][:resulting_entity_ids] =
+      ['persistent_id:702']
+    failed = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'physical.pdf', { text_mode: :text3d }, stats
+    )
+    assert_equal false, failed[:extra][:representation_fidelity][:ready]
+    assert_includes failed[:extra][:representation_fidelity][:errors],
+                    'physical_glyph_delivery_crosslink_invalid'
   end
 
   def test_model_3d_intent_is_reported_from_text_evidence

@@ -45,10 +45,13 @@ class DependencyResolverTest < Minitest::Test
         File.write(fake, 'stub')
 
         original = @resolver.method(:bundled_bin_dir)
+        original_ready = @resolver.method(:bundled_bin_ready?)
         @resolver.define_singleton_method(:bundled_bin_dir) { bin_dir }
+        @resolver.define_singleton_method(:bundled_bin_ready?) { true }
         assert_equal fake, @resolver.find_pdftocairo
       ensure
         @resolver.define_singleton_method(:bundled_bin_dir, original)
+        @resolver.define_singleton_method(:bundled_bin_ready?, original_ready)
       end
     end
   end
@@ -75,6 +78,22 @@ class DependencyResolverTest < Minitest::Test
     assert_includes joined, 'ghostscript.com'
   end
 
+  def test_missing_helper_notice_describes_source_only_distribution_truthfully
+    status = {
+      bundled_bin: false,
+      pdftocairo: nil,
+      pdftotext: nil,
+      pdffonts: nil,
+      ghostscript: nil,
+      mutool: nil
+    }
+    message = @resolver.build_notice_message(status)
+
+    assert_includes message, 'source-only'
+    refute_match(/RBZ builds bundle/i, message)
+    refute_match(/Bundled copy path/i, message)
+  end
+
   def test_build_notice_message_nil_when_all_present
     status = {
       bundled_bin: true,
@@ -85,5 +104,47 @@ class DependencyResolverTest < Minitest::Test
       mutool: nil
     }
     assert_nil @resolver.build_notice_message(status)
+  end
+
+  def with_file_symlink_stub(symlink_path)
+    original = File.method(:symlink?)
+    target = File.expand_path(symlink_path)
+    File.define_singleton_method(:symlink?) do |path|
+      File.expand_path(path.to_s) == target || original.call(path)
+    end
+    yield
+  ensure
+    File.define_singleton_method(:symlink?, original) if original
+  end
+
+  def test_symlinked_manifest_is_rejected_before_json_can_unlock_runtime
+    Dir.mktmpdir('bc_dep_manifest_link') do |tmpdir|
+      original_support = nil
+      begin
+        manifest = File.join(tmpdir, 'poppler-runtime-manifest.json')
+        File.write(manifest, '{"schema":1,"license_review":{"status":"approved"}}')
+        original_support = @resolver.method(:support_dir)
+        @resolver.define_singleton_method(:support_dir) { tmpdir }
+
+        with_file_symlink_stub(manifest) do
+          assert_nil @resolver.bundled_runtime_manifest
+          refute @resolver.bundled_bin_ready?
+        end
+      ensure
+        @resolver.define_singleton_method(:support_dir, original_support) if original_support
+      end
+    end
+  end
+
+  def test_symlinked_support_path_component_is_rejected
+    Dir.mktmpdir('bc_dep_support_link') do |tmpdir|
+      component = File.join(tmpdir, 'linked-component')
+      support = File.join(component, 'bc_pdf_vector_importer')
+      FileUtils.mkdir_p(support)
+
+      with_file_symlink_stub(component) do
+        refute @resolver.send(:runtime_path_components_symlink_free?, support)
+      end
+    end
   end
 end

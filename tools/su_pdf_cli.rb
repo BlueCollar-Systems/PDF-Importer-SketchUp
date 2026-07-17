@@ -24,10 +24,6 @@ def plugin_version
   match || 'unknown'
 end
 
-def poppler_bin_dir
-  File.join(REPO_ROOT, 'extracted', 'sketchup_ext', 'bc_pdf_vector_importer', 'bin')
-end
-
 def preflight(pdf_path)
   checks = []
   add = lambda do |id, ok, message|
@@ -41,13 +37,21 @@ def preflight(pdf_path)
     add.call('pdf_header', header.start_with?('%PDF-'),
              header.start_with?('%PDF-') ? 'valid %PDF- header' : 'not a PDF (bad header)')
   end
-  %w[pdftotext.exe pdftocairo.exe pdffonts.exe].each do |exe|
-    path = File.join(poppler_bin_dir, exe)
-    present = File.file?(path)
+  resolver = BlueCollarSystems::PDFVectorImporter::DependencyResolver
+  pdftocairo = resolver.find_pdftocairo
+  helper_paths = {
+    'pdftotext' => resolver.find_pdftotext,
+    'pdftocairo' => pdftocairo,
+    'pdffonts' => resolver.find_pdffonts(pdftocairo)
+  }
+  helper_paths.each do |name, path|
+    resolved = path.to_s.strip
+    present = !resolved.empty?
     checks << {
-      'id' => "poppler_#{exe.sub('.exe', '')}",
+      'id' => "poppler_#{name}",
       'status' => present ? 'pass' : 'warn',
-      'message' => present ? "bundled #{exe} present" : "#{exe} missing (text falls back to internal extractor)"
+      'message' => present ? "resolved #{name}: #{resolved}" :
+                   "#{name} unavailable; modes that require it stop explicitly"
     }
   end
 
@@ -70,22 +74,22 @@ def preflight(pdf_path)
 end
 
 def help_text
-  <<~HELP
-    Usage:
-      ruby tools/su_pdf_cli.rb INPUT.pdf [--json OUT.json] [--report OUT.json]
-      ruby tools/su_pdf_cli.rb INPUT.pdf --preflight
-      ruby tools/su_pdf_cli.rb --version
+  <<-HELP
+Usage:
+  ruby tools/su_pdf_cli.rb INPUT.pdf [--json OUT.json] [--report OUT.json]
+  ruby tools/su_pdf_cli.rb INPUT.pdf --preflight
+  ruby tools/su_pdf_cli.rb --version
 
-    Unified CLI flags forwarded to the extension CLI:
-      --output-dir DIR
-      --mode auto|vector|raster|hybrid
-      --pages All|1|1-3|1,3,5
-      --scale VALUE
-      --text-mode MODE
-        labels, 3d_text, glyphs, geometry, or no_text (matches FC/LC/BL CLI)
-      --no-text
-      --extract-images / --no-extract-images
-      --no-primitives-json
+Unified CLI flags forwarded to the extension CLI:
+  --output-dir DIR
+  --mode auto|vector|raster|hybrid
+  --pages All|1|1-3|1,3,5
+  --scale VALUE
+  --text-mode MODE
+    labels, 3d_text, glyphs, geometry, or no_text (matches FC/LC/BL CLI)
+  --no-text
+  --extract-images / --no-extract-images
+  --no-primitives-json
   HELP
 end
 
@@ -130,10 +134,10 @@ def parse_legacy_args(argv)
       options[:cli_args].concat(['--report', options[:report]])
     when '--extrude-to-3d', '--extrude-depth', '--extrude-depth-mm'
       raise OptionParser::InvalidOption,
-            "#{arg} is currently shelved; 3D shape extrusion is disabled for go-live imports"
+            "#{arg} controls closed-shape extrusion, which is disabled independently of 3D text"
     when /\A--extrude-depth(?:-mm)?=.+\z/
       raise OptionParser::InvalidOption,
-            "#{arg.split('=').first} is currently shelved; 3D shape extrusion is disabled for go-live imports"
+            "#{arg.split('=').first} controls closed-shape extrusion, which is disabled independently of 3D text"
     when *value_flags
       i += 1
       options[:cli_args].concat([arg, argv[i]]) if argv[i]

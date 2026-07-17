@@ -129,6 +129,28 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_equal true, opts[:import_text]
   end
 
+  def test_legacy_text_and_label_aliases_preserve_native_labels_mode
+    %w[Text text Label label].each do |raw|
+      opts = BID.send(:build_opts,
+                      import_mode: 'auto',
+                      import_text: 'Yes',
+                      text_mode: raw)
+
+      assert_equal :labels, opts[:text_mode], "expected #{raw} -> Labels"
+      assert_equal false, opts[:use_3d_text], raw
+      assert_equal true, opts[:import_text], raw
+    end
+  end
+
+  def test_saving_legacy_text_alias_migrates_to_canonical_labels_preference
+    BID.send(:save_prefs, text_mode: 'Text')
+    prefs = BID.send(:load_prefs)
+
+    assert_equal 'Labels', prefs[:text_mode]
+    assert_equal 'Labels', Sketchup.default_value(PREF_KEY, 'text_mode')
+    assert_equal 'Labels', BID.effective_text_mode(prefs)
+  end
+
   def test_cli_snake_case_text_mode_aliases_match_pdfcadcore_contract
     {
       '3d_text' => :text3d,
@@ -206,7 +228,7 @@ class ImportDialogDefaultsTest < Minitest::Test
     %w[Auto Vector Raster Hybrid].each { |m| assert_includes html, m }
   end
 
-  def test_advanced_html_3d_model_shelved
+  def test_advanced_html_closed_shape_extrusion_disabled_independently
     d = {
       mode: 'Auto', pages: 'All', scale: '1.0', text_mode: 'Geometry',
       import_text: 'Yes', match_pdf_layers: 'Yes',
@@ -217,10 +239,11 @@ class ImportDialogDefaultsTest < Minitest::Test
     }
     html = BID.send(:advanced_html, 'sample.pdf', d)
 
-    # 3D extrusion UI is shelved — controls must NOT appear
+    # Closed-shape extrusion controls remain unavailable; 3D Text is separate.
     refute_includes html, 'id="extrude_to_3d"'
     refute_includes html, 'id="extrude_depth_mm"'
-    assert_includes html, '3D Model section shelved'
+    assert_includes html, 'Closed-shape 3D Model controls intentionally disabled'
+    assert_includes html, 'source-glyph 3D Text remains available'
   end
 
   def test_build_opts_maps_3d_model_controls
@@ -238,7 +261,7 @@ class ImportDialogDefaultsTest < Minitest::Test
     end
   end
 
-  def test_shape_extrusion_pipeline_remains_shelved
+  def test_closed_shape_extrusion_pipeline_remains_disabled
     assert_includes MAIN_SOURCE, 'SHAPE_EXTRUSION_ENABLED = false'
     assert_includes MAIN_SOURCE, 'if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0'
     assert_includes MAIN_SOURCE, 'if SHAPE_EXTRUSION_ENABLED && opts[:extrude_to_3d]'
@@ -251,6 +274,31 @@ class ImportDialogDefaultsTest < Minitest::Test
     ))
 
     assert_equal 'auto', opts[:import_mode]
+  end
+
+  def test_non_raster_modes_never_authorize_implicit_page_raster_substitution
+    %w[auto vector hybrid].each do |mode|
+      opts = BID.send(:build_opts,
+                      import_mode: mode,
+                      import_text: 'Yes',
+                      text_mode: '3D Text')
+      assert_equal false, opts[:force_raster], mode
+      assert_equal false, opts[:raster_fallback], mode
+
+      config = BIC.from_mode(mode.capitalize)
+      assert_equal 'No', config.raster_fallback, mode
+      assert_equal 'No', config.force_raster, mode
+    end
+  end
+
+  def test_raster_mode_is_an_explicit_requested_representation_not_a_fallback
+    opts = BID.send(:build_opts, import_mode: 'raster')
+    assert_equal true, opts[:force_raster]
+    assert_equal false, opts[:raster_fallback]
+
+    config = BIC.from_mode('Raster')
+    assert_equal 'Yes', config.force_raster
+    assert_equal 'No', config.raster_fallback
   end
 
   def test_legacy_saved_mode_migrates_to_auto

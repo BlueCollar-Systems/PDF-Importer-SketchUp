@@ -43,14 +43,14 @@ options = {
 }
 
 parser = OptionParser.new do |opts|
-  opts.banner = <<~BANNER
-    su_batch_cli — SketchUp PDF importer offline batch CLI (BlueCollar Systems)
+  opts.banner = <<-BANNER
+su_batch_cli — SketchUp PDF importer offline batch CLI (BlueCollar Systems)
 
-    Analyzes PDFs without SketchUp: open gate, vector parse, import_report.json.
-    Optional geometry sidecar summarizes path/text/image counts.
+Analyzes PDFs without SketchUp: open gate, vector parse, import_report.json.
+Optional geometry sidecar summarizes path/text/image counts.
 
-    Full SketchUp geometry batch:
-      SketchUp.exe -RubyStartup tools/sketchup_batch_import.rb -RubyStartupArg file.pdf
+Full SketchUp geometry batch:
+  SketchUp.exe -RubyStartup tools/sketchup_batch_import.rb -RubyStartupArg file.pdf
   BANNER
 
   opts.on('--preflight', 'Print preflight guidance and exit') { options[:preflight] = true }

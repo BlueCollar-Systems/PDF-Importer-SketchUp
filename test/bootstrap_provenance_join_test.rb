@@ -64,21 +64,43 @@ TI = MOD::TextParser::TextItem
 # Fake SketchUp label/entities host — real GeometryBuilder code paths run,
 # only the SketchUp API surface is faked.
 class FakeLabel
-  attr_accessor :layer
-  def display_leader=(_v); end
-  def vector=(_v); end
+  attr_accessor :layer, :display_leader, :vector
+  attr_reader :persistent_id, :point, :text
+
+  def initialize(id, text, point, vector)
+    @persistent_id = id
+    @text = text
+    @point = point
+    @vector = vector
+  end
+
+  def typename
+    'Text'
+  end
 end
 
 class FakeEntities
   attr_reader :labels
   def initialize
     @labels = []
+    @entities = []
+    @next_id = 100
   end
 
-  def add_text(_text, _pt, _vec = nil)
-    label = FakeLabel.new
+  def to_a
+    @entities.dup
+  end
+
+  def add_text(text, pt, vec = nil)
+    @next_id += 1
+    label = FakeLabel.new(@next_id, text, pt, vec)
     @labels << label
+    @entities << label
     label
+  end
+
+  def erase_entities(*values)
+    values.flatten.each { |value| @entities.delete(value) }
   end
 end
 
@@ -272,15 +294,17 @@ class BootstrapProvenanceJoinTest < Minitest::Test
                     'identity must be assigned BEFORE GeometryBuilder consumes items'
 
     cli_src = File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'cli.rb'))
-    cli_extract = cli_src.index('extract_text(parser, pdf_path, page_num, streams, ocg_map, opts)')
+    cli_gate = cli_src.index('certified_pages = certify_page_text_sources(')
+    cli_extract = cli_src.index('text_items, text_source = extract_text(')
     cli_assign = cli_src.index('TextSourceIdentity.assign!(text_items, page_num)')
     cli_map = cli_src.index('stats[:page_text_map][page_num] = text_items')
+    refute_nil cli_gate, 'cli.rb all-pages identity gate call site missing'
     refute_nil cli_extract, 'cli.rb extract_text call site missing'
     refute_nil cli_assign, 'cli.rb must call TextSourceIdentity.assign!'
     refute_nil cli_map, 'cli.rb page_text_map write missing'
     assert_operator cli_extract, :<, cli_assign,
                     'CLI identity must be assigned AFTER final extraction'
-    assert_operator cli_assign, :<, cli_map,
-                    'CLI identity must be assigned BEFORE page_text_map is built'
+    assert_operator cli_gate, :<, cli_map,
+                    'CLI all-pages identity gate must run BEFORE page_text_map is built'
   end
 end

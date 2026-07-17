@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status (2026-07-17): SUPERSEDED — historical reference only.** Active authority is the requested-representation directive in Q&A together with current verified source and tests; no dated implementation plan is an executable authority. This older native-font plan must not be executed or used to freeze Q&A, block a correction, or replace exact PDF glyph outlines with a host font.
+
 **Goal:** Deliver native SketchUp 3D Text at the PDF's visible height, run length, baseline, rotation, and placement without representation switching or silent partial geometry.
 
 **Architecture:** Preserve trusted font and text-matrix metadata from the internal PDF parser while keeping external `pdftotext` bboxes and identity. GeometryBuilder converts canonical PDF em height into SketchUp letter-height units, applies trusted and shrink-only local-X correction before placement, cleans failed partial meshes, and emits structured telemetry. Existing placement anchors remain unchanged; live SketchUp 2017 evidence is the release gate.
@@ -20,7 +22,7 @@
 - Transform order is local-X scale about `ORIGIN`, translation to the existing insertion point, then rotation about that insertion point. Y and Z scale remain exactly `1.0`.
 - Existing rotated and horizontal insertion anchors, tolerance `0.0`, filled faces, materials, hard height limits, and loud height-fallback counting remain.
 - A failed transformed mesh is erased before fallback; when cleanup cannot be confirmed, do not overlay a Label and route the item to the existing page-level terminal rung.
-- No release or version claim occurs until fresh installed-byte SketchUp 2017 visual acceptance passes. Q&A authority and archival remain unchanged until the separate five-mode host verification also passes.
+- No release or version claim occurs until fresh installed-byte SketchUp 2017 visual acceptance passes. Q&A records must still describe the current verified state and any live-host gap; an older plan cannot freeze corrections or stale authority.
 
 ---
 
@@ -1294,7 +1296,7 @@ no microscopic text, erased faces, duplicate partial mesh, or raster substitutio
 installed loader/plugin hashes match files expanded from the candidate RBZ
 ```
 
-If any line fails, do not bump the version or edit Q&A authority. Add a failing regression test for the observed defect, return to the responsible task, and rerun Steps 1-6.
+If any line fails, withhold the version bump, record the failure accurately in Q&A, add a failing regression test for the observed defect, return to the responsible task, and rerun Steps 1-6.
 
 - [ ] **Step 7: Bump to 3.7.95 only after acceptance and rebuild/reprobe final bytes**
 
@@ -1343,7 +1345,7 @@ Start-Process -FilePath 'C:\Program Files\SketchUp\SketchUp 2017\SketchUp.exe' -
 
 Expected: all Step 5-6 facts remain true and `plugin_version` is `3.7.95`.
 
-- [ ] **Step 8: Freeze acceptance evidence and leave Q&A authority unchanged**
+- [ ] **Step 8: Preserve acceptance evidence and refresh Q&A authority**
 
 Run:
 
@@ -1358,7 +1360,7 @@ $evidence = @(
 Get-FileHash -Algorithm SHA256 -LiteralPath $evidence | Format-Table -AutoSize
 ```
 
-Expected: every evidence file exists and has a SHA256. Do not edit, archive, quarantine, or delete any Q&A document in this plan. The follow-on host-matrix plan owns the final Q&A authority update, QA007 repair, recovery check, and removal of stale instructions after all modes pass.
+Expected: every evidence file exists and has a SHA256. Refresh Q&A authority from the verified evidence, record any remaining host blocker explicitly, repair QA007 if applicable, and remove stale instructions in the same correction round; ownership is not deferred to an unnamed future worker.
 
 - [ ] **Step 9: Final review, commit, and push**
 

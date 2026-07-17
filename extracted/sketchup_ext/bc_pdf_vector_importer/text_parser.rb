@@ -81,7 +81,73 @@ module BlueCollarSystems
         @text_items
       end
 
+      # Count nonempty PDF text-show operands without requiring font decoding.
+      # This is a detection-only proof used when both source extractors return
+      # no spans: encoded/CID text must not disappear merely because it could
+      # not be decoded into host-deliverable source objects.
+      def nonempty_text_show_operation_count
+        @streams.inject(0) do |total, stream|
+          next total unless stream && !stream.empty?
+          total + count_nonempty_text_show_operations(stream)
+        end
+      end
+
       private
+
+      def count_nonempty_text_show_operations(stream)
+        in_text = false
+        operand_stack = []
+        text_render_mode = 0
+        render_mode_stack = []
+        count = 0
+        tokenize(stream).each do |token|
+          if token[:type] == :operator
+            operator = token[:value]
+            if in_text && ![3, 7].include?(text_render_mode) &&
+               ['Tj', 'TJ', "'", '"'].include?(operator) &&
+               nonempty_text_show_operand?(operand_stack)
+              count += 1
+            end
+            if operator == 'q'
+              render_mode_stack << text_render_mode
+            elsif operator == 'Q'
+              restored = render_mode_stack.pop
+              text_render_mode = restored unless restored.nil?
+            elsif operator == 'Tr'
+              modes = operand_stack.select do |operand|
+                operand[:type] == :number
+              end
+              candidate = modes.last && modes.last[:value].to_i
+              text_render_mode = candidate if candidate && candidate.between?(0, 7)
+            end
+            in_text = true if operator == 'BT'
+            in_text = false if operator == 'ET'
+            operand_stack.clear
+          else
+            operand_stack << token
+          end
+        end
+        count
+      end
+
+      def nonempty_text_show_operand?(tokens)
+        Array(tokens).any? do |token|
+          case token[:type]
+          when :string
+            !decode_pdf_string_bytes(token[:value]).empty?
+          when :hex_string
+            !decode_pdf_hex_bytes(token[:value]).empty?
+          when :array
+            token[:value].to_s.scan(/\((?:\\.|[^\\)])*\)|<[^>]*>/).any? do |chunk|
+              bytes = chunk.start_with?('<') ?
+                decode_pdf_hex_bytes(chunk) : decode_pdf_string_bytes(chunk)
+              !bytes.empty?
+            end
+          else
+            false
+          end
+        end
+      end
 
       def extract_text_from_stream(stream)
         # Text state
@@ -1097,7 +1163,27 @@ module BlueCollarSystems
 
           j = i
           while j < len && stream[j] !~ /[\s\[\]<>(){}\/\%]/; j += 1; end
+          if j == i
+            i += 1
+            next
+          end
           word = stream[i...j]
+
+          # Inline image payloads are arbitrary binary bytes and can contain
+          # sequences that resemble BT/Tj text operators. Skip BI...ID...EI so
+          # neither extraction nor the no-omission detector invents text from
+          # image data.
+          if word == 'BI'
+            id_pos = stream.index(/\sID[\s\n\r]/, j)
+            if id_pos
+              ei_pos = stream.index(/[\s\n\r]EI(?=[\s\n\r\/\[<])/, id_pos + 3)
+              i = ei_pos ? ei_pos + 3 : len
+            else
+              i = j
+            end
+            next
+          end
+
           if word =~ /\A[+-]?\d*\.?\d+\z/
             tokens << { type: :number, value: word.to_f }
           else

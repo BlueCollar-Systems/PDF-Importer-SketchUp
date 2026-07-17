@@ -10,23 +10,32 @@ alwaysApply: true
 ## MUST
 
 1. **Stay in the requested mode** and fix transforms / placement / height there.
-2. **Fallback only** when that exact *(importer, option, PDF)* **cannot** produce the mode (missing engine, host API absent, empty SVG, native create fails). Prove impossibility in the report/logs.
-3. **Ordered fallback** then (closest first): Glyphs ↔ Geometry → **3D Text** → Labels → page raster. Log + report `degraded: true`. Never leave text empty when a related path exists.
+2. Treat fallback as unauthorized unless affirmative evidence proves the requested representation impossible for the exact source item and the alternative has its own certified type-and-visual attempt.
+3. After affirmative item-scoped impossibility, advance exactly one rung in the finite closest ladder, certify that attempt, and continue only as needed: Labels → 3D Text → Glyphs → Geometry → Raster; 3D Text → Glyphs → Geometry → Raster; Glyphs → Geometry → Raster; Geometry → Raster. Without that proof, erase partial artifacts, identify the exact source span, and stop.
 4. **Free only** — bundled / host-native. No paid-only path.
 
 ## MUST NOT (instant reject)
 
 - Switch Labels ↔ 3D Text / Geometry / Glyphs / raster to “fix” alignment, rotation, or scale.
-- Skip 3D Text after Geometry/Glyphs SVG failure because mesh “might look wrong.”
+- Treat a missing/skipped helper, generic host/API limit, exception, empty artifact, or currently broken implementation as proof of item-specific impossibility.
+- Record a “proven unavailable” placeholder or advance to a peer/next rung without a real attempt and type-and-visual certificate.
 - Treat SIZE-1 or R20-2 as permission to change representation (they are **in-mode** height contracts).
-- Convert rotated Labels to mesh/geometry; SketchUp `Text` limits stay Labels.
+- Jump rotated Labels directly to mesh/geometry. Try Labels first; a proven host rotation impossibility advances only to verified 3D Text.
 - Silent empty text, or “helpful” mode change for prettier results.
 
 ## Agent trap
 
-If the bug report is “wrong position / angle / size,” your first change is **not** the fallback ladder. Fallback is capability failure only — not quality escape.
+If the bug report is “wrong position / angle / size,” fix and certify that requested representation. A broken implementation is not evidence that the user's requested outcome is impossible.
 
 ## Done only when
 
-- Delivered representation matches the requested mode, **or**
-- Impossibility is documented and the **closest** free fallback was used with `degraded` reported — and you did **not** change mode to hide a transform bug.
+- Delivered representation matches the requested mode and its source item, type,
+  placement, rotation, and scale evidence is certified; **or**
+- Each necessary adjacent fallback has affirmative item proof and the terminal
+  attempt is independently certified; **or**
+- A generic/unproven failure stops without leaving partial artifacts and reports
+  the exact requested-mode/source-item certification failure.
+
+Fallback is eligible only after affirmative item-scoped impossibility evidence
+exists and the next adjacent attempt independently certifies its actual type and
+visual result. Generic failure telemetry is never enough; the ladder never cycles.

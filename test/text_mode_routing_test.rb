@@ -1,9 +1,10 @@
 #!/usr/bin/env ruby
 # test/text_mode_routing_test.rb
 #
-# Text-mode routing locks: the requested text mode must reach the renderer
-# that implements it (TEXTMODE-1), and the SVG glyph path stays reserved for
-# Geometry/Glyphs.
+  # Text-mode routing locks: the requested text mode must reach the renderer
+  # that implements it (TEXTMODE-1). Geometry/Glyphs use the existing edge /
+  # component SVG renderer; 3D Text uses the separate filled-solid source SVG
+  # renderer so it can preserve glyph identity and verify positive Z depth.
 #
 # RB-11 (2026-07-12 roadblock audit, re-scoped 2026-07-16): earlier versions
 # asserted exact implementation wording (full assignment expressions, comment
@@ -41,7 +42,7 @@ class TextModeRoutingTest < Minitest::Test
     lines
   end
 
-  def test_3d_text_does_not_route_through_svg_glyph_renderer
+  def test_3d_text_uses_separate_exact_source_outline_solid_renderer
     assignments = assignments_to(@main, 'use_svg_text')
     routing = assignments.find { |a| a.include?(':geometry') }
     refute_nil routing, 'expected the use_svg_text routing assignment to test :geometry'
@@ -51,8 +52,13 @@ class TextModeRoutingTest < Minitest::Test
                     'SVG routing must be driven by the requested text mode'
     assignments.each do |a|
       refute_match(/:text3d|:labels/, a,
-                   "3D Text / Labels must never route through the SVG glyph renderer: #{a.strip}")
+                   "3D Text / Labels must never route through the edge/component renderer: #{a.strip}")
     end
+    solid_assignments = assignments_to(@main, 'use_svg_3d_text')
+    assert solid_assignments.any? { |a| a.include?(':text3d') && a.include?('requested_text_mode') }
+    assert_match(/Svg3DTextRenderer\.render_svg/, @main)
+    assert_match(/:renderer\s*=>\s*:svg_source_3d_text/, @main)
+    assert_match(/:positive_z_depth_verified\s*=>\s*true/, @main)
   end
 
   def test_labels_do_not_hide_native_annotations_behind_svg_visual_layer
@@ -63,39 +69,40 @@ class TextModeRoutingTest < Minitest::Test
                  'native text group must never be hidden behind an SVG visual layer')
   end
 
-  def test_native_label_and_3d_text_renderers_are_reported
-    assert_match(/builder_use_3d_text\s*\?\s*:add_3d_text\s*:\s*:labels/, @main,
-                 'native renderer selection must distinguish :add_3d_text from :labels')
+  def test_labels_and_exact_source_3d_text_renderers_are_reported
+    assert_match(/builder_use_3d_text\s*=\s*false/, @main,
+                 'unproven native font identity must not be the default 3D path')
+    assert_match(/:renderer\s*=>\s*:svg_source_3d_text/, @main)
     assert_match(/record_text_renderer\(\s*stats,\s*page_num,/, @main,
-                 'native renderer outcomes must be recorded in the report stats')
+                  'renderer outcomes must be recorded in the report stats')
   end
 
-  def test_svg_fallback_only_for_geometry_and_glyphs_modes
-    # Report contract values for the degraded fallback record.
-    assert_match(/note:\s*(?:'SVG text unavailable'|missing_renderer_note)/, @main)
-    assert_match(/degraded:\s*true,\s*reason:\s*'svg_text_unavailable'/, @main)
+  def test_labels_subset_fallback_does_not_render_unmatched_page_glyphs
+    assert_match(
+      /preserve_unmatched_source_placements\s*=>\s*false/,
+      @main,
+      'Labels item fallback must not duplicate successful page labels as anonymous 3D glyphs'
+    )
+  end
 
-    # Fallback ladder: SVG-unavailable falls to 3D Text for the mesh/outline
-    # family (:text3d, :geometry, :glyphs) and to Labels otherwise.
-    fb_assignments = assignments_to(@main, 'fallback_use_3d')
-    ladder = fb_assignments.find { |a| a.include?('requested_text_mode') }
-    refute_nil ladder, 'expected fallback_use_3d to be derived from requested_text_mode'
-    [':text3d', ':geometry', ':glyphs'].each do |mode|
-      assert_includes ladder, mode,
-                      "#{mode} must fall back to 3D Text when SVG text is unavailable"
-    end
-    refute_match(/:labels/, ladder,
-                 'Labels must not be routed into the 3D-text fallback')
-
-    # No SVG rendering inside the SVG-unavailable fallback: the else branch
-    # must not re-enter SvgTextRenderer.
-    refute_match(/else\s+SvgTextRenderer\.render/m, @main)
-    svg_fallback_section = @main[/Fallback text rendering.*?count: native_fb_text_objects/m]
-    refute_nil svg_fallback_section, 'expected SVG unavailable fallback block'
-    refute_match(/SvgTextRenderer\.render/, svg_fallback_section)
-    assert_match(/renderer:\s*\(\s*fallback_use_3d\s*\?\s*:add_3d_text\s*:\s*:labels\s*\)/,
-                 svg_fallback_section,
-                 'fallback must report the natively delivered renderer')
+  def test_generic_svg_failure_stops_without_substitution
+    assert_match(/def self\.enforce_requested_text_delivery!/, @main)
+    assert_match(/no representation fallback.*authorized/m, @main)
+    refute_match(/fallback_use_3d/, @main)
+    refute_match(/native_fb_text_objects/, @main)
+    refute_match(/degraded:\s*true,\s*reason:\s*'svg_text_unavailable'/, @main)
+    refute_match(/renderer:\s*\([^\n]*\?\s*:add_3d_text\s*:\s*:labels/, @main)
+    refute_match(/actual_source_association_impossibility_proof!/, @main,
+                 'one association query must not impersonate distinct Glyph/Geometry attempts')
+    refute_match(/stop_unimplemented_item_fallback!/, @main)
+    assert_match(/SvgItemRepresentationRenderer\.render_svg/, @main,
+                 'each item Glyph/Geometry rung must run its distinct renderer')
+    assert_match(/controller\.advance!\(proof\)/, @main,
+                 'only a validated item proof may advance an unsuccessful rung')
+    assert_match(/complete_text3d_item_fallbacks!/, @main,
+                 '3D Text failures must enter the finite item-scoped ladder')
+    assert_match(/verified_item_raster_entity!/, @main,
+                 'the terminal rung must verify a real source-bound host raster entity')
   end
 
   def test_labels_with_layer_matching_disables_svg_text
@@ -107,8 +114,11 @@ class TextModeRoutingTest < Minitest::Test
   end
 
   def test_import_dialog_maps_labels_string_to_labels_symbol
-    assert_match(/when\s+\/Labels\/i\s+then\s+:labels/, @import_dialog)
-    assert_match(/when\s+\/Glyphs\/i\s+then\s+:glyphs/, @import_dialog)
+    assert_match(
+      /when\s+'labels',\s*'label',\s*'text'\s+then\s+:labels/m,
+      @import_dialog
+    )
+    assert_match(/when\s+'glyphs'\s+then\s+:glyphs/, @import_dialog)
   end
 
   def test_svg_glyphs_default_to_raw_edges_to_avoid_component_boxes
@@ -138,10 +148,18 @@ class TextModeRoutingTest < Minitest::Test
   def test_geometry_glyphs_preflight_warns_when_svg_renderer_missing
     assert_match(/svg_renderer_missing/, @main)
     assert_match(/SvgTextRenderer\.svg_renderer_available\?/, @main)
-    # User-facing contract: the preflight names both free engines and asks
-    # before degrading (never a silent downgrade).
-    assert_match(/Poppler \(pdftocairo\) or MuPDF \(mutool\)/, @main)
-    assert_match(/Continue with degraded text\?/, @main)
+    # User-facing contract: the preflight stops explicitly and directs the
+    # user to a free external renderer; a source-only RBZ cannot repair this
+    # by being reinstalled and the importer never offers a downgrade.
+    assert_match(/free Poppler\/MuPDF SVG/, @main)
+    assert_match(/renderer, which is unavailable/, @main)
+    assert_match(/import is stopping without/, @main)
+    assert_match(/changing the requested representation/, @main)
+    assert_match(/BC_PDFTOCAIRO_PATH/, @main)
+    assert_match(/BC_MUTOOL_PATH/, @main)
+    assert_match(/Compatibility Report/, @main)
+    refute_match(/Reinstall the extension/, @main)
+    refute_match(/Continue with degraded text\?/, @main)
   end
 
   def test_large_import_component_visibility_is_opt_in_for_emergency_performance

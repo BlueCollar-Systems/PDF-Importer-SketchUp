@@ -5,7 +5,14 @@
 require 'minitest/autorun'
 
 module UI
-  def self.messagebox(_msg); nil; end
+  class << self
+    attr_reader :last_message
+  end
+
+  def self.messagebox(msg)
+    @last_message = msg
+    nil
+  end
 end
 
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/import_health'
@@ -38,5 +45,24 @@ class ImportHealthTest < Minitest::Test
     assert result.start_with?('...'), 'expected leading ellipsis'
     assert_equal 72, result.length, '3-char prefix + 69-char tail'
     assert_equal path[-69, 69], result[3..-1], 'tail must use two-arg String#[] (Ruby 2.2 safe)'
+  end
+
+  def test_failed_representation_contract_is_preserved_and_shown_loudly
+    H.record!({
+      pages: 1, edges: 2, text: 0, layers: [],
+      import_contract_ready: {
+        ready: false,
+        errors: ['source_delivery_set_mismatch']
+      },
+      representation_fidelity: {
+        ready: false,
+        errors: ['source_delivery_set_mismatch']
+      }
+    }, 'fixture.pdf')
+
+    assert_equal false, H.snapshot[:import_contract_ready][:ready]
+    H.show
+    assert_includes UI.last_message, 'QA contract: NOT READY'
+    assert_includes UI.last_message, 'source_delivery_set_mismatch'
   end
 end

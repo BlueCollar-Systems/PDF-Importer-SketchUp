@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
-# TEXTMODE-1 production-path lock: renderer statistics emitted by main.rb must
-# leave the report with either the requested text mode delivered or an honest
-# requested/delivered/reason fallback record.
+# TEXTMODE-1 production-path lock: generic API/helper failures and broken
+# transforms cannot authorize a representation substitution.  Runtime either
+# certifies the requested type or aborts the requested delivery explicitly.
 
 require 'minitest/autorun'
 
@@ -10,6 +10,39 @@ SRC_ROOT = File.join(REPO_ROOT, 'extracted', 'sketchup_ext')
 $LOAD_PATH.unshift(SRC_ROOT)
 
 require 'bc_pdf_vector_importer/main'
+
+class TextModeOwnedEntity
+  attr_reader :persistent_id
+
+  def initialize(id)
+    @persistent_id = id
+  end
+end
+
+class TextModeOwnedEntities
+  attr_reader :erased
+
+  def initialize(items = [])
+    @items = items.dup
+    @erased = []
+  end
+
+  def to_a
+    @items.dup
+  end
+
+  def add(entity)
+    @items << entity
+    entity
+  end
+
+  def erase_entities(*items)
+    items.flatten.each do |item|
+      @items.delete(item)
+      @erased << item
+    end
+  end
+end
 
 class TextModeOneInvariantTest < Minitest::Test
   IMP = BlueCollarSystems::PDFVectorImporter
@@ -36,123 +69,26 @@ class TextModeOneInvariantTest < Minitest::Test
     refute_empty text[:reason].to_s
   end
 
-  def test_main_merge_emits_a_reported_3d_text_to_labels_substitution
-    stats = { text_renderers: [] }
-    IMP.merge_text_mode_fallbacks!(stats, 1, [
-      {
-        requested: :text3d,
-        delivered: :labels,
-        reason: 'text3d_mesh_unavailable',
-        count: 1
-      }
-    ])
-
-    report = report_for(stats[:text_renderers])
-    assert_requested_equals_delivered_or_reported(report, '3d_text', 'labels')
-    assert_includes report[:extra][:diagnostics][:signals], 'text_mode_fallback'
-  end
-
-  def test_main_merge_coalesces_matching_span_fallbacks_into_one_report_record
-    stats = { text_renderers: [] }
-    IMP.merge_text_mode_fallbacks!(stats, 1, [
-      { requested: :text3d, delivered: :labels, reason: 'text3d_mesh_unavailable', count: 1 },
-      { requested: :text3d, delivered: :labels, reason: 'text3d_mesh_unavailable', count: 1 }
-    ])
-
-    assert_equal 1, stats[:text_renderers].length
-    assert_equal 2, stats[:text_renderers].first[:count]
-    assert_equal 2, report_for(stats[:text_renderers])[:fallback][:text][:count]
-  end
-
-  def test_terminal_text_failure_promotes_the_page_to_raster_and_reports_it
-    raster_calls = []
-    original = IMP.method(:import_page_as_raster)
-    IMP.define_singleton_method(:import_page_as_raster) do |*args|
-      raster_calls << args
-      true
-    end
-
-    page_group = Struct.new(:hidden).new(false)
-    stats = {
-      text_renderers: [
-        {
-          page: 1,
-          renderer: :labels,
-          mode: :labels,
-          requested_mode: :text3d,
-          delivered_mode: :labels,
-          degraded: true,
-          reason: 'text3d_mesh_unavailable',
-          count: 1
-        }
+  def test_generic_text_failure_aborts_without_mutating_to_raster
+    failures = [{
+      source_span_id: 'text_span:1:0', requested: :text3d,
+      reason: 'text3d_mesh_unavailable', count: 1,
+      attempt_history: [
+        { mode: :text3d, outcome: :failed, cleanup_outcome: :not_required }
       ]
-    }
-    failures = [
-      {
-        requested: :text3d,
-        reason: 'text3d_mesh_unavailable_labels_unavailable',
-        count: 1
-      }
-    ]
-    begin
-      promoted = IMP.promote_text_delivery_failures_to_raster!(
-        Object.new, 'x.pdf', 1, [0, 0, 612, 792], {}, Time.now, 0.0,
-        [0, 0, 612, 792], page_group, :text3d, stats, failures
-      )
-      assert promoted
-      assert_equal true, page_group.hidden
-      assert_equal 1, raster_calls.length
-      report = report_for(stats[:text_renderers])
-      assert_requested_equals_delivered_or_reported(report, '3d_text', 'raster')
-      assert_equal 1, stats[:text_renderers].length
-    ensure
-      IMP.define_singleton_method(:import_page_as_raster, original)
+    }]
+
+    error = assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.enforce_requested_text_delivery!(1, :text3d, failures)
     end
-  end
+    assert_match(/requested 3D Text representation was not certified/, error.message)
+    assert_match(/no representation fallback is authorized/, error.message)
 
-  def test_terminal_raster_erases_page_vectors_when_grouping_is_disabled
-    raster_calls = []
-    original = IMP.method(:import_page_as_raster)
-    IMP.define_singleton_method(:import_page_as_raster) do |*args|
-      raster_calls << args
-      true
-    end
-
-    entities = Class.new do
-      attr_reader :erased
-
-      def initialize
-        @erased = []
-      end
-
-      def erase_entities(*items)
-        @erased.concat(items)
-      end
-    end.new
-    model = Struct.new(:active_entities).new(entities)
-    vector_entity = Object.new
-    stats = { text_renderers: [] }
-    failures = [{ requested: :labels, reason: 'text_native_api_unavailable', count: 1 }]
-    begin
-      promoted = IMP.promote_text_delivery_failures_to_raster!(
-        model, 'x.pdf', 1, [0, 0, 612, 792], {}, Time.now, 0.0,
-        [0, 0, 612, 792], nil, :labels, stats, failures, [vector_entity]
-      )
-      assert promoted
-      assert_equal [vector_entity], entities.erased
-      assert_equal 1, raster_calls.length
-    ensure
-      IMP.define_singleton_method(:import_page_as_raster, original)
-    end
-  end
-
-  def test_native_renderer_count_excludes_rescued_spans
-    fallbacks = [
-      { requested: :text3d, delivered: :labels, reason: 'text3d_mesh_unavailable', count: 2 }
-    ]
-
-    assert_equal 0, IMP.native_text_delivery_count(2, fallbacks)
-    assert_equal 1, IMP.native_text_delivery_count(3, fallbacks)
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'), encoding: 'UTF-8'
+    )
+    refute_match(/promote_text_delivery_failures_to_raster!/, main)
+    refute_match(/falling back to .*text \(degraded fidelity\)/, main)
   end
 
   def test_normal_native_label_delivery_needs_no_fallback_record
@@ -166,5 +102,21 @@ class TextModeOneInvariantTest < Minitest::Test
     report = report_for(stats[:text_renderers])
     assert_nil report[:fallback][:text]
     assert_requested_equals_delivered_or_reported(report, 'labels', 'labels')
+  end
+
+  def test_distinct_item_renderers_replace_the_old_missing_renderer_roadblock
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'), encoding: 'UTF-8'
+    )
+    renderer = File.read(File.join(
+      SRC_ROOT, 'bc_pdf_vector_importer',
+      'svg_item_representation_renderer.rb'
+    ), encoding: 'UTF-8')
+
+    refute_match(/stop_unimplemented_item_fallback!/, main)
+    assert_match(/SvgItemRepresentationRenderer\.render_svg/, main)
+    assert_match(/build_glyph_groups!/, renderer)
+    assert_match(/build_flat_geometry!/, renderer)
+    assert_match(/cleanup_created_since/, renderer)
   end
 end

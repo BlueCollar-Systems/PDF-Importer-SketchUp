@@ -9,6 +9,23 @@
 
 require_relative 'mesh_text_scaling_test'
 
+class PlacementLabelEntity
+  attr_accessor :layer, :vector, :display_leader
+  attr_reader :point, :persistent_id, :text
+
+  def initialize(text, point, vector)
+    @text = text
+    @point = point
+    @vector = vector
+    @display_leader = true
+    @persistent_id = FidelityFixtureIdentity.next_entity_id
+  end
+
+  def typename
+    'Text'
+  end
+end
+
 class LabelModeEntities < DummyTransformEntities
   attr_reader :texts, :mesh_calls
 
@@ -19,12 +36,8 @@ class LabelModeEntities < DummyTransformEntities
   end
 
   def add_text(text, point, vector = nil)
-    ent = Object.new
-    def ent.display_leader=(*); end
-    def ent.display_leader; false; end
-    def ent.vector; @vector; end
-    def ent.vector=(v); @vector = v; end
-    ent.vector = vector
+    ent = PlacementLabelEntity.new(text, point, vector)
+    @entities << ent
     @texts << { text: text, point: point, vector: vector, entity: ent }
     ent
   end
@@ -39,7 +52,16 @@ class AllModesPlacementContractTest < Minitest::Test
   def make_mode_builder(use_3d:)
     GB.new(
       Object.new, [], [], LETTER,
-      scale_factor: 1.0, import_text: true, use_3d_text: use_3d
+      scale_factor: 1.0, import_text: true, use_3d_text: use_3d,
+      native_font_identity_resolver: lambda { |source|
+        {
+          source_span_id: source.source_span_id,
+          pdf_font_identity: 'embedded:test-font',
+          installed_family: 'Test Exact Font',
+          exact_family_match: true,
+          verified: true
+        }
+      }
     )
   end
 
@@ -48,8 +70,10 @@ class AllModesPlacementContractTest < Minitest::Test
   def test_horizontal_labels_and_text3d_share_pdf_anchor
     label_b = make_mode_builder(use_3d: false)
     mesh_b = make_mode_builder(use_3d: true)
-    item = TI.new('QUAN', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil,
-                  90.0, 198.0, 130.0, 210.0)
+    item = identified_text_item(
+      'QUAN', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil,
+      90.0, 198.0, 130.0, 210.0
+    )
     lx, ly, la = label_b.send(:text_insertion_pdf, item)
     mx, my, ma = mesh_b.send(:mesh_text_insertion_pdf, item)
     assert_in_delta lx, mx, 0.01
@@ -57,18 +81,27 @@ class AllModesPlacementContractTest < Minitest::Test
     assert_in_delta la, ma, 0.01
   end
 
-  # Rotated 3D Text transform order: width fit about ORIGIN (pre-rotation
-  # run axis), then the single translation to the anchor, then the single
+  # Rotated 3D Text transform order: exact fit about the generated lower bound,
+  # then the single translation to the anchor, then the single
   # rotation about that anchor. No post-rotation nudges, ever.
   def test_rotated_mesh_transform_order_is_scale_translate_rotate
     b = make_mode_builder(use_3d: true)
-    item = TI.new('a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil,
-                  140.0, 250.0, 148.0, 292.0)
+    item = identified_text_item(
+      'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil,
+      140.0, 250.0, 148.0, 292.0
+    )
     ents = DummyTransformEntities.new
     assert b.send(:place_mesh_text, ents, item, 0.0, 0.0, 'TextLayer')
     kinds = ents.transforms.map { |args| args.first.kind }
     assert_equal [:scaling, :translation, :rotation], kinds,
-                 'rotated 3D Text must scale about ORIGIN, then move, then rotate'
+                 'rotated 3D Text must fit, then move, then rotate'
+    attempt = b.text_attempts.fetch(0)
+    assert_equal item.source_span_id, attempt[:source_span_id]
+    assert_equal :text3d, attempt[:delivered_mode]
+    assert attempt[:placement_verified]
+    assert attempt[:rotation_verified]
+    assert attempt[:width_verified]
+    assert attempt[:height_verified]
     assert(
       !File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb'),
                  encoding: 'UTF-8')
@@ -77,27 +110,40 @@ class AllModesPlacementContractTest < Minitest::Test
     )
   end
 
-  # Labels mode must deliver a native rotated label — never silently a mesh.
-  def test_labels_mode_keeps_native_label_for_rotated_text
+  # SketchUp::Text cannot rotate its glyphs; Text#vector controls only the
+  # leader. The native rung must therefore leave no artifact and emit the
+  # adjacent Labels -> 3D Text proof for the pipeline controller.
+  def test_labels_mode_proves_rotated_native_label_is_host_unsupported
     b = make_mode_builder(use_3d: false)
-    item = TI.new('a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil,
-                  140.0, 250.0, 148.0, 292.0)
+    item = identified_text_item(
+      'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil,
+      140.0, 250.0, 148.0, 292.0
+    )
     ents = LabelModeEntities.new
-    b.send(:place_text, ents, item, 0.0, 0.0, 792.0, 'TextLayer')
-    assert_equal 1, ents.texts.length
+    refute b.send(:place_text, ents, item, 0.0, 0.0, 792.0, 'TextLayer')
+    assert_empty ents.texts
     assert_empty ents.mesh_calls
+    attempt = b.text_attempts.fetch(0)
+    assert_equal item.source_span_id, attempt[:source_span_id]
+    assert_nil attempt[:delivered_mode]
+    rung = attempt[:attempt_history].fetch(0)
+    assert_equal :failed, rung[:outcome]
+    assert_equal :labels, rung[:transition_proof][:from_mode]
+    assert_equal :text3d, rung[:transition_proof][:to_mode]
+    assert_equal :host_representation_unsupported,
+                 rung[:transition_proof][:reason_code]
   end
 
-  # Geometry and Glyphs are both SVG-rendered representations routed through
-  # the same renderer with 3D Text fallback semantics.
-  def test_geometry_and_glyphs_share_svg_renderer_path
+  # Geometry and Glyphs may share free SVG extraction, but their host entity
+  # structures are deliberately distinct: raw edges vs reusable components.
+  def test_geometry_and_glyphs_force_distinct_host_entity_structures
     # Explicit UTF-8 for the bare ruby:2.2 container (US-ASCII default).
     main = File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
                      encoding: 'UTF-8')
-    assert_match(/SvgTextRenderer\.render/, main)
-    assert_match(
-      /fallback_use_3d = \[:text3d, :geometry, :glyphs\]\.include\?\(requested_text_mode\)/,
-      main
-    )
+    assert_match(/requested_text_mode == :geometry/, main)
+    assert_match(/raw_edge_glyphs: true,\s*\n\s*flatten_glyph_instances: true/, main)
+    assert_match(/raw_edge_glyphs: false,\s*\n\s*flatten_glyph_instances: false/, main)
+    assert_match(/Raw Text Path Geometry/, main)
+    assert_match(/Glyph Components/, main)
   end
 end

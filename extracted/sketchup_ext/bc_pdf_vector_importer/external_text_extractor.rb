@@ -8,6 +8,7 @@ require 'cgi'
 require 'tmpdir'
 require File.join(File.dirname(__FILE__), 'command_runner')
 require File.join(File.dirname(__FILE__), 'dependency_resolver')
+require File.join(File.dirname(__FILE__), 'poppler_result_validator')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -51,8 +52,29 @@ module BlueCollarSystems
               timeout_s: 45,
               context: 'ExternalTextExtractor.pdftotext'
             )
-            break if run[:timed_out]
-            next unless run[:ok] && File.exist?(out_html)
+            validation = PopplerResultValidator.validate(
+              run,
+              :executable => exe,
+              :argv => args,
+              :context => 'ExternalTextExtractor.pdftotext',
+              :page => page_number,
+              :attempt => idx + 1,
+              :representation => :text_bbox,
+              :artifacts => [out_html],
+              :artifact_policy => :all_nonempty
+            )
+            unless validation[:ok]
+              PopplerResultValidator.log_rejection(
+                validation, 'ExternalTextExtractor'
+              )
+              begin
+                File.delete(out_html) if File.exist?(out_html)
+              rescue StandardError
+                # The method-level ensure makes one final cleanup attempt.
+              end
+              break if run[:timed_out]
+              next
+            end
 
             if idx == 1
               Logger.warn(

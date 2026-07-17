@@ -69,7 +69,7 @@ module BlueCollarSystems
       GROUPING_CHOICES         = 'Single group|Group per page|Group per layer|Group per color|Nested: page > layer|Nested: page > lineweight'
       PAGE_ARRANGEMENT_CHOICES = 'Spread (20% gap)|Compact gap|Touching pages|Overlay pages'
 
-      # Shelved 2026-07-06: closed-region shape extrusion deferred; code retained.
+      # Closed-region page extrusion is disabled independently of 3D text.
       SHAPE_EXTRUSION_UI_ENABLED = false
 
       def self.show(filepath)
@@ -367,7 +367,7 @@ module BlueCollarSystems
             <div><label>Page Arrangement</label>
               <select id="page_arrangement">#{page_arrangement_opts}</select></div>
           </div>
-          <!-- 3D Model section shelved — revisit after 3D text scaling resolved -->
+          <!-- Closed-shape 3D Model controls intentionally disabled; source-glyph 3D Text remains available. -->
           <div class="actions">
             <button class="btn btn-secondary" onclick="cancel()">Cancel</button>
             <button class="btn btn-primary" onclick="doImport()">Import</button>
@@ -487,14 +487,15 @@ module BlueCollarSystems
         text_mode_key = text_mode_raw.downcase.gsub(/\s+/, '_')
         text_mode = case text_mode_key
                     when 'no_text', 'none'     then :none
-                    when 'labels'             then :labels
+                    when 'labels', 'label',
+                         'text'               then :labels
                     when '3d_text', 'text3d'  then :text3d
                     when 'glyphs'             then :glyphs
                     when 'geometry'           then :geometry
                     else
                       case text_mode_raw
                       when /No text/i           then :none
-                      when /Labels/i            then :labels
+                      when /\A(?:Labels?|Text)\z/i then :labels
                       when /\A3D\s*Text\z/i     then :text3d
                       when /Glyphs/i            then :glyphs
                       when /Geometry/i          then :geometry
@@ -536,7 +537,9 @@ module BlueCollarSystems
           text_mode:        text_mode,
           use_3d_text:      use_3d_text,
           hatch_mode:       is_raster ? :skip : :group,
-          raster_fallback:  (mode_str == 'auto' || mode_str == 'hybrid' || is_raster),
+          # Raster is an explicit requested representation, never an implicit
+          # substitute for an Auto/Vector/Hybrid extraction failure.
+          raster_fallback:  false,
           force_raster:     is_raster,
           raster_dpi:       300,
           page_arrangement: (raw[:page_arrangement] || 'Spread (20% gap)').to_s,
@@ -568,6 +571,7 @@ module BlueCollarSystems
       def self.effective_text_mode(prefs)
         mode = prefs[:text_mode].to_s
         return mode if TEXT_MODE_CHOICES.include?(mode)
+        return 'Labels' if mode =~ /\A(?:Labels?|Text)\z/i
 
         FIRST_RUN_TEXT_MODE
       end

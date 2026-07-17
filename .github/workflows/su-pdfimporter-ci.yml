@@ -10,11 +10,21 @@ on:
   workflow_dispatch:
 
 jobs:
+  ruby22-exact-parse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install exact-Ruby source build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl
+      - name: Exact Ruby 2.2.4-p230 parse gate — every shipped extension file
+        run: bash tools/run_ruby22_exact_source.sh --parse
+
   syntax-check:
+    needs: ruby22-exact-parse
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        ruby: ['2.2', '2.7', '3.2']
+        ruby: ['2.7', '3.2']
     steps:
       - uses: actions/checkout@v7
       - name: SketchUp 2017 Ruby compatibility guard
@@ -47,66 +57,38 @@ jobs:
           fi
 
   smoke:
+    needs: ruby22-exact-parse
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        ruby-version: ["2.2", "2.7", "3.0", "3.2"]
+        ruby-version: ["2.2.4-p230", "2.7", "3.0", "3.2"]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Set up Ruby ${{ matrix.ruby-version }}
-        if: matrix.ruby-version != '2.2'
+        if: matrix.ruby-version != '2.2.4-p230'
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby-version }}
           bundler-cache: false
 
-      # R22 incident (2026-07-16): a value-if with a `return` branch parses on
-      # Ruby 3.4 but is a SyntaxError ("void value expression") on the
-      # SketchUp Make 2017 Ruby 2.2 host. The regex compat checker CANNOT see
-      # parser-level incompatibilities — only a real 2.2 parser can. This
-      # dedicated gate parses EVERY shipped extension file under ruby:2.2 and
-      # fails on any parse error, before anything else runs.
-      - name: Ruby 2.2 PARSE gate — every extension file (R22 incident class)
-        if: matrix.ruby-version == '2.2'
+      - name: Ruby 2.2.4-p230 syntax + smoke (SketchUp Make 2017 compatibility)
+        if: matrix.ruby-version == '2.2.4-p230'
         run: |
-          set -e
-          docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
-            set -e
-            find extracted/sketchup_ext -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
-          '
-
-      - name: Ruby 2.2 syntax + smoke (SketchUp Make 2017 compatibility)
-        if: matrix.ruby-version == '2.2'
-        run: |
-          set -e
-          docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
-            set -e
-            find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
-            ruby test/smoke_test.rb
-            ruby test/ruby22_compat_test.rb
-            ruby test/import_health_test.rb
-            ruby test/arc_fitter_test.rb
-            ruby test/unit_parser_test.rb
-            ruby test/mesh_text_scaling_test.rb
-            ruby test/mesh_text_width_fidelity_test.rb
-            ruby test/condensed_text_width_regression_test.rb
-            ruby test/all_modes_placement_contract_test.rb
-            ruby test/textmode1_invariant_test.rb
-            ruby test/geometry_builder_text_fallback_test.rb
-            ruby test/cairo_glyph_source_test.rb
-          '
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl zlib1g-dev libyaml-dev libffi-dev
+          bash tools/run_ruby22_exact_source.sh --smoke
 
       - name: Ruby syntax check
-        if: matrix.ruby-version != '2.2'
+        if: matrix.ruby-version != '2.2.4-p230'
         run: |
           set -e
           find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
 
       - name: Run smoke test
-        if: matrix.ruby-version != '2.2'
+        if: matrix.ruby-version != '2.2.4-p230'
         run: |
           ruby test/smoke_test.rb
           ruby test/ruby22_compat_test.rb
@@ -133,7 +115,7 @@ jobs:
       - name: Poppler helper smoke (static-only visible-skip off Windows; R21-8)
         run: python tools/smoke_poppler_helpers.py
 
-  poppler-smoke-windows:
+  source-only-build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -141,11 +123,9 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Poppler PE prune lock (R21-7/R21-8)
-        run: python tools/test_prune_poppler_bundle.py -v
-      - name: Poppler helper smoke unit tests (R21-8)
-        run: python tools/test_smoke_poppler_helpers.py -v
+      - name: Source-only release contract tests
+        run: python tools/test_build_release.py -v
       - name: Release safety unit tests (R21-5)
         run: python tools/test_release_safety.py
-      - name: Build release with required Poppler smoke (R21-8)
-        run: python build_release.py --require-poppler-smoke --out "$env:RUNNER_TEMP\su-rbz"
+      - name: Build source-only release in temporary output
+        run: python build_release.py --out "$env:RUNNER_TEMP\su-rbz"

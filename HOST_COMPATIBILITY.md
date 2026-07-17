@@ -32,22 +32,50 @@ importer must detect them rather than assume this workstation's paths.
 | Poppler `pdffonts` | Non-embedded font preflight before SVG rendering |
 | Ghostscript | Temporary font embedding repair for PDFs with non-embedded fonts |
 
-If a helper is missing, the feature must degrade through the built-in parser or a
-documented host-native fallback, and the Compatibility Report must say what was
-disabled.
+If a helper is missing, the Compatibility Report must say which capability is
+unavailable. A same-representation source may be tried only when it is
+independently verified; missing helpers do not authorize changing the requested
+representation.
 
 ### Text rendering
 
 | Option | SketchUp result |
 |--------|-----------------|
-| **3D Text** | Default visual-parity path; preserves model-space size and PDF rotation for Adobe-like review |
+| **3D Text** | Source-glyph solid text with verified positive Z depth; preserves model-space size and PDF rotation |
 | **Glyphs** | Per-glyph edges; high-fidelity outline path when exact geometry is preferred |
 | **Geometry** | Text as edges only; outline geometry when the user selects that option |
-| **Labels** | Editable text entities; horizontal and screen-space by SketchUp host behavior |
+| **Labels** | Editable `Sketchup::Text` when the host can represent the item; nonzero glyph rotation enters the verified closest fallback ladder |
 
 The dialog defaults to 3D Text on first run and restores the last text rendering option used after that. Labels are an editability tradeoff, not the default visual sign-off mode.
 
-**Mode fidelity:** honor the selected text option. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. If Geometry/Glyphs cannot run (no Poppler/MuPDF SVG), degrade **Glyphs ↔ Geometry → 3D Text → Labels → page raster** (Glyphs/Geometry share one SVG renderer today, so failure skips the peer rung and goes to 3D Text), report `degraded`, and stay free/bundled. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
+**Mode fidelity:** honor the selected text option first. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. A missing helper, generic exception, empty artifact, or broken implementation cannot authorize fallback. The declared closest order is Labels → 3D Text → Glyphs → Geometry → item Raster; requested Raster directly renders every selected page. Each adjacent rung requires a distinct item renderer and its own type/visual certificate. The current implementation can deliver verified Labels → 3D Text items; when a distinct Glyphs/Geometry item renderer is unavailable, it stops truthfully and does not skip to Raster. Successful peer spans and page geometry remain intact. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
+
+Native Labels are certified only after the host reads back a `Text` entity with
+the exact content, all three anchor/direction coordinates, and its leader hidden.
+`Text#vector` controls the leader, not glyph orientation. A nonzero requested
+glyph rotation is an affirmative host-representation impossibility for that item,
+so the closest next attempt is source-glyph 3D Text—not a direct geometry swap.
+If both text extractors return no spans, the importer checks page and referenced
+Form-XObject streams for real painting text-show operands before accepting a
+no-text page; undecodable text is not silently omitted.
+
+**Poppler proof scope:** process exit status and a nonempty SVG are transport
+evidence, not semantic completeness. The known Adobe-GB1 diagnostic cluster may
+be deferred only for the exact public fixture PDF/page/output certificate, then
+must also pass the current page's real Cairo source-span match and host-placement
+checks. `unmatched_source_runs`, `unmatched_placements`,
+`missing_language_packs`, `skipped_placements`, and `placement_failures` must
+each be present as arrays and empty. A missing collection fails closed. This is
+a fixture-scoped exception, not a general CID-completeness claim.
+
+**Source-only releases and legacy runtime trust:** release RBZ files do not ship
+helper runtimes. Legacy extension-adjacent runtime recognition remains
+fail-closed: a runtime is eligible only after its canonical member digest, exact
+files/directories, sizes, and hashes validate. A direct `bin` tree, an extra
+member, or a symlinked manifest/path component disables selection. Only a
+successful full verification is cached, and symlink trust paths are still
+checked before each selection. Normal installs should use an explicitly
+configured environment path or a system helper discovered by the importer.
 
 ### PDF layers / SketchUp Tags
 

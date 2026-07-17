@@ -8,8 +8,8 @@
 # height to come from the NOMINAL font size (font_size_pts / 72 * scale),
 # so the import reproduces the PDF faithfully at equal zoom.
 #
-# This guard fails if any session reintroduces bbox-derived height or a
-# bbox-fit shrink into the mesh-text height path.
+# This guard fails if any session reintroduces bbox-derived/clamped source
+# height or certifies delivery without checking final host bounds.
 #
 # RB-10 (2026-07-12 roadblock audit): the old method-body extraction anchored
 # on a hard-coded 6-space "end" indentation; a re-indent/re-nest could make it
@@ -39,7 +39,7 @@ class MeshTextHeightFaithfulTest < Minitest::Test
   # "end" can sit at the def's own column before the method's own end, so this
   # either isolates the FULL method or returns nil (which fails loudly below).
   def method_body(name)
-    body = source[/^([ \t]*)def #{Regexp.escape(name)}\b.*?^\1end\b/m]
+    body = source[/^([ \t]*)def #{Regexp.escape(name)}(?=\s|\().*?^\1end\b/m]
     refute_nil body, "could not isolate ##{name}"
     body
   end
@@ -47,9 +47,13 @@ class MeshTextHeightFaithfulTest < Minitest::Test
   def test_mesh_text_height_uses_nominal_font_size_only
     body = method_body('mesh_text_height_inches')
     # Must derive from the nominal font size and the fixed point->inch scale.
-    assert_includes body, 'effective_font_size_pts',
-                    'height must come from nominal font size'
+    assert_includes body, 'item.font_size.to_f',
+                    'height must come directly from the source font size'
     assert_includes body, 'PDF_POINT_TO_INCH', 'height must use the pt->inch factor'
+    assert_includes body, 'return nil unless fs_pts.finite? && fs_pts > 0.0',
+                    'unverifiable height must fail closed'
+    refute_match(/MESH_TEXT_HEIGHT_(?:MIN|MAX)/, body,
+                 'historical telemetry constants must not clamp delivery height')
     # Must NOT read bbox extents in the height path. bbox_* tokens are valid
     # elsewhere in the file (placement/provenance), so these stay
     # method-scoped over the robustly isolated body.
@@ -99,14 +103,16 @@ class MeshTextHeightFaithfulTest < Minitest::Test
                     '3D-text faces must be painted, proving they are retained'
   end
 
-  # Whole-file: the v3.7.83 face-erase regression identifiers exist nowhere
-  # in the builder; any erase path anywhere fails the lock.
-  def test_no_face_erase_anywhere_in_geometry_builder
-    %w[erase_entities faces_to_erase].each do |forbidden|
-      refute_includes source, forbidden,
-        "#{forbidden} must not exist anywhere in geometry_builder.rb " \
-        '(3D-text glyph faces must never be erased — v3.7.83 regression, FACE-1)'
-    end
+  # Failed attempts must erase their exact owned set.  A blanket erase ban is
+  # itself a roadblock because it leaves unverified partial geometry live.
+  def test_failed_text_rung_uses_scoped_verified_cleanup
+    body = method_body('fail_created_text_rung!')
+    assert_includes body, 'RepresentationFidelity.stable_ids(created)'
+    assert_includes body, 'RepresentationFidelity.erase_owned!(entities, created)'
+    assert_includes body, 'rung[:cleanup_outcome] = :verified'
+    assert_includes body, 'rung[:resulting_entity_ids] = []'
+    refute_includes body, 'entities.to_a',
+                    'cleanup must target the owned delta, not all model entities'
   end
 
   # Round 20 (R20-2): the v3.7.81–3.7.89 field bug — Numeric#clamp (Ruby 2.4+)
@@ -124,25 +130,20 @@ class MeshTextHeightFaithfulTest < Minitest::Test
   # tolerance 0.0 is kept for curve quality and the faithful height is passed
   # to add_3d_text directly.
   #
-  # Round 22 escape-hatch exercise (live-host measurements + explicit owner
-  # reopen): condensed title-block text declares run widths at measured
-  # 0.5864..0.7996 of the host font's natural width (up to 1.4365 expanded),
-  # so long strings overlapped. Width fidelity now scales the generated run
-  # to the PDF-declared extent along the PRE-ROTATION run axis (local X)
-  # ONLY. Transformation.scaling is therefore allowed EXCLUSIVELY inside
-  # apply_mesh_text_width_fidelity with hard-coded 1.0 height/depth factors.
-  # Any other scaling call — and any height-axis factor — stays banned.
-  def test_no_legacy_tolerance_and_scaling_only_in_width_fidelity
+  # Fitting may scale both generated axes because the host glyph's measured
+  # height is not assumed to equal the requested source height.  The proof is
+  # the measured post-scale and final rotated bounds, not an arbitrary ban on
+  # a Y factor.
+  def test_no_legacy_tolerance_and_visual_fit_measures_final_bounds
     refute_match(/add_3d_text\([\s\S]*?,\s*0\.6\s*,/, source,
                  'must not hard-code add_3d_text tolerance 0.6 (R20-1)')
-    occurrences = source.scan('Transformation.scaling').length
-    assert_equal 1, occurrences,
-                 'Transformation.scaling may appear exactly once — in ' \
-                 'apply_mesh_text_width_fidelity (R22 width fidelity)'
-    body = method_body('apply_mesh_text_width_fidelity')
-    assert_includes body, 'Transformation.scaling(ORIGIN, factor, 1.0, 1.0)',
-                    'width fidelity must scale local X only, with height/depth ' \
-                    'factors hard-coded to exactly 1.0 (SIZE-1 height ban)'
+    body = method_body('fit_created_text_entities!')
+    assert_includes body, 'factor_x = target_width / generated[:width]'
+    assert_includes body, 'factor_y = target_height / generated[:height]'
+    assert_includes body, 'Transformation.scaling(pivot, factor_x, factor_y, 1.0)'
+    assert_includes body, 'scaled = RepresentationFidelity.bounds(created)'
+    assert_includes body, 'final_bounds = RepresentationFidelity.bounds(created)'
+    assert_includes body, 'RepresentationFidelity.expected_rotated_bounds'
   end
 
   def test_place_mesh_text_records_height_samples

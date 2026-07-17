@@ -15,6 +15,8 @@
 
 require 'tmpdir'
 require 'fileutils'
+require 'open3'
+require File.join(File.dirname(__FILE__), 'poppler_result_validator')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -137,24 +139,31 @@ module BlueCollarSystems
           end
           out = File.join(Dir.tmpdir,
                           'bc_salvaged_' + Process.pid.to_s + '_' +
+                          Time.now.to_i.to_s + '_' + rand(100000).to_s + '_' +
                           File.basename(pdf_path))
-          File.delete(out) if File.file?(out)
-          ok = run_pdftocairo(exe, pdf_path, out)
-          return nil unless ok && File.file?(out) && File.size(out) > 0
-
-          check = PDFParser.new(out)
           begin
-            check.parse
-          rescue StandardError
             File.delete(out) if File.file?(out)
-            return nil
-          end
-          if check.page_count > 0
+            accepted = false
+            validation = run_pdftocairo(exe, pdf_path, out)
+            return nil unless validation && validation[:ok]
+
+            check = PDFParser.new(out)
+            begin
+              check.parse
+            rescue StandardError
+              return nil
+            end
+            return nil unless check.page_count > 0
+
             temp_salvages << out
+            accepted = true
             out
-          else
-            File.delete(out) if File.file?(out)
-            nil
+          ensure
+            begin
+              File.delete(out) if !accepted && File.file?(out)
+            rescue StandardError => e
+              log_warn("cleanup rejected salvage artifact failed: #{e.message}")
+            end
           end
         end
 
@@ -193,16 +202,65 @@ module BlueCollarSystems
         private
 
         def run_pdftocairo(exe, input, output)
+          args = [exe, '-pdf', input, output]
           if defined?(CommandRunner) && CommandRunner.respond_to?(:run)
             res = CommandRunner.run(
-              [exe, '-pdf', input, output],
+              args,
               :timeout_s => SALVAGE_TIMEOUT_S, :context => 'PdfSalvage')
-            return !!(res && res[:ok])
+          else
+            res = fallback_run_pdftocairo(args)
           end
-          system(exe, '-pdf', input, output)
+          validation = PopplerResultValidator.validate(
+            res,
+            :executable => exe,
+            :argv => args,
+            :context => 'PdfSalvage',
+            :attempt => 1,
+            :representation => :pdf_salvage,
+            :artifacts => [output],
+            :artifact_policy => :all_nonempty
+          )
+          PopplerResultValidator.log_rejection(
+            validation, 'PdfSalvage'
+          ) unless validation[:ok]
+          validation
         rescue StandardError => e
           log_warn("pdftocairo salvage run failed: #{e.message}")
-          false
+          {
+            :ok => false,
+            :reason => :process_failed,
+            :incomplete_output => false,
+            :rejection_scope => :helper_attempt,
+            :evidence => {
+              :executable => exe.to_s,
+              :stdout => '',
+              :stderr => e.message,
+              :artifacts => []
+            }
+          }
+        end
+
+        def fallback_run_pdftocairo(args)
+          stdout, stderr, status = Open3.capture3(*args)
+          ok = status && status.respond_to?(:success?) && status.success?
+          {
+            :ok => !!ok,
+            :timed_out => false,
+            :exitstatus => status && status.respond_to?(:exitstatus) ?
+              status.exitstatus : nil,
+            :stdout => stdout.to_s,
+            :stderr => stderr.to_s,
+            :error => nil
+          }
+        rescue StandardError => e
+          {
+            :ok => false,
+            :timed_out => false,
+            :exitstatus => nil,
+            :stdout => '',
+            :stderr => '',
+            :error => e.message
+          }
         end
 
         def log_info(msg)
