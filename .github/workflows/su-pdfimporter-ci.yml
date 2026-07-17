@@ -96,6 +96,7 @@ jobs:
             ruby test/all_modes_placement_contract_test.rb
             ruby test/textmode1_invariant_test.rb
             ruby test/geometry_builder_text_fallback_test.rb
+            ruby test/cairo_glyph_source_test.rb
           '
 
       - name: Ruby syntax check
@@ -117,6 +118,7 @@ jobs:
           ruby test/all_modes_placement_contract_test.rb
           ruby test/textmode1_invariant_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
+          ruby test/cairo_glyph_source_test.rb
 
   poppler-prune:
     runs-on: ubuntu-latest
