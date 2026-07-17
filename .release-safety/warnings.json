@@ -1,4 +1,15 @@
 {
   "schema_version": 1,
-  "warnings": []
+  "warnings": [
+    {
+      "repo": "BlueCollar-Systems/PDF-Importer-SketchUp",
+      "tag": "v3.7.96",
+      "first_seen": "2026-07-17T20:36:37.032362+00:00",
+      "first_seen_sha": "870c5979ce4d2c77fc0e08770664d9843e1ea6b1",
+      "deadline": "2026-07-18T20:36:37.032362+00:00",
+      "responsible_session": "WS-WEEK-SU-LETTERHEIGHT",
+      "version_bump_plan": "3.7.98",
+      "acknowledged_at": "2026-07-17T20:36:37.333935+00:00"
+    }
+  ]
 }
