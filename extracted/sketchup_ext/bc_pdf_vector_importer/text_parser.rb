@@ -672,14 +672,30 @@ module BlueCollarSystems
         buckets.each_value do |group|
           next merged.concat(group) if group.length < 2
 
+          # P0-3: rows and in-row order must follow the RUN axis, not raw X/Y.
+          # emit_text stores angle = -atan2(m1, m0) in degrees, so the reading
+          # direction of this bucket in item space is (cos(-angle), sin(-angle)).
+          # Rotate every position into the run frame: u advances along the
+          # reading direction, v is the perpendicular (baseline) offset. For
+          # unrotated text (angle 0) u == x and v == y, so horizontal merging
+          # behavior is unchanged. Without this, a 45-degree beam label arrives
+          # as one fragment per glyph in reverse reading order (the owner's
+          # scrambled diagonal label class).
+          angle_sum = 0.0
+          group.each { |it| angle_sum += it.angle.to_f }
+          theta = -(angle_sum / group.length) * Math::PI / 180.0
+          cos_t = Math.cos(theta)
+          sin_t = Math.sin(theta)
+
           rows = []
-          group.sort_by { |it| [-it.y.to_f, it.x.to_f] }.each do |it|
+          group.sort_by { |it| [-run_frame_v(it, cos_t, sin_t), run_frame_u(it, cos_t, sin_t)] }.each do |it|
+            v = run_frame_v(it, cos_t, sin_t)
             placed = false
             rows.each do |row|
               y_tol = [0.9, row[:size] * 0.28].max
-              if (it.y.to_f - row[:y]).abs <= y_tol
+              if (v - row[:y]).abs <= y_tol
                 row[:items] << it
-                row[:y_sum] += it.y.to_f
+                row[:y_sum] += v
                 row[:count] += 1
                 row[:y] = row[:y_sum] / row[:count]
                 placed = true
@@ -688,8 +704,8 @@ module BlueCollarSystems
             end
             unless placed
               rows << {
-                y: it.y.to_f,
-                y_sum: it.y.to_f,
+                y: v,
+                y_sum: v,
                 count: 1,
                 size: it.font_size.to_f,
                 items: [it]
@@ -698,7 +714,7 @@ module BlueCollarSystems
           end
 
           rows.each do |row|
-            line = row[:items].sort_by { |it| it.x.to_f }
+            line = row[:items].sort_by { |it| run_frame_u(it, cos_t, sin_t) }
             run = []
             line.each do |it|
               if run.empty?
@@ -708,18 +724,19 @@ module BlueCollarSystems
 
               prev = run.last
               prev_width = estimate_text_width(prev.text, prev.font_size.to_f)
-              gap = it.x.to_f - (prev.x.to_f + prev_width)
+              gap = run_frame_u(it, cos_t, sin_t) -
+                    (run_frame_u(prev, cos_t, sin_t) + prev_width)
               max_join_gap = [prev.font_size.to_f * 2.2, 4.0].max
               min_overlap = -[prev.font_size.to_f * 0.9, 4.0].max
 
               if gap <= max_join_gap && gap >= min_overlap
                 run << it
               else
-                merged << merge_run(run)
+                merged << merge_run(run, cos_t, sin_t)
                 run = [it]
               end
             end
-            merged << merge_run(run) unless run.empty?
+            merged << merge_run(run, cos_t, sin_t) unless run.empty?
           end
         end
 
@@ -790,14 +807,21 @@ module BlueCollarSystems
         clean_text(fixed)
       end
 
-      def merge_run(run)
+      # P0-3: cursor/gap arithmetic runs along the run axis (u), matching
+      # merge_text_runs. Defaults keep the historical raw-X behavior for
+      # unrotated callers (cos 1, sin 0 makes u == x). The merged anchor is
+      # run.first, which after run-frame ordering is the TRUE first glyph in
+      # reading order, so the merged baseline starts at the correct end of a
+      # rotated label.
+      def merge_run(run, cos_t = 1.0, sin_t = 0.0)
         return run.first if run.length == 1
 
         text = ""
-        cursor = run.first.x.to_f
+        cursor = run_frame_u(run.first, cos_t, sin_t)
         run.each_with_index do |it, idx|
+            u = run_frame_u(it, cos_t, sin_t)
             if idx > 0
-              gap = it.x.to_f - cursor
+              gap = u - cursor
               prev_txt = run[idx - 1].text.to_s
               curr_txt = it.text.to_s
 
@@ -813,7 +837,7 @@ module BlueCollarSystems
             end
           text << it.text.to_s
           width = estimate_text_width(it.text, it.font_size.to_f)
-          cursor = [cursor, it.x.to_f + width].max
+          cursor = [cursor, u + width].max
         end
 
         base = run.first
@@ -834,6 +858,18 @@ module BlueCollarSystems
       def estimate_text_width(text, font_size)
         chars = [text.to_s.length, 1].max
         [font_size.to_f * 0.24 * chars, font_size.to_f * 0.25].max
+      end
+
+      # Run-frame projection (P0-3). theta (already folded into cos_t/sin_t)
+      # is the reading-direction angle of a merge bucket in item space:
+      # u = x*cos + y*sin advances along the reading direction; v = y*cos -
+      # x*sin is the perpendicular baseline offset. Ruby 2.2-safe (RB22).
+      def run_frame_u(item, cos_t, sin_t)
+        (item.x.to_f * cos_t) + (item.y.to_f * sin_t)
+      end
+
+      def run_frame_v(item, cos_t, sin_t)
+        (item.y.to_f * cos_t) - (item.x.to_f * sin_t)
       end
 
       def dedupe_text_items(items)

@@ -1508,6 +1508,12 @@ module BlueCollarSystems
           parts << "Scale note: #{banner.sub(/\.\z/, '')}" unless banner.empty?
         end
 
+        # P1-3 fleet parity: every human summary attributes the importer
+        # version so owner-shared reports stay attributable evidence.
+        importer_info = data['importer'] || {}
+        importer_ver = importer_info['version'].to_s.strip
+        parts << "Importer v#{importer_ver}" unless importer_ver.empty?
+
         paragraph = parts.map { |part| part.to_s.sub(/\.\z/, '') }.reject(&:empty?).join('. ')
         paragraph += '.' unless paragraph.empty? || paragraph.end_with?('.')
         paragraph

@@ -99,6 +99,7 @@ jobs:
           ruby test/open_gate_file_missing_salvage_test.rb
           ruby test/source_provenance_test.rb
           ruby test/textmode1_invariant_test.rb
+          ruby test/rotated_run_merge_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
 
       - name: Exact Ruby 2.2.4-p230 source-built parse and smoke gates
