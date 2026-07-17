@@ -287,8 +287,52 @@ module BlueCollarSystems
           model_3d: model_3d_block(stats, opts),
           parts_bootstrap: parts_bootstrap_block(stats),
           text_height_crosscheck: text_height_crosscheck_block(stats),
-          text_width_crosscheck: text_width_crosscheck_block(stats)
+          text_width_crosscheck: text_width_crosscheck_block(stats),
+          glyph_source: glyph_source_block(stats)
         }
+      end
+
+      # Round 23 (F-1): which glyph SOURCE produced the Glyphs-mode outlines
+      # (TEXTMODE-1: the delivered mode stays Glyphs; the source is reported,
+      # never silently swapped). Present only when a Glyphs-mode import ran.
+      #   source                 cairo_svg (bundled pdftocairo), mupdf_svg
+      #                          (installed mutool), or internal (StrokeFont
+      #                          lettering fallback).
+      #   fallback_reason        why the preferred cairo source was not used
+      #                          (pdftocairo_missing/_failed/_timeout,
+      #                          svg_zero_placements) or null.
+      #   runs_matched/unmatched extractor text spans with / without rendered
+      #                          glyph ink at their declared position (R17-3
+      #                          span matching keeps span_ids attached).
+      #   placements_unmatched   rendered glyph ink the extractor never
+      #                          declared (disagreement, reported not hidden).
+      #   missing_fonts /        poppler stderr diagnostics captured even when
+      #   missing_language_packs the process exits 0 — dropped runs are loud.
+      def glyph_source_block(stats)
+        src = stats[:glyph_source] || stats['glyph_source']
+        return nil unless src.respond_to?(:[])
+        reason = src[:fallback_reason] || src['fallback_reason']
+        out = {
+          source: (src[:source] || src['source']).to_s,
+          fallback_reason: reason.nil? ? nil : reason.to_s,
+          pages: (src[:pages] || src['pages']).to_i,
+          runs_matched: (src[:runs_matched] || src['runs_matched']).to_i,
+          runs_unmatched: (src[:runs_unmatched] || src['runs_unmatched']).to_i,
+          placements_unmatched: (src[:placements_unmatched] ||
+                                 src['placements_unmatched']).to_i,
+          note: 'Glyphs-mode outline source (R23). cairo_svg/mupdf_svg stamp ' \
+                'the PDF fonts\' own glyph outlines; internal is StrokeFont ' \
+                'lettering (degraded, reported). runs_* position-match ' \
+                'extractor spans to rendered glyph ink (R17-3).'
+        }
+        fonts = Array(src[:missing_fonts] || src['missing_fonts']).map { |v| v.to_s }
+        packs = Array(src[:missing_language_packs] ||
+                      src['missing_language_packs']).map { |v| v.to_s }
+        out[:missing_fonts] = fonts unless fonts.empty?
+        out[:missing_language_packs] = packs unless packs.empty?
+        out
+      rescue StandardError
+        nil
       end
 
       # Round 20 (R20-1b/R20-2): report faithful mesh-text target heights and
@@ -693,6 +737,25 @@ module BlueCollarSystems
         unless requested_mode.empty? || delivered_mode.empty?
           signals << 'text_mode_fallback'
           actions << "Requested text mode '#{requested_mode}' was delivered as '#{delivered_mode}' — see fallback.text in this report for the reason."
+        end
+
+        # Round 23 (F-1): Glyphs-mode source telemetry must fail VISIBLE —
+        # an internal-source delivery, unmatched runs, or a dropped CID
+        # language pack are signals, never silent passes.
+        glyph_source = glyph_source_block(stats)
+        if glyph_source
+          if glyph_source[:source] == 'internal'
+            signals << 'glyph_source_internal_fallback'
+            actions << "Glyphs mode delivered internal stroke-outline lettering (#{glyph_source[:fallback_reason]}) — restore the bundled Poppler pdftocairo for embedded-font glyph outlines."
+          end
+          if glyph_source[:runs_unmatched].to_i > 0
+            signals << 'glyph_runs_unmatched'
+            actions << 'Some extracted text spans have no rendered glyph ink at their declared position — see extra.glyph_source (possible dropped runs: unresolved fonts or missing CID language packs).'
+          end
+          unless Array(glyph_source[:missing_language_packs]).empty?
+            signals << 'glyph_missing_language_packs'
+            actions << "Poppler reported missing CID language pack(s) #{Array(glyph_source[:missing_language_packs]).join(', ')} — affected text runs were dropped by the renderer; verify the page visually."
+          end
         end
 
         if warning_count.to_i > 0
