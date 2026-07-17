@@ -153,7 +153,15 @@ module SketchupHostJob
 
   def self.normalize_pages(value)
     return :all if value.to_s.downcase == 'all'
-    pages = Array(value).map { |page| Integer(page) }
+    pages = Array(value).map do |page|
+      if page.is_a?(Integer)
+        page
+      elsif page.is_a?(String) && page =~ /\A[1-9][0-9]*\z/
+        page.to_i
+      else
+        raise ArgumentError, 'pages must contain positive integers'
+      end
+    end
     raise ArgumentError, 'pages must contain positive integers' if pages.empty? || pages.any? { |page| page < 1 }
     pages.uniq.sort
   rescue StandardError
@@ -166,7 +174,7 @@ end
 
 Run: `ruby test/sketchup_host_job_test.rb`
 
-Expected: 3 tests, 0 failures, 0 errors.
+Expected: 10 tests, 41 assertions, 0 failures, 0 errors.
 
 ### Task 2: Make the real-host runner non-modal and fail-closed
 
