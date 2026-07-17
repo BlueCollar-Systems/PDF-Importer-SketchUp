@@ -31,8 +31,15 @@ end
 
 class MeshTextWidthFidelityTest < Minitest::Test
   RF = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
-  H8 = 8.0 * PT_TO_IN            # faithful 8pt height, 0.1111..."
-  RENDERED_W = H8 * 3.0          # stub add_3d_text run width = 3x height
+  H8 = sketchup_letter_height_in(8.0)  # SketchUp letter height for 8pt
+  # Stub add_3d_text width = 3x letter height. Relative to the old em-based
+  # 24pt natural width, every X factor scales by 1/LETTER_H_RATIO.
+  NATURAL_RUN_PTS = 8.0 * 3.0 * LETTER_H_RATIO
+  RENDERED_W = H8 * 3.0
+
+  def expected_x_factor(declared_run_pts)
+    declared_run_pts.to_f / NATURAL_RUN_PTS
+  end
 
   def place(item, ents = DummyTransformEntities.new, media = LETTER)
     b = make_builder(media)
@@ -71,8 +78,7 @@ class MeshTextWidthFidelityTest < Minitest::Test
 
   # ── Wide (condensed-declared) run compressed to the declared extent ──────
   def test_wide_run_is_compressed_to_declared_span_extent
-    # Declared 16.8pt run vs stub-rendered 24pt-equivalent -> factor 0.7,
-    # inside the measured condensed band (0.5864..0.7996).
+    # Declared 16.8pt run vs stub-rendered natural at letter height.
     item = bbox_item('STD. NOTE', 8.0, 10.0, bbox_w: 16.8)
     b, ents, delivered = place(item)
 
@@ -81,7 +87,8 @@ class MeshTextWidthFidelityTest < Minitest::Test
     assert_equal [:scaling, :translation], kinds,
                  'run-axis fit must happen BEFORE the placement translation'
     args = ents.transforms[0][0].args
-    assert_in_delta 0.7, args[1], 1e-9, 'X factor must be declared/rendered'
+    assert_in_delta expected_x_factor(16.8), args[1], 1e-9,
+                    'X factor must be declared/rendered'
     assert_equal [1.0, 1.0], args[2..3],
                  'this fixture already renders at the exact source height'
 
@@ -96,13 +103,12 @@ class MeshTextWidthFidelityTest < Minitest::Test
 
   # ── Expanded run grows to the declared extent ─────────────────────────────
   def test_expanded_run_grows_to_declared_span_extent
-    # Declared 34.475pt vs rendered 24pt -> factor ~1.4365 (measured
-    # expanded case).
-    item = bbox_item('ONE FRAME', 8.0, 10.0, bbox_w: 24.0 * 1.4365)
+    declared = 24.0 * 1.4365
+    item = bbox_item('ONE FRAME', 8.0, 10.0, bbox_w: declared)
     b, ents, delivered = place(item)
     assert delivered
     args = scaling_transforms(ents)[0][0].args
-    assert_in_delta 1.4365, args[1], 1e-9
+    assert_in_delta expected_x_factor(declared), args[1], 1e-9
     assert_equal [1.0, 1.0], args[2..3]
     assert_verified_visual_bounds(b, ents, item)
   end
@@ -110,7 +116,7 @@ class MeshTextWidthFidelityTest < Minitest::Test
   # ── Rotated run: factor along the pre-rotation run axis ──────────────────
   def test_rotated_run_scales_pre_rotation_x_from_bbox_run_extent
     # 90-degree part mark: bbox X extent 8pt (cross axis), Y extent 42pt
-    # (run axis). Declared run = 42pt vs rendered 24pt -> factor 1.75.
+    # (run axis). Declared run = 42pt vs stub natural at letter height.
     item = identified_text_item(
       'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext',
       nil, 140.0, 250.0, 148.0, 292.0
@@ -122,7 +128,7 @@ class MeshTextWidthFidelityTest < Minitest::Test
     assert_equal [:scaling, :translation, :rotation], kinds,
                  'rotated runs must scale local X first, then move, then rotate'
     args = ents.transforms[0][0].args
-    assert_in_delta 42.0 / 24.0, args[1], 1e-9,
+    assert_in_delta expected_x_factor(42.0), args[1], 1e-9,
                     'factor must use the bbox extent along the run axis'
     assert_equal [1.0, 1.0], args[2..3]
     assert_verified_visual_bounds(b, ents, item)
@@ -131,7 +137,8 @@ class MeshTextWidthFidelityTest < Minitest::Test
   # Near-natural widths are still fitted and verified.  A heuristic skip is a
   # roadblock because it cannot prove exact declared-width delivery.
   def test_near_1_factor_is_applied_and_post_transform_verified
-    item = bbox_item('MARK', 8.0, 10.0, bbox_w: 24.0 * 1.01)
+    declared = NATURAL_RUN_PTS * 1.01
+    item = bbox_item('MARK', 8.0, 10.0, bbox_w: declared)
     b, ents, delivered = place(item)
     assert delivered
     fits = scaling_transforms(ents)
@@ -142,20 +149,20 @@ class MeshTextWidthFidelityTest < Minitest::Test
 
   # No arbitrary min/max width factor may preempt a geometrically valid fit.
   def test_arbitrary_positive_width_factors_preserve_declared_width
-    { 24.0 * 5.0 => 'factor 5.0 (too wide)',
-      24.0 * 0.2 => 'factor 0.2 (too narrow)' }.each do |bbox_w, label|
+    { NATURAL_RUN_PTS * 5.0 => 'factor 5.0 (too wide)',
+      NATURAL_RUN_PTS * 0.2 => 'factor 0.2 (too narrow)' }.each do |bbox_w, label|
       item = bbox_item('BOUND', 8.0, 10.0, bbox_w: bbox_w)
       b, ents, delivered = place(item)
       assert delivered, "#{label}: positive source width must remain achievable"
       fits = scaling_transforms(ents)
       assert_equal 1, fits.length
-      assert_in_delta bbox_w / 24.0, fits[0][0].args[1], 1.0e-9
+      assert_in_delta expected_x_factor(bbox_w), fits[0][0].args[1], 1.0e-9
       assert_verified_visual_bounds(b, ents, item)
     end
   end
 
   def test_former_factor_boundaries_are_ordinary_exact_fits
-    { 24.0 * 0.25 => 0.25, 24.0 * 4.0 => 4.0 }.each do |bbox_w, expected|
+    { NATURAL_RUN_PTS * 0.25 => 0.25, NATURAL_RUN_PTS * 4.0 => 4.0 }.each do |bbox_w, expected|
       item = bbox_item('EDGE', 8.0, 10.0, bbox_w: bbox_w)
       b, ents, delivered = place(item)
       assert delivered

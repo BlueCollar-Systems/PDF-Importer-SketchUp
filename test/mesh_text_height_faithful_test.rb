@@ -45,21 +45,30 @@ class MeshTextHeightFaithfulTest < Minitest::Test
   end
 
   def test_mesh_text_height_uses_nominal_font_size_only
+    em_body = method_body('mesh_text_pdf_em_height_inches')
     body = method_body('mesh_text_height_inches')
     # Must derive from the nominal font size and the fixed point->inch scale.
-    assert_includes body, 'item.font_size.to_f',
-                    'height must come directly from the source font size'
-    assert_includes body, 'PDF_POINT_TO_INCH', 'height must use the pt->inch factor'
-    assert_includes body, 'return nil unless fs_pts.finite? && fs_pts > 0.0',
-                    'unverifiable height must fail closed'
+    assert_includes em_body, 'item.font_size.to_f',
+                    'em height must come directly from the source font size'
+    assert_includes em_body, 'PDF_POINT_TO_INCH', 'em height must use the pt->inch factor'
+    assert_includes em_body, 'return nil unless fs_pts.finite? && fs_pts > 0.0',
+                    'unverifiable em height must fail closed'
+    assert_includes body, 'mesh_text_pdf_em_height_inches',
+                    'letter height must start from the canonical PDF em'
+    assert_includes body, 'mesh_text_letter_height_ratio',
+                    'PDF em must convert into SketchUp letter-height units'
     refute_match(/MESH_TEXT_HEIGHT_(?:MIN|MAX)/, body,
                  'historical telemetry constants must not clamp delivery height')
+    refute_match(/MESH_TEXT_HEIGHT_(?:MIN|MAX)/, em_body,
+                 'em height must not clamp delivery height')
     # Must NOT read bbox extents in the height path. bbox_* tokens are valid
     # elsewhere in the file (placement/provenance), so these stay
     # method-scoped over the robustly isolated body.
     %w[bbox_x0 bbox_x1 bbox_y0 bbox_y1].each do |forbidden|
       refute_includes body, forbidden,
         "mesh-text height must not use #{forbidden} (bbox-fit masking is forbidden)"
+      refute_includes em_body, forbidden,
+        "em height must not use #{forbidden} (bbox-fit masking is forbidden)"
     end
   end
 
@@ -134,16 +143,22 @@ class MeshTextHeightFaithfulTest < Minitest::Test
   # height is not assumed to equal the requested source height.  The proof is
   # the measured post-scale and final rotated bounds, not an arbitrary ban on
   # a Y factor.
-  def test_no_legacy_tolerance_and_visual_fit_measures_final_bounds
+  def test_no_legacy_tolerance_and_no_bbox_fit_in_place_mesh_text
     refute_match(/add_3d_text\([\s\S]*?,\s*0\.6\s*,/, source,
                  'must not hard-code add_3d_text tolerance 0.6 (R20-1)')
-    body = method_body('fit_created_text_entities!')
-    assert_includes body, 'factor_x = target_width / generated[:width]'
-    assert_includes body, 'factor_y = target_height / generated[:height]'
-    assert_includes body, 'Transformation.scaling(pivot, factor_x, factor_y, 1.0)'
-    assert_includes body, 'scaled = RepresentationFidelity.bounds(created)'
-    assert_includes body, 'final_bounds = RepresentationFidelity.bounds(created)'
-    assert_includes body, 'RepresentationFidelity.expected_rotated_bounds'
+    refute_includes source, 'def fit_created_text_entities!',
+                    'bbox-derived width/height scaling must be removed (SIZE-1)'
+    body = method_body('place_mesh_text')
+    refute_includes body, 'Transformation.scaling',
+                    'place_mesh_text must not scale generated mesh text'
+    refute_includes body, 'factor_x = target_width / generated[:width]',
+                    'width must not be bbox-fitted'
+    refute_includes body, 'factor_y = target_height / generated[:height]',
+                    'height must not be bbox-fitted'
+    refute_includes body, 'mesh_text_declared_run_width_inches',
+                    'declared run width from bbox must not be used'
+    assert_includes body, 'record_mesh_text_height_sample',
+                    'faithful target heights must feed the report crosscheck'
   end
 
   def test_place_mesh_text_records_height_samples

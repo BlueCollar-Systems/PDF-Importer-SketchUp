@@ -3020,6 +3020,11 @@ module BlueCollarSystems
           representation_parent = builder.page_group.entities
           depth = opts[:text_3d_depth]
           depth = Svg3DTextRenderer::DEFAULT_DEPTH_INCHES if depth.nil?
+          # When semantic spans exist, do not also emit anonymous unmatched
+          # glyph groups — partial matcher leftovers beside delivered spans
+          # read as ghosted duplicates on shop drawings. Truly source-only
+          # symbol ink without a span identity still advances via the item
+          # fallback ladder / transition proofs, not a second anonymous paint.
           text3d_result = Svg3DTextRenderer.render_svg(
             representation_parent, svg_document[:svg], media_box, text_items,
             :scale => opts[:scale],
@@ -3028,6 +3033,7 @@ module BlueCollarSystems
             :depth => depth,
             :layer => layer_mgr.text_fallback_layer,
             :page_number => page_num,
+            :preserve_unmatched_source_placements => Array(text_items).empty?,
             :source_context => svg_source_context(
               svg_document, page_num, svg_failure
             )
