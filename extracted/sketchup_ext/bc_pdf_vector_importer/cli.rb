@@ -32,6 +32,7 @@ require File.join(dir, 'primitives')
 require File.join(dir, 'primitive_extractor')
 require File.join(dir, 'embedded_image_extractor')
 require File.join(dir, 'import_dialog')
+require File.join(dir, 'cairo_glyph_source')
 require File.join(dir, 'qa_report')
 
 module BlueCollarSystems
@@ -311,6 +312,14 @@ module BlueCollarSystems
             }
           end
 
+          # R23 (F-1): Glyphs-mode headless parity — the CLI report carries
+          # the SAME extra.glyph_source telemetry the live import records,
+          # exercising the real bundled pdftocairo + span matching (R17-3).
+          if glyphs_text_mode?(opts)
+            record_headless_glyph_source(stats, pdf_path, page_num, raw,
+                                         media_box, text_items)
+          end
+
           payload[:pages] << {
             page: page_num,
             media_box: media_box,
@@ -340,6 +349,63 @@ module BlueCollarSystems
         font_maps = parser.page_font_maps(page_num)
         parsed = TextParser.new(streams, font_maps, { strict_text_fidelity: false }, ocg_map).parse
         [parsed || [], :internal]
+      end
+
+      def glyphs_text_mode?(opts)
+        return false unless opts[:import_text]
+        opts[:text_mode].to_s.strip.downcase.start_with?('glyph')
+      end
+
+      # R23 (F-1): headless mirror of the live Glyphs-mode source decision —
+      # renders the page with the bundled pdftocairo, matches glyph pens to
+      # extractor spans, and accumulates stats[:glyph_source] (single
+      # per-import decision, demotion only before the first delivered page).
+      def record_headless_glyph_source(stats, pdf_path, page_num, raw,
+                                       media_box, text_items)
+        decision = CairoGlyphSource.import_decision(stats)
+        return unless decision
+
+        if CairoGlyphSource.svg_source?(decision)
+          failure = {}
+          page = CairoGlyphSource.render_page_svg(pdf_path, page_num,
+                                                  failure_info: failure)
+          pens = []
+          if page
+            crop = raw[:crop_box]
+            crop = nil unless crop.is_a?(Array) && crop.length >= 4
+            pens = CairoGlyphSource.pen_placements_pdf(
+              page[:svg], media_box, svg_page_box: crop || media_box
+            )
+            if pens.empty? &&
+               CairoGlyphSource.zero_placement_false_green?({ glyphs: 0 }, text_items)
+              failure[:reason] = 'svg_zero_placements'
+              page = nil
+            end
+          end
+          if page
+            CairoGlyphSource.record_svg_page!(
+              decision, page_num,
+              { glyphs: pens.length, placements_pdf: pens,
+                missing_fonts: page[:missing_fonts],
+                missing_language_packs: page[:missing_language_packs] },
+              text_items, media_box, nil
+            )
+            return
+          end
+          CairoGlyphSource.demote_to_internal!(
+            decision, CairoGlyphSource.failure_reason(failure)
+          )
+        end
+
+        if CairoGlyphSource.internal_source?(decision)
+          spans = 0
+          Array(text_items).each do |item|
+            spans += 1 unless CairoGlyphSource.item_text(item).empty?
+          end
+          CairoGlyphSource.record_internal_page!(decision, spans)
+        end
+      rescue StandardError => e
+        Logger.warn('CLI', "glyph_source telemetry failed: #{e.message}")
       end
 
       def normalize_pages(spec, page_count)

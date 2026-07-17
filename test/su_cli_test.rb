@@ -88,6 +88,34 @@ Dir.mktmpdir('su_cli_test_') do |tmp|
   pf2 = JSON.parse(pf2_out) rescue nil
   check.call('preflight with real PDF exits 0', pf2_status.success?)
   check.call('preflight status pass/warn', pf2 && %w[pass warn].include?(pf2['status']), pf2 && pf2['status'])
+
+  # R23 (F-1): Glyphs-mode report parity — extra.glyph_source names the
+  # source that produced the outlines and the R17-3 run-matching counts.
+  glyphs_report = File.join(tmp, 'glyphs_report.json')
+  _, g_err, g_status = Open3.capture3(
+    RbConfig.ruby, CLI, TEST_PDF, '--text-mode', 'glyphs', '--report', glyphs_report
+  )
+  check.call('glyphs-mode run exits 0', g_status.success?, "stderr=#{g_err}")
+  check.call('glyphs-mode report written', File.file?(glyphs_report))
+  if File.file?(glyphs_report)
+    greport = JSON.parse(File.read(glyphs_report))
+    gs = (greport['extra'] || {})['glyph_source']
+    check.call('glyphs report carries extra.glyph_source', gs.is_a?(Hash))
+    if gs.is_a?(Hash)
+      check.call('glyph_source names a source',
+                 %w[cairo_svg mupdf_svg internal].include?(gs['source']), gs['source'])
+      check.call('glyph_source counts pages', gs['pages'].to_i >= 1, gs['pages'])
+      if gs['source'] == 'cairo_svg'
+        check.call('cairo source matches extractor runs (R17-3)',
+                   gs['runs_matched'].to_i > 0, gs.inspect)
+        check.call('no unmatched extractor runs on the synthetic page',
+                   gs['runs_unmatched'].to_i == 0, gs.inspect)
+      else
+        check.call('non-cairo source records a visible fallback_reason',
+                   gs['fallback_reason'].to_s.length > 0, gs.inspect)
+      end
+    end
+  end
 end
 
 if failures.empty?
