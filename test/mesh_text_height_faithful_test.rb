@@ -136,28 +136,27 @@ class MeshTextHeightFaithfulTest < Minitest::Test
 
   # Round 20 (R20-1 quality, panel-verified): live-host probes showed the old
   # fixed tolerance 0.6" only coarsened glyph curves (same size, same faces);
-  # tolerance 0.0 is kept for curve quality and the faithful height is passed
-  # to add_3d_text directly.
+  # tolerance 0.0 is kept for curve quality and the faithful letter height is
+  # passed to add_3d_text directly.
   #
   # Fitting may scale both generated axes because the host glyph's measured
-  # height is not assumed to equal the requested source height.  The proof is
-  # the measured post-scale and final rotated bounds, not an arbitrary ban on
-  # a Y factor.
-  def test_no_legacy_tolerance_and_no_bbox_fit_in_place_mesh_text
+  # height is not assumed to equal the requested source height. The proof is
+  # the measured post-scale and final rotated bounds. Declared-span WIDTH fit
+  # (R22) remains required; that is not bbox-derived HEIGHT shrink (SIZE-1).
+  def test_no_legacy_tolerance_and_visual_fit_measures_final_bounds
     refute_match(/add_3d_text\([\s\S]*?,\s*0\.6\s*,/, source,
                  'must not hard-code add_3d_text tolerance 0.6 (R20-1)')
-    refute_includes source, 'def fit_created_text_entities!',
-                    'bbox-derived width/height scaling must be removed (SIZE-1)'
-    body = method_body('place_mesh_text')
-    refute_includes body, 'Transformation.scaling',
-                    'place_mesh_text must not scale generated mesh text'
-    refute_includes body, 'factor_x = target_width / generated[:width]',
-                    'width must not be bbox-fitted'
-    refute_includes body, 'factor_y = target_height / generated[:height]',
-                    'height must not be bbox-fitted'
-    refute_includes body, 'mesh_text_declared_run_width_inches',
-                    'declared run width from bbox must not be used'
-    assert_includes body, 'record_mesh_text_height_sample',
+    body = method_body('fit_created_text_entities!')
+    assert_includes body, 'factor_x = target_width / generated[:width]'
+    assert_includes body, 'factor_y = target_height / generated[:height]'
+    assert_includes body, 'Transformation.scaling(pivot, factor_x, factor_y, 1.0)'
+    assert_includes body, 'scaled = RepresentationFidelity.bounds(created)'
+    assert_includes body, 'final_bounds = RepresentationFidelity.bounds(created)'
+    assert_includes body, 'RepresentationFidelity.expected_rotated_bounds'
+    place = method_body('place_mesh_text')
+    assert_includes place, 'fit_created_text_entities!',
+                    'native 3D Text must prove visual fidelity after generation'
+    assert_includes place, 'record_mesh_text_height_sample',
                     'faithful target heights must feed the report crosscheck'
   end
 
