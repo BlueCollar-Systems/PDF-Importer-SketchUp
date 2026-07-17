@@ -40,6 +40,16 @@ class SketchupBatchHostContractTest < Minitest::Test
     )
   end
 
+  def importer_source
+    File.read(
+      File.join(
+        REPO_ROOT, 'extracted', 'sketchup_ext',
+        'bc_pdf_vector_importer', 'main.rb'
+      ),
+      :encoding => 'UTF-8'
+    )
+  end
+
   def test_runner_uses_one_job_argument_and_never_blocks_on_messagebox
     assert_includes source, 'arguments.length == 1'
     assert_includes source, 'SketchupHostJob.load(arguments[0])'
@@ -50,6 +60,8 @@ class SketchupBatchHostContractTest < Minitest::Test
     assert_includes source, 'File.file?(job[:model_path])'
     assert_includes source, "'run_pipeline' => importer.method(:run_pipeline).source_location"
     assert_includes source, "'source_root_verified' => true"
+    assert_includes source, 'Sketchup.plugins_disabled?'
+    assert_includes source, "'plugins_disabled_verified' => true"
     refute_includes source, 'UI.messagebox'
     refute_match(/ARGV\[1\]/, source)
   end
@@ -129,6 +141,19 @@ class SketchupBatchHostContractTest < Minitest::Test
                     'importer::CairoGlyphSource.method(:render_page_svg).source_location'
     assert_includes source,
                     'importer.method(:verified_item_raster_entity!).source_location'
+    assert_includes source, "'original_pdf_path' => job[:original_pdf_path]"
+    assert_includes source, "'immutable_pdf_path' => job[:immutable_pdf_path]"
+    assert_includes source, "'normalized_pdf_path' =>"
+    assert_includes source, "'salvage_note' =>"
+    assert_includes source,
+                    'after_manifest, reopened_manifest'
+  end
+
+  def test_pipeline_binds_report_to_immutable_input_and_records_salvage_lineage
+    assert_includes importer_source, 'source_input_path = path'
+    assert_includes importer_source, 'record_source_lineage!('
+    assert_includes importer_source,
+                    'finalize_import_diagnostics!(source_input_path, opts, stats)'
   end
 
 

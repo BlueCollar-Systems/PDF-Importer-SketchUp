@@ -7,6 +7,29 @@ require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/qa_report'
 QAReportTextItem = Struct.new(:text, :page_number, :bbox_x0, :bbox_y0, :id)
 
 class QAReportTest < Minitest::Test
+  def test_report_preserves_immutable_normalized_and_salvage_lineage
+    lineage = {
+      original_pdf_path: 'C:/owner/original.pdf',
+      original_pdf_sha256: '1' * 64,
+      immutable_pdf_path: 'C:/evidence/source.pdf',
+      immutable_pdf_sha256: '2' * 64,
+      normalized_pdf_path: 'C:/temp/salvaged.pdf',
+      normalized_pdf_sha256: '3' * 64,
+      salvage_note: 'normalized damaged xref'
+    }
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 0, layers: [],
+      text_renderers: [], source_lineage: lineage
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      lineage[:immutable_pdf_path], { import_mode: 'vector' }, stats
+    )
+
+    assert_equal JSON.parse(JSON.generate(lineage)),
+                 JSON.parse(JSON.generate(report[:extra][:source_lineage]))
+  end
+
   def test_report_binds_requested_mode_session_and_full_provenance_even_when_empty
     stats = {
       pages: 1,

@@ -16,6 +16,7 @@ module SketchupBatchImport
 
     def perform(job, binding)
       require_batch_environment!
+      verify_plugins_disabled!
       install_modal_guard!
       plugin_root = File.expand_path('../extracted/sketchup_ext', __dir__)
       load File.join(plugin_root, 'bc_pdf_vector_importer', 'main.rb')
@@ -44,6 +45,7 @@ module SketchupBatchImport
         @model, job[:pdf_path], import_options(importer, job)
       )
       raise 'run_pipeline returned nil' unless stats.is_a?(Hash)
+      source_lineage = verified_source_lineage!(stats, job)
 
       after_manifest = SketchupHostEvidence.snapshot_entities(
         @model.active_entities
@@ -83,7 +85,8 @@ module SketchupBatchImport
         :source_provenance_objects =>
           Array(stats[:source_provenance_objects]),
         :representation_fidelity => stats[:representation_fidelity],
-        :import_contract_ready => stats[:import_contract_ready]
+        :import_contract_ready => stats[:import_contract_ready],
+        :source_lineage => source_lineage
       )
 
       manifest_path = File.join(job[:output_dir], 'entity_manifest.json')
@@ -91,9 +94,11 @@ module SketchupBatchImport
         'requested_text_mode' => job[:text_mode].to_s,
         'source_pdf_path' => job[:pdf_path],
         'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
+        'source_lineage' => source_lineage,
         'import_session_id' => import_session_id,
         'source_provenance' => provenance,
-        'same_session_entities' => owned_manifest
+        'same_session_entities' => owned_manifest,
+        'post_import_entities' => after_manifest
       )
       SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
 
@@ -102,13 +107,14 @@ module SketchupBatchImport
         reopened_model.active_entities
       )
       SketchupHostEvidence.verify_reopen_continuity!(
-        owned_manifest, reopened_manifest
+        after_manifest, reopened_manifest
       )
       manifest_payload['reopened_entities'] = reopened_manifest
       manifest_payload['reopen_persistent_id_verified'] = true
       SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
 
       {
+        'plugins_disabled_verified' => true,
         'source_root_verified' => true,
         'source_root' => expected_root,
         'source_locations' => source_locations,
@@ -120,12 +126,21 @@ module SketchupBatchImport
         'requested_text_mode' => job[:text_mode].to_s,
         'source_pdf_path' => job[:pdf_path],
         'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
+        'original_pdf_path' => job[:original_pdf_path],
+        'original_pdf_sha256' => job[:original_pdf_sha256],
+        'immutable_pdf_path' => job[:immutable_pdf_path],
+        'immutable_pdf_sha256' => job[:immutable_pdf_sha256],
+        'normalized_pdf_path' => source_lineage['normalized_pdf_path'],
+        'normalized_pdf_sha256' => source_lineage['normalized_pdf_sha256'],
+        'salvage_note' => source_lineage['salvage_note'],
         'delivery_summary_mode' => stats[:text_mode].to_s,
         'import_session_id' => import_session_id,
         'model_path' => job[:model_path],
+        'model_sha256' => Digest::SHA256.file(job[:model_path]).hexdigest,
         'import_report_path' => report_copy,
         'import_report_sha256' => Digest::SHA256.file(report_copy).hexdigest,
         'entity_manifest_path' => manifest_path,
+        'entity_manifest_sha256' => Digest::SHA256.file(manifest_path).hexdigest,
         'reopen_persistent_id_verified' => true,
         'text_entities' => stats[:text].to_i,
         'text_renderers' => Array(stats[:text_renderers]),
@@ -180,6 +195,14 @@ module SketchupBatchImport
       unless ENV['BC_PDF_IMPORTER_BATCH_NONINTERACTIVE'].to_s == '1'
         raise 'noninteractive batch environment is not enabled'
       end
+    end
+
+    def verify_plugins_disabled!
+      unless defined?(Sketchup) && Sketchup.respond_to?(:plugins_disabled?) &&
+             Sketchup.plugins_disabled? == true
+        raise 'SketchUp did not confirm plugins_disabled? for this process'
+      end
+      true
     end
 
     def install_modal_guard!
@@ -241,7 +264,37 @@ module SketchupBatchImport
       opts[:import_text] = (job[:text_mode] != :raster)
       opts[:use_3d_text] = (job[:text_mode] == :text3d)
       opts[:group_per_page] = true
+      opts[:source_lineage] = {
+        :original_pdf_path => job[:original_pdf_path],
+        :original_pdf_sha256 => job[:original_pdf_sha256],
+        :immutable_pdf_path => job[:immutable_pdf_path],
+        :immutable_pdf_sha256 => job[:immutable_pdf_sha256]
+      }
       opts
+    end
+
+    def verified_source_lineage!(stats, job)
+      raw = stats[:source_lineage]
+      raise 'pipeline source_lineage is missing' unless raw.is_a?(Hash)
+      lineage = JSON.parse(JSON.generate(raw))
+      unless same_path?(lineage['original_pdf_path'], job[:original_pdf_path]) &&
+             lineage['original_pdf_sha256'] == job[:original_pdf_sha256] &&
+             same_path?(lineage['immutable_pdf_path'], job[:immutable_pdf_path]) &&
+             lineage['immutable_pdf_sha256'] == job[:immutable_pdf_sha256]
+        raise 'pipeline immutable/original source lineage mismatch'
+      end
+      unless !lineage['normalized_pdf_path'].to_s.strip.empty? &&
+             lineage['normalized_pdf_sha256'].to_s =~ /\A[0-9a-f]{64}\z/ &&
+             (lineage['salvage_note'].nil? ||
+              lineage['salvage_note'].is_a?(String))
+        raise 'pipeline normalized/salvage source lineage is incomplete'
+      end
+      lineage
+    end
+
+    def same_path?(left, right)
+      File.expand_path(left.to_s).tr('\\', '/').downcase ==
+        File.expand_path(right.to_s).tr('\\', '/').downcase
     end
 
     def reopen_model!(model_path)

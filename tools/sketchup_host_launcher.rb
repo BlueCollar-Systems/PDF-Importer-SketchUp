@@ -1,16 +1,122 @@
 #!/usr/bin/env ruby
-# External owner for one isolated SketchUp real-host acceptance process.
+# External owner for one fail-closed SketchUp real-host acceptance process.
 
 require 'json'
 require 'digest'
 require 'fileutils'
-require 'tmpdir'
 require 'securerandom'
 require File.expand_path('sketchup_host_job', __dir__)
 require File.expand_path('sketchup_host_evidence', __dir__)
 
 module SketchupHostLauncher
   class LaunchError < StandardError; end
+
+  # SketchUp's documented Sketchup.plugins_disabled= preference is persisted
+  # here for the next process start. The launcher changes only this value and
+  # restores its exact prior existence, registry type, and decoded raw value.
+  class RegistryPreferenceBackend
+    KEY_PATH = 'Software\\SketchUp\\SketchUp 2017\\PREFS'.freeze
+    VALUE_NAME = 'RubyManager_DisablePlugins'.freeze
+
+    def initialize
+      require 'win32/registry'
+      @root = Win32::Registry::HKEY_CURRENT_USER
+    end
+
+    def dword_type
+      Win32::Registry::REG_DWORD
+    end
+
+    def capture
+      state = nil
+      @root.open(KEY_PATH, Win32::Registry::KEY_READ) do |registry|
+        type, data = registry.read(VALUE_NAME)
+        state = {
+          'value_exists' => true,
+          'type' => type,
+          'data' => data
+        }
+      end
+      state
+    rescue Win32::Registry::Error => error
+      return { 'value_exists' => false } if registry_not_found?(error)
+      raise
+    end
+
+    def write(type, data)
+      @root.create(KEY_PATH, Win32::Registry::KEY_ALL_ACCESS) do |registry|
+        registry.write(VALUE_NAME, type, data)
+      end
+      true
+    end
+
+    def delete
+      @root.open(KEY_PATH, Win32::Registry::KEY_ALL_ACCESS) do |registry|
+        registry.delete_value(VALUE_NAME)
+      end
+      true
+    rescue Win32::Registry::Error => error
+      return true if registry_not_found?(error)
+      raise
+    end
+
+    private
+
+    def registry_not_found?(error)
+      error.respond_to?(:code) && error.code.to_i == 2
+    end
+  end
+
+  class PluginStateGuard
+    def initialize(backend = nil, dword_type = nil)
+      @backend = backend || RegistryPreferenceBackend.new
+      @dword_type = dword_type || @backend.dword_type
+      @prior = nil
+    end
+
+    def suppress!
+      raise LaunchError, 'plugin suppression guard is already active' if @prior
+      @prior = @backend.capture
+      begin
+        @backend.write(@dword_type, 1)
+        observed = @backend.capture
+        unless observed['value_exists'] == true &&
+               observed['type'] == @dword_type && observed['data'].to_i == 1
+          raise LaunchError,
+                'SketchUp plugin suppression could not be proven by readback'
+        end
+      rescue StandardError
+        restore_prior!
+        raise
+      end
+      true
+    end
+
+    def restore!
+      raise LaunchError, 'plugin suppression guard has no captured state' unless
+        @prior
+      restore_prior!
+      true
+    end
+
+    private
+
+    def restore_prior!
+      prior = @prior
+      if prior['value_exists']
+        @backend.write(prior['type'], prior['data'])
+      else
+        @backend.delete
+      end
+      observed = @backend.capture
+      unless observed == prior
+        raise LaunchError,
+              'SketchUp plugin-disabled preference exact restoration failed'
+      end
+      @prior = nil
+      true
+    end
+  end
 
   class SystemClock
     def now
@@ -28,10 +134,15 @@ module SketchupHostLauncher
     end
 
     def poll(pid)
-      waited = Process.waitpid(pid, Process::WNOHANG)
-      waited ? :exited : :running
+      waited, status = Process.waitpid2(pid, Process::WNOHANG)
+      return { :state => :running } unless waited
+      {
+        :state => :exited,
+        :exit_code => status.exitstatus,
+        :term_signal => status.signaled? ? status.termsig : nil
+      }
     rescue Errno::ECHILD
-      :exited
+      { :state => :exited, :exit_code => nil, :wait_error => 'ECHILD' }
     end
 
     def kill(pid)
@@ -53,7 +164,7 @@ module SketchupHostLauncher
     path = File.expand_path(job_path.to_s)
     raise LaunchError, 'one JSON job path is required' unless
       File.file?(path) && File.extname(path).downcase == '.json'
-    job = SketchupHostJob.load(path)
+    original_job = SketchupHostJob.load(path)
     executable = options[:sketchup_exe].to_s.strip
     executable = ENV['SKETCHUP_EXE'].to_s.strip if executable.empty?
     raise LaunchError, 'SKETCHUP_EXE is required' if executable.empty?
@@ -62,112 +173,407 @@ module SketchupHostLauncher
     clock = options[:clock] || SystemClock.new
     timeout = options[:timeout_seconds].to_f
     timeout = 900.0 unless timeout > 0.0
-    parent = options[:profile_parent]
-    parent = File.expand_path(parent.to_s) unless parent.to_s.empty?
-    FileUtils.mkdir_p(parent) if parent && !File.directory?(parent)
+    guard = options[:plugin_state_guard] || PluginStateGuard.new
 
-    job_sha256 = Digest::SHA256.file(path).hexdigest
     job_id = "su-host-#{SecureRandom.hex(12)}"
+    snapshot = prepare_controlled_job!(path, original_job, job_id)
+    controlled_path = snapshot['job_path']
+    job = SketchupHostJob.load(controlled_path)
     binding = {
       'job_id' => job_id,
-      'job_sha256' => job_sha256
+      'job_sha256' => Digest::SHA256.file(controlled_path).hexdigest
     }
     atomic_write_json(job[:result_path], binding.merge('status' => 'STARTED'))
 
-    profile = Dir.mktmpdir('bc-su-clean-profile-', parent)
-    environment = controlled_environment(profile, binding)
-    runner = File.expand_path('sketchup_batch_import.rb', __dir__)
-    command = [
-      executable,
-      '-RubyStartup', runner,
-      '-RubyStartupArg', path
-    ]
-    pid = backend.spawn(environment, command)
+    result = nil
     process_done = false
-    started_at = clock.now
+    guard_active = false
+    begin
+      guard.suppress!
+      guard_active = true
+      verify_source_unchanged_before_spawn!(snapshot)
+      environment = controlled_environment(binding)
+      runner = File.expand_path('sketchup_batch_import.rb', __dir__)
+      command = [
+        executable,
+        '-RubyStartup', runner,
+        '-RubyStartupArg', controlled_path
+      ]
+      pid = backend.spawn(environment, command)
+      started_at = clock.now
 
-    loop do
-      state = backend.poll(pid)
-      if state == :exited
-        process_done = true
-        result = read_bound_final_result(job[:result_path], binding)
-        unless result
-          result = binding.merge(
-            'status' => 'ERROR',
-            'error' => 'SketchUp exited without an atomic bound result'
-          )
-          atomic_write_json(job[:result_path], result)
+      loop do
+        state = backend.poll(pid)
+        unless state.is_a?(Hash) && [:running, :exited].include?(state[:state])
+          raise LaunchError, 'process backend returned an invalid state'
         end
-        return result
-      end
+        if state[:state] == :exited
+          process_done = true
+          candidate = read_bound_final_result(job[:result_path], binding)
+          if state[:exit_code] != 0
+            result = error_result(
+              binding,
+              "SketchUp exited with exit code #{state[:exit_code].inspect}"
+            )
+          elsif candidate.nil?
+            result = error_result(
+              binding, 'SketchUp exited without an atomic bound result'
+            )
+          elsif candidate['status'] == 'ERROR'
+            result = candidate
+          else
+            begin
+              verify_terminal_result!(candidate, job, binding)
+              result = candidate
+            rescue StandardError => evidence_error
+              result = error_result(
+                binding,
+                "terminal evidence incomplete: #{evidence_error.message}"
+              )
+            end
+          end
+          break
+        end
 
-      if clock.now - started_at >= timeout
-        backend.kill(pid)
-        process_done = true
-        result = binding.merge(
-          'status' => 'ERROR',
-          'error' => 'SketchUp host timeout while result remained STARTED or process did not exit'
-        )
-        atomic_write_json(job[:result_path], result)
-        return result
+        if clock.now - started_at >= timeout
+          backend.kill(pid)
+          process_done = true
+          result = error_result(
+            binding,
+            'SketchUp host timeout while result remained STARTED or process did not exit'
+          )
+          break
+        end
+        clock.sleep(0.1)
       end
-      clock.sleep(0.1)
+    rescue StandardError => error
+      if defined?(pid) && pid && !process_done
+        begin
+          backend.kill(pid)
+        rescue StandardError
+          # The exact spawned child may already have exited.
+        end
+      end
+      result = error_result(
+        binding, "launcher failure: #{error.class}: #{error.message}"
+      )
+    ensure
+      if guard_active
+        begin
+          guard.restore!
+        rescue StandardError => restore_error
+          result = error_result(
+            binding,
+            "plugin preference restoration failure: " \
+            "#{restore_error.class}: #{restore_error.message}"
+          )
+        end
+      end
+      atomic_write_json(job[:result_path], result) if result
     end
+    result
   rescue StandardError => error
-    if defined?(pid) && pid && defined?(backend) && backend &&
-       (!defined?(process_done) || !process_done)
-      begin
-        backend.kill(pid)
-      rescue StandardError
-        # The only permitted kill target is the exact child PID returned by
-        # this launch; a child that already exited needs no further action.
-      end
-    end
     if defined?(job) && job && defined?(binding) && binding
-      result = binding.merge(
-        'status' => 'ERROR',
-        'error' => "launcher failure: #{error.class}: #{error.message}"
+      result = error_result(
+        binding, "launcher failure: #{error.class}: #{error.message}"
       )
       atomic_write_json(job[:result_path], result)
       result
     else
       raise
     end
-  ensure
-    if defined?(profile) && profile && File.directory?(profile)
-      begin
-        FileUtils.remove_entry_secure(profile)
-      rescue StandardError
-        # The child is already exited/killed; a locked disposable profile may
-        # be removed by the next maintenance sweep without touching user data.
-      end
-    end
   end
 
-  def controlled_environment(profile, binding)
-    roaming = File.join(profile, 'AppData', 'Roaming')
-    local = File.join(profile, 'AppData', 'Local')
-    program_data = File.join(profile, 'ProgramData')
-    temporary = File.join(profile, 'Temp')
-    [roaming, local, program_data, temporary].each do |path|
-      FileUtils.mkdir_p(path)
+  def prepare_controlled_job!(original_job_path, original_job, job_id)
+    source = File.expand_path(original_job[:pdf_path].to_s)
+    bytes = File.binread(source)
+    source_sha256 = Digest::SHA256.hexdigest(bytes)
+    run_dir = File.join(original_job[:output_dir], '.bc_host_jobs', job_id)
+    FileUtils.mkdir_p(run_dir)
+    immutable_path = File.join(run_dir, File.basename(source))
+    SketchupHostEvidence.atomic_write(immutable_path, bytes)
+    unless File.binread(immutable_path) == bytes
+      raise LaunchError, 'immutable PDF snapshot differs from original bytes'
     end
-    # Create the only user plugin search root SketchUp 2017 may inspect. It is
-    # deliberately empty; the acceptance runner loads the worktree explicitly.
-    FileUtils.mkdir_p(File.join(
-      roaming, 'SketchUp', 'SketchUp 2017', 'SketchUp', 'Plugins'
-    ))
+    begin
+      File.chmod(0444, immutable_path)
+    rescue StandardError
+      # Hash verification before acceptance remains authoritative on Windows.
+    end
+    unless File.binread(source) == bytes
+      raise LaunchError, 'original PDF changed while immutable snapshot was created'
+    end
+
+    payload = {
+      'pdf_path' => immutable_path,
+      'output_dir' => original_job[:output_dir],
+      'text_mode' => original_job[:text_mode].to_s,
+      'import_mode' => original_job[:import_mode],
+      'pages' => original_job[:pages] == :all ? 'all' : original_job[:pages],
+      'original_job_path' => File.expand_path(original_job_path),
+      'original_job_sha256' => Digest::SHA256.file(original_job_path).hexdigest,
+      'original_pdf_path' => source,
+      'original_pdf_sha256' => source_sha256,
+      'immutable_pdf_path' => immutable_path,
+      'immutable_pdf_sha256' => source_sha256
+    }
+    controlled_path = File.join(run_dir, 'job.json')
+    atomic_write_json(controlled_path, payload)
+    payload.merge(
+      'job_path' => controlled_path,
+      'source_bytes' => bytes
+    )
+  end
+
+  def verify_source_unchanged_before_spawn!(snapshot)
+    source = snapshot['original_pdf_path']
+    unless File.binread(source) == snapshot['source_bytes']
+      raise LaunchError, 'original PDF changed before the host launch boundary'
+    end
+    immutable = snapshot['immutable_pdf_path']
+    unless Digest::SHA256.file(immutable).hexdigest ==
+           snapshot['immutable_pdf_sha256']
+      raise LaunchError, 'immutable PDF snapshot changed before host launch'
+    end
+    true
+  end
+
+  def controlled_environment(binding)
     {
-      'APPDATA' => roaming,
-      'LOCALAPPDATA' => local,
-      'PROGRAMDATA' => program_data,
-      'ALLUSERSPROFILE' => program_data,
-      'TEMP' => temporary,
-      'TMP' => temporary,
       'BC_PDF_IMPORTER_BATCH_NONINTERACTIVE' => '1',
       'BC_HOST_JOB_ID' => binding['job_id'],
       'BC_HOST_JOB_SHA256' => binding['job_sha256']
     }
+  end
+
+  def verify_terminal_result!(result, job, binding)
+    require_equal!(result['job_id'], binding['job_id'], 'result job ID')
+    require_equal!(result['job_sha256'], binding['job_sha256'], 'result job SHA256')
+    require_equal!(result['status'], 'OK', 'result status')
+    require_equal!(result['plugins_disabled_verified'], true,
+                   'in-host plugin-disabled API proof')
+    require_equal!(result['source_root_verified'], true, 'source-root proof')
+    SketchupHostEvidence.verify_source_locations!(
+      result['source_root'], result['source_locations']
+    )
+    require_equal!(result['requested_text_mode'], job[:text_mode].to_s,
+                   'requested representation mode')
+    require_equal!(result['worktree_metadata_version'],
+                   result['loaded_importer_version'], 'loaded importer version')
+    require_nonempty!(result['host_version'], 'host version')
+    require_nonempty!(result['report_schema'], 'report schema')
+
+    immutable_sha256 = Digest::SHA256.file(job[:immutable_pdf_path]).hexdigest
+    require_equal!(immutable_sha256, job[:immutable_pdf_sha256],
+                   'immutable job PDF SHA256')
+    require_path_equal!(result['source_pdf_path'], job[:immutable_pdf_path],
+                        'result source PDF')
+    require_equal!(result['source_pdf_sha256'], immutable_sha256,
+                   'result source PDF SHA256')
+    require_path_equal!(result['original_pdf_path'], job[:original_pdf_path],
+                        'original PDF lineage')
+    require_equal!(result['original_pdf_sha256'], job[:original_pdf_sha256],
+                   'original PDF lineage SHA256')
+    require_path_equal!(result['immutable_pdf_path'], job[:immutable_pdf_path],
+                        'immutable PDF lineage')
+    require_equal!(result['immutable_pdf_sha256'], immutable_sha256,
+                   'immutable PDF lineage SHA256')
+    require_nonempty!(result['normalized_pdf_path'], 'normalized PDF lineage')
+    require_sha256!(result['normalized_pdf_sha256'],
+                    'normalized PDF lineage SHA256')
+    unless result['salvage_note'].nil? || result['salvage_note'].is_a?(String)
+      raise LaunchError, 'salvage lineage note is invalid'
+    end
+    if same_expanded_path?(
+      result['normalized_pdf_path'], job[:immutable_pdf_path]
+    )
+      require_equal!(result['normalized_pdf_sha256'], immutable_sha256,
+                     'unsalvaged normalized PDF SHA256')
+    elsif result['salvage_note'].to_s.strip.empty?
+      raise LaunchError,
+            'normalized PDF differs from immutable input without salvage proof'
+    end
+
+    session_id = result['import_session_id'].to_s.strip
+    raise LaunchError, 'import session is missing' if session_id.empty?
+    ['representation_fidelity', 'import_contract_ready'].each do |gate|
+      value = result[gate]
+      unless value.is_a?(Hash) && value['ready'] == true
+        raise LaunchError, "#{gate} is incomplete"
+      end
+    end
+
+    require_path_equal!(result['model_path'], job[:model_path],
+                        'saved model path')
+    require_path_equal!(result['import_report_path'],
+                        File.join(job[:output_dir], 'import_report.json'),
+                        'import report path')
+    require_path_equal!(result['entity_manifest_path'],
+                        File.join(job[:output_dir], 'entity_manifest.json'),
+                        'entity manifest path')
+    model_path = verified_artifact!(result['model_path'], nil, 'saved model')
+    require_sha256!(result['model_sha256'], 'saved model SHA256')
+    require_equal!(Digest::SHA256.file(model_path).hexdigest,
+                   result['model_sha256'], 'saved model SHA256')
+    report_path = verified_artifact!(
+      result['import_report_path'], result['import_report_sha256'],
+      'import report'
+    )
+    manifest_path = verified_artifact!(
+      result['entity_manifest_path'], result['entity_manifest_sha256'],
+      'entity manifest'
+    )
+    report = JSON.parse(File.read(report_path, :encoding => 'UTF-8'))
+    verify_terminal_report!(report, result, job, immutable_sha256, session_id)
+    manifest = JSON.parse(File.read(manifest_path, :encoding => 'UTF-8'))
+    verify_terminal_manifest!(manifest, result, job, binding, immutable_sha256,
+                              session_id)
+    true
+  end
+
+  def verify_terminal_report!(report, result, job, immutable_sha256, session_id)
+    require_equal!(report['schema'], result['report_schema'], 'report schema')
+    require_equal!(report_value(report, 'host', 'app'), 'sketchup',
+                   'report host app')
+    require_equal!(report_value(report, 'host', 'version'),
+                   result['host_version'], 'report host version')
+    require_equal!(report_value(report, 'importer', 'version'),
+                   result['loaded_importer_version'], 'report importer version')
+    require_equal!(report_value(report, 'report_meta', 'semver'),
+                   result['loaded_importer_version'], 'report metadata version')
+    require_path_equal!(report_value(report, 'input', 'file'),
+                        job[:immutable_pdf_path], 'report source PDF')
+    require_equal!(report_value(report, 'input', 'sha256'), immutable_sha256,
+                   'report source SHA256')
+    require_equal!(report_value(report, 'extra', 'requested_text_mode'),
+                   job[:text_mode].to_s, 'report requested mode')
+    require_equal!(report_value(report, 'extra', 'import_session_id'),
+                   session_id, 'report import session')
+    require_equal!(report_value(report, 'extra', 'representation_fidelity', 'ready'),
+                   true, 'report representation readiness')
+    require_equal!(report_value(report, 'extra', 'import_contract_ready', 'ready'),
+                   true, 'report import-contract readiness')
+    lineage = report_value(report, 'extra', 'source_lineage')
+    expected = terminal_lineage(result)
+    require_equal!(lineage, expected, 'report source lineage')
+    provenance = report_value(report, 'extra', 'source_provenance')
+    unless provenance.is_a?(Hash) && provenance['objects'].is_a?(Array)
+      raise LaunchError, 'report full source provenance is missing'
+    end
+    require_equal!(provenance['import_session_id'], session_id,
+                   'report provenance session')
+    result_provenance = result['source_provenance']
+    unless result_provenance.is_a?(Hash) &&
+           result_provenance['objects'].is_a?(Array)
+      raise LaunchError, 'result full source provenance is missing'
+    end
+    require_equal!(provenance['objects'], result_provenance['objects'],
+                   'report/result source provenance')
+    true
+  end
+
+  def verify_terminal_manifest!(manifest, result, job, binding,
+                                immutable_sha256, session_id)
+    require_equal!(manifest['job_id'], binding['job_id'], 'manifest job ID')
+    require_equal!(manifest['job_sha256'], binding['job_sha256'],
+                   'manifest job SHA256')
+    require_equal!(manifest['requested_text_mode'], job[:text_mode].to_s,
+                   'manifest requested mode')
+    require_path_equal!(manifest['source_pdf_path'], job[:immutable_pdf_path],
+                        'manifest source PDF')
+    require_equal!(manifest['source_pdf_sha256'], immutable_sha256,
+                   'manifest source SHA256')
+    require_equal!(manifest['import_session_id'], session_id,
+                   'manifest import session')
+    require_equal!(manifest['reopen_persistent_id_verified'], true,
+                   'manifest reopen proof')
+    require_equal!(result['reopen_persistent_id_verified'], true,
+                   'result reopen proof')
+    require_equal!(manifest['source_lineage'], terminal_lineage(result),
+                   'manifest source lineage')
+    owned = manifest['same_session_entities']
+    post_import = manifest['post_import_entities']
+    reopened = manifest['reopened_entities']
+    if !owned.is_a?(Array) || owned.empty? ||
+       !post_import.is_a?(Array) || post_import.empty? ||
+       !reopened.is_a?(Array)
+      raise LaunchError, 'manifest entity evidence is missing'
+    end
+    SketchupHostEvidence.verify_reopen_continuity!(post_import, reopened)
+
+    evidence = result.dup
+    provenance = result['source_provenance']
+    unless provenance.is_a?(Hash) && provenance['objects'].is_a?(Array)
+      raise LaunchError, 'result full source provenance is missing'
+    end
+    evidence['source_provenance_objects'] = provenance['objects']
+    SketchupHostEvidence.verify_delivery_evidence!(
+      evidence, owned, job[:text_mode], job[:pages]
+    )
+    true
+  end
+
+  def terminal_lineage(result)
+    {
+      'original_pdf_path' => result['original_pdf_path'],
+      'original_pdf_sha256' => result['original_pdf_sha256'],
+      'immutable_pdf_path' => result['immutable_pdf_path'],
+      'immutable_pdf_sha256' => result['immutable_pdf_sha256'],
+      'normalized_pdf_path' => result['normalized_pdf_path'],
+      'normalized_pdf_sha256' => result['normalized_pdf_sha256'],
+      'salvage_note' => result['salvage_note']
+    }
+  end
+
+  def verified_artifact!(path, expected_sha256, label)
+    expanded = File.expand_path(path.to_s)
+    unless File.file?(expanded) && File.size(expanded).to_i > 0
+      raise LaunchError, "#{label} is missing or empty"
+    end
+    if expected_sha256
+      require_sha256!(expected_sha256, "#{label} SHA256")
+      require_equal!(Digest::SHA256.file(expanded).hexdigest, expected_sha256,
+                     "#{label} SHA256")
+    end
+    expanded
+  end
+
+  def report_value(hash, *keys)
+    keys.inject(hash) do |value, key|
+      value.is_a?(Hash) ? value[key] : nil
+    end
+  end
+
+  def require_nonempty!(value, label)
+    raise LaunchError, "#{label} is missing" if value.to_s.strip.empty?
+    true
+  end
+
+  def require_sha256!(value, label)
+    unless value.to_s =~ /\A[0-9a-f]{64}\z/
+      raise LaunchError, "#{label} is invalid"
+    end
+    true
+  end
+
+  def require_equal!(actual, expected, label)
+    raise LaunchError, "#{label} mismatch" unless actual == expected
+    true
+  end
+
+  def require_path_equal!(actual, expected, label)
+    raise LaunchError, "#{label} mismatch" unless
+      same_expanded_path?(actual, expected)
+    true
+  end
+
+  def same_expanded_path?(left, right)
+    File.expand_path(left.to_s).tr('\\', '/').downcase ==
+      File.expand_path(right.to_s).tr('\\', '/').downcase
+  end
+
+  def error_result(binding, message)
+    binding.merge('status' => 'ERROR', 'error' => message.to_s)
   end
 
   def read_bound_final_result(path, binding)

@@ -91,6 +91,23 @@ module SketchupHostEvidence
     unless saved.keys.sort == reopened.keys.sort
       raise EvidenceError, 'reopened persistent_id set mismatch'
     end
+    verify_persistent_rows!(saved, reopened)
+  end
+
+  def self.verify_owned_reopen_continuity!(owned_manifest, reopened_manifest)
+    owned = persistent_rows(owned_manifest)
+    reopened = persistent_rows(reopened_manifest)
+    if owned.empty?
+      raise EvidenceError, 'owned manifest has no persistent_id identities'
+    end
+    missing = owned.keys.reject { |persistent_id| reopened.key?(persistent_id) }
+    unless missing.empty?
+      raise EvidenceError, 'reopened owned persistent_id set mismatch'
+    end
+    verify_persistent_rows!(owned, reopened)
+  end
+
+  def self.verify_persistent_rows!(saved, reopened)
     saved.each do |persistent_id, row|
       other = reopened[persistent_id]
       unless hash_value(row, :typename).to_s == hash_value(other, :typename).to_s
@@ -113,6 +130,7 @@ module SketchupHostEvidence
     end
     true
   end
+  private_class_method :verify_persistent_rows!
 
   def self.verify_delivery_evidence!(stats, manifest, requested_mode = nil,
                                      selected_pages = nil)
@@ -504,20 +522,16 @@ module SketchupHostEvidence
       return true
     end
 
-    attempt_ids = Array(hash_value(stats, :text_attempts)).map do |row|
-      hash_value(row, :source_span_id).to_s.strip
-    end.reject { |value| value.empty? }.uniq.sort
+    attempt_ids = Array(hash_value(stats, :text_attempts)).flat_map do |row|
+      source_span_ids(row, :span_id => false)
+    end.uniq.sort
     delivered_ids = []
     Array(hash_value(stats, :source_provenance_objects)).each do |row|
-      span = hash_value(row, :span_id).to_s.strip
-      delivered_ids << span unless span.empty?
+      delivered_ids.concat(source_span_ids(row, :span_id => true))
     end
     [:terminal_text_delivery_records, :page_text_delivery_records].each do |name|
       Array(hash_value(stats, name)).each do |row|
-        Array(hash_value(row, :source_span_ids)).each do |span|
-          value = span.to_s.strip
-          delivered_ids << value unless value.empty?
-        end
+        delivered_ids.concat(source_span_ids(row, :span_id => false))
       end
     end
     expected = source_ids.map { |value| value.to_s.strip }.sort
@@ -530,6 +544,33 @@ module SketchupHostEvidence
     true
   end
   private_class_method :verify_source_sets!
+
+  def self.source_span_ids(record, options = {})
+    return [] unless record.is_a?(Hash)
+    values = []
+    singular_keys = [:source_span_id]
+    singular_keys << :span_id if options[:span_id]
+    plural_keys = [:source_span_ids]
+    plural_keys << :span_ids if options[:span_id]
+    singular_keys.each do |key|
+      next unless hash_key?(record, key)
+      value = hash_value(record, key).to_s.strip
+      values << value unless value.empty?
+    end
+    plural_keys.each do |key|
+      next unless hash_key?(record, key)
+      raw = hash_value(record, key)
+      unless raw.is_a?(Array)
+        raise EvidenceError, "#{key} must be an Array"
+      end
+      raw.each do |span|
+        value = span.to_s.strip
+        values << value unless value.empty?
+      end
+    end
+    values.uniq
+  end
+  private_class_method :source_span_ids
 
   def self.verify_empty_source_proof!(stats, pages)
     inspections = Array(hash_value(stats, :empty_page_source_inspections))
@@ -628,6 +669,15 @@ module SketchupHostEvidence
                    'representation readiness')
     require_equal!(report, [:extra, :import_contract_ready, :ready], true,
                    'import contract readiness')
+    if hash_key?(expected, :source_lineage)
+      expected_lineage = JSON.parse(JSON.generate(
+        hash_value(expected, :source_lineage)
+      ))
+      unless nested_value(report, [:extra, :source_lineage]) ==
+             expected_lineage
+        raise EvidenceError, 'report source lineage does not match host session'
+      end
+    end
     {
       :representation_fidelity => [:extra, :representation_fidelity],
       :import_contract_ready => [:extra, :import_contract_ready]

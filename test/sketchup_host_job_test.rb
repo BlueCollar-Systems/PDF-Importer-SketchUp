@@ -113,6 +113,35 @@ class SketchupHostJobTest < Minitest::Test
     end
   end
 
+  def test_controlled_job_preserves_original_and_immutable_source_lineage
+    load_job_tool
+    Dir.mktmpdir('su-host-job-lineage') do |dir|
+      original = File.join(dir, 'owner.pdf')
+      immutable = File.join(dir, 'snapshot', 'owner.pdf')
+      FileUtils.mkdir_p(File.dirname(immutable))
+      bytes = "%PDF-1.4\nimmutable\n%%EOF\n"
+      File.binwrite(original, bytes)
+      File.binwrite(immutable, bytes)
+      digest = Digest::SHA256.hexdigest(bytes)
+      job_path = File.join(dir, 'controlled.json')
+      File.write(job_path, JSON.generate(
+        'pdf_path' => immutable,
+        'output_dir' => dir,
+        'text_mode' => 'labels',
+        'original_pdf_path' => original,
+        'original_pdf_sha256' => digest,
+        'immutable_pdf_path' => immutable,
+        'immutable_pdf_sha256' => digest
+      ))
+
+      job = SketchupHostJob.load(job_path)
+      assert_equal original, job[:original_pdf_path]
+      assert_equal digest, job[:original_pdf_sha256]
+      assert_equal immutable, job[:immutable_pdf_path]
+      assert_equal digest, job[:immutable_pdf_sha256]
+    end
+  end
+
   private
 
   def assert_invalid_pages(value)

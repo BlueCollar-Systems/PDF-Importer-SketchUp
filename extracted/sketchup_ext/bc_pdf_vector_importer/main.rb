@@ -5,6 +5,7 @@
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
 require 'zlib'
+require 'digest'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -2196,6 +2197,45 @@ module BlueCollarSystems
       contract[:ready] == true || contract['ready'] == true
     end
 
+    def self.record_source_lineage!(stats, source_path, normalized_path,
+                                    salvage_note, opts = {})
+      raise RepresentationFidelity::ContractError,
+            'source-lineage stats are unavailable' unless stats.is_a?(Hash)
+      provided = opts.is_a?(Hash) ? opts[:source_lineage] : nil
+      provided = {} unless provided.is_a?(Hash)
+      lineage = {}
+      provided.each do |key, value|
+        normalized_key = key.respond_to?(:to_sym) ? key.to_sym : key
+        lineage[normalized_key] = value
+      end
+
+      immutable_path = File.expand_path(source_path.to_s)
+      normalized = File.expand_path(normalized_path.to_s)
+      immutable_sha256 = Digest::SHA256.file(immutable_path).hexdigest
+      normalized_sha256 = Digest::SHA256.file(normalized).hexdigest
+      declared_immutable_sha256 = lineage[:immutable_pdf_sha256].to_s
+      unless declared_immutable_sha256.empty? ||
+             declared_immutable_sha256 == immutable_sha256
+        raise RepresentationFidelity::ContractError,
+              'immutable source lineage SHA256 differs from imported bytes'
+      end
+
+      lineage[:original_pdf_path] ||= immutable_path
+      lineage[:original_pdf_sha256] ||= immutable_sha256
+      lineage[:immutable_pdf_path] = immutable_path
+      lineage[:immutable_pdf_sha256] = immutable_sha256
+      lineage[:normalized_pdf_path] = normalized
+      lineage[:normalized_pdf_sha256] = normalized_sha256
+      lineage[:salvage_note] = salvage_note
+      stats[:source_lineage] = lineage
+      stats[:source_input_path] = immutable_path
+      stats[:source_input_sha256] = immutable_sha256
+      stats[:normalized_input_path] = normalized
+      stats[:normalized_input_sha256] = normalized_sha256
+      stats[:salvage_note] = salvage_note
+      lineage
+    end
+
     def self.finalize_import_diagnostics!(path, opts, stats)
       report = QAReport.build_from_stats(path, opts, stats)
       parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
@@ -2284,6 +2324,7 @@ module BlueCollarSystems
         :source_glyph_physical_deliveries => [],
         :raster_delivery_records => [], :raster_fallback_used => false
       }
+      record_source_lineage!(stats, path, path, nil, opts)
 
       model.start_operation('Import PDF Raster', true)
       operation_open = true
@@ -2382,6 +2423,7 @@ module BlueCollarSystems
     def self.run_pipeline(model, path, opts)
       Logger.reset
       config = RecognitionConfig.default
+      source_input_path = path
 
       # ── Explicit Raster request: deliver verified images for every selected
       # page. This is a requested representation, not a fallback. ──
@@ -2484,6 +2526,9 @@ module BlueCollarSystems
                  source_glyph_physical_deliveries: [],
                  raster_delivery_records: [],
                  raster_fallback_used: false }
+      record_source_lineage!(
+        stats, source_input_path, path, salvage_note, opts
+      )
 
       image_extractor = nil
       if opts[:extract_embedded_images] != false && opts[:import_mode].to_s != 'vector'
@@ -3416,7 +3461,7 @@ module BlueCollarSystems
       apply_top_view_fit(model, page_fit_bounds, imported_entities)
 
       stats[:log_path] = Logger.log_path
-      finalize_import_diagnostics!(path, opts, stats)
+      finalize_import_diagnostics!(source_input_path, opts, stats)
       Sketchup.status_text = if import_contract_ready?(stats)
         "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text " \
           "items — #{elapsed}s"

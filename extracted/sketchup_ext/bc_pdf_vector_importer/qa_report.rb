@@ -284,6 +284,10 @@ module BlueCollarSystems
                                 stats['requested_text_mode']).to_s,
           import_session_id: (stats[:import_session_id] ||
                               stats['import_session_id']).to_s,
+          source_lineage: begin
+            lineage = stats[:source_lineage] || stats['source_lineage']
+            lineage.is_a?(Hash) ? normalize_json(lineage) : nil
+          end,
           svg_renderer_missing: !!stats[:svg_renderer_missing],
           font_substitution_note: stats[:font_substitution_note],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,

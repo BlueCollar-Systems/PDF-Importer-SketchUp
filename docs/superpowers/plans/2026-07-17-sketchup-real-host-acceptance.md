@@ -256,8 +256,8 @@ Expected: FAIL because the existing runner hard-codes Labels, reads `ARGV[1]`, s
 
 Use callable orchestration with an injected host-session object so ordinary
 Ruby behavioral fakes exercise STARTED/OK/ERROR, discard, and quit behavior.
-The external launcher, not the startup script, owns profile isolation, timeout,
-and the exact child PID. The startup script owns the production import,
+The external launcher, not the startup script, owns reversible next-start plugin
+suppression, timeout, and the exact child PID. The startup script owns the production import,
 recursive before/after ownership, strict ledgers, report binding, save/reopen,
 and atomic bound results. Do not restore the rejected one-file skeleton: it
 could hang before rescue, load installed plugins, accept stale reports, and
@@ -282,13 +282,22 @@ used by the run. Reject any location outside `plugin_root`. This is an
 acceptance guard against SketchUp's installed 3.7.96 extension satisfying the
 run through already-loaded constants while the worktree is 3.7.97 or newer.
 
-The external `sketchup_host_launcher.rb` owns an isolated APPDATA,
-LOCALAPPDATA, and PROGRAMDATA profile with empty plugin roots, passes exactly
-one startup argument, binds each atomic result to a random job ID plus the job
-SHA-256, and kills only the PID it spawned when the host remains STARTED or
-fails to exit before timeout. The in-host runner installs a last-resort modal
-guard; production first-run, large-file, missing-renderer, and salvage paths
-must honor the explicit noninteractive policy and fail closed without prompting.
+The external `sketchup_host_launcher.rb` preserves the real APPDATA,
+LOCALAPPDATA, and PROGRAMDATA paths (including the user's real license state).
+Before launch it captures the exact persisted `Sketchup.plugins_disabled`
+preference state, enables the official next-start suppression preference,
+proves it by readback, and restores the prior value/existence/type on every
+normal, error, crash, and timeout path. The host must independently confirm
+`Sketchup.plugins_disabled? == true`; otherwise the run is ERROR. The launcher
+also creates an immutable per-job PDF copy before the host starts, passes only
+that copy through exactly one startup argument, records original/immutable/
+normalized-salvage lineage, captures the child exit code, and accepts OK only
+when exit code zero accompanies the complete bound model/report/manifest
+contract. It kills only the PID it spawned when the host remains STARTED or
+fails to exit before timeout. No installed plugin file is read, moved, renamed,
+or modified. The in-host runner installs a last-resort modal guard; production
+first-run, large-file, missing-renderer, and salvage paths must honor the
+explicit noninteractive policy and fail closed without prompting.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
@@ -310,12 +319,14 @@ Expected: all tests pass.
 
 Modes: `labels`, `text3d`, `glyphs`, `geometry`, `raster`; import mode `vector` except requested Raster, which uses `raster`.
 
-- [ ] **Step 2: Launch SketchUp through the isolated watchdog**
+- [ ] **Step 2: Launch SketchUp through the guarded watchdog**
 
 Run: set `SKETCHUP_EXE` to the SketchUp 2017 executable, then run
 `ruby tools/sketchup_host_launcher.rb <job.json>`.
 
-Expected: the launcher passes exactly one `-RubyStartupArg`,
+Expected: the launcher proves and later restores the official plugin-disabled
+preference, preserves the real user/machine profile and license paths, imports
+only an immutable per-job PDF copy, and passes exactly one `-RubyStartupArg`,
 `host_acceptance.json` moves atomically from bound STARTED to bound OK or a
 specific ERROR, SketchUp closes itself, and no installed third-party plugin or
 BlueCollar message box appears. A lingering process is a timeout ERROR, never

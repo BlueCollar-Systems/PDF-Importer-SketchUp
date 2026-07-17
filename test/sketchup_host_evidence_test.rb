@@ -233,6 +233,20 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_match(/transformation/, error.message)
   end
 
+  def test_owned_reopen_continuity_ignores_preexisting_template_entities
+    owned = SketchupHostEvidence.snapshot_entities([
+      FakeGroup.new(10, [], :persistent_id => 7010)
+    ])
+    reopened = SketchupHostEvidence.snapshot_entities([
+      FakeEntity.new(50, 'Edge', :persistent_id => 5000),
+      FakeGroup.new(90, [], :persistent_id => 7010)
+    ])
+
+    assert SketchupHostEvidence.verify_owned_reopen_continuity!(
+      owned, reopened
+    )
+  end
+
   def test_recursive_ownership_rejects_preexisting_nested_entities
     before = SketchupHostEvidence.snapshot_entities([
       FakeGroup.new(1, [FakeEntity.new(2, 'Edge')])
@@ -294,6 +308,28 @@ class SketchupHostEvidenceTest < Minitest::Test
       SketchupHostEvidence.verify_delivery_evidence!(stats, manifest, :labels, [1])
     end
     assert_match(/source.*set mismatch/, error.message)
+  end
+
+  def test_geometry_and_glyph_ledgers_accept_plural_source_span_ids
+    [:geometry, :glyphs].each do |mode|
+      stats = ready_stats(
+        :requested_text_mode => mode,
+        :text_source_span_ids => ['p1:s1', 'p1:s2'],
+        :text_attempts => [{
+          :source_span_ids => ['p1:s1', 'p1:s2'],
+          :resulting_entity_ids => ['entity_id:13']
+        }],
+        :source_provenance_objects => [],
+        :page_text_delivery_records => [{
+          :source_span_ids => ['p1:s1', 'p1:s2'],
+          :resulting_entity_ids => ['entity_id:13']
+        }]
+      )
+
+      assert SketchupHostEvidence.verify_delivery_evidence!(
+        stats, manifest, mode, [1]
+      )
+    end
   end
 
   def test_report_copy_is_parsed_bound_and_atomic
