@@ -6,6 +6,7 @@
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
 require File.join(File.dirname(__FILE__), 'page_transform')
+require File.join(File.dirname(__FILE__), 'stroke_font')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -40,6 +41,10 @@ module BlueCollarSystems
         @map_dashes      = opts[:map_dashes] || false
         @import_text     = opts[:import_text] || false
         @use_3d_text     = opts[:use_3d_text] || false
+        # R23 (F-1): the INTERNAL glyph-outline source for Glyphs mode —
+        # StrokeFont single-stroke lettering. Only set by the Glyphs-mode
+        # source fallback; never touches the Labels / 3D Text pipelines.
+        @glyph_outline_text = opts[:glyph_outline_text] || false
         @requested_text_mode = normalize_text_mode_symbol(opts[:requested_text_mode]) ||
                                (@use_3d_text ? :text3d : :labels)
         @strict_text_fidelity = opts[:strict_text_fidelity] || false
@@ -517,7 +522,9 @@ module BlueCollarSystems
         return unless @import_text && item.text && !item.text.strip.empty?
 
         begin
-          if @use_3d_text
+          if @glyph_outline_text
+            place_glyph_outline_text(entities, item, origin_x, origin_y, layer)
+          elsif @use_3d_text
             place_mesh_text(
               entities, item, origin_x, origin_y, layer, @requested_text_mode
             )
@@ -740,6 +747,80 @@ module BlueCollarSystems
                     "mesh text width fidelity failed (#{e.class}: #{e.message}); " \
                     'keeping natural width')
         true
+      end
+
+      # ---------------------------------------------------------------
+      # R23 (F-1): INTERNAL glyph-outline source — Glyphs mode fallback
+      # when the SVG glyph source (bundled pdftocairo / mutool) is
+      # unavailable. Renders each extractor span as StrokeFont
+      # single-stroke lettering: outline edges in model space, i.e. the
+      # SAME representation type as the requested Glyphs mode (TEXTMODE-1
+      # source fallback, not a mode fallback). Height uses the nominal
+      # SIZE-1 contract (pt/72 x scale, same bounds as mesh text); the run
+      # is then compressed/expanded along its pre-rotation axis to the
+      # PDF-declared span extent (R22 width parity) with the same factor
+      # bounds. If the stroke engine delivers nothing for a span, the
+      # existing per-span mode ladder takes over (3D Text -> Labels),
+      # loudly, via place_mesh_text's fallback recording.
+      # ---------------------------------------------------------------
+      def place_glyph_outline_text(entities, item, origin_x, origin_y, layer)
+        requested_mode = @requested_text_mode || :glyphs
+        label_x, label_y, label_angle = mesh_label_anchor_pdf(item)
+        display_angle = display_text_angle(item, label_angle)
+        pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
+
+        page_h = PageTransform.effective_height(@media_box, @page_rotation)
+        page_h = 792.0 if page_h < 1
+        height = mesh_text_height_inches(item, display_angle, page_h)
+        if height <= 0
+          return place_mesh_text(
+            entities, item, origin_x, origin_y, layer, requested_mode,
+            'glyph_outline_height_unavailable'
+          )
+        end
+
+        # Same transform order as place_mesh_text (locked contract):
+        # generate at the origin, width-fit along the pre-rotation run axis
+        # via the SAME R22 width-fidelity method, then one translation to
+        # the anchor and one rotation about it.
+        count_before = entities.to_a.length
+        edges = StrokeFont.render(
+          entities, item.text, Geom::Point3d.new(0.0, 0.0, 0.0), height, 0
+        )
+        if edges.to_i <= 0
+          return place_mesh_text(
+            entities, item, origin_x, origin_y, layer, requested_mode,
+            'glyph_outline_empty'
+          )
+        end
+
+        new_ents = entities.to_a[count_before..-1] || []
+        apply_mesh_text_width_fidelity(entities, new_ents, item, display_angle)
+
+        move = Geom::Transformation.new(pt)
+        entities.transform_entities(move, *new_ents)
+        if display_angle.abs > 0.1
+          rot = Geom::Transformation.rotation(pt, Z_AXIS, display_angle.degrees)
+          entities.transform_entities(rot, *new_ents)
+        end
+
+        new_ents.each do |entity|
+          begin
+            set_layer(entity, layer)
+          rescue StandardError => e
+            Logger.warn("GeometryBuilder", "set_layer on glyph outline failed: #{e.message}")
+          end
+        end
+        @edge_count += edges.to_i
+        @text_count += 1
+        record_text_span_provenance(item, 'glyph_outline')
+        true
+      rescue StandardError => e
+        Logger.warn("GeometryBuilder", "glyph outline render failed: #{e.message}")
+        place_mesh_text(
+          entities, item, origin_x, origin_y, layer, requested_mode || :glyphs,
+          'glyph_outline_exception'
+        )
       end
 
       def place_mesh_text(entities, item, origin_x, origin_y, layer,

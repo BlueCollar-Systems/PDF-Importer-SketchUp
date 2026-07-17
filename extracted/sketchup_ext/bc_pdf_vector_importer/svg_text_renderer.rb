@@ -24,8 +24,16 @@ module BlueCollarSystems
       GLYPH_POINT_TOLERANCE = 1.0e-7
 
       def self.render(entities, pdf_path, page_num, media_box, opts = {})
+        # Optional failure sink (R23): callers that must distinguish WHY the
+        # SVG text path returned nil (missing renderer / timeout / failed
+        # render / exception) pass opts[:failure_info] = {} and read
+        # [:reason] back. Purely additive — behaviour is unchanged.
+        failure_info = opts[:failure_info].is_a?(Hash) ? opts[:failure_info] : nil
         renderer = find_svg_renderer
-        return nil unless renderer
+        unless renderer
+          failure_info[:reason] = 'no_renderer' if failure_info
+          return nil
+        end
 
         # If the PDF references non-embedded fonts (e.g. the base-14 "Symbol"
         # font) that pdftocairo can't resolve on this platform, embed them once
@@ -86,9 +94,17 @@ module BlueCollarSystems
             render_ok = true
             break
           end
-          break if run[:timed_out]
+          if run[:timed_out]
+            failure_info[:reason] = 'timeout' if failure_info
+            break
+          end
         end
-        return nil unless render_ok
+        unless render_ok
+          if failure_info && failure_info[:reason].to_s.empty?
+            failure_info[:reason] = 'render_failed'
+          end
+          return nil
+        end
         if used_cropbox_fallback
           Logger.warn("SvgTextRenderer",
             "Page #{page_num}: #{renderer[:kind]} crop box render unavailable; used media box SVG fallback")
@@ -201,6 +217,13 @@ module BlueCollarSystems
         collapsed_signature_keys(placements).each { |k| collapsed_set[k] = true }
         skipped_collapsed = 0
 
+        # R23: pen points of rendered glyphs in PDF points relative to the
+        # media-box origin, y-up — the space extractor span bboxes use.
+        # Consumed by CairoGlyphSource for span matching (R17-3).
+        placements_pdf = []
+        pen_dx = svg_min_x - media_min_x
+        pen_dy = svg_min_y - media_min_y
+
         # Place instances (fast)
         total = placements.length
         placements.each_with_index do |p, idx|
@@ -226,6 +249,7 @@ module BlueCollarSystems
 
               tx = (e - vb_min_x) * x_unit_to_in + box_offset_x_in
               ty = (vb_h + vb_min_y - f) * y_unit_to_in + y_offset.to_f + box_offset_y_in
+              placements_pdf << { x: (e - vb_min_x) + pen_dx, y: (vb_h + vb_min_y - f) + pen_dy }
 
               # Local glyph coordinates are scaled to inches and Y-flipped.
               ratio_xy = y_unit_to_in.zero? ? 1.0 : (x_unit_to_in / y_unit_to_in)
@@ -237,6 +261,8 @@ module BlueCollarSystems
             else
               tx = (p[:x].to_f - vb_min_x) * x_unit_to_in + box_offset_x_in
               ty = (vb_h + vb_min_y - p[:y].to_f) * y_unit_to_in + y_offset.to_f + box_offset_y_in
+              placements_pdf << { x: (p[:x].to_f - vb_min_x) + pen_dx,
+                                  y: (vb_h + vb_min_y - p[:y].to_f) + pen_dy }
               tr = Geom::Transformation.new(Geom::Point3d.new(tx, ty, 0.0))
             end
 
@@ -294,13 +320,16 @@ module BlueCollarSystems
           estimated_glyph_edges: estimated_glyph_edges,
           text_performance_mode: raw_edge_glyphs ? :raw_edges : :glyph_components,
           component_container: component_container,
-          skipped_glyphs: skipped_collapsed, missing_fonts: missing_fonts }
+          skipped_glyphs: skipped_collapsed, missing_fonts: missing_fonts,
+          missing_language_packs: missing_language_packs(render_stderr),
+          placements_pdf: placements_pdf }
       rescue StandardError => e
         begin
           Logger.warn("SvgTextRenderer", "Failed: #{e.message}")
         rescue StandardError
           # Logger may be unavailable in minimal runtime/test contexts.
         end
+        failure_info[:reason] = 'exception' if failure_info && failure_info[:reason].to_s.empty?
         nil
       ensure
         begin
@@ -633,6 +662,15 @@ module BlueCollarSystems
       def self.missing_display_fonts(stderr)
         return [] unless stderr.is_a?(String) && !stderr.empty?
         stderr.scan(/No display font for '([^']+)'/).map { |mm| mm[0] }.uniq
+      end
+
+      # R23: poppler exits 0 while dropping every run of a CID font whose
+      # language pack (e.g. Adobe-GB1) is not packaged — the only trace is
+      # this stderr line. Surface it so reports can show the loss instead
+      # of a silent pass.
+      def self.missing_language_packs(stderr)
+        return [] unless stderr.is_a?(String) && !stderr.empty?
+        stderr.scan(/Missing language pack for '([^']+)'/).map { |mm| mm[0] }.uniq
       end
 
       # ------------------------------------------------------------------

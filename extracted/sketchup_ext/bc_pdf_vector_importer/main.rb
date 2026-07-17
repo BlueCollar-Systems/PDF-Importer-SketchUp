@@ -53,6 +53,7 @@ module BlueCollarSystems
     require File.join(dir, 'hatch_detector')
     require File.join(dir, 'stroke_font')
     require File.join(dir, 'svg_text_renderer')
+    require File.join(dir, 'cairo_glyph_source')
     require File.join(dir, 'svg_geometry_renderer')
     require File.join(dir, 'metadata')
     # Tools & UI
@@ -1061,16 +1062,31 @@ module BlueCollarSystems
       svg_text_mode = [:geometry, :glyphs].include?(requested_text_mode)
       if svg_text_mode && opts[:import_text] && !SvgTextRenderer.svg_renderer_available?
         stats[:svg_renderer_missing] = true
+        # R23 (F-1): Glyphs mode keeps its outline representation via the
+        # internal StrokeFont source (a recorded SOURCE fallback inside the
+        # mode); Geometry mode keeps the existing 3D Text mode ladder.
+        if requested_text_mode == :glyphs
+          degrade_log = 'text will degrade to internal stroke-outline lettering ' \
+                        '(glyph source fallback, reported in extra.glyph_source).'
+          degrade_msg = 'Without one of these helpers, text will import as simplified ' \
+                        'stroke-outline lettering (internal glyph source, degraded ' \
+                        'fidelity) instead of exact glyph outlines.'
+        else
+          degrade_log = 'text will degrade to 3D Text (then Labels only if mesh is ' \
+                        'unavailable) — mode-fidelity fallback.'
+          degrade_msg = 'Without one of these helpers, text will import as SketchUp ' \
+                        '3D Text (closest free model-space fallback) instead of ' \
+                        'outline geometry.'
+        end
         Logger.warn(
           "Pipeline",
-          "Geometry/Glyphs text requested but Poppler (pdftocairo) and MuPDF (mutool) were not found; " \
-          "text will degrade to 3D Text (then Labels only if mesh is unavailable) — mode-fidelity fallback."
+          "Geometry/Glyphs text requested but Poppler (pdftocairo) and MuPDF (mutool) were not found; " +
+          degrade_log
         )
         if defined?(UI) && UI.respond_to?(:messagebox)
           choice = UI.messagebox(
-            "Geometry/Glyphs text mode needs Poppler (pdftocairo) or MuPDF (mutool).\n\n" \
-            "Without one of these helpers, text will import as SketchUp 3D Text " \
-            "(closest free model-space fallback) instead of outline geometry.\n\n" \
+            "Geometry/Glyphs text mode needs Poppler (pdftocairo) or MuPDF (mutool).\n\n" +
+            degrade_msg + "\n\n" \
             "Install Poppler or open Extensions > PDF Vector Importer > Compatibility Report.\n\n" \
             "Continue with degraded text?",
             MB_OKCANCEL)
@@ -1510,11 +1526,31 @@ module BlueCollarSystems
         if use_svg_text && builder.page_group
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
           text_layer = layer_mgr.text_fallback_layer
-          svg_result = SvgTextRenderer.render(
-            builder.page_group.entities, path, page_num, media_box,
-            scale: opts[:scale], layer: text_layer, y_offset: page_y_offset,
-            svg_page_box: svg_page_box,
-            page_rotation: page_rotation)
+
+          # R23 (F-1): Glyphs mode goes through the glyph SOURCE decision —
+          # SVG glyph outlines preferred, internal stroke outlines as the
+          # recorded per-import fallback (TEXTMODE-1: a source change inside
+          # the delivered Glyphs mode, never a mode change). Geometry mode is
+          # untouched.
+          glyph_decision = nil
+          glyph_decision = CairoGlyphSource.import_decision(stats) if requested_text_mode == :glyphs
+          svg_failure = {}
+          svg_result = nil
+          if glyph_decision.nil? || CairoGlyphSource.svg_source?(glyph_decision)
+            svg_result = SvgTextRenderer.render(
+              builder.page_group.entities, path, page_num, media_box,
+              scale: opts[:scale], layer: text_layer, y_offset: page_y_offset,
+              svg_page_box: svg_page_box,
+              page_rotation: page_rotation,
+              failure_info: svg_failure)
+          end
+          if glyph_decision && svg_result &&
+             CairoGlyphSource.zero_placement_false_green?(svg_result, text_items)
+            # No glyph ink although the extractor found spans: a "success"
+            # here would be a false green (pinned-review forward fix).
+            svg_failure[:reason] = 'svg_zero_placements'
+            svg_result = nil
+          end
 
           if svg_result
             stats[:text] += svg_result[:glyphs]
@@ -1524,7 +1560,7 @@ module BlueCollarSystems
                                 when :text3d then :text3d
                                 else :geometry
                                 end
-            record_text_renderer(stats, page_num,
+            renderer_attrs = {
               renderer: svg_result[:renderer], mode: stats[:text_mode],
               requested_mode: requested_text_mode, degraded: false,
               cropbox_fallback: svg_result[:cropbox_fallback],
@@ -1533,8 +1569,85 @@ module BlueCollarSystems
               flattened_glyph_instances: svg_result[:flattened_glyph_instances],
               estimated_glyph_edges: svg_result[:estimated_glyph_edges],
               text_performance_mode: svg_result[:text_performance_mode],
-              component_container: svg_result[:component_container])
+              component_container: svg_result[:component_container]
+            }
+            if glyph_decision
+              CairoGlyphSource.record_svg_page!(
+                glyph_decision, page_num, svg_result, text_items, media_box,
+                stats[:source_provenance_objects]
+              )
+              renderer_attrs[:glyph_source] = glyph_decision[:source]
+            end
+            record_text_renderer(stats, page_num, renderer_attrs)
           else
+            # R23 (F-1): in Glyphs mode a failed SVG source demotes the whole
+            # import (single per-import decision) to the INTERNAL glyph-outline
+            # source — StrokeFont lettering, same outline representation,
+            # recorded in stats[:glyph_source]. Demotion is refused once the
+            # SVG source has delivered a page (never mix sources mid-import);
+            # then the existing per-page mode ladder below runs instead.
+            internal_result = nil
+            if glyph_decision
+              if CairoGlyphSource.svg_source?(glyph_decision)
+                CairoGlyphSource.demote_to_internal!(
+                  glyph_decision, CairoGlyphSource.failure_reason(svg_failure))
+              end
+              if CairoGlyphSource.internal_source?(glyph_decision)
+                Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering internal glyph outlines... [#{(Time.now - import_start).round(1)}s]"
+                internal_builder = GeometryBuilder.new(model, [], text_items, media_box,
+                  scale_factor: opts[:scale], layer_name: opts[:layer_name],
+                  group_per_page: false, page_number: page_num,
+                  flatten_to_2d: true, import_text: true, use_3d_text: false,
+                  glyph_outline_text: true,
+                  strict_text_fidelity: opts[:strict_text_fidelity],
+                  requested_text_mode: :glyphs,
+                  layer_manager: layer_mgr,
+                  y_offset: page_y_offset,
+                  page_rotation: page_rotation,
+                  target_entities: builder.page_group.entities,
+                  provenance_bucket: provenance_opts[:provenance_bucket],
+                  import_session_id: provenance_opts[:import_session_id])
+                internal_result = internal_builder.build
+              end
+            end
+
+            if internal_result
+              stats[:text] += internal_result[:text_objects]
+              merge_text_mode_fallbacks!(stats, page_num, internal_result[:text_fallbacks])
+              merge_text_height_samples!(stats, internal_result[:text_height_samples])
+              stats[:text_height_fallback_count] =
+                stats[:text_height_fallback_count].to_i + internal_result[:text_height_fallback_count].to_i
+              merge_text_width_crosscheck!(stats, internal_result)
+              if !Array(internal_result[:text_delivery_failures]).empty?
+                terminal_raster = promote_text_delivery_failures_to_raster!(
+                  model, path, page_num, media_box, opts, import_start, page_y_offset,
+                  svg_page_box, builder.page_group, requested_text_mode, stats,
+                  internal_result[:text_delivery_failures],
+                  page_entities_created_since(model, page_entities_before_builder)
+                )
+                unless terminal_raster
+                  raise "Page #{page_num}: internal glyph source ladder was exhausted and the terminal raster fallback failed."
+                end
+                discard_hidden_page_vector_result!(
+                  stats, page_counts_before_builder, page_provenance_before_builder
+                )
+                add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
+                running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
+                next
+              end
+              outline_count = native_text_delivery_count(
+                internal_result[:text_objects], internal_result[:text_fallbacks]
+              )
+              if outline_count > 0
+                record_text_renderer(stats, page_num,
+                  renderer: :stroke_font, mode: :glyphs, requested_mode: :glyphs,
+                  degraded: true, reason: glyph_decision[:fallback_reason].to_s,
+                  count: outline_count,
+                  glyph_source: CairoGlyphSource::SOURCE_INTERNAL,
+                  note: 'Internal stroke-outline glyph source (SVG glyph source unavailable)')
+              end
+              CairoGlyphSource.record_internal_page!(glyph_decision, outline_count)
+            else
             # SVG outline path unavailable. Glyphs↔Geometry are peer SVG modes, so
             # the next free representation is 3D Text (model-space), then Labels.
             # Do NOT skip 3D Text to paper over mesh transform bugs (mode fidelity).
@@ -1597,6 +1710,7 @@ module BlueCollarSystems
                 delivered_mode: delivered_mode,
                 degraded: true, reason: 'svg_text_unavailable',
                 count: native_fb_text_objects, note: missing_renderer_note)
+            end
             end
           end
         end
