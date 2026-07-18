@@ -332,7 +332,21 @@ module BlueCollarSystems
                  bytes.encode(Encoding::UTF_8, Encoding::BINARY,
                               invalid: :replace, undef: :replace, replace: '')
                end
-        clean_text(text)
+        preserve_decoded_text(text)
+      end
+
+      # Preserve decoded semantic content exactly. Normalization belongs in
+      # heuristics and lookup keys, never in a requested host representation.
+      # Whitespace/default-ignorable codepoints do not prove a PDF glyph has
+      # no painted outline.
+      def preserve_decoded_text(text)
+        return "" unless text
+        text.to_s.encode(
+          Encoding::UTF_8,
+          invalid: :replace,
+          undef: :replace,
+          replace: ''
+        )
       end
 
       def decode_bytes_with_font_map(bytes, font_name)
@@ -383,8 +397,14 @@ module BlueCollarSystems
       end
 
       def readable_text?(text)
-        t = clean_text(text)
-        return false if t.empty?
+        raw = text.to_s
+        return false if raw.empty?
+        return true if @strict_text_fidelity
+
+        t = clean_text(raw)
+        # String normalization is not physical evidence that a source glyph
+        # has no ink. Keep semantic-only spans for explicit reconciliation.
+        return true if t.empty?
         return false if t.length > 200
 
         compact = t.gsub(/\s+/, '')
@@ -804,7 +824,10 @@ module BlueCollarSystems
           end
         end
 
-        clean_text(fixed)
+        # Keep every character that was not part of an explicit, validated
+        # fraction repair. Generic whitespace cleanup would mutate semantic
+        # source content even when no fraction rule matched.
+        fixed
       end
 
       # P0-3: cursor/gap arithmetic runs along the run axis (u), matching
@@ -842,7 +865,7 @@ module BlueCollarSystems
 
         base = run.first
         merged = TextItem.new(
-          clean_text(text),
+          @strict_text_fidelity ? text : clean_text(text),
           base.x,
           base.y,
           base.font_size,
@@ -878,8 +901,10 @@ module BlueCollarSystems
         seen = {}
         out = []
         items.each do |it|
-          txt = clean_text(it.text)
-          next if txt.empty?
+          raw = it.text.to_s
+          next if raw.empty?
+          txt = @strict_text_fidelity ? raw : clean_text(raw)
+          txt = raw if txt.empty?
           key = [
             txt,
             (it.x.to_f * 2.0).round / 2.0,
@@ -1123,7 +1148,7 @@ module BlueCollarSystems
         chunks.each do |chunk|
           text << decode_text_operand(chunk, font_name)
         end
-        clean_text(text)
+        @strict_text_fidelity ? text : clean_text(text)
       end
 
       # ---------------------------------------------------------------

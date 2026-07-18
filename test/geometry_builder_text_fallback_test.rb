@@ -128,13 +128,14 @@ class TextFallbackEntity
 end
 
 class TextFallbackEntities
-  attr_reader :labels, :mesh_calls
+  attr_reader :labels, :mesh_calls, :added_texts
 
   def initialize(mesh_result, label_result)
     @mesh_result = mesh_result
     @label_result = label_result
     @labels = []
     @mesh_calls = []
+    @added_texts = []
     @entities = []
     @next_id = 100
   end
@@ -156,7 +157,8 @@ class TextFallbackEntities
     true
   end
 
-  def add_text(_text, point, vector = nil)
+  def add_text(text, point, vector = nil)
+    @added_texts << text
     raise 'forced label failure' if @label_result == :raise
     return nil if @label_result == :nil
 
@@ -300,6 +302,25 @@ class GeometryBuilderTextFallbackTest < Minitest::Test
     assert_equal 'label_native_api_unavailable', failure[:reason]
     assert_equal [:labels],
                  failure[:attempt_history].map { |rung| rung[:mode] }
+  end
+
+  def test_whitespace_only_label_is_attempted_with_exact_source_content
+    provenance = []
+    builder = make_builder(false, provenance, :labels)
+    entities = TextFallbackEntities.new(:success, :nil)
+    item = Item.new('   ', 10.0, 20.0, 9.0, 0.0, 'Arial', nil,
+                    10.0, 20.0, 25.0, 29.0, nil, 'text_span:1:1')
+
+    delivered = builder.send(
+      :place_text, entities, item, 0.0, 0.0, 792.0, 'Text'
+    )
+
+    refute delivered
+    assert_equal ['   ', '   ', '   '], entities.added_texts,
+                 'all native label signatures must receive exact source content'
+    failure = builder.text_delivery_failures.fetch(0)
+    assert_equal 'text_span:1:1', failure[:source_span_id]
+    assert_equal :labels, failure[:requested]
   end
 
   def test_sketchup_2017_label_leader_vector_is_never_certified_as_rotation

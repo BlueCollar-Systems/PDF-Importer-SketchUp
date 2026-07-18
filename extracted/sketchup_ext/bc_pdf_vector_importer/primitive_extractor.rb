@@ -154,25 +154,27 @@ module BlueCollarSystems
       end
 
       def self.normalize_text_item(ti, media_box, ox, oy, scale, page_num, page_rotation)
-        return nil unless ti.text && !ti.text.strip.empty?
+        return nil unless ti.text
+        source_text = ti.text.to_s
+        return nil if source_text.empty?
 
         ins = convert_pt([ti.x, ti.y], media_box, ox, oy, scale, page_rotation, false)
         fs = ti.font_size * PDF_PT_TO_INCH * scale
         fs = 0.05 if fs < 0.01
 
         # Estimate bbox from insertion + font size
-        text_w = ti.text.length * fs * 0.6
+        text_w = source_text.length * fs * 0.6
         text_h = fs * 1.2
         bbox = [ins[0], ins[1] - text_h * 0.3, ins[0] + text_w, ins[1] + text_h * 0.7]
 
-        normalized = ti.text.strip.upcase.gsub(/\s+/, ' ')
+        normalized = source_text.strip.upcase.gsub(/\s+/, ' ')
 
         # Generic tags only — no domain-specific classification at this layer
         generic_tags = classify_generic(ti.text)
 
         NormalizedText.new(
           IDGen.next,
-          ti.text.strip,
+          source_text,
           normalized,
           ins,
           bbox,

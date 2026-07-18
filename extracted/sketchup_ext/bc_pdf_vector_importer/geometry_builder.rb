@@ -522,7 +522,7 @@ module BlueCollarSystems
       # Text placement
       # ---------------------------------------------------------------
       def place_text(entities, item, origin_x, origin_y, page_height, layer)
-        return unless @import_text && item.text && !item.text.strip.empty?
+        return unless @import_text && item.text && !item.text.to_s.empty?
 
         begin
           if @use_3d_text

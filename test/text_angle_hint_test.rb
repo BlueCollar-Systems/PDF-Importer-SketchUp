@@ -81,6 +81,27 @@ far_merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hint
 assert_near(far_merged[0].angle, 0.0, 0.01,
             'far internal text must not rotate an unrelated external item')
 
+# Poppler bbox output commonly omits leading/trailing spaces.  The nearby
+# internal source span is the semantic-content authority; bbox geometry still
+# comes from the external item.
+semantic_external = [
+  ti.new('A', 100.0, 200.0, 10.0, 0.0, 'pdftotext', nil,
+         100.0, 200.0, 110.0, 212.0, nil)
+]
+semantic_internal = [
+  ti.new(' A ', 100.0, 200.0, 10.0, 0.0, 'F1', 10.0,
+         nil, nil, nil, nil, nil),
+  ti.new('   ', 130.0, 200.0, 10.0, 0.0, 'F1', 10.0,
+         nil, nil, nil, nil, nil)
+]
+semantic_merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hints(
+  semantic_external, semantic_internal
+)
+assert_true(semantic_merged[0].text == ' A ',
+            'internal source text must restore exact leading/trailing spaces')
+assert_true(semantic_merged.any? { |item| item.text == '   ' },
+            'whitespace-only internal source spans must not disappear')
+
 puts
 if $failures.empty?
   puts "PASS: #{$pass_count} assertions"

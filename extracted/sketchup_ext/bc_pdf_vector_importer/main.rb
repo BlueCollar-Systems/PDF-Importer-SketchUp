@@ -1744,16 +1744,23 @@ module BlueCollarSystems
       return text_items unless text_items && angle_items && !angle_items.empty?
 
       hints = angle_items.select do |it|
-        it && it.text && !it.text.to_s.strip.empty?
+        it && it.text && !it.text.to_s.empty?
       end
       return text_items if hints.empty?
 
-      text_items.map do |item|
+      merged = text_items.map do |item|
         next item unless item && item.text
 
         hint = nearest_text_angle_hint(item, hints)
         hint ? clone_text_item_with_hints(item, hint) : item
       end
+      # pdftotext bbox output has no word element for a whitespace-only source
+      # span. Keep those internal semantic spans so downstream delivery either
+      # creates the requested representation or records an explicit failure.
+      semantic_whitespace = hints.select do |hint|
+        normalize_text_key(hint.text).empty?
+      end
+      merged + semantic_whitespace
     rescue StandardError => e
       Logger.warn("Pipeline", "apply internal text angle hints failed: #{e.message}")
       text_items
@@ -1813,9 +1820,9 @@ module BlueCollarSystems
       item
     end
 
-    # Merge internal PDF text-matrix origin, nominal size, and angle onto
-    # external bbox items. Poppler gives excellent coverage and bboxes; the
-    # internal parser gives the Adobe-faithful nominal text height.
+    # Merge exact internal semantic content, PDF text-matrix origin, nominal
+    # size, and angle onto external bbox items. Poppler gives excellent
+    # coverage and bboxes; the internal parser keeps the source operand.
     def self.clone_text_item_with_hints(item, hint)
       nominal_size = begin
         v = hint.font_size.to_f
@@ -1824,7 +1831,7 @@ module BlueCollarSystems
         item.font_size
       end
       TextParser::TextItem.new(
-        item.text,
+        hint.text,
         hint.x,
         hint.y,
         nominal_size,
