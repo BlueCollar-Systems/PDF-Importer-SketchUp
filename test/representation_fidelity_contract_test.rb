@@ -606,6 +606,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       ])
     )
     stats = {
+      requested_text_mode: :geometry, text_mode: :geometry,
       text_source_span_ids: ['text_span:1:0', 'text_span:1:1'],
       text_attempts: [], source_provenance_objects: [],
       page_text_delivery_records: [], text_renderers: []
@@ -674,6 +675,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       ])
     )
     stats = {
+      requested_text_mode: :glyphs, text_mode: :glyphs,
       text_source_span_ids: ['text_span:1:0', 'text_span:1:1'],
       text_attempts: [], source_provenance_objects: [],
       page_text_delivery_records: [], text_renderers: []
@@ -788,6 +790,7 @@ class RepresentationFidelityContractTest < Minitest::Test
 
   def test_qa_identity_ledger_accepts_exact_cross_links_and_rejects_bad_or_orphan_ids
     valid = {
+      requested_text_mode: :text3d, text_mode: :text3d,
       text_source_span_ids: ['text_span:1:0'],
       source_provenance_objects: [{
         object_id: 'text_delivery:1:0', page: 1, source_kind: 'text_span',
@@ -840,6 +843,7 @@ class RepresentationFidelityContractTest < Minitest::Test
 
   def test_qa_requires_mode_specific_text_delivery_evidence_on_attempt_and_completed_rung
     text3d = {
+      requested_text_mode: :text3d, text_mode: :text3d,
       text_source_span_ids: ['text_span:1:0'],
       source_provenance_objects: [{
         object_id: 'text_delivery:1:0', page: 1, source_kind: 'text_span',
@@ -864,6 +868,8 @@ class RepresentationFidelityContractTest < Minitest::Test
       }]
     }
     labels = Marshal.load(Marshal.dump(text3d))
+    labels[:requested_text_mode] = :labels
+    labels[:text_mode] = :labels
     labels[:source_provenance_objects][0][:created_entity_type] = 'native_label'
     labels[:text_attempts][0][:requested_mode] = :labels
     labels[:text_attempts][0][:delivered_mode] = :labels
@@ -1479,6 +1485,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       missing_fonts: [], missing_language_packs: []
     }
     stats = {
+      requested_text_mode: :text3d, text_mode: :text3d,
       text_source_span_ids: ['text_span:1:0'],
       fallback_transitions: [], terminal_text_delivery_records: [],
       text_attempts: [], text_renderers: [], page_text_sources: {},
@@ -1559,6 +1566,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       renderer: :pdftocairo, missing_fonts: [], missing_language_packs: []
     }
     stats = {
+      requested_text_mode: :text3d, text_mode: :text3d,
       text_source_span_ids: ['text_span:1:0'],
       fallback_transitions: [], terminal_text_delivery_records: [],
       text_attempts: [], text_renderers: [], page_text_sources: {},

@@ -415,7 +415,7 @@ class SketchupHostLauncherTest < Minitest::Test
           'import_session_id' => 'session-1',
           'object_count' => 1,
           'objects' => [{
-            'span_id' => 'p1:s1',
+            'span_id' => 'text_span:1:0',
             'resulting_entity_ids' => ['entity_id:13']
           }]
         },
@@ -476,16 +476,26 @@ class SketchupHostLauncherTest < Minitest::Test
       'entity_manifest_path' => manifest_path,
       'entity_manifest_sha256' => Digest::SHA256.file(manifest_path).hexdigest,
       'reopen_persistent_id_verified' => true,
-      'text_source_span_ids' => ['p1:s1'],
+      'text_source_span_ids' => ['text_span:1:0'],
       'text_attempts' => [{
-        'source_span_id' => 'p1:s1',
-        'resulting_entity_ids' => ['entity_id:13']
+        'source_span_id' => 'text_span:1:0',
+        'requested_mode' => 'labels', 'delivered_mode' => 'labels',
+        'resulting_entity_ids' => ['entity_id:13'],
+        'visual_fidelity_verified' => true,
+        'content_verified' => true, 'leader_verified' => true,
+        'attempt_history' => [{
+          'mode' => 'labels', 'outcome' => 'complete',
+          'resulting_entity_ids' => ['entity_id:13'],
+          'visual_fidelity_verified' => true,
+          'cleanup_outcome' => 'not_required',
+          'content_verified' => true, 'leader_verified' => true
+        }]
       }],
       'source_provenance' => {
         'schema' => 'bcs.source_provenance/1.0',
         'import_session_id' => 'session-1',
         'objects' => [{
-          'span_id' => 'p1:s1',
+          'span_id' => 'text_span:1:0',
           'resulting_entity_ids' => ['entity_id:13']
         }]
       },

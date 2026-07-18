@@ -498,3 +498,93 @@ ruby test/ruby22_compat_test.rb
 The actual registry preference backend was exercised read-only and returned the
 current absent state; only injected fake preference backends were mutated.
 No real SketchUp executable or paid/installed extension was launched.
+
+## Third Independent Review Correction (2026-07-17)
+
+The third review rejected the remaining false-green evidence paths. This pass
+binds every representation record to the job request, makes fallback proof
+independently verifiable in the host runner, proves Raster is an actual host
+image with bound content, and restricts all semantic span evidence to the
+selected PDF pages.
+
+### Corrected contracts
+
+- `QAReport` now derives one authoritative requested mode from the pipeline and
+  import options. Every attempt, page delivery, terminal delivery, raster
+  delivery, renderer, and page fallback that declares a request must match it.
+  A Labels job can no longer pass by self-declaring Geometry inside its records.
+- The host evidence verifier independently replays every item fallback ladder.
+  Only the next adjacent rung is legal, and every transition requires the exact
+  source span/importer/page, item scope, affirmative impossibility evidence,
+  attempted renderer, and complete cleanup of every created identity. The
+  global transition ledger must exactly equal the per-attempt proofs.
+- Requested Raster requires exactly one raster delivery for every selected
+  page. Each record must request and deliver Raster, identify one live manifest
+  entity, and cross-link to the terminal ledger. The entity typename must be an
+  Image/Image-like host type, never Group, and its importer attributes must
+  match the verified PNG page, dimensions, SHA-256, and byte count.
+- Raster fallbacks use the same image/content verification and must also have
+  exact terminal/raster-ledger identity cross-links. Temporary PNG content is
+  hashed before placement and the binding is persisted on the Image entity.
+- Normalized selected pages are recorded in pipeline stats. Every non-Raster
+  source span, attempt, provenance delivery, page delivery, terminal delivery,
+  and fallback proof is checked against that exact page set and against the
+  page embedded in `text_span:<page>:<index>`.
+
+### Adversarial RED evidence before correction
+
+```text
+ruby test/qa_report_test.rb --name
+  /requested_mode_spoof|outside_selected_pages|requested_raster_rejects/
+3 runs, 3 assertions, 3 failures, 0 errors
+- self-declared Geometry passed a Labels request
+- page-2-only span evidence passed a page-1 request
+- a non-raster Raster record passed
+
+ruby test/sketchup_host_evidence_test.rb --name
+  /self_declared_geometry|outside_selected_pages|real_image_manifest/
+3 runs, 6 assertions, 3 failures, 0 errors
+- host evidence trusted ready flags and entity IDs without semantic binding
+
+The adjacent/item/cleanup regression was also executed against cf5f20d:
+1 run, 2 assertions, 1 failure, 0 errors
+- non-adjacent, wrong-item, and incomplete-cleanup proofs were accepted
+```
+
+### Fresh GREEN evidence after correction
+
+```text
+ruby test/qa_report_test.rb
+35 runs, 174 assertions, 0 failures, 0 errors
+
+ruby test/sketchup_host_evidence_test.rb
+25 runs, 160 assertions, 0 failures, 0 errors
+
+ruby test/representation_fidelity_contract_test.rb
+55 runs, 530 assertions, 0 failures, 0 errors
+
+ruby test/sketchup_host_launcher_test.rb
+11 runs, 57 assertions, 0 failures, 0 errors
+
+ruby test/sketchup_batch_host_contract_test.rb
+7 runs, 93 assertions, 0 failures, 0 errors
+
+ruby test/sketchup_host_job_test.rb
+11 runs, 45 assertions, 0 failures, 0 errors
+
+ruby test/batch_host_nonmodal_policy_test.rb
+4 runs, 18 assertions, 0 failures, 0 errors
+
+ruby test/dependency_resolver_test.rb
+7 runs, 21 assertions, 0 failures, 0 errors
+
+ruby test/ruby22_compat_test.rb
+3 runs, 5 assertions, 0 failures, 0 errors
+
+Seven changed Ruby files: Syntax OK
+SketchUp 2017 Ruby compatibility: PASS
+git diff --check: clean
+```
+
+No real SketchUp host, installed plugin, paid extension, license file, or real
+registry preference was launched or modified during this correction.

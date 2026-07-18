@@ -383,6 +383,105 @@ class QAReportTest < Minitest::Test
     }
   end
 
+  def qa_page_mode_stats(requested_mode, delivered_mode, page_number)
+    source_id = "text_span:#{page_number}:0"
+    entity_id = 'persistent_id:811'
+    {
+      pages: 1, selected_pages: [page_number], primitives: 1, edges: 1,
+      text: 1, layers: [], text_mode: requested_mode,
+      requested_text_mode: requested_mode,
+      text_source_span_ids: [source_id], source_provenance_objects: [],
+      fallback_transitions: [], terminal_text_delivery_records: [],
+      raster_delivery_records: [], source_glyph_physical_deliveries: [],
+      text_attempts: [{
+        page: page_number, source_span_ids: [source_id],
+        requested_mode: delivered_mode, delivered_mode: delivered_mode,
+        resulting_entity_ids: [entity_id], visual_fidelity_verified: true,
+        attempt_history: [{
+          mode: delivered_mode, outcome: :complete,
+          resulting_entity_ids: [entity_id], visual_fidelity_verified: true,
+          cleanup_outcome: :not_required
+        }]
+      }],
+      page_text_delivery_records: [{
+        page: page_number, source_span_ids: [source_id],
+        requested_mode: delivered_mode, delivered_mode: delivered_mode,
+        resulting_entity_ids: [entity_id],
+        created_entity_type: delivered_mode == :geometry ?
+          'page_path_geometry' : 'glyph_outline',
+        visual_fidelity_verified: true
+      }]
+    }
+  end
+
+  def test_representation_fidelity_rejects_record_requested_mode_spoof
+    stats = qa_page_mode_stats(:labels, :geometry, 1)
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'spoof.pdf', { text_mode: :labels, pages: [1] }, stats
+    )
+    fidelity = report[:extra][:representation_fidelity]
+
+    assert_equal false, fidelity[:ready]
+    assert fidelity[:errors].any? { |error| error.include?('requested_mode') },
+           fidelity[:errors].join(', ')
+  end
+
+  def test_representation_fidelity_rejects_span_evidence_outside_selected_pages
+    stats = qa_page_mode_stats(:geometry, :geometry, 2)
+    stats[:selected_pages] = [1]
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'wrong-page.pdf', { text_mode: :geometry, pages: [1] }, stats
+    )
+    fidelity = report[:extra][:representation_fidelity]
+
+    assert_equal false, fidelity[:ready]
+    assert fidelity[:errors].any? { |error| error.include?('selected_page') },
+           fidelity[:errors].join(', ')
+  end
+
+  def test_requested_raster_rejects_self_declared_non_raster_delivery
+    entity_id = 'persistent_id:812'
+    record = {
+      page: 1, source_span_ids: [], requested_mode: :labels,
+      delivered_mode: :raster, resulting_entity_ids: [entity_id],
+      created_entity_type: 'Group', real_raster_verified: true,
+      visual_fidelity_verified: true, cleanup_outcome: :not_required,
+      delivery_scope: :page_raster, no_semantic_text: true
+    }
+    stats = {
+      pages: 1, selected_pages: [1], primitives: 1, edges: 0, text: 0,
+      layers: [], text_mode: :raster, requested_text_mode: :raster,
+      text_source_span_ids: [], text_attempts: [],
+      source_provenance_objects: [], page_text_delivery_records: [],
+      terminal_text_delivery_records: [record], raster_delivery_records: [record],
+      fallback_transitions: [], source_glyph_physical_deliveries: []
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'raster.pdf', { text_mode: :raster, pages: [1] }, stats
+    )
+    fidelity = report[:extra][:representation_fidelity]
+
+    assert_equal false, fidelity[:ready]
+    assert fidelity[:errors].any? { |error| error.include?('raster_delivery') },
+           fidelity[:errors].join(', ')
+
+    record[:requested_mode] = :raster
+    record[:created_entity_type] = 'raster_image'
+    record[:artifact_evidence] = {
+      page_number: 1, pixel_width: 1200, pixel_height: 1600,
+      png_signature_verified: true, page_binding_verified: true,
+      box_binding_verified: true, content_sha256: 'b' * 64,
+      content_byte_size: 48_000
+    }
+    accepted = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'raster.pdf', { text_mode: :raster, pages: [1] }, stats
+    )[:extra][:representation_fidelity]
+    assert_equal true, accepted[:ready], accepted[:errors].join(', ')
+  end
+
   def test_source_glyph_3d_text_requires_and_accepts_complete_host_evidence
     id = 'text_span:1:0'
     entity_id = 'persistent_id:101'
@@ -470,6 +569,9 @@ class QAReportTest < Minitest::Test
                              source_crop_binding_verified: true }
       }]
     }
+    stats[:raster_delivery_records] = [
+      stats[:terminal_text_delivery_records][0].dup
+    ]
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
       'fallback.pdf', { text_mode: :text3d }, stats
     )
@@ -657,10 +759,18 @@ class QAReportTest < Minitest::Test
         page: 1, source_span_ids: [], no_semantic_text: true,
         requested_mode: :text3d, delivered_mode: :raster,
         resulting_entity_ids: ['persistent_id:91'],
+        created_entity_type: 'raster_image',
         real_raster_verified: true, visual_fidelity_verified: true,
-        cleanup_outcome: :not_required, delivery_scope: :page_raster
+        cleanup_outcome: :not_required, delivery_scope: :page_raster,
+        artifact_evidence: {
+          page_number: 1, png_signature_verified: true,
+          page_binding_verified: true, box_binding_verified: true
+        }
       }]
     }
+    stats[:raster_delivery_records] = [
+      stats[:terminal_text_delivery_records][0].dup
+    ]
 
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
       'image-only.pdf', { text_mode: :text3d }, stats

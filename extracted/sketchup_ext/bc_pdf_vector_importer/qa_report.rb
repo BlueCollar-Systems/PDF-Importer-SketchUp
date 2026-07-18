@@ -100,7 +100,7 @@ module BlueCollarSystems
             'to match the Python hosts (R2-6).'
         end
         report[:extra][:representation_fidelity] =
-          validate_representation_fidelity(stats)
+          validate_representation_fidelity(stats, opts)
         enrich_report_extras!(report)
         attach_source_provenance!(report, stats)
         report
@@ -282,6 +282,9 @@ module BlueCollarSystems
           text_mode: stats[:text_mode].to_s,
           requested_text_mode: (stats[:requested_text_mode] ||
                                 stats['requested_text_mode']).to_s,
+          selected_pages: Array(
+            stats[:selected_pages] || stats['selected_pages']
+          ).map { |value| value.to_i },
           import_session_id: (stats[:import_session_id] ||
                               stats['import_session_id']).to_s,
           source_lineage: begin
@@ -298,6 +301,7 @@ module BlueCollarSystems
           embedded_image_paths: Array(stats[:embedded_image_paths] || stats[:embedded_image_files]).map(&:to_s),
           fallback_transitions: Array(stats[:fallback_transitions]).map { |entry| normalize_json(entry) },
           terminal_text_delivery_records: Array(stats[:terminal_text_delivery_records]).map { |entry| normalize_json(entry) },
+          raster_delivery_records: Array(stats[:raster_delivery_records]).map { |entry| normalize_json(entry) },
           terminal_cleanup_events: Array(stats[:terminal_cleanup_events]).map { |entry| normalize_json(entry) },
           page_representation_fallbacks: Array(stats[:page_representation_fallbacks]).map { |entry| normalize_json(entry) },
           empty_page_source_inspections: Array(stats[:empty_page_source_inspections]).map { |entry| normalize_json(entry) },
@@ -593,7 +597,92 @@ module BlueCollarSystems
         end
       end
 
-      def validate_representation_fidelity(stats)
+      def fidelity_requested_mode(stats, opts)
+        raw = stats[:requested_text_mode] || stats['requested_text_mode'] ||
+              stats[:text_mode] || stats['text_mode'] || opts[:text_mode] ||
+              opts['text_mode']
+        raw = :raster if opts[:force_raster] || opts['force_raster']
+        RepresentationFidelity.normalize_mode(raw)
+      end
+
+      def fidelity_expected_mode(opts)
+        return :raster if opts[:force_raster] || opts['force_raster']
+        RepresentationFidelity.normalize_mode(opts[:text_mode] || opts['text_mode'])
+      end
+
+      def fidelity_page_list(raw, page_count)
+        if raw == :all || raw.to_s.strip.downcase == 'all'
+          count = page_count.to_i
+          return count > 0 ? (1..count).to_a : []
+        end
+        Array(raw).map { |value| value.to_i }.select do |value|
+          value > 0
+        end.uniq.sort
+      end
+
+      def fidelity_selected_pages(stats, opts, errors)
+        stats_has_pages = stats.key?(:selected_pages) ||
+                          stats.key?('selected_pages')
+        stats_pages = fidelity_page_list(
+          stats[:selected_pages] || stats['selected_pages'], stats[:pages]
+        )
+        opts_has_pages = opts.key?(:pages) || opts.key?('pages')
+        opts_pages = fidelity_page_list(
+          opts[:pages] || opts['pages'], stats[:pages]
+        )
+        if stats_has_pages && opts_has_pages && stats_pages != opts_pages
+          errors << 'selected_pages_do_not_match_import_request'
+        end
+        stats_has_pages ? stats_pages : opts_pages
+      end
+
+      def fidelity_source_page(source_id)
+        match = RepresentationFidelity::SOURCE_ID.match(source_id.to_s.strip)
+        match ? match[1].to_i : nil
+      end
+
+      def fidelity_record_mode_binding!(errors, collection_name, records,
+                                        requested_mode, field, required)
+        Array(records).each_with_index do |entry, index|
+          next unless entry.is_a?(Hash)
+          has_field = entry.key?(field) || entry.key?(field.to_s)
+          next unless required || has_field
+          actual = RepresentationFidelity.normalize_mode(
+            telemetry_value(entry, field)
+          )
+          unless requested_mode && actual == requested_mode
+            errors << "#{collection_name}_requested_mode_mismatch:#{index}"
+          end
+        end
+      end
+
+      def fidelity_span_pages_valid?(entry, span_ids, selected_pages)
+        pages = Array(span_ids).map do |source_id|
+          fidelity_source_page(source_id)
+        end
+        return false if pages.empty? || pages.any? { |page| page.nil? }
+        return false unless selected_pages.empty? ||
+                            pages.all? { |page| selected_pages.include?(page) }
+        return false unless pages.uniq.length == 1
+        raw_page = telemetry_value(entry, :page)
+        return true if raw_page.nil? || raw_page.to_s.strip.empty?
+        raw_page.to_i == pages[0]
+      end
+
+      def fidelity_raster_artifact_valid?(artifact, page_number)
+        return false unless artifact.is_a?(Hash)
+        sha256 = telemetry_value(artifact, :content_sha256).to_s.downcase
+        telemetry_value(artifact, :page_number).to_i == page_number.to_i &&
+          telemetry_value(artifact, :pixel_width).to_i > 0 &&
+          telemetry_value(artifact, :pixel_height).to_i > 0 &&
+          telemetry_value(artifact, :png_signature_verified) == true &&
+          telemetry_value(artifact, :page_binding_verified) == true &&
+          telemetry_value(artifact, :box_binding_verified) == true &&
+          sha256 =~ /\A[0-9a-f]{64}\z/ &&
+          telemetry_value(artifact, :content_byte_size).to_i > 0
+      end
+
+      def validate_representation_fidelity(stats, opts = {})
         execution_scope = (stats[:execution_scope] ||
                            stats['execution_scope']).to_s
         if execution_scope == 'extraction_only'
@@ -627,10 +716,56 @@ module BlueCollarSystems
           stats['source_glyph_physical_deliveries']
         )
         errors = []
+        requested_mode = fidelity_requested_mode(stats, opts)
+        expected_mode = fidelity_expected_mode(opts)
+        selected_pages = fidelity_selected_pages(stats, opts, errors)
+        errors << 'requested_text_mode_invalid' unless requested_mode
+        if expected_mode && requested_mode != expected_mode
+          errors << 'requested_text_mode_does_not_match_import_request'
+        end
+
+        fidelity_record_mode_binding!(
+          errors, 'text_attempt', attempts, requested_mode,
+          :requested_mode, true
+        )
+        fidelity_record_mode_binding!(
+          errors, 'page_delivery', page_deliveries, requested_mode,
+          :requested_mode, true
+        )
+        fidelity_record_mode_binding!(
+          errors, 'terminal_delivery', terminal, requested_mode,
+          :requested_mode, true
+        )
+        raster_deliveries = Array(
+          stats[:raster_delivery_records] || stats['raster_delivery_records']
+        )
+        fidelity_record_mode_binding!(
+          errors, 'raster_delivery', raster_deliveries, requested_mode,
+          :requested_mode, true
+        )
+        fidelity_record_mode_binding!(
+          errors, 'text_renderer',
+          stats[:text_renderers] || stats['text_renderers'], requested_mode,
+          :requested_mode, false
+        )
+        fidelity_record_mode_binding!(
+          errors, 'page_fallback',
+          stats[:page_representation_fallbacks] ||
+            stats['page_representation_fallbacks'], requested_mode,
+          :requested_text_mode, false
+        )
 
         if source_ids.uniq.length != source_ids.length ||
            !source_ids.all? { |identity| identity =~ RepresentationFidelity::SOURCE_ID }
           errors << 'source_span_ledger_invalid'
+        end
+        unless requested_mode == :raster || selected_pages.empty?
+          source_ids.each do |source_id|
+            page = fidelity_source_page(source_id)
+            unless page && selected_pages.include?(page)
+              errors << "source_span_outside_selected_pages:#{source_id}"
+            end
+          end
         end
 
         provenance_by_span = {}
@@ -681,7 +816,9 @@ module BlueCollarSystems
           ids = RepresentationFidelity.positive_entity_ids(
             telemetry_value(entry, :resulting_entity_ids)
           )
-          unless source_ids.include?(span_id) && ids
+          page_valid = requested_mode == :raster || selected_pages.empty? ||
+            fidelity_span_pages_valid?(entry, [span_id], selected_pages)
+          unless source_ids.include?(span_id) && ids && page_valid
             errors << "provenance_invalid:#{span_id}"
             next
           end
@@ -752,6 +889,7 @@ module BlueCollarSystems
           if span_ids.empty? && no_semantic_text
             page_number = telemetry_value(entry, :page).to_i
             valid_page_raster = page_number > 0 &&
+              (selected_pages.empty? || selected_pages.include?(page_number)) &&
               !terminal_no_semantic_pages.key?(page_number) && ids &&
               cleanup == 'not_required' && delivered == :raster &&
               telemetry_value(entry, :delivery_scope).to_s == 'page_raster' &&
@@ -784,6 +922,7 @@ module BlueCollarSystems
             telemetry_value(artifact, :source_crop_binding_verified) == true
           valid = !span_ids.empty? && span_ids.uniq.length == span_ids.length &&
                   span_ids.all? { |span_id| source_ids.include?(span_id) } &&
+                  fidelity_span_pages_valid?(entry, span_ids, selected_pages) &&
                   span_ids.none? { |span_id| terminal_by_span.key?(span_id) } &&
                   ids && delivered == :raster && page_number > 0 &&
                   (page_raster_valid || item_raster_valid) &&
@@ -801,6 +940,114 @@ module BlueCollarSystems
             end
           end
           span_ids.each { |span_id| terminal_by_span[span_id] = ids }
+        end
+
+        raster_delivery_signatures = raster_deliveries.each_with_index.map do |entry, index|
+          unless entry.is_a?(Hash)
+            errors << "raster_delivery_invalid:#{index}"
+            next nil
+          end
+          page_number = telemetry_value(entry, :page).to_i
+          ids = RepresentationFidelity.positive_entity_ids(
+            telemetry_value(entry, :resulting_entity_ids)
+          )
+          artifact = telemetry_value(entry, :artifact_evidence)
+          valid = RepresentationFidelity.normalize_mode(
+            telemetry_value(entry, :requested_mode)
+          ) == requested_mode &&
+            RepresentationFidelity.normalize_mode(
+              telemetry_value(entry, :delivered_mode)
+            ) == :raster && ids && ids.length == 1 && page_number > 0 &&
+            (selected_pages.empty? || selected_pages.include?(page_number)) &&
+            telemetry_value(entry, :created_entity_type).to_s == 'raster_image' &&
+            telemetry_value(entry, :real_raster_verified) == true &&
+            telemetry_value(entry, :visual_fidelity_verified) == true &&
+            artifact.is_a?(Hash) &&
+            telemetry_value(artifact, :page_number).to_i == page_number
+          unless valid
+            errors << "raster_delivery_invalid:#{index}"
+            next nil
+          end
+          [page_number, ids[0]]
+        end
+        terminal_raster_signatures = terminal.map do |entry|
+          next nil unless entry.is_a?(Hash) &&
+            RepresentationFidelity.normalize_mode(
+              telemetry_value(entry, :delivered_mode)
+            ) == :raster
+          ids = RepresentationFidelity.positive_entity_ids(
+            telemetry_value(entry, :resulting_entity_ids)
+          )
+          ids && ids.length == 1 ?
+            [telemetry_value(entry, :page).to_i, ids[0]] : :invalid
+        end.compact
+        if raster_delivery_signatures.any? { |signature| signature.nil? } ||
+           terminal_raster_signatures.include?(:invalid) ||
+           raster_delivery_signatures.compact.sort !=
+             terminal_raster_signatures.reject { |value| value == :invalid }.sort
+          errors << 'raster_delivery_terminal_crosslink_invalid'
+        end
+
+        if requested_mode == :raster
+          raster_signatures = []
+          raster_pages = []
+          raster_deliveries.each_with_index do |entry, index|
+            unless entry.is_a?(Hash)
+              errors << "raster_delivery_invalid:#{index}"
+              next
+            end
+            page_number = telemetry_value(entry, :page).to_i
+            ids = RepresentationFidelity.positive_entity_ids(
+              telemetry_value(entry, :resulting_entity_ids)
+            )
+            spans = telemetry_value(entry, :source_span_ids)
+            spans = spans.is_a?(Array) ? spans : nil
+            requested = RepresentationFidelity.normalize_mode(
+              telemetry_value(entry, :requested_mode)
+            )
+            delivered = RepresentationFidelity.normalize_mode(
+              telemetry_value(entry, :delivered_mode)
+            )
+            valid = requested == :raster && delivered == :raster &&
+              spans == [] && ids && ids.length == 1 && page_number > 0 &&
+              (selected_pages.empty? || selected_pages.include?(page_number)) &&
+              telemetry_value(entry, :created_entity_type).to_s == 'raster_image' &&
+              telemetry_value(entry, :real_raster_verified) == true &&
+              telemetry_value(entry, :visual_fidelity_verified) == true &&
+              telemetry_value(entry, :cleanup_outcome).to_s == 'not_required' &&
+              telemetry_value(entry, :delivery_scope).to_s == 'page_raster' &&
+              telemetry_value(entry, :no_semantic_text) == true &&
+              fidelity_raster_artifact_valid?(
+                telemetry_value(entry, :artifact_evidence), page_number
+              )
+            unless valid
+              errors << "raster_delivery_invalid:#{index}"
+              next
+            end
+            raster_pages << page_number
+            raster_signatures << [page_number, ids[0]]
+          end
+          if raster_pages.uniq.length != raster_pages.length ||
+             raster_pages.sort.empty? ||
+             (!selected_pages.empty? && raster_pages.sort != selected_pages.sort)
+            errors << 'raster_delivery_page_set_mismatch'
+          end
+          terminal_signatures = terminal.map do |entry|
+            next nil unless entry.is_a?(Hash)
+            ids = RepresentationFidelity.positive_entity_ids(
+              telemetry_value(entry, :resulting_entity_ids)
+            )
+            ids && ids.length == 1 ?
+              [telemetry_value(entry, :page).to_i, ids[0]] : nil
+          end
+          if terminal_signatures.any? { |signature| signature.nil? } ||
+             terminal_signatures.sort != raster_signatures.sort
+            errors << 'raster_delivery_terminal_crosslink_invalid'
+          end
+          unless source_ids.empty? && attempts.empty? &&
+                 page_deliveries.empty? && provenance.empty?
+            errors << 'raster_delivery_contains_non_raster_span_evidence'
+          end
         end
 
         page_delivery_by_span = {}
@@ -828,6 +1075,7 @@ module BlueCollarSystems
           }
           valid = !span_ids.empty? && span_ids.uniq.length == span_ids.length &&
                   span_ids.all? { |span_id| source_ids.include?(span_id) } &&
+                  fidelity_span_pages_valid?(entry, span_ids, selected_pages) &&
                   ids && requested == delivered &&
                   page_entity_types[delivered] == entity_type &&
                   telemetry_value(entry, :visual_fidelity_verified) == true
@@ -874,6 +1122,9 @@ module BlueCollarSystems
             valid_page_attempt = !page_span_ids.empty? &&
               page_span_ids.uniq.length == page_span_ids.length &&
               page_span_ids.all? { |identity| source_ids.include?(identity) } &&
+              fidelity_span_pages_valid?(
+                attempt, page_span_ids, selected_pages
+              ) &&
               requested == delivered && page_modes.include?(delivered) && ids &&
               telemetry_value(attempt, :visual_fidelity_verified) == true &&
               history.is_a?(Array) && history.length == 1 &&
@@ -913,6 +1164,9 @@ module BlueCollarSystems
           history = telemetry_value(attempt, :attempt_history)
           scalar_modes = RepresentationFidelity::MODES
           unless source_ids.include?(span_id) && requested && delivered &&
+                 fidelity_span_pages_valid?(
+                   attempt, [span_id], selected_pages
+                 ) &&
                  scalar_modes.include?(delivered) && ids &&
                  history.is_a?(Array) && !history.empty?
             errors << "attempt_fields_invalid:#{span_id}"

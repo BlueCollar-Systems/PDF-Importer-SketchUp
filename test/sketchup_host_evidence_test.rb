@@ -77,6 +77,21 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  class FakeImage < FakeEntity
+    attr_reader :width, :height
+
+    def initialize(entity_id, options = {})
+      super(entity_id, 'Image', options)
+      @width = options.fetch(:width, 8.5)
+      @height = options.fetch(:height, 11.0)
+      @attributes = options.fetch(:attributes, {})
+    end
+
+    def get_attribute(dictionary, key, default_value = nil)
+      @attributes.fetch([dictionary, key], default_value)
+    end
+  end
+
   def setup
     assert File.file?(EVIDENCE_TOOL),
            'tools/sketchup_host_evidence.rb must exist'
@@ -178,11 +193,18 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_equal 13, rows[0]['entity_id']
     assert_equal 7013, rows[0]['persistent_id']
 
-    assert SketchupHostEvidence.verify_delivery_evidence!(
-      ready_stats(:terminal_text_delivery_records => [{
+    valid = ready_stats(:terminal_text_delivery_records => [{
         :resulting_entity_ids => ['persistent_id:7013'],
-        :source_span_ids => ['p1:s1']
-      }]),
+        :source_span_ids => ['text_span:1:0'],
+        :requested_mode => :labels, :delivered_mode => :labels
+      }])
+    valid[:text_attempts][0][:resulting_entity_ids] = ['persistent_id:7013']
+    valid[:text_attempts][0][:attempt_history][0][:resulting_entity_ids] =
+      ['persistent_id:7013']
+    valid[:source_provenance_objects][0][:resulting_entity_ids] =
+      ['persistent_id:7013']
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      valid,
       rows,
       :labels,
       [1]
@@ -191,7 +213,8 @@ class SketchupHostEvidenceTest < Minitest::Test
       SketchupHostEvidence.verify_delivery_evidence!(
         ready_stats(:terminal_text_delivery_records => [{
           :resulting_entity_ids => ['persistent_id:13'],
-          :source_span_ids => ['p1:s1']
+          :source_span_ids => ['text_span:1:0'],
+          :requested_mode => :labels, :delivered_mode => :labels
         }]),
         rows,
         :labels,
@@ -294,13 +317,14 @@ class SketchupHostEvidenceTest < Minitest::Test
 
   def test_source_span_attempt_and_delivery_sets_must_be_equal
     stats = ready_stats(
-      :text_source_span_ids => ['p1:s1', 'p1:s2'],
+      :text_source_span_ids => ['text_span:1:0', 'text_span:1:1'],
       :text_attempts => [{
-        :source_span_id => 'p1:s1',
+        :source_span_id => 'text_span:1:0',
+        :requested_mode => :labels,
         :resulting_entity_ids => ['entity_id:13']
       }],
       :source_provenance_objects => [{
-        :span_id => 'p1:s1',
+        :span_id => 'text_span:1:0',
         :resulting_entity_ids => ['entity_id:13']
       }]
     )
@@ -314,14 +338,28 @@ class SketchupHostEvidenceTest < Minitest::Test
     [:geometry, :glyphs].each do |mode|
       stats = ready_stats(
         :requested_text_mode => mode,
-        :text_source_span_ids => ['p1:s1', 'p1:s2'],
+        :text_source_span_ids => ['text_span:1:0', 'text_span:1:1'],
         :text_attempts => [{
-          :source_span_ids => ['p1:s1', 'p1:s2'],
-          :resulting_entity_ids => ['entity_id:13']
+          :page => 1,
+          :source_span_ids => ['text_span:1:0', 'text_span:1:1'],
+          :requested_mode => mode, :delivered_mode => mode,
+          :resulting_entity_ids => ['entity_id:13'],
+          :visual_fidelity_verified => true,
+          :attempt_history => [{
+            :mode => mode, :outcome => :complete,
+            :resulting_entity_ids => ['entity_id:13'],
+            :visual_fidelity_verified => true,
+            :cleanup_outcome => :not_required
+          }]
         }],
         :source_provenance_objects => [],
         :page_text_delivery_records => [{
-          :source_span_ids => ['p1:s1', 'p1:s2'],
+          :page => 1,
+          :source_span_ids => ['text_span:1:0', 'text_span:1:1'],
+          :requested_mode => mode, :delivered_mode => mode,
+          :created_entity_type => mode == :geometry ?
+            'page_path_geometry' : 'glyph_outline',
+          :visual_fidelity_verified => true,
           :resulting_entity_ids => ['entity_id:13']
         }]
       )
@@ -329,6 +367,104 @@ class SketchupHostEvidenceTest < Minitest::Test
       assert SketchupHostEvidence.verify_delivery_evidence!(
         stats, manifest, mode, [1]
       )
+    end
+  end
+
+  def test_strict_evidence_rejects_self_declared_geometry_for_labels_job
+    stats = strict_page_mode_stats(:labels, :geometry, 1)
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, manifest, :labels, [1]
+      )
+    end
+    assert_match(/requested.*mode/i, error.message)
+  end
+
+  def test_strict_evidence_rejects_span_evidence_outside_selected_pages
+    stats = strict_page_mode_stats(:labels, :labels, 2)
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, manifest, :labels, [1]
+      )
+    end
+    assert_match(/selected page/i, error.message)
+  end
+
+  def test_requested_raster_requires_real_image_manifest_content_binding
+    sha256 = 'a' * 64
+    artifact = {
+      :page_number => 1, :pixel_width => 1200, :pixel_height => 1600,
+      :png_signature_verified => true, :page_binding_verified => true,
+      :box_binding_verified => true, :content_sha256 => sha256,
+      :content_byte_size => 48_000
+    }
+    record = {
+      :page => 1, :source_span_ids => [], :requested_mode => :raster,
+      :delivered_mode => :raster, :resulting_entity_ids => ['entity_id:13'],
+      :created_entity_type => 'raster_image', :real_raster_verified => true,
+      :visual_fidelity_verified => true, :cleanup_outcome => :not_required,
+      :delivery_scope => :page_raster, :no_semantic_text => true,
+      :artifact_evidence => artifact
+    }
+    stats = ready_stats(
+      :requested_text_mode => :raster, :text_source_span_ids => [],
+      :text_attempts => [], :source_provenance_objects => [],
+      :terminal_text_delivery_records => [record],
+      :raster_delivery_records => [record]
+    )
+    group_manifest = SketchupHostEvidence.snapshot_entities([
+      FakeGroup.new(13, [])
+    ])
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, group_manifest, :raster, [1]
+      )
+    end
+    assert_match(/image/i, error.message)
+
+    image_manifest = SketchupHostEvidence.snapshot_entities([
+      FakeImage.new(13, :attributes => {
+        ['BC_PDF_Importer', 'raster_page_number'] => 1,
+        ['BC_PDF_Importer', 'raster_pixel_width'] => 1200,
+        ['BC_PDF_Importer', 'raster_pixel_height'] => 1600,
+        ['BC_PDF_Importer', 'raster_content_sha256'] => sha256,
+        ['BC_PDF_Importer', 'raster_content_bytes'] => 48_000
+      })
+    ])
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, image_manifest, :raster, [1]
+    )
+  end
+
+  def test_fallback_requires_adjacent_item_bound_proof_and_owned_cleanup
+    mutations = [
+      proc do |proof|
+        proof[:to_mode] = :geometry
+      end,
+      proc do |proof|
+        proof[:source_span_id] = 'text_span:1:99'
+      end,
+      proc do |proof|
+        proof[:created_entity_ids] = ['entity_id:99']
+        proof[:cleaned_entity_ids] = []
+        proof[:cleanup_outcome] = :verified
+      end
+    ]
+    mutations.each do |mutate|
+      stats = strict_item_fallback_stats
+      proof = stats[:text_attempts][0][:attempt_history][0][:transition_proof]
+      mutate.call(proof)
+      stats[:fallback_transitions] = [proof.dup]
+
+      error = assert_raises(StandardError) do
+        SketchupHostEvidence.verify_delivery_evidence!(
+          stats, manifest, :labels, [1]
+        )
+      end
+      assert_match(/fallback|transition|source item/i, error.message)
     end
   end
 
@@ -477,13 +613,21 @@ class SketchupHostEvidenceTest < Minitest::Test
     {
       :requested_text_mode => :labels,
       :import_session_id => 'test-session',
-      :text_source_span_ids => ['p1:s1'],
+      :text_source_span_ids => ['text_span:1:0'],
       :text_attempts => [{
-        :source_span_id => 'p1:s1',
-        :resulting_entity_ids => [13]
+        :source_span_id => 'text_span:1:0',
+        :requested_mode => :labels, :delivered_mode => :labels,
+        :resulting_entity_ids => [13],
+        :visual_fidelity_verified => true,
+        :attempt_history => [{
+          :mode => :labels, :outcome => :complete,
+          :resulting_entity_ids => [13],
+          :visual_fidelity_verified => true,
+          :cleanup_outcome => :not_required
+        }]
       }],
       :source_provenance_objects => [{
-        :span_id => 'p1:s1',
+        :span_id => 'text_span:1:0',
         :resulting_entity_ids => [13]
       }],
       :page_text_delivery_records => [],
@@ -497,6 +641,73 @@ class SketchupHostEvidenceTest < Minitest::Test
       :representation_fidelity => { :ready => true },
       :import_contract_ready => { :ready => true }
     }.merge(overrides)
+  end
+
+  def strict_page_mode_stats(job_mode, record_mode, page_number)
+    source_id = "text_span:#{page_number}:0"
+    entity_id = 'entity_id:13'
+    ready_stats(
+      :requested_text_mode => job_mode,
+      :text_source_span_ids => [source_id],
+      :text_attempts => [{
+        :page => page_number, :source_span_ids => [source_id],
+        :requested_mode => record_mode, :delivered_mode => record_mode,
+        :resulting_entity_ids => [entity_id],
+        :visual_fidelity_verified => true,
+        :attempt_history => [{
+          :mode => record_mode, :outcome => :complete,
+          :resulting_entity_ids => [entity_id],
+          :visual_fidelity_verified => true,
+          :cleanup_outcome => :not_required
+        }]
+      }],
+      :source_provenance_objects => [],
+      :page_text_delivery_records => [{
+        :page => page_number, :source_span_ids => [source_id],
+        :requested_mode => record_mode, :delivered_mode => record_mode,
+        :resulting_entity_ids => [entity_id],
+        :created_entity_type => record_mode == :geometry ?
+          'page_path_geometry' : 'native_label',
+        :visual_fidelity_verified => true
+      }]
+    )
+  end
+
+  def strict_item_fallback_stats
+    source_id = 'text_span:1:0'
+    entity_id = 'entity_id:13'
+    proof = {
+      :source_span_id => source_id,
+      :importer_id => 'sketchup_pdf_vector_importer',
+      :page_number => 1, :scope => :item,
+      :category => :exact_representation_impossible,
+      :affirmative_impossibility => true, :generic_failure => false,
+      :from_mode => :labels, :to_mode => :text3d,
+      :reason_code => :source_item_identity_unavailable,
+      :attempted_renderer => 'native_label_renderer',
+      :evidence => { :fresh_inventory_evaluation => true },
+      :created_entity_ids => [], :cleaned_entity_ids => [],
+      :cleanup_outcome => :not_required
+    }
+    ready_stats(
+      :text_attempts => [{
+        :source_span_id => source_id, :requested_mode => :labels,
+        :delivered_mode => :text3d, :resulting_entity_ids => [entity_id],
+        :attempt_history => [{
+          :mode => :labels, :outcome => :failed,
+          :resulting_entity_ids => [], :transition_proof => proof
+        }, {
+          :mode => :text3d, :outcome => :complete,
+          :resulting_entity_ids => [entity_id],
+          :visual_fidelity_verified => true,
+          :cleanup_outcome => :not_required
+        }]
+      }],
+      :source_provenance_objects => [{
+        :span_id => source_id, :resulting_entity_ids => [entity_id]
+      }],
+      :fallback_transitions => [proof.dup]
+    )
   end
 
   def bound_report(pdf)

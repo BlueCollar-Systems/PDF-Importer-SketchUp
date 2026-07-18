@@ -2309,6 +2309,7 @@ module BlueCollarSystems
         :embedded_images_placed => 0, :embedded_image_paths => [],
         :embedded_image_dir => nil, :extruded_faces => 0,
         :text_mode => :raster, :requested_text_mode => :raster,
+        :selected_pages => pages.dup,
         :match_pdf_layers => false,
         :text_renderers => [], :page_text_sources => {}, :peak_mb => 0.0,
         :model_3d_texts => [], :page_text_map => {},
@@ -2511,6 +2512,7 @@ module BlueCollarSystems
                 embedded_image_dir: nil, extruded_faces: 0,
                 text_mode: requested_text_mode,
                 requested_text_mode: requested_text_mode,
+                selected_pages: pages.dup,
                 match_pdf_layers: match_pdf_layers,
                 text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
                 model_3d_texts: [], page_text_map: {},
@@ -2821,8 +2823,10 @@ module BlueCollarSystems
                 :delivered_mode => :raster,
                 :no_semantic_text => true,
                 :resulting_entity_ids => [raster[:entity_id]],
+                :created_entity_type => 'raster_image',
                 :real_raster_verified => true,
                 :visual_fidelity_verified => true,
+                :artifact_evidence => raster[:artifact_evidence],
                 :cleanup_outcome => :not_required,
                 :delivery_scope => :page_raster
               }
@@ -3651,6 +3655,8 @@ module BlueCollarSystems
 
       {
         :png_path => png_path.to_s,
+        :content_sha256 => Digest::SHA256.file(png_path).hexdigest,
+        :content_byte_size => File.size(png_path).to_i,
         :pixel_width => pixel_width.to_i,
         :pixel_height => pixel_height.to_i,
         :page_number => requested_page,
@@ -3725,6 +3731,8 @@ module BlueCollarSystems
       end
       {
         :png_path => png_path.to_s,
+        :content_sha256 => Digest::SHA256.file(png_path).hexdigest,
+        :content_byte_size => File.size(png_path).to_i,
         :source_span_id => source_id,
         :page_number => requested_page,
         :page_rotation => crop_geometry[:page_rotation].to_i,
@@ -3877,6 +3885,14 @@ module BlueCollarSystems
           )
           image.set_attribute(dictionary, 'raster_source_box', artifact[:source_box])
           image.set_attribute(dictionary, 'raster_pixel_crop', artifact[:pixel_crop])
+          image.set_attribute(dictionary, 'raster_pixel_width', artifact[:pixel_width])
+          image.set_attribute(dictionary, 'raster_pixel_height', artifact[:pixel_height])
+          image.set_attribute(
+            dictionary, 'raster_content_sha256', artifact[:content_sha256]
+          )
+          image.set_attribute(
+            dictionary, 'raster_content_bytes', artifact[:content_byte_size]
+          )
         end
       rescue StandardError => e
         Logger.warn('Raster', "item image evidence attributes unavailable: #{e.message}")
@@ -4042,6 +4058,10 @@ module BlueCollarSystems
                               artifact_evidence[:pixel_width])
             img.set_attribute(dictionary, 'raster_pixel_height',
                               artifact_evidence[:pixel_height])
+            img.set_attribute(dictionary, 'raster_content_sha256',
+                              artifact_evidence[:content_sha256])
+            img.set_attribute(dictionary, 'raster_content_bytes',
+                              artifact_evidence[:content_byte_size])
           end
         rescue StandardError => e
           Logger.warn('Raster', "image evidence attributes unavailable: #{e.message}")
