@@ -959,12 +959,24 @@ module BlueCollarSystems
         0
       end
 
+      # Exact semantic content is part of the source-item identity and must
+      # never pass through a matching-key normalization. In particular, an
+      # all-space span still exists even when the renderer later proves that
+      # its exact source glyphs own no painted ink.
       def self.item_text(item)
         if item.respond_to?(:text)
-          item.text.to_s.strip
+          item.text.to_s
         else
           ''
         end
+      rescue StandardError
+        ''
+      end
+
+      # Heuristics may use a separately named key, but it must never be stored
+      # as delivered content, source evidence, or zero-ink authority.
+      def self.item_matching_text(item)
+        item_text(item).strip
       rescue StandardError
         ''
       end

@@ -297,7 +297,36 @@ class CairoGlyphSourceTest < Minitest::Test
     refute CGS.zero_placement_false_green?({ glyphs: 12 }, spans)
     refute CGS.zero_placement_false_green?({ glyphs: 0 }, []),
            'a genuinely empty page is not a false green'
-    refute CGS.zero_placement_false_green?({ glyphs: 0 }, [SpanItem.new('  ')])
+    assert CGS.zero_placement_false_green?({ glyphs: 0 }, [SpanItem.new('  ')]),
+           'Unicode whitespace is still a real semantic source span; only ' \
+           'physical renderer/font evidence may certify that it owns no ink'
+  end
+
+  def test_exact_source_text_is_not_stripped_from_inventory_or_evidence
+    span = SpanItem.new(' A ', 'pdftotext', 'text_span:1:spaces',
+                        100.0, 100.0, 150.0, 110.0)
+    whitespace = SpanItem.new('   ', 'internal', 'text_span:1:blank',
+                              160.0, 100.0, 175.0, 110.0)
+
+    assert_equal ' A ', CGS.item_text(span)
+    assert_equal '   ', CGS.item_text(whitespace)
+    assert_equal ' A ', CGS.source_span_evidence(span)[:text]
+
+    evidence = CGS.semantic_completion_evidence(
+      {
+        :placements_pdf => [],
+        :semantic_svg_glyphs => 0,
+        :semantic_svg_placements => 0,
+        :skipped_placements => [],
+        :placement_failures => []
+      },
+      [span, whitespace], FIXTURE_MEDIA_BOX
+    )
+    ids = evidence[:unmatched_source_runs].map do |entry|
+      entry[:source_span_id]
+    end
+    assert_includes ids, 'text_span:1:spaces'
+    assert_includes ids, 'text_span:1:blank'
   end
 
   # ── 6. span matching + provenance (R17-3) ────────────────────────────────
