@@ -40,6 +40,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       @deleted = options.fetch(:deleted, false)
       @bounds = options[:bounds]
       @transformation = options[:transformation]
+      @attributes = options.fetch(:attributes, {})
     end
 
     def valid?
@@ -49,6 +50,10 @@ class SketchupHostEvidenceTest < Minitest::Test
     def deleted?
       @deleted
     end
+
+    def get_attribute(dictionary, key, default_value = nil)
+      @attributes.fetch([dictionary, key], default_value)
+    end
   end
 
   class FakeGroup < FakeEntity
@@ -57,6 +62,21 @@ class SketchupHostEvidenceTest < Minitest::Test
     def initialize(entity_id, children, options = {})
       super(entity_id, 'Group', options)
       @entities = children
+    end
+  end
+
+  class FakeText < FakeEntity
+    attr_reader :text, :point
+
+    def initialize(entity_id, options = {})
+      super(entity_id, 'Text', options)
+      @text = options.fetch(:text, 'A')
+      @point = options.fetch(:point, FakePoint.new(1, 2, 0))
+      @leader_visible = options.fetch(:leader_visible, false)
+    end
+
+    def display_leader?
+      @leader_visible
     end
   end
 
@@ -123,6 +143,14 @@ class SketchupHostEvidenceTest < Minitest::Test
       )
     end
     assert_match(/source location/, error.message)
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_source_locations!(
+        'C:/work/sketchup_ext',
+        'renderer' => ['C:/work/sketchup_ext/renderer.rb', 4.5]
+      )
+    end
+    assert_match(/source location|Integer|line/i, error.message)
   end
 
   def test_nested_groups_and_components_produce_recursive_manifest_rows
@@ -159,6 +187,49 @@ class SketchupHostEvidenceTest < Minitest::Test
                  SketchupHostEvidence.manifest_entity_ids(manifest).sort
   end
 
+  def test_snapshot_preserves_representation_identity_attributes
+    entity = FakeGroup.new(20, [FakeEntity.new(21, 'Edge')],
+      :attributes => {
+        ['BC_PDF_Importer', 'source_span_id'] => 'text_span:1:0',
+        ['BC_PDF_Importer', 'source_kind'] => 'text_span',
+        ['BC_PDF_Importer', 'representation'] => 'geometry',
+        ['BC_PDF_Importer', 'renderer'] => 'svg_item_flat_geometry_renderer'
+      })
+
+    row = SketchupHostEvidence.snapshot_entities([entity]).first
+    assert_equal({
+      'source_span_id' => 'text_span:1:0',
+      'source_unit_id' => nil,
+      'source_kind' => 'text_span',
+      'representation' => 'geometry',
+      'renderer' => 'svg_item_flat_geometry_renderer'
+    }, row['representation_evidence'])
+  end
+
+  def test_duplicate_manifest_identities_fail_even_when_typenames_match
+    duplicate_entity_id = [{
+      'entity_id' => 10, 'persistent_id' => 1010, 'typename' => 'Group',
+      'children' => [{
+        'entity_id' => 10, 'persistent_id' => 1011, 'typename' => 'Group',
+        'children' => []
+      }]
+    }]
+    duplicate_persistent_id = [{
+      'entity_id' => 10, 'persistent_id' => 1010, 'typename' => 'Group',
+      'children' => [{
+        'entity_id' => 11, 'persistent_id' => 1010, 'typename' => 'Group',
+        'children' => []
+      }]
+    }]
+
+    [duplicate_entity_id, duplicate_persistent_id].each do |rows|
+      error = assert_raises(StandardError) do
+        SketchupHostEvidence.manifest_identity_sets(rows)
+      end
+      assert_match(/duplicate/i, error.message)
+    end
+  end
+
   def test_delivery_ids_are_cross_checked_against_nested_manifest
     stats = ready_stats(
       :terminal_text_delivery_records => [{
@@ -188,7 +259,7 @@ class SketchupHostEvidenceTest < Minitest::Test
 
   def test_manifest_records_both_identity_namespaces_and_checks_each_claim
     rows = SketchupHostEvidence.snapshot_entities([
-      FakeEntity.new(13, 'Face', :persistent_id => 7013)
+      FakeText.new(13, :persistent_id => 7013)
     ])
     assert_equal 13, rows[0]['entity_id']
     assert_equal 7013, rows[0]['persistent_id']
@@ -256,6 +327,33 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_match(/transformation/, error.message)
   end
 
+  def test_reopen_continuity_rejects_deleted_rows_and_changed_parentage
+    saved = SketchupHostEvidence.snapshot_entities([
+      FakeGroup.new(10, [
+        FakeEntity.new(11, 'Edge', :persistent_id => 7011)
+      ], :persistent_id => 7010)
+    ])
+    deleted = SketchupHostEvidence.snapshot_entities([
+      FakeGroup.new(90, [
+        FakeEntity.new(91, 'Edge', :persistent_id => 7011,
+                       :valid => false, :deleted => true)
+      ], :persistent_id => 7010)
+    ])
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_reopen_continuity!(saved, deleted)
+    end
+    assert_match(/live|deleted|valid/i, error.message)
+
+    reparented = SketchupHostEvidence.snapshot_entities([
+      FakeGroup.new(90, [], :persistent_id => 7010),
+      FakeEntity.new(91, 'Edge', :persistent_id => 7011)
+    ])
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_reopen_continuity!(saved, reparented)
+    end
+    assert_match(/child|parent|structure/i, error.message)
+  end
+
   def test_owned_reopen_continuity_ignores_preexisting_template_entities
     owned = SketchupHostEvidence.snapshot_entities([
       FakeGroup.new(10, [], :persistent_id => 7010)
@@ -287,7 +385,7 @@ class SketchupHostEvidenceTest < Minitest::Test
     stats = ready_stats
     stats.delete(:text_source_span_ids)
     error = assert_raises(StandardError) do
-      SketchupHostEvidence.verify_delivery_evidence!(stats, manifest, :labels, [1])
+      SketchupHostEvidence.verify_delivery_evidence!(stats, label_manifest, :labels, [1])
     end
     assert_match(/text_source_span_ids.*missing/, error.message)
   end
@@ -300,7 +398,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       :empty_page_source_inspections => []
     )
     error = assert_raises(StandardError) do
-      SketchupHostEvidence.verify_delivery_evidence!(stats, manifest, :labels, [1])
+        SketchupHostEvidence.verify_delivery_evidence!(stats, label_manifest, :labels, [1])
     end
     assert_match(/decoded-stream no-text proof/, error.message)
 
@@ -311,7 +409,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       :decoded_form_stream_text_operators => false
     }]
     assert SketchupHostEvidence.verify_delivery_evidence!(
-      stats, manifest, :labels, [1]
+      stats, label_manifest, :labels, [1]
     )
   end
 
@@ -329,7 +427,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       }]
     )
     error = assert_raises(StandardError) do
-      SketchupHostEvidence.verify_delivery_evidence!(stats, manifest, :labels, [1])
+      SketchupHostEvidence.verify_delivery_evidence!(stats, label_manifest, :labels, [1])
     end
     assert_match(/source.*set mismatch/, error.message)
   end
@@ -365,7 +463,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       )
 
       assert SketchupHostEvidence.verify_delivery_evidence!(
-        stats, manifest, mode, [1]
+        stats, mode == :geometry ? geometry_manifest : glyph_manifest, mode, [1]
       )
     end
   end
@@ -375,7 +473,7 @@ class SketchupHostEvidenceTest < Minitest::Test
 
     error = assert_raises(StandardError) do
       SketchupHostEvidence.verify_delivery_evidence!(
-        stats, manifest, :labels, [1]
+        stats, label_manifest, :labels, [1]
       )
     end
     assert_match(/requested.*mode/i, error.message)
@@ -386,10 +484,105 @@ class SketchupHostEvidenceTest < Minitest::Test
 
     error = assert_raises(StandardError) do
       SketchupHostEvidence.verify_delivery_evidence!(
-        stats, manifest, :labels, [1]
+        stats, label_manifest, :labels, [1]
       )
     end
     assert_match(/selected page/i, error.message)
+  end
+
+  def test_strict_page_identities_reject_lossy_numeric_coercion
+    stats = strict_page_mode_stats(:labels, :labels, 1)
+    stats[:text_attempts][0][:page] = 1.5
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, label_manifest, :labels, [1]
+      )
+    end
+    assert_match(/page/i, error.message)
+
+    stats = strict_page_mode_stats(:labels, :labels, 1)
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, label_manifest, :labels, [1.5]
+      )
+    end
+    assert_match(/page/i, error.message)
+
+    stats = strict_item_fallback_stats
+    proof = stats[:text_attempts][0][:attempt_history][0][:transition_proof]
+    proof[:page_number] = 1.5
+    stats[:fallback_transitions] = [proof.dup]
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, text3d_manifest, :labels, [1]
+      )
+    end
+    assert_match(/proof|page|transition/i, error.message)
+  end
+
+  def test_nonraster_delivery_must_match_actual_host_representation
+    labels = strict_page_mode_stats(:labels, :labels, 1)
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        labels, geometry_manifest, :labels, [1]
+      )
+    end
+    assert_match(/Labels|Text|representation|typename/i, error.message)
+
+    text3d = strict_text3d_stats
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        text3d, geometry_manifest, :text3d, [1]
+      )
+    end
+    assert_match(/3D|representation|depth|identity/i, error.message)
+
+    geometry = strict_page_mode_stats(:geometry, :geometry, 1)
+    glyphs = strict_page_mode_stats(:glyphs, :glyphs, 1)
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      geometry, geometry_manifest, :geometry, [1]
+    )
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      glyphs, glyph_manifest, :glyphs, [1]
+    )
+    assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        geometry, glyph_manifest, :geometry, [1]
+      )
+    end
+    assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        glyphs, geometry_manifest, :glyphs, [1]
+      )
+    end
+  end
+
+  def test_duplicate_source_identity_inside_one_delivery_record_fails
+    stats = strict_page_mode_stats(:geometry, :geometry, 1)
+    stats[:text_attempts][0][:source_span_ids] = [
+      'text_span:1:0', 'text_span:1:0'
+    ]
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, geometry_manifest, :geometry, [1]
+      )
+    end
+    assert_match(/duplicate|source span/i, error.message)
+  end
+
+  def test_delivery_rejects_deleted_or_invalid_nested_physical_entities
+    stats = strict_page_mode_stats(:geometry, :geometry, 1)
+    rows = Marshal.load(Marshal.dump(geometry_manifest))
+    rows[0]['children'][0]['valid'] = false
+    rows[0]['children'][0]['deleted'] = true
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, rows, :geometry, [1]
+      )
+    end
+    assert_match(/live|deleted|physical/i, error.message)
   end
 
   def test_requested_raster_requires_real_image_manifest_content_binding
@@ -437,6 +630,26 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert SketchupHostEvidence.verify_delivery_evidence!(
       stats, image_manifest, :raster, [1]
     )
+
+    record[:page] = 1.5
+    artifact[:page_number] = 1.5
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, image_manifest, :raster, [1]
+      )
+    end
+    assert_match(/page|integer/i, error.message)
+
+    record[:page] = 1
+    artifact[:page_number] = 1
+    string_dimensions = Marshal.load(Marshal.dump(image_manifest))
+    string_dimensions[0]['content_evidence']['display_width'] = '8.5'
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, string_dimensions, :raster, [1]
+      )
+    end
+    assert_match(/content|display|raster/i, error.message)
   end
 
   def test_fallback_requires_adjacent_item_bound_proof_and_owned_cleanup
@@ -461,7 +674,7 @@ class SketchupHostEvidenceTest < Minitest::Test
 
       error = assert_raises(StandardError) do
         SketchupHostEvidence.verify_delivery_evidence!(
-          stats, manifest, :labels, [1]
+          stats, text3d_manifest, :labels, [1]
         )
       end
       assert_match(/fallback|transition|source item/i, error.message)
@@ -601,9 +814,93 @@ class SketchupHostEvidenceTest < Minitest::Test
     [{
       'entity_id' => 10,
       'persistent_id' => 10,
+      'typename' => 'Group',
+      'valid' => true,
+      'deleted' => false,
       'children' => [{
         'entity_id' => 13,
         'persistent_id' => 13,
+        'typename' => 'Text',
+        'valid' => true,
+        'deleted' => false,
+        'content_evidence' => {
+          'text_like' => true, 'text' => 'A',
+          'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
+        },
+        'children' => []
+      }]
+    }]
+  end
+
+  def label_manifest
+    [{
+      'entity_id' => 13, 'persistent_id' => 1013,
+      'typename' => 'Text', 'valid' => true, 'deleted' => false,
+      'content_evidence' => {
+        'text_like' => true, 'text' => 'A',
+        'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
+      },
+      'children' => []
+    }]
+  end
+
+  def geometry_manifest
+    [{
+      'entity_id' => 13, 'persistent_id' => 1013,
+      'typename' => 'Group', 'valid' => true, 'deleted' => false,
+      'representation_evidence' => {
+        'source_span_id' => 'text_span:1:0', 'source_unit_id' => nil,
+        'source_kind' => 'text_span', 'representation' => 'geometry',
+        'renderer' => 'svg_item_flat_geometry_renderer'
+      },
+      'children' => [{
+        'entity_id' => 14, 'persistent_id' => 1014,
+        'typename' => 'Edge', 'valid' => true, 'deleted' => false,
+        'children' => []
+      }]
+    }]
+  end
+
+  def glyph_manifest
+    [{
+      'entity_id' => 13, 'persistent_id' => 1013,
+      'typename' => 'Group', 'valid' => true, 'deleted' => false,
+      'representation_evidence' => {
+        'source_span_id' => 'text_span:1:0', 'source_unit_id' => nil,
+        'source_kind' => 'text_span', 'representation' => 'glyphs',
+        'renderer' => 'svg_item_glyph_group_renderer'
+      },
+      'children' => [{
+        'entity_id' => 14, 'persistent_id' => 1014,
+        'typename' => 'ComponentInstance', 'valid' => true, 'deleted' => false,
+        'children' => [{
+          'entity_id' => 15, 'persistent_id' => 1015,
+          'typename' => 'Edge', 'valid' => true, 'deleted' => false,
+          'children' => []
+        }]
+      }]
+    }]
+  end
+
+  def text3d_manifest
+    [{
+      'entity_id' => 13, 'persistent_id' => 1013,
+      'typename' => 'Group', 'valid' => true, 'deleted' => false,
+      'bounds' => { 'min' => [0.0, 0.0, 0.0],
+                    'max' => [1.0, 1.0, 0.1] },
+      'representation_evidence' => {
+        'source_span_id' => 'text_span:1:0',
+        'source_unit_id' => 'text_span:1:0',
+        'source_kind' => 'text_span', 'representation' => 'text3d',
+        'renderer' => 'svg_source_3d_text'
+      },
+      'children' => [{
+        'entity_id' => 14, 'persistent_id' => 1014,
+        'typename' => 'Face', 'valid' => true, 'deleted' => false,
+        'children' => []
+      }, {
+        'entity_id' => 15, 'persistent_id' => 1015,
+        'typename' => 'Edge', 'valid' => true, 'deleted' => false,
         'children' => []
       }]
     }]
@@ -666,8 +963,12 @@ class SketchupHostEvidenceTest < Minitest::Test
         :page => page_number, :source_span_ids => [source_id],
         :requested_mode => record_mode, :delivered_mode => record_mode,
         :resulting_entity_ids => [entity_id],
-        :created_entity_type => record_mode == :geometry ?
-          'page_path_geometry' : 'native_label',
+         :created_entity_type => case record_mode
+                                 when :geometry then 'page_path_geometry'
+                                 when :glyphs then 'glyph_outline'
+                                 when :text3d then 'source_glyph_3d_text'
+                                 else 'native_label'
+                                 end,
         :visual_fidelity_verified => true
       }]
     )
@@ -707,6 +1008,32 @@ class SketchupHostEvidenceTest < Minitest::Test
         :span_id => source_id, :resulting_entity_ids => [entity_id]
       }],
       :fallback_transitions => [proof.dup]
+    )
+  end
+
+  def strict_text3d_stats
+    source_id = 'text_span:1:0'
+    entity_id = 'entity_id:13'
+    ready_stats(
+      :requested_text_mode => :text3d,
+      :text_attempts => [{
+        :source_span_id => source_id, :page => 1,
+        :requested_mode => :text3d, :delivered_mode => :text3d,
+        :resulting_entity_ids => [entity_id],
+        :visual_fidelity_verified => true,
+        :attempt_history => [{
+          :mode => :text3d, :outcome => :complete,
+          :resulting_entity_ids => [entity_id],
+          :visual_fidelity_verified => true,
+          :cleanup_outcome => :not_required
+        }]
+      }],
+      :source_provenance_objects => [{
+        :span_id => source_id, :page => 1,
+        :created_entity_type => 'source_glyph_3d_text',
+        :renderer => 'svg_source_3d_text',
+        :resulting_entity_ids => [entity_id]
+      }]
     )
   end
 

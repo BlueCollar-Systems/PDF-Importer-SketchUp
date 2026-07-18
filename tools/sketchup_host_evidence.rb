@@ -48,6 +48,15 @@ module SketchupHostEvidence
   ].freeze unless const_defined?(:AFFIRMATIVE_FALLBACK_REASONS, false)
   IMAGE_TYPENAMES = ['image', 'rasterimage', 'imageentity'].freeze unless
     const_defined?(:IMAGE_TYPENAMES, false)
+  CREATED_ENTITY_MODES = {
+    'native_label' => :labels,
+    'native_3d_text' => :text3d,
+    'source_glyph_3d_text' => :text3d,
+    'glyph_outline' => :glyphs,
+    'page_path_geometry' => :geometry,
+    'raster_image' => :raster,
+    'sketchup_image' => :raster
+  }.freeze unless const_defined?(:CREATED_ENTITY_MODES, false)
 
   def self.verify_source_locations!(expected_root, locations)
     root = normalized_path(expected_root)
@@ -57,7 +66,8 @@ module SketchupHostEvidence
     prefix = root.end_with?('/') ? root : "#{root}/"
     locations.each do |name, location|
       unless location.is_a?(Array) && location.length >= 2 &&
-             !location[0].to_s.strip.empty? && location[1].to_i > 0
+             !location[0].to_s.strip.empty? &&
+             location[1].is_a?(Integer) && location[1] > 0
         raise EvidenceError, "#{name} source location is missing"
       end
       source_path = normalized_path(location[0])
@@ -91,7 +101,6 @@ module SketchupHostEvidence
     end
     sets = { 'entity_id' => [], 'persistent_id' => [] }
     collect_manifest_identities(manifest, sets)
-    sets.each { |key, values| sets[key] = values.uniq }
     sets
   end
 
@@ -128,6 +137,13 @@ module SketchupHostEvidence
   def self.verify_persistent_rows!(saved, reopened)
     saved.each do |persistent_id, row|
       other = reopened[persistent_id]
+      unless hash_value(row, :valid) == true &&
+             hash_value(row, :deleted) == false &&
+             hash_value(other, :valid) == true &&
+             hash_value(other, :deleted) == false
+        raise EvidenceError,
+              "reopened entity is not live for persistent_id:#{persistent_id}"
+      end
       unless hash_value(row, :typename).to_s == hash_value(other, :typename).to_s
         raise EvidenceError,
               "reopened typename mismatch for persistent_id:#{persistent_id}"
@@ -145,10 +161,47 @@ module SketchupHostEvidence
         raise EvidenceError,
               "reopened bounds mismatch for persistent_id:#{persistent_id}"
       end
+      unless evidence_payload_equal?(
+        hash_value(row, :representation_evidence),
+        hash_value(other, :representation_evidence)
+      )
+        raise EvidenceError,
+              "reopened representation identity mismatch for persistent_id:#{persistent_id}"
+      end
+      unless evidence_payload_equal?(
+        hash_value(row, :content_evidence),
+        hash_value(other, :content_evidence)
+      )
+        raise EvidenceError,
+              "reopened content evidence mismatch for persistent_id:#{persistent_id}"
+      end
+      unless direct_child_persistent_ids(row) ==
+             direct_child_persistent_ids(other)
+        raise EvidenceError,
+              "reopened child structure mismatch for persistent_id:#{persistent_id}"
+      end
     end
     true
   end
   private_class_method :verify_persistent_rows!
+
+  def self.direct_child_persistent_ids(row)
+    children = hash_value(row, :children)
+    children = [] if children.nil?
+    unless children.is_a?(Array)
+      raise EvidenceError, 'manifest children must be an Array'
+    end
+    values = children.map do |child|
+      exact_positive_integer!(
+        hash_value(child, :persistent_id), 'child persistent_id'
+      )
+    end
+    if values.uniq.length != values.length
+      raise EvidenceError, 'manifest child persistent_ids are duplicated'
+    end
+    values.sort
+  end
+  private_class_method :direct_child_persistent_ids
 
   def self.verify_delivery_evidence!(stats, manifest, requested_mode = nil,
                                      selected_pages = nil)
@@ -161,6 +214,7 @@ module SketchupHostEvidence
       raise EvidenceError,
             'entity manifest requires entity_id and persistent_id namespaces'
     end
+    claim_rows = manifest_claim_rows(manifest)
 
     verify_ready_gate!(stats, :representation_fidelity)
     verify_ready_gate!(stats, :import_contract_ready)
@@ -195,7 +249,9 @@ module SketchupHostEvidence
         raise EvidenceError, "#{collection_name} must be an Array"
       end
       records.each_with_index do |record, index|
-        verify_delivery_record!(collection_name, index, record, namespaces)
+        verify_delivery_record!(
+          collection_name, index, record, namespaces, claim_rows, strict
+        )
       end
     end
 
@@ -296,7 +352,8 @@ module SketchupHostEvidence
       'deleted' => boolean_state(entity, :deleted?),
       'bounds' => bounds_payload(entity),
       'transformation' => transformation_payload(entity),
-      'content_evidence' => image_content_evidence(entity, typename),
+      'representation_evidence' => representation_identity_evidence(entity),
+      'content_evidence' => host_content_evidence(entity, typename),
       'children' => children.map do |child|
         snapshot_entity(child, ancestors + [identity])
       end
@@ -369,6 +426,51 @@ module SketchupHostEvidence
   end
   private_class_method :image_content_evidence
 
+  def self.native_text_content_evidence(entity, typename)
+    return nil unless typename.to_s == 'Text'
+    text = entity.respond_to?(:text) ? entity.text.to_s : nil
+    point = entity.respond_to?(:point) ? point_payload(entity.point) : nil
+    leader = if entity.respond_to?(:display_leader?)
+               entity.display_leader?
+             elsif entity.respond_to?(:display_leader)
+               entity.display_leader
+             end
+    {
+      'text_like' => true,
+      'text' => text,
+      'anchor' => point,
+      'leader_visible' => leader
+    }
+  rescue StandardError => error
+    raise EvidenceError, "host text content evidence failed: #{error.message}"
+  end
+  private_class_method :native_text_content_evidence
+
+  def self.host_content_evidence(entity, typename)
+    image = image_content_evidence(entity, typename)
+    return image if image
+    native_text_content_evidence(entity, typename)
+  end
+  private_class_method :host_content_evidence
+
+  def self.representation_identity_evidence(entity)
+    return nil unless entity.respond_to?(:get_attribute)
+    dictionary = 'BC_PDF_Importer'
+    values = {}
+    [
+      'source_span_id', 'source_unit_id', 'source_kind', 'representation',
+      'renderer'
+    ].each do |key|
+      values[key] = entity.get_attribute(dictionary, key, nil)
+    end
+    return nil if values.values.all? { |value| value.nil? }
+    values
+  rescue StandardError => error
+    raise EvidenceError,
+          "host representation identity evidence failed: #{error.message}"
+  end
+  private_class_method :representation_identity_evidence
+
   def self.boolean_state(entity, method_name)
     return nil unless entity.respond_to?(method_name)
     value = entity.send(method_name)
@@ -439,6 +541,10 @@ module SketchupHostEvidence
           raise EvidenceError,
                 "entity manifest row has no positive #{namespace}"
         end
+        if sets[namespace].include?(value)
+          raise EvidenceError,
+                "duplicate entity manifest #{namespace}:#{value}"
+        end
         sets[namespace] << value
       end
       children = hash_value(row, :children)
@@ -479,12 +585,7 @@ module SketchupHostEvidence
         raise EvidenceError, 'manifest row has no persistent_id'
       end
       if rows.key?(persistent_id)
-        unless hash_value(rows[persistent_id], :typename).to_s ==
-               hash_value(row, :typename).to_s
-          raise EvidenceError,
-                "conflicting duplicate persistent_id:#{persistent_id}"
-        end
-        next
+        raise EvidenceError, "duplicate persistent_id:#{persistent_id}"
       end
       rows[persistent_id] = row
     end
@@ -530,7 +631,8 @@ module SketchupHostEvidence
   end
   private_class_method :verify_ready_gate!
 
-  def self.verify_delivery_record!(collection_name, index, record, namespaces)
+  def self.verify_delivery_record!(collection_name, index, record, namespaces,
+                                   claim_rows = nil, strict = false)
     unless record.is_a?(Hash)
       raise EvidenceError, "#{collection_name}[#{index}] must be a Hash"
     end
@@ -551,8 +653,243 @@ module SketchupHostEvidence
             "#{collection_name}[#{index}] identities are absent from manifest: " \
             "#{labels.join(', ')}"
     end
+    if strict
+      rows_by_claim = claim_rows || {}
+      keys = normalized.map do |namespace, value|
+        "#{namespace}:#{value}"
+      end
+      rows = keys.map { |key| rows_by_claim[key] }
+      if rows.any? { |row| row.nil? } ||
+         rows.map { |row| hash_value(row, :entity_id) }.uniq.length != rows.length
+        raise EvidenceError,
+              "#{collection_name}[#{index}] aliases or duplicates one host entity"
+      end
+      verify_host_representation!(
+        collection_name, index, record, rows
+      )
+    end
   end
   private_class_method :verify_delivery_record!
+
+  def self.record_delivery_mode!(collection_name, index, record)
+    explicit = normalize_mode(hash_value(record, :delivered_mode))
+    created_type = hash_value(record, :created_entity_type).to_s.strip
+    derived = CREATED_ENTITY_MODES[created_type]
+    if explicit && derived && explicit != derived
+      raise EvidenceError,
+            "#{collection_name}[#{index}] host entity type conflicts with delivered mode"
+    end
+    explicit || derived
+  end
+  private_class_method :record_delivery_mode!
+
+  def self.verify_host_representation!(collection_name, index, record, rows)
+    mode = record_delivery_mode!(collection_name, index, record)
+    return true unless mode
+    label = "#{collection_name}[#{index}] #{mode}"
+    rows.each { |row| verify_live_manifest_row!(row, label) }
+    verify_representation_identity!(record, rows, mode, label)
+
+    case mode
+    when :labels
+      verify_native_labels!(rows, label)
+    when :text3d
+      verify_text3d_rows!(rows, record, label)
+    when :glyphs
+      verify_glyph_rows!(rows, record, label)
+    when :geometry
+      verify_geometry_rows!(rows, record, label)
+    when :raster
+      rows.each do |row|
+        unless image_typename?(hash_value(row, :typename))
+          raise EvidenceError, "#{label} is not a host image representation"
+        end
+      end
+    else
+      raise EvidenceError, "#{label} has an unsupported delivered representation"
+    end
+    true
+  end
+  private_class_method :verify_host_representation!
+
+  def self.verify_live_manifest_row!(row, label)
+    unless hash_value(row, :valid) == true &&
+           hash_value(row, :deleted) == false
+      raise EvidenceError, "#{label} claims a host entity that is not live"
+    end
+  end
+  private_class_method :verify_live_manifest_row!
+
+  def self.verify_representation_identity!(record, rows, mode, label)
+    expected_spans = source_span_ids(record, :span_id => true)
+    expected_unit = hash_value(record, :source_unit_id).to_s.strip
+    rows.each do |row|
+      evidence = hash_value(row, :representation_evidence)
+      next unless evidence.is_a?(Hash)
+      declared = hash_value(evidence, :representation)
+      unless declared.nil? || declared.to_s.strip.empty?
+        unless normalize_mode(declared) == mode
+          raise EvidenceError, "#{label} host representation attribute conflicts"
+        end
+      end
+      source_span = hash_value(evidence, :source_span_id).to_s.strip
+      if expected_spans.length == 1 && !source_span.empty? &&
+         source_span != expected_spans[0]
+        raise EvidenceError, "#{label} host source-span identity conflicts"
+      end
+      source_unit = hash_value(evidence, :source_unit_id).to_s.strip
+      if !expected_unit.empty? && source_unit != expected_unit
+        raise EvidenceError, "#{label} host source-unit identity conflicts"
+      end
+    end
+    true
+  end
+  private_class_method :verify_representation_identity!
+
+  def self.verify_native_labels!(rows, label)
+    valid = rows.all? do |row|
+      content = hash_value(row, :content_evidence)
+      hash_value(row, :typename).to_s == 'Text' &&
+        content.is_a?(Hash) && hash_value(content, :text_like) == true &&
+        !hash_value(content, :text).to_s.strip.empty? &&
+        numeric_point_payload?(hash_value(content, :anchor)) &&
+        hash_value(content, :leader_visible) == false &&
+        Array(hash_value(row, :children)).empty?
+    end
+    raise EvidenceError, "#{label} is not verified native SketchUp Text" unless valid
+    true
+  end
+  private_class_method :verify_native_labels!
+
+  def self.verify_text3d_rows!(rows, record, label)
+    types = rows.map { |row| hash_value(row, :typename).to_s }
+    if types.all? { |type| type == 'Group' }
+      rows.each do |row|
+        evidence = hash_value(row, :representation_evidence)
+        unless evidence.is_a?(Hash) &&
+               normalize_mode(hash_value(evidence, :representation)) == :text3d &&
+               !hash_value(evidence, :renderer).to_s.strip.empty?
+          raise EvidenceError, "#{label} lacks persisted 3D Text identity"
+        end
+        descendants = descendant_manifest_rows(row)
+        descendants.each do |child|
+          verify_live_manifest_row!(child, "#{label} physical child")
+        end
+        descendant_types = descendants.map do |child|
+          hash_value(child, :typename).to_s
+        end
+        unless descendant_types.include?('Face') &&
+               descendant_types.include?('Edge') &&
+               (descendant_types - ['Face', 'Edge']).empty? &&
+               positive_z_depth?(hash_value(row, :bounds))
+          raise EvidenceError, "#{label} is not positive-depth 3D Text geometry"
+        end
+      end
+      return true
+    end
+
+    unless (types - ['Face', 'Edge']).empty? && types.include?('Face') &&
+           rows.any? { |row| positive_z_depth?(hash_value(row, :bounds)) }
+      raise EvidenceError, "#{label} is not positive-depth native 3D Text"
+    end
+    created_type = hash_value(record, :created_entity_type).to_s
+    if !created_type.empty? && created_type != 'native_3d_text'
+      raise EvidenceError, "#{label} host structure conflicts with 3D Text type"
+    end
+    true
+  end
+  private_class_method :verify_text3d_rows!
+
+  def self.verify_geometry_rows!(rows, record, label)
+    unless rows.length == 1 && hash_value(rows[0], :typename).to_s == 'Group'
+      raise EvidenceError, "#{label} must identify one owned Geometry group"
+    end
+    children = Array(hash_value(rows[0], :children))
+    children.each do |child|
+      verify_live_manifest_row!(child, "#{label} physical child")
+    end
+    unless !children.empty? && children.all? do |child|
+      hash_value(child, :typename).to_s == 'Edge' &&
+        Array(hash_value(child, :children)).empty?
+    end
+      raise EvidenceError, "#{label} is not flat raw-edge Geometry"
+    end
+    verify_item_group_identity_if_required!(rows[0], record, :geometry, label)
+    true
+  end
+  private_class_method :verify_geometry_rows!
+
+  def self.verify_glyph_rows!(rows, record, label)
+    unless rows.length == 1 && hash_value(rows[0], :typename).to_s == 'Group'
+      raise EvidenceError, "#{label} must identify one owned Glyphs group"
+    end
+    children = Array(hash_value(rows[0], :children))
+    descendants = descendant_manifest_rows(rows[0])
+    descendants.each do |child|
+      verify_live_manifest_row!(child, "#{label} physical child")
+    end
+    descendant_types = descendants.map do |child|
+      hash_value(child, :typename).to_s
+    end
+    valid_containers = children.all? do |child|
+      ['Group', 'ComponentInstance'].include?(
+        hash_value(child, :typename).to_s
+      )
+    end
+    allowed = ['Group', 'ComponentInstance', 'Edge']
+    unless !children.empty? && valid_containers &&
+           descendant_types.include?('Edge') &&
+           (descendant_types - allowed).empty?
+      raise EvidenceError, "#{label} is not a physical Glyphs hierarchy"
+    end
+    verify_item_group_identity_if_required!(rows[0], record, :glyphs, label)
+    true
+  end
+  private_class_method :verify_glyph_rows!
+
+  def self.verify_item_group_identity_if_required!(row, record, mode, label)
+    return true unless hash_key?(record, :source_span_id)
+    evidence = hash_value(row, :representation_evidence)
+    unless evidence.is_a?(Hash) &&
+           normalize_mode(hash_value(evidence, :representation)) == mode &&
+           hash_value(evidence, :source_span_id).to_s ==
+             hash_value(record, :source_span_id).to_s
+      raise EvidenceError, "#{label} lacks exact item representation identity"
+    end
+    true
+  end
+  private_class_method :verify_item_group_identity_if_required!
+
+  def self.descendant_manifest_rows(row)
+    descendants = []
+    Array(hash_value(row, :children)).each do |child|
+      descendants << child
+      descendants.concat(descendant_manifest_rows(child))
+    end
+    descendants
+  end
+  private_class_method :descendant_manifest_rows
+
+  def self.numeric_point_payload?(value)
+    value.is_a?(Array) && value.length == 3 && value.all? do |number|
+      number.is_a?(Numeric) && number.to_f.finite?
+    end
+  rescue StandardError
+    false
+  end
+  private_class_method :numeric_point_payload?
+
+  def self.positive_z_depth?(bounds)
+    return false unless bounds.is_a?(Hash)
+    minimum = hash_value(bounds, :min)
+    maximum = hash_value(bounds, :max)
+    return false unless numeric_point_payload?(minimum) &&
+                        numeric_point_payload?(maximum)
+    (maximum[2].to_f - minimum[2].to_f).abs > 1.0e-9
+  rescue StandardError
+    false
+  end
+  private_class_method :positive_z_depth?
 
   def self.verify_requested_mode_records!(stats, expected_mode)
     required = [
@@ -611,7 +948,9 @@ module SketchupHostEvidence
                  hash_value(record, :page)
                end
     unless raw_page.nil? || raw_page.to_s.strip.empty? ||
-           raw_page.to_i == pages[0]
+           exact_positive_integer!(
+             raw_page, "#{collection_name}[#{index}] page"
+           ) == pages[0]
       raise EvidenceError,
             "#{collection_name}[#{index}] page does not match source span identity"
     end
@@ -645,7 +984,9 @@ module SketchupHostEvidence
     end
     unless hash_value(proof, :importer_id).to_s ==
              'sketchup_pdf_vector_importer' &&
-           hash_value(proof, :page_number).to_i == page &&
+           exact_positive_integer!(
+             hash_value(proof, :page_number), 'fallback proof page_number'
+           ) == page &&
            hash_value(proof, :scope).to_s == 'item' &&
            hash_value(proof, :category).to_s ==
              'exact_representation_impossible' &&
@@ -839,6 +1180,12 @@ module SketchupHostEvidence
     visit_manifest(manifest) do |row|
       entity_id = hash_value(row, :entity_id)
       persistent_id = hash_value(row, :persistent_id)
+      if rows.key?("entity_id:#{entity_id}")
+        raise EvidenceError, "duplicate entity_id:#{entity_id}"
+      end
+      if rows.key?("persistent_id:#{persistent_id}")
+        raise EvidenceError, "duplicate persistent_id:#{persistent_id}"
+      end
       rows["entity_id:#{entity_id}"] = row
       rows["persistent_id:#{persistent_id}"] = row
     end
@@ -847,7 +1194,9 @@ module SketchupHostEvidence
   private_class_method :manifest_claim_rows
 
   def self.verify_raster_artifact_binding!(record, row, claim, selected_pages)
-    page = hash_value(record, :page).to_i
+    page = exact_positive_integer!(
+      hash_value(record, :page), 'raster delivery page'
+    )
     unless page > 0 &&
            (selected_pages.empty? || selected_pages.include?(page))
       raise EvidenceError, 'raster delivery is outside the selected page set'
@@ -872,22 +1221,42 @@ module SketchupHostEvidence
       raise EvidenceError, 'raster image content evidence is missing'
     end
     sha256 = hash_value(artifact, :content_sha256).to_s.downcase
-    byte_size = hash_value(artifact, :content_byte_size).to_i
-    pixel_width = hash_value(artifact, :pixel_width).to_i
-    pixel_height = hash_value(artifact, :pixel_height).to_i
+    byte_size = exact_positive_integer!(
+      hash_value(artifact, :content_byte_size), 'raster content byte size'
+    )
+    pixel_width = exact_positive_integer!(
+      hash_value(artifact, :pixel_width), 'raster pixel width'
+    )
+    pixel_height = exact_positive_integer!(
+      hash_value(artifact, :pixel_height), 'raster pixel height'
+    )
     unless hash_value(content, :image_like) == true &&
-           hash_value(content, :display_width).to_f > 0.0 &&
-           hash_value(content, :display_height).to_f > 0.0 &&
-           hash_value(artifact, :page_number).to_i == page &&
+           positive_finite_number?(hash_value(content, :display_width)) &&
+           positive_finite_number?(hash_value(content, :display_height)) &&
+           exact_positive_integer!(
+             hash_value(artifact, :page_number), 'raster artifact page_number'
+           ) == page &&
            hash_value(artifact, :png_signature_verified) == true &&
            hash_value(artifact, :page_binding_verified) == true &&
            pixel_width > 0 && pixel_height > 0 &&
            sha256 =~ /\A[0-9a-f]{64}\z/ && byte_size > 0 &&
-           hash_value(content, :raster_page_number).to_i == page &&
-           hash_value(content, :raster_pixel_width).to_i == pixel_width &&
-           hash_value(content, :raster_pixel_height).to_i == pixel_height &&
+           exact_positive_integer!(
+             hash_value(content, :raster_page_number),
+             'host raster page_number'
+           ) == page &&
+           exact_positive_integer!(
+             hash_value(content, :raster_pixel_width),
+             'host raster pixel width'
+           ) == pixel_width &&
+           exact_positive_integer!(
+             hash_value(content, :raster_pixel_height),
+             'host raster pixel height'
+           ) == pixel_height &&
            hash_value(content, :raster_content_sha256).to_s.downcase == sha256 &&
-           hash_value(content, :raster_content_bytes).to_i == byte_size
+           exact_positive_integer!(
+             hash_value(content, :raster_content_bytes),
+             'host raster content byte size'
+           ) == byte_size
       raise EvidenceError, 'raster image content/page/identity evidence is incomplete'
     end
     scope = hash_value(record, :delivery_scope).to_s
@@ -941,7 +1310,9 @@ module SketchupHostEvidence
         raise EvidenceError, "raster delivery identity is absent from manifest: #{claim}"
       end
       verify_raster_artifact_binding!(record, row, claim, pages)
-      page = hash_value(record, :page).to_i
+      page = exact_positive_integer!(
+        hash_value(record, :page), 'raster delivery page'
+      )
       delivery_pages << page
       signatures << [page, claim]
     end
@@ -956,7 +1327,12 @@ module SketchupHostEvidence
       unless claims.length == 1
         raise EvidenceError, 'terminal raster must identify exactly one host image'
       end
-      terminal_raster_signatures << [hash_value(record, :page).to_i, claims[0]]
+      terminal_raster_signatures << [
+        exact_positive_integer!(
+          hash_value(record, :page), 'terminal raster page'
+        ),
+        claims[0]
+      ]
     end
     unless terminal_raster_signatures.sort == signatures.sort
       raise EvidenceError,
@@ -984,7 +1360,12 @@ module SketchupHostEvidence
              normalize_mode(hash_value(record, :delivered_mode)) == :raster
         raise EvidenceError, 'terminal Raster delivery is invalid'
       end
-      [hash_value(record, :page).to_i, claims[0]]
+      [
+        exact_positive_integer!(
+          hash_value(record, :page), 'terminal Raster page'
+        ),
+        claims[0]
+      ]
     end
     unless terminal_signatures.sort == signatures.sort
       raise EvidenceError, 'Raster terminal delivery identities do not crosslink'
@@ -1021,7 +1402,9 @@ module SketchupHostEvidence
         raise EvidenceError, 'Raster source span ledger must be empty'
       end
       delivered_pages = Array(hash_value(stats, :raster_delivery_records)).map do |row|
-        hash_value(row, :page).to_i
+        exact_positive_integer!(
+          hash_value(row, :page), 'raster delivery page'
+        )
       end.uniq.sort
       unless !delivered_pages.empty? &&
              (pages.empty? || delivered_pages == pages)
@@ -1094,7 +1477,10 @@ module SketchupHostEvidence
         values << value unless value.empty?
       end
     end
-    values.uniq
+    if values.uniq.length != values.length
+      raise EvidenceError, 'source span identities are duplicated within a record'
+    end
+    values
   end
   private_class_method :source_span_ids
 
@@ -1104,8 +1490,18 @@ module SketchupHostEvidence
       hash_value(row, :semantic_text_extraction_complete) == true &&
         hash_value(row, :decoded_stream_text_operators) == false &&
         hash_value(row, :decoded_form_stream_text_operators) == false &&
-        hash_value(row, :page).to_i > 0
-    end.map { |row| hash_value(row, :page).to_i }.uniq.sort
+        exact_positive_integer!(
+          hash_value(row, :page), 'empty-source inspection page'
+        ) > 0
+    end.map do |row|
+      exact_positive_integer!(
+        hash_value(row, :page), 'empty-source inspection page'
+      )
+    end
+    if proven_pages.uniq.length != proven_pages.length
+      raise EvidenceError, 'empty-source inspection pages are duplicated'
+    end
+    proven_pages = proven_pages.sort
     unless !proven_pages.empty? && (pages.empty? || proven_pages == pages)
       raise EvidenceError,
             'empty text ledger lacks decoded-stream no-text proof'
@@ -1115,14 +1511,35 @@ module SketchupHostEvidence
 
   def self.normalized_pages(selected_pages, stats)
     if selected_pages == :all || selected_pages.to_s == 'all'
-      count = hash_value(stats, :pages).to_i
-      return count > 0 ? (1..count).to_a : []
+      count = exact_positive_integer!(
+        hash_value(stats, :pages), 'pipeline page count'
+      )
+      return (1..count).to_a
     end
-    Array(selected_pages).map { |value| value.to_i }.select do |value|
-      value > 0
-    end.uniq.sort
+    values = Array(selected_pages).map do |value|
+      exact_positive_integer!(value, 'selected page')
+    end
+    if values.uniq.length != values.length
+      raise EvidenceError, 'selected page identities are duplicated'
+    end
+    values.sort
   end
   private_class_method :normalized_pages
+
+  def self.exact_positive_integer!(value, label)
+    unless value.is_a?(Integer) && value > 0
+      raise EvidenceError, "#{label} must be a positive Integer"
+    end
+    value
+  end
+  private_class_method :exact_positive_integer!
+
+  def self.positive_finite_number?(value)
+    value.is_a?(Numeric) && value.to_f.finite? && value.to_f > 0.0
+  rescue StandardError
+    false
+  end
+  private_class_method :positive_finite_number?
 
   def self.normalize_mode(value)
     text = value.to_s.strip.downcase

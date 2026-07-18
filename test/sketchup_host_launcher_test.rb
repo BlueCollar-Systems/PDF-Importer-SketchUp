@@ -432,15 +432,30 @@ class SketchupHostLauncherTest < Minitest::Test
       'import_session_id' => 'session-1',
       'same_session_entities' => [{
         'entity_id' => 13, 'persistent_id' => 7013,
-        'typename' => 'Text', 'children' => []
+        'typename' => 'Text', 'valid' => true, 'deleted' => false,
+        'content_evidence' => {
+          'text_like' => true, 'text' => 'A',
+          'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
+        },
+        'children' => []
       }],
       'post_import_entities' => [{
         'entity_id' => 13, 'persistent_id' => 7013,
-        'typename' => 'Text', 'children' => []
+        'typename' => 'Text', 'valid' => true, 'deleted' => false,
+        'content_evidence' => {
+          'text_like' => true, 'text' => 'A',
+          'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
+        },
+        'children' => []
       }],
       'reopened_entities' => [{
         'entity_id' => 91, 'persistent_id' => 7013,
-        'typename' => 'Text', 'children' => []
+        'typename' => 'Text', 'valid' => true, 'deleted' => false,
+        'content_evidence' => {
+          'text_like' => true, 'text' => 'A',
+          'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
+        },
+        'children' => []
       }],
       'reopen_persistent_id_verified' => true
     )

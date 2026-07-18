@@ -48,11 +48,15 @@ pdftotext_item = item_class.new(
   90.0, 198.0, 130.0, 210.0
 )
 mesh_h = builder.send(:mesh_text_height_inches, pdftotext_item, 0.0, 792.0)
+letter_height_ratio = builder.send(
+  :mesh_text_letter_height_ratio, pdftotext_item
+)
 assert_near(
   mesh_h,
-  12.0 * pt_to_in,
+  12.0 * pt_to_in * letter_height_ratio,
   0.0005,
-  'pdftotext 3D text height should equal nominal font size converted to inches'
+  'pdftotext 3D text height must convert the nominal PDF em into the ' \
+    'SketchUp letter_height domain exactly once'
 )
 
 oversized_bbox = item_class.new(
