@@ -996,6 +996,51 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_match(/content|display|raster/i, error.message)
   end
 
+  def test_empty_semantic_page_raster_requires_affirmative_source_bound_fallback
+    stats, image_manifest = strict_empty_page_raster_fixture
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, image_manifest, :text3d, [1]
+    )
+
+    mutations = {
+      :affirmative_impossibility => false,
+      :reason_code => :helper_failed,
+      :canonical_text_item_count => 1,
+      :source_page_number => 2,
+      :immutable_pdf_sha256 => 'c' * 64,
+      :rendered_pdf_sha256 => 'd' * 64,
+      :embedded_image_placed_count => 1
+    }
+    mutations.each do |field, value|
+      invalid = Marshal.load(Marshal.dump(stats))
+      invalid[:page_representation_fallbacks][0][field] = value
+      error = assert_raises(StandardError, "#{field} must be enforced") do
+        SketchupHostEvidence.verify_delivery_evidence!(
+          invalid, image_manifest, :text3d, [1]
+        )
+      end
+      assert_match(/fallback|source|page|raster|impossib/i, error.message)
+    end
+
+    invalid = Marshal.load(Marshal.dump(stats))
+    invalid[:page_representation_fallbacks][0][:source_summary][
+      :source_glyph_placements
+    ] = 1
+    assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        invalid, image_manifest, :text3d, [1]
+      )
+    end
+
+    missing = Marshal.load(Marshal.dump(stats))
+    missing[:page_representation_fallbacks] = []
+    assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        missing, image_manifest, :text3d, [1]
+      )
+    end
+  end
+
   def test_fallback_requires_adjacent_item_bound_proof_and_owned_cleanup
     mutations = [
       proc do |proof|
@@ -1623,6 +1668,78 @@ class SketchupHostEvidenceTest < Minitest::Test
       }],
       :fallback_transitions => [proof.dup]
     )
+  end
+
+  def strict_empty_page_raster_fixture
+    png_sha = 'a' * 64
+    source_sha = 'b' * 64
+    entity_id = 'entity_id:13'
+    artifact = {
+      :page_number => 1, :pixel_width => 1200, :pixel_height => 1600,
+      :png_signature_verified => true, :page_binding_verified => true,
+      :box_binding_verified => true, :content_sha256 => png_sha,
+      :content_byte_size => 48_000, :source_pdf_sha256 => source_sha,
+      :source_pdf_binding_verified => true
+    }
+    record = {
+      :page => 1, :source_span_ids => [], :requested_mode => :text3d,
+      :delivered_mode => :raster, :resulting_entity_ids => [entity_id],
+      :created_entity_type => 'raster_image', :real_raster_verified => true,
+      :visual_fidelity_verified => true, :cleanup_outcome => :not_required,
+      :delivery_scope => :page_raster, :no_semantic_text => true,
+      :canonical_text_item_count => 0, :source_page_number => 1,
+      :immutable_pdf_sha256 => source_sha,
+      :rendered_pdf_sha256 => source_sha,
+      :artifact_evidence => artifact
+    }
+    fallback = {
+      :page => 1, :scope => :page,
+      :reason_code => :visible_nontext_source_only,
+      :affirmative_impossibility => true,
+      :requested_text_mode => :text3d,
+      :source_text_items => 0, :canonical_text_item_count => 0,
+      :source_page_number => 1, :immutable_pdf_sha256 => source_sha,
+      :rendered_pdf_sha256 => source_sha,
+      :embedded_image_asset_count => 1,
+      :embedded_image_placed_count => 0,
+      :source_summary => {
+        :source_glyph_placements => 0,
+        :visible_nontext_source => true
+      },
+      :delivered_mode => :raster, :resulting_entity_ids => [entity_id],
+      :real_raster_verified => true, :visual_fidelity_verified => true
+    }
+    inspection = {
+      :page => 1, :source_page_number => 1,
+      :canonical_text_item_count => 0,
+      :immutable_pdf_sha256 => source_sha,
+      :rendered_pdf_sha256 => source_sha,
+      :semantic_text_extraction_complete => true,
+      :decoded_stream_text_operators => false,
+      :decoded_form_stream_text_operators => false
+    }
+    stats = ready_stats(
+      :requested_text_mode => :text3d,
+      :source_input_sha256 => source_sha,
+      :normalized_input_sha256 => source_sha,
+      :text_source_span_ids => [], :text_attempts => [],
+      :source_provenance_objects => [], :page_text_delivery_records => [],
+      :terminal_text_delivery_records => [record],
+      :page_representation_fallbacks => [fallback],
+      :raster_delivery_records => [record.dup],
+      :empty_page_source_inspections => [inspection]
+    )
+    manifest = SketchupHostEvidence.snapshot_entities([
+      FakeImage.new(13, :attributes => {
+        ['BC_PDF_Importer', 'raster_page_number'] => 1,
+        ['BC_PDF_Importer', 'raster_pixel_width'] => 1200,
+        ['BC_PDF_Importer', 'raster_pixel_height'] => 1600,
+        ['BC_PDF_Importer', 'raster_content_sha256'] => png_sha,
+        ['BC_PDF_Importer', 'raster_content_bytes'] => 48_000,
+        ['BC_PDF_Importer', 'raster_source_pdf_sha256'] => source_sha
+      })
+    ])
+    [stats, manifest]
   end
 
   def strict_text3d_stats

@@ -287,6 +287,9 @@ module SketchupHostEvidence
       verify_raster_deliveries!(
         stats, manifest, requested_mode, selected_pages
       )
+      verify_page_representation_fallbacks!(
+        stats, requested_mode, selected_pages
+      )
       verify_source_expected_attempts!(
         hash_value(stats, :text_attempts), claim_rows
       )
@@ -1970,6 +1973,98 @@ module SketchupHostEvidence
     true
   end
   private_class_method :verify_raster_deliveries!
+
+  def self.verify_page_representation_fallbacks!(stats, requested_mode,
+                                                  selected_pages)
+    expected_mode = normalize_mode(requested_mode)
+    pages = normalized_pages(selected_pages, stats)
+    fallbacks = Array(hash_value(stats, :page_representation_fallbacks))
+    if expected_mode == :raster
+      unless fallbacks.empty?
+        raise EvidenceError,
+              'requested Raster cannot be relabeled as a page fallback'
+      end
+      return true
+    end
+
+    immutable_sha = source_sha256_value(
+      stats, :source_input_sha256, :immutable_pdf_sha256
+    )
+    rendered_sha = source_sha256_value(
+      stats, :normalized_input_sha256, :normalized_pdf_sha256
+    )
+    fallback_signatures = fallbacks.map do |record|
+      unless record.is_a?(Hash)
+        raise EvidenceError, 'page fallback record is invalid'
+      end
+      page = exact_positive_integer!(
+        hash_value(record, :page), 'page fallback page'
+      )
+      source_page = exact_positive_integer!(
+        hash_value(record, :source_page_number), 'page fallback source page'
+      )
+      claims = canonical_claims!(
+        hash_value(record, :resulting_entity_ids), 'page fallback', false
+      )
+      summary = hash_value(record, :source_summary)
+      source_items = hash_value(record, :source_text_items)
+      canonical_items = hash_value(record, :canonical_text_item_count)
+      asset_count = hash_value(record, :embedded_image_asset_count)
+      placed_count = hash_value(record, :embedded_image_placed_count)
+      glyph_count = hash_value(summary, :source_glyph_placements)
+      unless (pages.empty? || pages.include?(page)) && source_page == page &&
+             claims.length == 1 &&
+             hash_value(record, :scope).to_s == 'page' &&
+             hash_value(record, :reason_code).to_s ==
+               'visible_nontext_source_only' &&
+             hash_value(record, :affirmative_impossibility) == true &&
+             normalize_mode(hash_value(record, :requested_text_mode)) ==
+               expected_mode &&
+             normalize_mode(hash_value(record, :delivered_mode)) == :raster &&
+             source_items.is_a?(Integer) && source_items == 0 &&
+             canonical_items.is_a?(Integer) && canonical_items == 0 &&
+             hash_value(record, :immutable_pdf_sha256).to_s.downcase ==
+               immutable_sha &&
+             hash_value(record, :rendered_pdf_sha256).to_s.downcase ==
+               rendered_sha &&
+             asset_count.is_a?(Integer) && asset_count >= 0 &&
+             placed_count.is_a?(Integer) && placed_count == 0 &&
+             summary.is_a?(Hash) && glyph_count.is_a?(Integer) &&
+             glyph_count == 0 &&
+             hash_value(summary, :visible_nontext_source) == true &&
+             hash_value(record, :real_raster_verified) == true &&
+             hash_value(record, :visual_fidelity_verified) == true
+        raise EvidenceError,
+              'page fallback lacks affirmative source-bound impossibility proof'
+      end
+      [page, claims[0]]
+    end
+
+    raster_signatures = Array(hash_value(stats, :raster_delivery_records)).map do |record|
+      next unless hash_value(record, :delivery_scope).to_s == 'page_raster'
+      next unless normalize_mode(hash_value(record, :requested_mode)) == expected_mode
+      unless hash_value(record, :no_semantic_text) == true
+        raise EvidenceError,
+              'page raster fallback is not marked as zero semantic text'
+      end
+      claims = canonical_claims!(
+        hash_value(record, :resulting_entity_ids), 'page raster fallback', false
+      )
+      unless claims.length == 1
+        raise EvidenceError,
+              'page raster fallback must own exactly one image'
+      end
+      [exact_positive_integer!(
+        hash_value(record, :page), 'page raster fallback page'
+      ), claims[0]]
+    end.compact
+    unless fallback_signatures.sort == raster_signatures.sort
+      raise EvidenceError,
+            'page raster deliveries do not match affirmative fallback proofs'
+    end
+    true
+  end
+  private_class_method :verify_page_representation_fallbacks!
 
   def self.normalized_delivery_claim(value)
     return ['entity_id', value] if value.is_a?(Integer) && value > 0
