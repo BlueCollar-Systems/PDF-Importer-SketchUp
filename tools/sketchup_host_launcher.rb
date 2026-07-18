@@ -360,7 +360,7 @@ module SketchupHostLauncher
                    'requested representation mode')
     require_equal!(result['worktree_metadata_version'],
                    result['loaded_importer_version'], 'loaded importer version')
-    require_nonempty!(result['host_version'], 'host version')
+    require_su2017_host_identity!(result)
     require_nonempty!(result['report_schema'], 'report schema')
 
     immutable_sha256 = Digest::SHA256.file(job[:immutable_pdf_path]).hexdigest
@@ -469,6 +469,26 @@ module SketchupHostLauncher
     end
     require_equal!(provenance['objects'], result_provenance['objects'],
                    'report/result source provenance')
+    true
+  end
+
+  def require_su2017_host_identity!(result)
+    host_version = result['host_version'].to_s.strip
+    unless host_version =~ /\A17(?:\.|\z)/
+      raise LaunchError,
+            "guarded host must be SketchUp 2017 (major 17), got #{host_version.inspect}"
+    end
+    identity = result['ruby_gate_identity']
+    unless identity.is_a?(Hash) &&
+           identity['engine'].to_s == 'ruby' &&
+           identity['version'].to_s == '2.2.4' &&
+           identity['patchlevel'].is_a?(Integer) &&
+           identity['patchlevel'] == 230 &&
+           identity['target'].to_s == 'sketchup-2017-ruby-2.2.4-p230' &&
+           identity['verified'] == true
+      raise LaunchError,
+            'guarded host Ruby identity is not exact ruby 2.2.4-p230'
+    end
     true
   end
 

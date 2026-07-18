@@ -82,6 +82,7 @@ module BlueCollarSystems
             :svg_item_flat_geometry,
           :mode => mode,
           :source_span_id => source_id,
+          :source_item => item,
           :group => group,
           :group_entity_id => group_id,
           :created_entities => created,
@@ -139,6 +140,47 @@ module BlueCollarSystems
                 'transformed item vector group has empty bounds'
         end
         true
+      end
+
+      def self.finalize_source_evidence!(result, item, page_rotation = 0.0)
+        verify_transformed_delivery!(result)
+        group = result[:group]
+        source_id = RepresentationFidelity.source_span_id(item)
+        unless result[:source_span_id].to_s == source_id
+          raise RepresentationFidelity::ContractError,
+                'item vector source identity changed before evidence finalization'
+        end
+        box = bounds_hash(group)
+        transform = RepresentationFidelity.entity_transformation_payload(group)
+        transform ||= { :kind => 'baked_geometry', :entity_count => 1 }
+        expected = RepresentationFidelity.source_expected_evidence(
+          item, result[:mode],
+          :entities => [group],
+          :source_anchor => [box[:min_x], box[:min_y], box[:min_z]],
+          :source_rotation_radians =>
+            (RepresentationFidelity.source_rotation_degrees(item) +
+             page_rotation.to_f) * Math::PI / 180.0,
+          :expected_width => box[:width],
+          :expected_height => box[:height],
+          :expected_depth => box[:max_z].to_f - box[:min_z].to_f,
+          :expected_bounds => {
+            :min => [box[:min_x], box[:min_y], box[:min_z]],
+            :max => [box[:max_x], box[:max_y], box[:max_z]]
+          },
+          :expected_transformation => transform
+        )
+        renderer = result[:mode] == :glyphs ?
+          'svg_item_glyph_group_renderer' :
+          'svg_item_flat_geometry_renderer'
+        RepresentationFidelity.attach_source_evidence!(
+          [group], expected, renderer
+        )
+        result[:expected_evidence] = expected
+        result[:content_verified] = true
+        result[:physical_geometry_verified] = true
+        result[:physical_style_verified] = true
+        result[:transform_verified] = true
+        result
       end
 
       def self.impossible_result(source_id, item, mode, placed, match,

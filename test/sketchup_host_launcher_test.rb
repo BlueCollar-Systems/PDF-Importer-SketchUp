@@ -425,42 +425,31 @@ class SketchupHostLauncherTest < Minitest::Test
       }
     }
     File.write(report_path, JSON.generate(report))
+    same_session_entities = [{
+      'entity_id' => 13, 'persistent_id' => 7013,
+      'typename' => 'Text', 'valid' => true, 'deleted' => false,
+      'content_evidence' => {
+        'text_like' => true, 'text' => 'A',
+        'text_sha256' => Digest::SHA256.hexdigest('A'),
+        'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
+      },
+      'children' => []
+    }]
+    expected_evidence = decorate_launcher_label_manifest!(
+      same_session_entities
+    )
+    post_import_entities = Marshal.load(Marshal.dump(same_session_entities))
+    reopened_entities = Marshal.load(Marshal.dump(same_session_entities))
+    reopened_entities[0]['entity_id'] = 91
     manifest = binding.merge(
       'requested_text_mode' => 'labels',
       'source_pdf_path' => pdf,
       'source_pdf_sha256' => digest,
       'source_lineage' => lineage,
       'import_session_id' => 'session-1',
-      'same_session_entities' => [{
-        'entity_id' => 13, 'persistent_id' => 7013,
-        'typename' => 'Text', 'valid' => true, 'deleted' => false,
-        'content_evidence' => {
-          'text_like' => true, 'text' => 'A',
-          'text_sha256' => Digest::SHA256.hexdigest('A'),
-          'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
-        },
-        'children' => []
-      }],
-      'post_import_entities' => [{
-        'entity_id' => 13, 'persistent_id' => 7013,
-        'typename' => 'Text', 'valid' => true, 'deleted' => false,
-        'content_evidence' => {
-          'text_like' => true, 'text' => 'A',
-          'text_sha256' => Digest::SHA256.hexdigest('A'),
-          'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
-        },
-        'children' => []
-      }],
-      'reopened_entities' => [{
-        'entity_id' => 91, 'persistent_id' => 7013,
-        'typename' => 'Text', 'valid' => true, 'deleted' => false,
-        'content_evidence' => {
-          'text_like' => true, 'text' => 'A',
-          'text_sha256' => Digest::SHA256.hexdigest('A'),
-          'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
-        },
-        'children' => []
-      }],
+      'same_session_entities' => same_session_entities,
+      'post_import_entities' => post_import_entities,
+      'reopened_entities' => reopened_entities,
       'reopen_persistent_id_verified' => true
     )
     SketchupHostLauncher.atomic_write_json(manifest_path, manifest)
@@ -476,6 +465,10 @@ class SketchupHostLauncherTest < Minitest::Test
       'loaded_importer_version' => '3.7.98',
       'report_schema' => 'bcs.import_report/1.1',
       'host_version' => '17.3.116',
+      'ruby_gate_identity' => {
+        'engine' => 'ruby', 'version' => '2.2.4', 'patchlevel' => 230,
+        'target' => 'sketchup-2017-ruby-2.2.4-p230', 'verified' => true
+      },
       'requested_text_mode' => 'labels',
       'source_pdf_path' => pdf,
       'source_pdf_sha256' => digest,
@@ -502,13 +495,23 @@ class SketchupHostLauncherTest < Minitest::Test
         'requested_mode' => 'labels', 'delivered_mode' => 'labels',
         'resulting_entity_ids' => ['entity_id:13'],
         'visual_fidelity_verified' => true,
+        'placement_verified' => true, 'rotation_verified' => true,
         'content_verified' => true, 'leader_verified' => true,
+        'entity_type_verified' => true,
+        'physical_geometry_verified' => true,
+        'physical_style_verified' => true, 'transform_verified' => true,
+        'expected_evidence' => expected_evidence,
         'attempt_history' => [{
           'mode' => 'labels', 'outcome' => 'complete',
           'resulting_entity_ids' => ['entity_id:13'],
           'visual_fidelity_verified' => true,
           'cleanup_outcome' => 'not_required',
-          'content_verified' => true, 'leader_verified' => true
+          'placement_verified' => true, 'rotation_verified' => true,
+          'content_verified' => true, 'leader_verified' => true,
+          'entity_type_verified' => true,
+          'physical_geometry_verified' => true,
+          'physical_style_verified' => true, 'transform_verified' => true,
+          'expected_evidence' => expected_evidence
         }]
       }],
       'source_provenance' => {
@@ -532,6 +535,61 @@ class SketchupHostLauncherTest < Minitest::Test
       'import_contract_ready' => { 'ready' => true }
     )
     SketchupHostLauncher.atomic_write_json(result_path, result)
+  end
+
+  def decorate_launcher_label_manifest!(rows)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    row = rows[0]
+    geometry = [{
+      :type => 'Text', :bounds => nil, :transformation => nil,
+      :anchor => [1.0, 2.0, 0.0],
+      :text_sha256 => Digest::SHA256.hexdigest('A'), :children => []
+    }]
+    style = [{
+      :type => 'Text', :entity_visible => true,
+      :layer_name => nil, :layer_visible => nil,
+      :material => nil, :back_material => nil,
+      :casts_shadows => nil, :receives_shadows => nil, :children => []
+    }]
+    expected = {
+      'schema' => 'bcs.source_expected/1.0',
+      'source_span_id' => 'text_span:1:0',
+      'representation' => 'labels',
+      'source_text_sha256' => Digest::SHA256.hexdigest('A'),
+      'source_bbox_pdf' => [0.0, 0.0, 72.0, 72.0],
+      'source_anchor' => [1.0, 2.0, 0.0],
+      'source_rotation_radians' => 0.0,
+      'source_font_sha256' => fidelity.canonical_sha256(
+        'source' => 'launcher-fixture'
+      ),
+      'expected_width' => 1.0, 'expected_height' => 1.0,
+      'expected_depth' => 0.0, 'expected_bounds' => nil,
+      'expected_transformation' => {
+        'kind' => 'native_text_anchor', 'anchor' => [1.0, 2.0, 0.0]
+      },
+      'physical_geometry_sha256' => fidelity.canonical_sha256(geometry),
+      'physical_style_sha256' => fidelity.canonical_sha256(style),
+      'physical_entity_count' => 1
+    }
+    expected['evidence_sha256'] = fidelity.canonical_sha256(expected)
+    row['representation_evidence'] = {
+      'source_span_id' => 'text_span:1:0', 'source_unit_id' => nil,
+      'source_kind' => 'text_span', 'representation' => 'labels',
+      'renderer' => 'sketchup_native_text',
+      'source_evidence_sha256' => expected['evidence_sha256'],
+      'source_text_sha256' => expected['source_text_sha256'],
+      'physical_geometry_sha256' => expected['physical_geometry_sha256'],
+      'physical_style_sha256' => expected['physical_style_sha256']
+    }
+    row['geometry_evidence'] = {
+      'sha256' => fidelity.canonical_sha256(geometry), 'payload' => geometry
+    }
+    row['style_evidence'] = {
+      'sha256' => fidelity.canonical_sha256(style), 'payload' => style,
+      'layer_name' => nil, 'layer_visible' => nil,
+      'entity_visible' => true, 'material' => nil, 'back_material' => nil
+    }
+    expected
   end
 
   def write_job(dir)

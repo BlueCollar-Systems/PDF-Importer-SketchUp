@@ -561,19 +561,24 @@ class RepresentationFidelityContractTest < Minitest::Test
 
   def test_geometry_and_glyphs_have_distinct_production_renderers_and_entity_types
     main = File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'), encoding: 'UTF-8')
+    renderer = File.read(
+      File.join(
+        SRC_ROOT, 'bc_pdf_vector_importer',
+        'svg_item_representation_renderer.rb'
+      ),
+      encoding: 'UTF-8'
+    )
     refute_match(/require.*svg_geometry_renderer|SvgGeometryRenderer/, main)
     assert_match(
-      /SvgTextRenderer\.render\(\s*geometry_group\.entities.*?raw_edge_glyphs:\s*true.*?flatten_glyph_instances:\s*true/m,
+      /Array\(text_items\)\.each do \|source_item\|.*?FallbackController\.new\(\s*requested_text_mode, source_id\s*\).*?complete_item_representation_ladder!/m,
       main
     )
-    assert_match(
-      /SvgTextRenderer\.render\(\s*glyph_group\.entities.*?raw_edge_glyphs:\s*false.*?flatten_glyph_instances:\s*false/m,
-      main
-    )
-    assert_match(
-      /use_svg_text\s*=\s*\[:geometry,\s*:glyphs\]\.include\?\(requested_text_mode\)/,
-      main
-    )
+    assert_match(/SvgItemRepresentationRenderer\.render_svg/, main)
+    assert_match(/build_flat_geometry!/, renderer)
+    assert_match(/build_glyph_groups!/, renderer)
+    assert_match(/assign_identity!\(group, source_id, mode/, renderer)
+    assert_match(/assign_identity!\(\s*edge, source_id, mode/m, renderer)
+    assert_match(/assign_identity!\(\s*glyph, source_id, :glyphs/m, renderer)
 
     counts = IMP::QAReport.send(:build_actual_text_entity_types_from_delivered_counts,
       'glyph_outline' => 2, 'page_path_geometry' => 3)
@@ -732,11 +737,19 @@ class RepresentationFidelityContractTest < Minitest::Test
     main = File.read(
       File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'), encoding: 'UTF-8'
     )
-    assert_match(
-      /SvgTextRenderer\.render\(\s*glyph_group\.entities.*?raw_edge_glyphs:\s*false.*?flatten_glyph_instances:\s*false/m,
-      main,
-      'Glyphs must be forced to the distinct reusable-component structure'
+    renderer = File.read(
+      File.join(
+        SRC_ROOT, 'bc_pdf_vector_importer',
+        'svg_item_representation_renderer.rb'
+      ),
+      encoding: 'UTF-8'
     )
+    assert_match(
+      /build_glyph_groups!\(group, entries, source_id, opts\[:layer\]\)/,
+      renderer,
+      'Glyphs must use independently owned source-bound physical groups'
+    )
+    assert_match(/SvgItemRepresentationRenderer\.render_svg/, main)
   end
 
 
@@ -1544,6 +1557,7 @@ class RepresentationFidelityContractTest < Minitest::Test
     attempt = stats[:text_attempts].first
     assert_equal :text3d, attempt[:requested_mode]
     assert_equal :geometry, attempt[:delivered_mode]
+    assert_equal true, attempt[:identity_verified]
     assert_equal [:text3d, :glyphs, :geometry],
                  attempt[:attempt_history].map { |rung| rung[:mode] }
     assert_equal [:failed, :failed, :complete],

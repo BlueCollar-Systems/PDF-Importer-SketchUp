@@ -310,7 +310,12 @@ module BlueCollarSystems
              result[:rotation_verified] == true &&
              result[:size_verified] == true &&
              result[:entity_type_verified] == true &&
-             result[:visibility_verified] == true
+             result[:visibility_verified] == true &&
+             result[:content_verified] == true &&
+             result[:physical_geometry_verified] == true &&
+             result[:physical_style_verified] == true &&
+             result[:transform_verified] == true &&
+             result[:expected_evidence].is_a?(Hash)
         raise RepresentationFidelity::ContractError,
               "#{source_id}: item vector delivery evidence is incomplete"
       end
@@ -332,6 +337,11 @@ module BlueCollarSystems
         :height_verified => true,
         :entity_type_verified => true,
         :visibility_verified => true,
+        :content_verified => true,
+        :physical_geometry_verified => true,
+        :physical_style_verified => true,
+        :transform_verified => true,
+        :expected_evidence => result[:expected_evidence],
         :physical_entity_ids => Array(result[:physical_entity_ids])
       }
       history << completed
@@ -342,12 +352,31 @@ module BlueCollarSystems
         :delivered_mode => delivered_mode,
         :resulting_entity_ids => [entity_id],
         :visual_fidelity_verified => true,
+        :identity_verified => true,
         :placement_verified => true,
         :rotation_verified => true,
         :width_verified => true,
         :height_verified => true,
         :entity_type_verified => true,
         :visibility_verified => true,
+        :content_verified => true,
+        :physical_geometry_verified => true,
+        :physical_style_verified => true,
+        :transform_verified => true,
+        :source_text_sha256 => result[:expected_evidence][:source_text_sha256],
+        :source_anchor => result[:expected_evidence][:source_anchor],
+        :source_rotation_radians =>
+          result[:expected_evidence][:source_rotation_radians],
+        :expected_width => result[:expected_evidence][:expected_width],
+        :expected_height => result[:expected_evidence][:expected_height],
+        :expected_depth => result[:expected_evidence][:expected_depth],
+        :source_style_sha256 =>
+          result[:expected_evidence][:physical_style_sha256],
+        :source_geometry_sha256 =>
+          result[:expected_evidence][:physical_geometry_sha256],
+        :expected_transform =>
+          result[:expected_evidence][:expected_transformation],
+        :expected_evidence => result[:expected_evidence],
         :attempt_history => history
       }
       created_type = delivered_mode == :glyphs ? 'glyph_outline' :
@@ -373,6 +402,11 @@ module BlueCollarSystems
         :height_verified => true,
         :entity_type_verified => true,
         :visibility_verified => true,
+        :content_verified => true,
+        :physical_geometry_verified => true,
+        :physical_style_verified => true,
+        :transform_verified => true,
+        :expected_evidence => result[:expected_evidence],
         :visual_fidelity_verified => true
       }
       record_fallback_transitions!(stats, page_num, transitions)
@@ -509,6 +543,9 @@ module BlueCollarSystems
               raise RepresentationFidelity::ContractError,
                     "#{source_id}: #{mode} item page transform was not verified"
             end
+            SvgItemRepresentationRenderer.finalize_source_evidence!(
+              result, item, page_rotation
+            )
             return record_item_vector_delivery!(
               stats, page_num, item, requested_mode, result, history,
               controller.transitions
@@ -730,7 +767,8 @@ module BlueCollarSystems
       end
       unless delivered_items.empty?
         record_svg_3d_text_delivery!(
-          stats, page_num, delivered_items, result, :labels, attempts_by_id
+          stats, page_num, delivered_items, result, :labels, attempts_by_id,
+          page_rotation
         )
         stats[:text] = stats[:text].to_i + rows.length
         stats[:faces] = stats[:faces].to_i + rows.inject(0) do |sum, row|
@@ -981,7 +1019,8 @@ module BlueCollarSystems
     def self.record_svg_3d_text_delivery!(stats, page_num, text_items,
                                           render_result,
                                           requested_mode = :text3d,
-                                          prior_attempts = {})
+                                          prior_attempts = {},
+                                          page_rotation = 0.0)
       requested_mode = RepresentationFidelity.normalize_mode(requested_mode)
       requested_mode = :text3d unless requested_mode
       rows = Array(render_result[:span_results])
@@ -989,15 +1028,29 @@ module BlueCollarSystems
       expected = Array(text_items).map do |item|
         RepresentationFidelity.source_span_id(item)
       end
+      items_by_id = {}
+      Array(text_items).each do |item|
+        items_by_id[RepresentationFidelity.source_span_id(item)] = item
+      end
       delivered = rows.map { |row| row[:source_span_id].to_s }
       unless delivered.sort == expected.sort
         raise RepresentationFidelity::ContractError,
               '3D text delivered source set does not equal the requested source set'
       end
       rows.each do |row|
+        item = items_by_id[row[:source_span_id].to_s]
+        unless item
+          raise RepresentationFidelity::ContractError,
+                "#{row[:source_span_id]} 3D Text source item is unavailable"
+        end
+        Svg3DTextRenderer.finalize_source_evidence!(
+          row, item, page_rotation
+        )
         required = [
           :identity_verified, :placement_verified, :rotation_verified,
-          :size_verified, :depth_verified
+          :size_verified, :depth_verified, :content_verified,
+          :physical_geometry_verified, :physical_style_verified,
+          :transform_verified
         ]
         unless required.all? { |key| row[key] == true }
           raise RepresentationFidelity::ContractError,
@@ -1018,9 +1071,15 @@ module BlueCollarSystems
           :rotation_verified => true,
           :width_verified => true,
           :height_verified => true,
+          :depth_verified => true,
+          :content_verified => true,
           :entity_type_verified => true,
           :source_glyph_identity_verified => true,
           :positive_z_depth_verified => true,
+          :physical_geometry_verified => true,
+          :physical_style_verified => true,
+          :transform_verified => true,
+          :expected_evidence => row[:expected_evidence],
           :visual_fidelity_verified => true
         }
         stats[:text_attempts] ||= []
@@ -1035,9 +1094,28 @@ module BlueCollarSystems
           :rotation_verified => true,
           :width_verified => true,
           :height_verified => true,
+          :depth_verified => true,
+          :content_verified => true,
           :entity_type_verified => true,
           :source_glyph_identity_verified => true,
           :positive_z_depth_verified => true,
+          :physical_geometry_verified => true,
+          :physical_style_verified => true,
+          :transform_verified => true,
+          :source_text_sha256 => row[:expected_evidence][:source_text_sha256],
+          :source_anchor => row[:expected_evidence][:source_anchor],
+          :source_rotation_radians =>
+            row[:expected_evidence][:source_rotation_radians],
+          :expected_width => row[:expected_evidence][:expected_width],
+          :expected_height => row[:expected_evidence][:expected_height],
+          :expected_depth => row[:expected_evidence][:expected_depth],
+          :source_style_sha256 =>
+            row[:expected_evidence][:physical_style_sha256],
+          :source_geometry_sha256 =>
+            row[:expected_evidence][:physical_geometry_sha256],
+          :expected_transform =>
+            row[:expected_evidence][:expected_transformation],
+          :expected_evidence => row[:expected_evidence],
           :width => row[:width], :height => row[:height], :depth => row[:depth],
           :attempt_history => history
         }
@@ -1054,9 +1132,15 @@ module BlueCollarSystems
           :rotation_verified => true,
           :width_verified => true,
           :height_verified => true,
+          :depth_verified => true,
+          :content_verified => true,
           :entity_type_verified => true,
           :source_glyph_identity_verified => true,
           :positive_z_depth_verified => true,
+          :physical_geometry_verified => true,
+          :physical_style_verified => true,
+          :transform_verified => true,
+          :expected_evidence => row[:expected_evidence],
           :width => row[:width], :height => row[:height], :depth => row[:depth]
         }
       end
@@ -3165,7 +3249,8 @@ module BlueCollarSystems
             end
             unless all_source_rows.empty?
               record_svg_3d_text_delivery!(
-                stats, page_num, delivered_items, text3d_result
+                stats, page_num, delivered_items, text3d_result, :text3d, {},
+                page_rotation
               )
             end
             # QA text_entities counts created host text-representation groups;
@@ -3217,162 +3302,41 @@ module BlueCollarSystems
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
           text_layer = layer_mgr.text_fallback_layer
 
-          # Geometry and Glyphs share only the free SVG extraction step.
-          # Geometry is forced to raw path edges; Glyphs is forced to reusable
-          # component instances.  Each lives in one exact owned group.
-          glyph_decision = nil
-          glyph_decision = CairoGlyphSource.import_decision(stats) if requested_text_mode == :glyphs
+          # A page container cannot prove which physical descendants belong to
+          # which source span. Render and certify every source item independently.
+          # This also keeps same-text spans distinct by their deterministic span
+          # identity and exact source placement set.
           svg_failure = {}
-          svg_result = nil
-          geometry_group = nil
-          glyph_group = nil
+          use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
+            (a.to_f - b.to_f).abs > 0.01
+          end
+          svg_document = source_svg_document ||
+            CairoGlyphSource.render_page_svg(
+              path, page_num,
+              :failure_info => svg_failure,
+              :use_cropbox => use_cropbox == true
+            )
+          unless svg_document && !svg_document[:svg].to_s.empty?
+            reason = svg_failure[:reason].to_s
+            reason = 'requested_svg_representation_unavailable' if reason.empty?
+            raise RepresentationFidelity::ContractError,
+                  "Page #{page_num}: item source inspection failed: #{reason}"
+          end
           representation_parent = builder.page_group ?
             builder.page_group.entities : model.active_entities
-          if requested_text_mode == :geometry
-            geometry_group = create_owned_page_representation_group!(
-              representation_parent,
-              "PDF Page #{page_num} - Raw Text Path Geometry"
+          Array(text_items).each do |source_item|
+            source_id = RepresentationFidelity.source_span_id(source_item)
+            controller = RepresentationFidelity::FallbackController.new(
+              requested_text_mode, source_id
             )
-            svg_failure[:created_entity_ids] = [
-              RepresentationFidelity.stable_entity_id(geometry_group)
-            ]
-            svg_result = SvgTextRenderer.render(
-              geometry_group.entities, path, page_num, media_box,
-              scale: opts[:scale], layer: text_layer, y_offset: 0.0,
-              svg_page_box: svg_page_box,
-              page_rotation: 0,
-              raw_edge_glyphs: true,
-              flatten_glyph_instances: true,
-              failure_info: svg_failure)
-          elsif glyph_decision && CairoGlyphSource.svg_source?(glyph_decision)
-            glyph_group = create_owned_page_representation_group!(
-              representation_parent,
-              "PDF Page #{page_num} - Glyph Components"
+            complete_item_representation_ladder!(
+              stats, model, representation_parent, path, page_num,
+              source_item, requested_text_mode, controller, [], media_box,
+              svg_page_box, page_rotation, opts, import_start, page_y_offset,
+              svg_document, text_layer, text_items
             )
-            svg_failure[:created_entity_ids] = [
-              RepresentationFidelity.stable_entity_id(glyph_group)
-            ]
-            svg_result = SvgTextRenderer.render(
-              glyph_group.entities, path, page_num, media_box,
-              scale: opts[:scale], layer: text_layer, y_offset: 0.0,
-              svg_page_box: svg_page_box,
-              page_rotation: 0,
-              raw_edge_glyphs: false,
-               flatten_glyph_instances: false,
-               failure_info: svg_failure)
           end
-          if svg_result
-            placements = svg_result[:semantic_svg_placements]
-            svg_failure[:detected_svg_placements] =
-              placements.is_a?(Array) ? placements.length : 0
-          end
-          if svg_result && !finalize_svg_poppler_semantics(
-               svg_result, path, page_num, text_items, media_box
-             )
-            final_validation = svg_result[:poppler_final_validation]
-            reason = final_validation.is_a?(Hash) ?
-              final_validation[:reason].to_s : ''
-            reason = 'poppler_semantic_evidence_incomplete' if reason.empty?
-            svg_failure[:reason] = reason
-            svg_failure[:created_definitions] = svg_result[:created_definitions]
-            svg_result = nil
-          end
-          if svg_result && !svg_page_visual_fidelity_verified?(
-               svg_result, text_items, media_box, requested_text_mode,
-               geometry_group || glyph_group
-              )
-            svg_failure[:reason] = 'svg_visual_evidence_incomplete'
-            svg_failure[:created_definitions] = svg_result[:created_definitions]
-            svg_result = nil
-          end
-          if svg_result && !apply_and_verify_page_representation_transform(
-               geometry_group || glyph_group, media_box, opts[:scale],
-               page_rotation, page_y_offset
-             )
-            svg_failure[:reason] = 'text_page_transform_unverified'
-            svg_failure[:created_definitions] = svg_result[:created_definitions]
-            svg_result = nil
-          end
-          failed_group = geometry_group || glyph_group
-          unless svg_result || failed_group.nil?
-            cleaned_ids = RepresentationFidelity.erase_owned!(
-              representation_parent, [failed_group]
-            )
-            erase_owned_glyph_definitions!(
-              model, svg_failure[:created_definitions]
-            )
-            svg_failure[:cleaned_entity_ids] = cleaned_ids
-            svg_failure[:cleanup_outcome] = :verified
-            geometry_group = nil
-            glyph_group = nil
-          end
-
-          if svg_result
-            stats[:text] += svg_result[:glyphs]
-            stats[:edges] += svg_result[:edges]
-            stats[:text_mode] = case requested_text_mode
-                                when :glyphs then :glyphs
-                                when :text3d then :text3d
-                                else :geometry
-                                end
-            renderer_attrs = {
-              renderer: svg_result[:renderer], mode: stats[:text_mode],
-              requested_mode: requested_text_mode, degraded: false,
-              cropbox_fallback: svg_result[:cropbox_fallback],
-              raw_edge_glyphs: svg_result[:raw_edge_glyphs],
-              glyph_instances: svg_result[:glyph_instances],
-              flattened_glyph_instances: svg_result[:flattened_glyph_instances],
-              estimated_glyph_edges: svg_result[:estimated_glyph_edges],
-              text_performance_mode: svg_result[:text_performance_mode],
-              component_container: svg_result[:component_container]
-            }
-            if requested_text_mode == :geometry
-              record_page_geometry_delivery!(
-                stats, page_num, text_items, geometry_group, svg_result,
-                media_box
-              )
-            elsif glyph_decision
-              CairoGlyphSource.record_svg_page!(
-                glyph_decision, page_num, svg_result, text_items, media_box,
-                nil
-              )
-              record_page_glyph_delivery!(
-                stats, page_num, text_items, glyph_group, svg_result,
-                media_box
-              )
-              renderer_attrs[:glyph_source] = glyph_decision[:source]
-            end
-            record_text_renderer(stats, page_num, renderer_attrs)
-          else
-            enforce_detected_svg_text_delivery!(
-              page_num, requested_text_mode, svg_failure, text_items
-            )
-            unless text_items.empty?
-              reason = svg_failure[:reason].to_s
-              reason = 'requested_svg_representation_unavailable' if reason.empty?
-              failures = text_items.map do |source_item|
-                {
-                  source_span_id: RepresentationFidelity.source_span_id(source_item),
-                  requested: requested_text_mode,
-                  reason: reason,
-                  count: 1,
-                  attempt_history: [{
-                    mode: requested_text_mode,
-                    outcome: :failed,
-                    reason: reason,
-                    created_entity_ids: Array(svg_failure[:created_entity_ids]),
-                    cleaned_entity_ids: Array(svg_failure[:cleaned_entity_ids]),
-                    resulting_entity_ids: [],
-                    cleanup_outcome: svg_failure[:cleanup_outcome] || :not_required,
-                    visual_fidelity_verified: false
-                  }]
-                }
-              end
-              enforce_requested_text_delivery!(
-                page_num, requested_text_mode, failures
-              )
-            end
-          end
+          stats[:text_mode] = requested_text_mode
         end
 
         if opts[:cleanup_geometry] && builder.page_group

@@ -3,6 +3,10 @@
 require 'json'
 require 'digest'
 require 'fileutils'
+require File.expand_path(
+  '../extracted/sketchup_ext/bc_pdf_vector_importer/representation_fidelity',
+  __dir__
+)
 
 module SketchupHostEvidence
   class EvidenceError < StandardError; end
@@ -180,6 +184,20 @@ module SketchupHostEvidence
         raise EvidenceError,
               "reopened child structure mismatch for persistent_id:#{persistent_id}"
       end
+      unless evidence_payload_equal?(
+        hash_value(row, :geometry_evidence),
+        hash_value(other, :geometry_evidence)
+      )
+        raise EvidenceError,
+              "reopened geometry evidence mismatch for persistent_id:#{persistent_id}"
+      end
+      unless evidence_payload_equal?(
+        hash_value(row, :style_evidence),
+        hash_value(other, :style_evidence)
+      )
+        raise EvidenceError,
+              "reopened style evidence mismatch for persistent_id:#{persistent_id}"
+      end
     end
     true
   end
@@ -263,6 +281,9 @@ module SketchupHostEvidence
       verify_fallback_contracts!(stats, requested_mode, selected_pages)
       verify_raster_deliveries!(
         stats, manifest, requested_mode, selected_pages
+      )
+      verify_source_expected_attempts!(
+        hash_value(stats, :text_attempts), claim_rows
       )
     end
     true
@@ -368,6 +389,7 @@ module SketchupHostEvidence
     end
     children = child_entities(entity)
     typename = host_typename(entity)
+    physical = physical_entity_evidence(entity)
     {
       'entity_id' => host_positive_id(entity, :entityID, 'entityID'),
       'persistent_id' => host_positive_id(
@@ -380,12 +402,38 @@ module SketchupHostEvidence
       'transformation' => transformation_payload(entity),
       'representation_evidence' => representation_identity_evidence(entity),
       'content_evidence' => host_content_evidence(entity, typename),
+      'geometry_evidence' => physical['geometry_evidence'],
+      'style_evidence' => physical['style_evidence'],
       'children' => children.map do |child|
         snapshot_entity(child, ancestors + [identity])
       end
     }
   end
   private_class_method :snapshot_entity
+
+  def self.physical_entity_evidence(entity)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    evidence = fidelity.physical_evidence([entity])
+    style_root = Array(evidence[:style_payload]).first || {}
+    {
+      'geometry_evidence' => {
+        'sha256' => evidence[:physical_geometry_sha256],
+        'payload' => evidence[:geometry_payload]
+      },
+      'style_evidence' => {
+        'sha256' => evidence[:physical_style_sha256],
+        'payload' => evidence[:style_payload],
+        'layer_name' => style_root[:layer_name],
+        'layer_visible' => style_root[:layer_visible],
+        'entity_visible' => style_root[:entity_visible],
+        'material' => style_root[:material],
+        'back_material' => style_root[:back_material]
+      }
+    }
+  rescue StandardError => error
+    raise EvidenceError, "host physical evidence failed: #{error.message}"
+  end
+  private_class_method :physical_entity_evidence
 
   def self.host_positive_id(entity, method_name, label)
     unless entity.respond_to?(method_name)
@@ -484,11 +532,19 @@ module SketchupHostEvidence
     return nil unless entity.respond_to?(:get_attribute)
     dictionary = 'BC_PDF_Importer'
     values = {}
-    [
+    base_keys = [
       'source_span_id', 'source_unit_id', 'source_kind', 'representation',
       'renderer'
-    ].each do |key|
+    ]
+    base_keys.each do |key|
       values[key] = entity.get_attribute(dictionary, key, nil)
+    end
+    [
+      'source_evidence_sha256', 'source_text_sha256',
+      'physical_geometry_sha256', 'physical_style_sha256'
+    ].each do |key|
+      value = entity.get_attribute(dictionary, key, nil)
+      values[key] = value unless value.nil?
     end
     return nil if values.values.all? { |value| value.nil? }
     values
@@ -716,7 +772,6 @@ module SketchupHostEvidence
     label = "#{collection_name}[#{index}] #{mode}"
     rows.each { |row| verify_live_manifest_row!(row, label) }
     verify_representation_identity!(record, rows, mode, label)
-
     case mode
     when :labels
       verify_native_labels!(rows, record, label)
@@ -759,11 +814,8 @@ module SketchupHostEvidence
           raise EvidenceError, "#{label} host representation attribute conflicts"
         end
       end
-      source_span = hash_value(evidence, :source_span_id).to_s.strip
-      if expected_spans.length == 1 && !source_span.empty? &&
-         source_span != expected_spans[0]
-        raise EvidenceError, "#{label} host source-span identity conflicts"
-      end
+      # Recursive exact source ownership is enforced against the source-bound
+      # evidence digest after page, fallback, and alias validation.
       source_unit = hash_value(evidence, :source_unit_id).to_s.strip
       if !expected_unit.empty? && source_unit != expected_unit
         raise EvidenceError, "#{label} host source-unit identity conflicts"
@@ -773,10 +825,182 @@ module SketchupHostEvidence
   end
   private_class_method :verify_representation_identity!
 
+  def self.verify_source_expected_evidence!(record, rows, mode, label)
+    expected = hash_value(record, :expected_evidence)
+    unless expected.is_a?(Hash) &&
+           hash_value(expected, :schema).to_s == 'bcs.source_expected/1.0'
+      raise EvidenceError, "#{label} source-bound expected evidence is missing"
+    end
+    spans = source_span_ids(record, :span_id => true)
+    unless spans.length == 1 &&
+           hash_value(expected, :source_span_id).to_s == spans[0] &&
+           normalize_mode(hash_value(expected, :representation)) == mode
+      raise EvidenceError, "#{label} expected evidence belongs to another source"
+    end
+    sha_fields = [
+      :source_text_sha256, :source_font_sha256,
+      :physical_geometry_sha256, :physical_style_sha256,
+      :evidence_sha256
+    ]
+    unless sha_fields.all? do |field|
+      hash_value(expected, field).to_s.downcase =~ /\A[0-9a-f]{64}\z/
+    end
+      raise EvidenceError, "#{label} expected evidence digests are incomplete"
+    end
+    canonical = expected.dup
+    canonical.delete(:evidence_sha256)
+    canonical.delete('evidence_sha256')
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    unless fidelity.canonical_sha256(canonical) ==
+           hash_value(expected, :evidence_sha256).to_s.downcase
+      raise EvidenceError, "#{label} expected evidence digest is invalid"
+    end
+    top_digest = hash_value(record, :source_text_sha256).to_s.downcase
+    if !top_digest.empty? && top_digest !=
+       hash_value(expected, :source_text_sha256).to_s.downcase
+      raise EvidenceError, "#{label} source content digest conflicts"
+    end
+
+    geometry_payload = manifest_evidence_payload!(rows, :geometry_evidence, label)
+    style_payload = manifest_evidence_payload!(rows, :style_evidence, label)
+    unless fidelity.canonical_sha256(geometry_payload) ==
+           hash_value(expected, :physical_geometry_sha256).to_s.downcase
+      raise EvidenceError, "#{label} physical geometry differs from source expectation"
+    end
+    unless fidelity.canonical_sha256(style_payload) ==
+           hash_value(expected, :physical_style_sha256).to_s.downcase
+      raise EvidenceError, "#{label} physical style differs from source expectation"
+    end
+    count = geometry_payload.inject(0) do |total, payload|
+      total + geometry_payload_entity_count(payload)
+    end
+    unless count == exact_positive_integer!(
+      hash_value(expected, :physical_entity_count),
+      "#{label} physical entity count"
+    )
+      raise EvidenceError, "#{label} physical entity count differs from expectation"
+    end
+    verify_expected_identity_tree!(
+      rows, spans[0], mode,
+      hash_value(expected, :evidence_sha256).to_s.downcase, label
+    )
+    verify_expected_dimensions!(expected, rows, mode, label)
+    true
+  end
+  private_class_method :verify_source_expected_evidence!
+
+  def self.verify_source_expected_attempts!(attempts, rows_by_claim)
+    Array(attempts).each_with_index do |attempt, index|
+      mode = normalize_mode(hash_value(attempt, :delivered_mode))
+      next if mode == :raster
+      claims = canonical_claims!(
+        hash_value(attempt, :resulting_entity_ids), 'attempt', false
+      )
+      rows = claims.map { |claim| rows_by_claim[claim] }
+      if rows.any? { |row| row.nil? }
+        raise EvidenceError, "text_attempts[#{index}] manifest binding is missing"
+      end
+      verify_source_expected_evidence!(
+        attempt, rows, mode, "text_attempts[#{index}] #{mode}"
+      )
+    end
+    true
+  end
+  private_class_method :verify_source_expected_attempts!
+
+  def self.manifest_evidence_payload!(rows, key, label)
+    payload = []
+    Array(rows).each do |row|
+      evidence = hash_value(row, key)
+      values = hash_value(evidence, :payload) if evidence.is_a?(Hash)
+      unless values.is_a?(Array) && !values.empty?
+        raise EvidenceError, "#{label} #{key} is unavailable"
+      end
+      payload.concat(values)
+    end
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    payload.sort_by { |entry| fidelity.canonical_json(entry) }
+  end
+  private_class_method :manifest_evidence_payload!
+
+  def self.geometry_payload_entity_count(payload)
+    children = hash_value(payload, :children)
+    1 + Array(children).inject(0) do |total, child|
+      total + geometry_payload_entity_count(child)
+    end
+  end
+  private_class_method :geometry_payload_entity_count
+
+  def self.verify_expected_identity_tree!(rows, source_id, mode, digest, label)
+    visit_manifest(Array(rows)) do |row|
+      evidence = hash_value(row, :representation_evidence)
+      unless evidence.is_a?(Hash) &&
+             hash_value(evidence, :source_span_id).to_s == source_id &&
+             normalize_mode(hash_value(evidence, :representation)) == mode &&
+             hash_value(evidence, :source_evidence_sha256).to_s.downcase == digest
+        raise EvidenceError,
+              "#{label} physical descendant lacks exact source evidence identity"
+      end
+    end
+    true
+  end
+  private_class_method :verify_expected_identity_tree!
+
+  def self.verify_expected_dimensions!(expected, rows, mode, label)
+    anchor = hash_value(expected, :source_anchor)
+    rotation = hash_value(expected, :source_rotation_radians)
+    unless numeric_point_payload?(anchor) && positive_finite_number?(
+      hash_value(expected, :expected_width)
+    ) && positive_finite_number?(hash_value(expected, :expected_height)) &&
+           rotation.is_a?(Numeric) && rotation.to_f.finite?
+      raise EvidenceError, "#{label} source dimensions/placement are incomplete"
+    end
+    depth = hash_value(expected, :expected_depth)
+    unless depth.is_a?(Numeric) && depth.to_f.finite? && depth.to_f >= 0.0
+      raise EvidenceError, "#{label} source depth is invalid"
+    end
+    if mode == :text3d && depth.to_f <= 0.0
+      raise EvidenceError, "#{label} expected 3D Text depth is not positive"
+    end
+    if [:text3d, :glyphs, :geometry].include?(mode)
+      bounds = hash_value(expected, :expected_bounds)
+      transform = hash_value(expected, :expected_transformation)
+      unless bounds.is_a?(Hash) && !transform.nil?
+        raise EvidenceError, "#{label} expected physical bounds/transform are missing"
+      end
+      if rows.length == 1
+        unless evidence_payload_equal?(bounds, hash_value(rows[0], :bounds))
+          raise EvidenceError, "#{label} saved bounds differ from source expectation"
+        end
+        row_transform = hash_value(rows[0], :transformation)
+        unless transform.is_a?(Hash) &&
+               hash_value(transform, :kind).to_s == 'baked_geometry'
+          unless evidence_payload_equal?(transform, row_transform)
+            raise EvidenceError,
+                  "#{label} saved transform differs from source expectation"
+          end
+        end
+      end
+    end
+    true
+  end
+  private_class_method :verify_expected_dimensions!
+
   def self.verify_native_labels!(rows, record, label)
     expected_digest = hash_value(record, :source_text_sha256).to_s.downcase
     unless expected_digest =~ /\A[0-9a-f]{64}\z/
       raise EvidenceError, "#{label} source text digest is missing"
+    end
+    expected = hash_value(record, :expected_evidence)
+    expected_anchor = expected.is_a?(Hash) ?
+      hash_value(expected, :source_anchor) : nil
+    expected_rotation = expected.is_a?(Hash) ?
+      hash_value(expected, :source_rotation_radians) : nil
+    if expected.is_a?(Hash) &&
+       (!numeric_point_payload?(expected_anchor) ||
+        !expected_rotation.is_a?(Numeric) ||
+        expected_rotation.to_f.abs > 1.0e-12)
+      raise EvidenceError, "#{label} exact source anchor/rotation is missing"
     end
     valid = rows.all? do |row|
       content = hash_value(row, :content_evidence)
@@ -787,6 +1011,10 @@ module SketchupHostEvidence
         Digest::SHA256.hexdigest(actual_text) == expected_digest &&
         hash_value(content, :text_sha256).to_s.downcase == expected_digest &&
         numeric_point_payload?(hash_value(content, :anchor)) &&
+        (!expected.is_a?(Hash) || [0, 1, 2].all? do |axis|
+          (hash_value(content, :anchor)[axis].to_f -
+            expected_anchor[axis].to_f).abs <= 1.0e-6
+        end) &&
         hash_value(content, :leader_visible) == false &&
         Array(hash_value(row, :children)).empty?
     end
@@ -1076,6 +1304,7 @@ module SketchupHostEvidence
            hash_value(rung, :cleanup_outcome).to_s == 'not_required'
       raise EvidenceError, "#{source_id} completed rung is not bound to delivery"
     end
+    verify_mode_flags!(rung, mode, "#{source_id} completed rung")
     if mode == :raster &&
        (hash_value(rung, :real_raster_verified) != true ||
         hash_value(rung, :source_crop_binding_verified) != true)
@@ -1084,6 +1313,47 @@ module SketchupHostEvidence
     true
   end
   private_class_method :verify_completed_rung!
+
+  def self.verify_mode_flags!(record, mode, label)
+    return true if mode == :raster
+    common = [
+      :visual_fidelity_verified, :placement_verified, :rotation_verified,
+      :content_verified, :entity_type_verified,
+      :physical_geometry_verified, :physical_style_verified,
+      :transform_verified
+    ]
+    required = common.dup
+    case mode
+    when :labels
+      required << :leader_verified
+    when :text3d
+      required.concat([:width_verified, :height_verified, :depth_verified])
+    when :glyphs, :geometry
+      required.concat([
+        :width_verified, :height_verified, :identity_verified,
+        :visibility_verified
+      ])
+    else
+      raise EvidenceError, "#{label} representation mode is invalid"
+    end
+    missing = required.reject { |field| hash_value(record, field) == true }
+    unless missing.empty?
+      raise EvidenceError,
+            "#{label} mode-specific verification failed: #{missing.join(', ')}"
+    end
+    if mode == :text3d
+      font_or_source = hash_value(record, :font_identity_verified) == true ||
+        hash_value(record, :source_glyph_identity_verified) == true
+      positive_depth = hash_value(record, :positive_z_depth_verified) == true ||
+        hash_value(record, :depth_verified) == true
+      unless font_or_source && positive_depth
+        raise EvidenceError,
+              "#{label} 3D Text content/font/depth verification is incomplete"
+      end
+    end
+    true
+  end
+  private_class_method :verify_mode_flags!
 
   def self.verify_fallback_contracts!(stats, requested_mode, selected_pages)
     expected_mode = normalize_mode(requested_mode)
@@ -1111,15 +1381,11 @@ module SketchupHostEvidence
 
       plural = hash_key?(attempt, :source_span_ids)
       if plural
-        unless [:glyphs, :geometry].include?(expected_mode) &&
-               delivered == expected_mode && history.length == 1
-          raise EvidenceError,
-                "text_attempts[#{index}] page delivery cannot self-declare a fallback mode"
-        end
-        spans.each do |source_id|
-          verify_completed_rung!(history[0], expected_mode, ids, source_id)
-        end
+        raise EvidenceError,
+              "text_attempts[#{index}] must be one independently owned source item"
       else
+        verify_mode_flags!(attempt, delivered,
+                           "text_attempts[#{index}]")
         unless spans.length == 1
           raise EvidenceError, "text_attempts[#{index}] item identity is ambiguous"
         end

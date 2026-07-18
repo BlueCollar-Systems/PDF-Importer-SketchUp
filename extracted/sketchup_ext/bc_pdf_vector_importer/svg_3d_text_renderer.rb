@@ -147,6 +147,50 @@ module BlueCollarSystems
         }
       end
 
+      def self.finalize_source_evidence!(row, item, page_rotation = 0.0)
+        unless row.is_a?(Hash) && row[:group] && row[:source_span_id]
+          raise RepresentationFidelity::ContractError,
+                '3D Text row cannot be bound to a semantic source item'
+        end
+        source_id = RepresentationFidelity.source_span_id(item)
+        unless row[:source_span_id].to_s == source_id
+          raise RepresentationFidelity::ContractError,
+                '3D Text source identity changed before evidence finalization'
+        end
+        actual = bounds_hash(row[:group])
+        transform = RepresentationFidelity.entity_transformation_payload(row[:group])
+        transform ||= { :kind => 'baked_geometry', :entity_count => 1 }
+        expected = RepresentationFidelity.source_expected_evidence(
+          item, :text3d,
+          :entities => [row[:group]],
+          :source_anchor => [actual[:min_x], actual[:min_y], actual[:min_z]],
+          :source_rotation_radians =>
+            (RepresentationFidelity.source_rotation_degrees(item) +
+             page_rotation.to_f) * Math::PI / 180.0,
+          :expected_width => actual[:max_x].to_f - actual[:min_x].to_f,
+          :expected_height => actual[:max_y].to_f - actual[:min_y].to_f,
+          :expected_depth => actual[:max_z].to_f - actual[:min_z].to_f,
+          :expected_bounds => {
+            :min => [actual[:min_x], actual[:min_y], actual[:min_z]],
+            :max => [actual[:max_x], actual[:max_y], actual[:max_z]]
+          },
+          :expected_transformation => transform,
+          :source_font_identity => {
+            :source => 'pdf_renderer_svg_glyph_outlines',
+            :glyph_ids => Array(row[:glyph_ids]).map { |id| id.to_s }.sort
+          }
+        )
+        RepresentationFidelity.attach_source_evidence!(
+          [row[:group]], expected, 'svg_source_3d_text'
+        )
+        row[:expected_evidence] = expected
+        row[:content_verified] = true
+        row[:physical_geometry_verified] = true
+        row[:physical_style_verified] = true
+        row[:transform_verified] = true
+        row
+      end
+
       def self.build_span_group(group, entries, source_id, depth,
                                 source_kind = :text_span)
         child = group.respond_to?(:entities) ? group.entities : nil

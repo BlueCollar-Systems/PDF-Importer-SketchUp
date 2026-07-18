@@ -263,6 +263,7 @@ class SketchupHostEvidenceTest < Minitest::Test
     ])
     assert_equal 13, rows[0]['entity_id']
     assert_equal 7013, rows[0]['persistent_id']
+    decorate_fixture_manifest!(rows, :labels, 'text_span:1:0', 'A')
 
     valid = ready_stats(:terminal_text_delivery_records => [{
         :resulting_entity_ids => ['persistent_id:7013'],
@@ -434,7 +435,7 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_match(/source.*set mismatch/, error.message)
   end
 
-  def test_geometry_and_glyph_ledgers_accept_plural_source_span_ids
+  def test_geometry_and_glyph_ledgers_reject_count_only_plural_source_span_ids
     [:geometry, :glyphs].each do |mode|
       stats = ready_stats(
         :requested_text_mode => mode,
@@ -464,9 +465,13 @@ class SketchupHostEvidenceTest < Minitest::Test
         }]
       )
 
-      assert SketchupHostEvidence.verify_delivery_evidence!(
-        stats, mode == :geometry ? geometry_manifest : glyph_manifest, mode, [1]
-      )
+      error = assert_raises(StandardError) do
+        SketchupHostEvidence.verify_delivery_evidence!(
+          stats, mode == :geometry ? geometry_manifest : glyph_manifest,
+          mode, [1]
+        )
+      end
+      assert_match(/independently owned source item|one.*source/i, error.message)
     end
   end
 
@@ -900,7 +905,7 @@ class SketchupHostEvidenceTest < Minitest::Test
   end
 
   def label_manifest
-    [{
+    rows = [{
       'entity_id' => 13, 'persistent_id' => 1013,
       'typename' => 'Text', 'valid' => true, 'deleted' => false,
       'content_evidence' => {
@@ -910,12 +915,20 @@ class SketchupHostEvidenceTest < Minitest::Test
       },
       'children' => []
     }]
+    decorate_fixture_manifest!(rows, :labels, 'text_span:1:0', 'A')
+    rows
   end
 
   def geometry_manifest
-    [{
+    rows = [{
       'entity_id' => 13, 'persistent_id' => 1013,
       'typename' => 'Group', 'valid' => true, 'deleted' => false,
+      'bounds' => { 'min' => [0.0, 0.0, 0.0],
+                    'max' => [1.0, 1.0, 0.0] },
+      'transformation' => [1.0, 0.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0, 0.0,
+                           0.0, 0.0, 1.0, 0.0,
+                           0.0, 0.0, 0.0, 1.0],
       'representation_evidence' => {
         'source_span_id' => 'text_span:1:0', 'source_unit_id' => nil,
         'source_kind' => 'text_span', 'representation' => 'geometry',
@@ -927,12 +940,20 @@ class SketchupHostEvidenceTest < Minitest::Test
         'children' => []
       }]
     }]
+    decorate_fixture_manifest!(rows, :geometry, 'text_span:1:0', 'A')
+    rows
   end
 
   def glyph_manifest
-    [{
+    rows = [{
       'entity_id' => 13, 'persistent_id' => 1013,
       'typename' => 'Group', 'valid' => true, 'deleted' => false,
+      'bounds' => { 'min' => [0.0, 0.0, 0.0],
+                    'max' => [1.0, 1.0, 0.0] },
+      'transformation' => [1.0, 0.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0, 0.0,
+                           0.0, 0.0, 1.0, 0.0,
+                           0.0, 0.0, 0.0, 1.0],
       'representation_evidence' => {
         'source_span_id' => 'text_span:1:0', 'source_unit_id' => nil,
         'source_kind' => 'text_span', 'representation' => 'glyphs',
@@ -948,14 +969,20 @@ class SketchupHostEvidenceTest < Minitest::Test
         }]
       }]
     }]
+    decorate_fixture_manifest!(rows, :glyphs, 'text_span:1:0', 'A')
+    rows
   end
 
   def text3d_manifest
-    [{
+    rows = [{
       'entity_id' => 13, 'persistent_id' => 1013,
       'typename' => 'Group', 'valid' => true, 'deleted' => false,
       'bounds' => { 'min' => [0.0, 0.0, 0.0],
                     'max' => [1.0, 1.0, 0.1] },
+      'transformation' => [1.0, 0.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0, 0.0,
+                           0.0, 0.0, 1.0, 0.0,
+                           0.0, 0.0, 0.0, 1.0],
       'representation_evidence' => {
         'source_span_id' => 'text_span:1:0',
         'source_unit_id' => 'text_span:1:0',
@@ -972,9 +999,12 @@ class SketchupHostEvidenceTest < Minitest::Test
         'children' => []
       }]
     }]
+    decorate_fixture_manifest!(rows, :text3d, 'text_span:1:0', 'A')
+    rows
   end
 
   def ready_stats(overrides = {})
+    expected = fixture_expected_evidence(:labels, 'text_span:1:0', 'A')
     {
       :requested_text_mode => :labels,
       :import_session_id => 'test-session',
@@ -985,10 +1015,22 @@ class SketchupHostEvidenceTest < Minitest::Test
         :requested_mode => :labels, :delivered_mode => :labels,
         :resulting_entity_ids => [13],
         :visual_fidelity_verified => true,
+        :placement_verified => true, :rotation_verified => true,
+        :content_verified => true, :entity_type_verified => true,
+        :leader_verified => true,
+        :physical_geometry_verified => true,
+        :physical_style_verified => true, :transform_verified => true,
+        :expected_evidence => expected,
         :attempt_history => [{
           :mode => :labels, :outcome => :complete,
           :resulting_entity_ids => [13],
           :visual_fidelity_verified => true,
+          :placement_verified => true, :rotation_verified => true,
+          :content_verified => true, :entity_type_verified => true,
+          :leader_verified => true,
+          :physical_geometry_verified => true,
+          :physical_style_verified => true, :transform_verified => true,
+          :expected_evidence => expected,
           :cleanup_outcome => :not_required
         }]
       }],
@@ -1012,22 +1054,26 @@ class SketchupHostEvidenceTest < Minitest::Test
   def strict_page_mode_stats(job_mode, record_mode, page_number)
     source_id = "text_span:#{page_number}:0"
     entity_id = 'entity_id:13'
+    expected = fixture_expected_evidence(record_mode, source_id, 'A')
+    flags = fixture_mode_flags(record_mode)
     ready_stats(
       :requested_text_mode => job_mode,
       :text_source_span_ids => [source_id],
       :text_attempts => [{
-        :page => page_number, :source_span_ids => [source_id],
+        :page => page_number, :source_span_id => source_id,
         :source_text_sha256 => Digest::SHA256.hexdigest('A'),
         :requested_mode => record_mode, :delivered_mode => record_mode,
         :resulting_entity_ids => [entity_id],
         :visual_fidelity_verified => true,
+        :expected_evidence => expected,
         :attempt_history => [{
           :mode => record_mode, :outcome => :complete,
           :resulting_entity_ids => [entity_id],
           :visual_fidelity_verified => true,
+          :expected_evidence => expected,
           :cleanup_outcome => :not_required
-        }]
-      }],
+        }.merge(flags)]
+      }.merge(flags)],
       :source_provenance_objects => [],
       :page_text_delivery_records => [{
         :page => page_number, :source_span_ids => [source_id],
@@ -1061,10 +1107,14 @@ class SketchupHostEvidenceTest < Minitest::Test
       :created_entity_ids => [], :cleaned_entity_ids => [],
       :cleanup_outcome => :not_required
     }
+    expected = fixture_expected_evidence(:text3d, source_id, 'A')
+    flags = fixture_mode_flags(:text3d)
     ready_stats(
       :text_attempts => [{
         :source_span_id => source_id, :requested_mode => :labels,
         :delivered_mode => :text3d, :resulting_entity_ids => [entity_id],
+        :source_text_sha256 => Digest::SHA256.hexdigest('A'),
+        :expected_evidence => expected,
         :attempt_history => [{
           :mode => :labels, :outcome => :failed,
           :resulting_entity_ids => [], :transition_proof => proof
@@ -1072,9 +1122,10 @@ class SketchupHostEvidenceTest < Minitest::Test
           :mode => :text3d, :outcome => :complete,
           :resulting_entity_ids => [entity_id],
           :visual_fidelity_verified => true,
+          :expected_evidence => expected,
           :cleanup_outcome => :not_required
-        }]
-      }],
+        }.merge(flags)]
+      }.merge(flags)],
       :source_provenance_objects => [{
         :span_id => source_id, :resulting_entity_ids => [entity_id]
       }],
@@ -1085,20 +1136,25 @@ class SketchupHostEvidenceTest < Minitest::Test
   def strict_text3d_stats
     source_id = 'text_span:1:0'
     entity_id = 'entity_id:13'
+    expected = fixture_expected_evidence(:text3d, source_id, 'A')
+    flags = fixture_mode_flags(:text3d)
     ready_stats(
       :requested_text_mode => :text3d,
       :text_attempts => [{
         :source_span_id => source_id, :page => 1,
         :requested_mode => :text3d, :delivered_mode => :text3d,
+        :source_text_sha256 => Digest::SHA256.hexdigest('A'),
         :resulting_entity_ids => [entity_id],
         :visual_fidelity_verified => true,
+        :expected_evidence => expected,
         :attempt_history => [{
           :mode => :text3d, :outcome => :complete,
           :resulting_entity_ids => [entity_id],
           :visual_fidelity_verified => true,
+          :expected_evidence => expected,
           :cleanup_outcome => :not_required
-        }]
-      }],
+        }.merge(flags)]
+      }.merge(flags)],
       :source_provenance_objects => [{
         :span_id => source_id, :page => 1,
         :created_entity_type => 'source_glyph_3d_text',
@@ -1106,6 +1162,172 @@ class SketchupHostEvidenceTest < Minitest::Test
         :resulting_entity_ids => [entity_id]
       }]
     )
+  end
+
+  def fixture_mode_flags(mode)
+    common = {
+      :visual_fidelity_verified => true,
+      :placement_verified => true, :rotation_verified => true,
+      :content_verified => true, :entity_type_verified => true,
+      :physical_geometry_verified => true,
+      :physical_style_verified => true, :transform_verified => true
+    }
+    case mode
+    when :labels
+      common.merge(:leader_verified => true)
+    when :text3d
+      common.merge(
+        :width_verified => true, :height_verified => true,
+        :depth_verified => true, :source_glyph_identity_verified => true,
+        :positive_z_depth_verified => true
+      )
+    when :glyphs, :geometry
+      common.merge(
+        :width_verified => true, :height_verified => true,
+        :identity_verified => true, :visibility_verified => true
+      )
+    else
+      common
+    end
+  end
+
+  def fixture_expected_evidence(mode, source_id, text)
+    rows = case mode
+           when :geometry then geometry_manifest
+           when :glyphs then glyph_manifest
+           when :text3d then text3d_manifest
+           else label_manifest
+           end
+    decorate_fixture_manifest!(rows, mode, source_id, text)
+  end
+
+  def decorate_fixture_manifest!(rows, mode, source_id, text)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    geometry_payload = Array(rows).map do |row|
+      fixture_geometry_payload(row)
+    end.sort_by { |entry| fidelity.canonical_json(entry) }
+    style_payload = Array(rows).map do |row|
+      fixture_style_payload(row)
+    end.sort_by { |entry| fidelity.canonical_json(entry) }
+    root = Array(rows).first || {}
+    bounds = root['bounds']
+    anchor = if mode == :labels
+               hash = root['content_evidence'] || {}
+               hash['anchor'] || [1.0, 2.0, 0.0]
+             elsif bounds
+               bounds['min']
+             else
+               [0.0, 0.0, 0.0]
+             end
+    width = bounds ? bounds['max'][0].to_f - bounds['min'][0].to_f : 1.0
+    height = bounds ? bounds['max'][1].to_f - bounds['min'][1].to_f : 1.0
+    depth = bounds ? bounds['max'][2].to_f - bounds['min'][2].to_f : 0.0
+    expected = {
+      :schema => 'bcs.source_expected/1.0',
+      :source_span_id => source_id,
+      :representation => mode,
+      :source_text_sha256 => Digest::SHA256.hexdigest(text),
+      :source_bbox_pdf => [0.0, 0.0, 72.0, 72.0],
+      :source_anchor => anchor,
+      :source_rotation_radians => 0.0,
+      :source_font_sha256 => fidelity.canonical_sha256(
+        :fixture => 'source-font'
+      ),
+      :expected_width => width.abs > 0.0 ? width.abs : 1.0,
+      :expected_height => height.abs > 0.0 ? height.abs : 1.0,
+      :expected_depth => mode == :text3d ? depth.abs : 0.0,
+      :expected_bounds => [:text3d, :glyphs, :geometry].include?(mode) ?
+        bounds : nil,
+      :expected_transformation => [:text3d, :glyphs, :geometry].include?(mode) ?
+        root['transformation'] : { :kind => 'native_text_anchor', :anchor => anchor },
+      :physical_geometry_sha256 => fidelity.canonical_sha256(geometry_payload),
+      :physical_style_sha256 => fidelity.canonical_sha256(style_payload),
+      :physical_entity_count => Array(rows).inject(0) do |total, row|
+        total + fixture_row_count(row)
+      end
+    }
+    expected[:evidence_sha256] = fidelity.canonical_sha256(expected)
+    renderer = case mode
+               when :geometry then 'svg_item_flat_geometry_renderer'
+               when :glyphs then 'svg_item_glyph_group_renderer'
+               when :text3d then 'svg_source_3d_text'
+               else 'sketchup_native_text'
+               end
+    fixture_visit_rows(rows) do |row|
+      evidence = row['representation_evidence'] || {}
+      evidence['source_span_id'] = source_id
+      evidence['source_kind'] = 'text_span'
+      evidence['representation'] = mode.to_s
+      evidence['renderer'] = renderer
+      evidence['source_evidence_sha256'] = expected[:evidence_sha256]
+      evidence['source_text_sha256'] = expected[:source_text_sha256]
+      evidence['physical_geometry_sha256'] =
+        expected[:physical_geometry_sha256]
+      evidence['physical_style_sha256'] = expected[:physical_style_sha256]
+      row['representation_evidence'] = evidence
+      geometry = fixture_geometry_payload(row)
+      style = fixture_style_payload(row)
+      row['geometry_evidence'] = {
+        'sha256' => fidelity.canonical_sha256([geometry]),
+        'payload' => [geometry]
+      }
+      row['style_evidence'] = {
+        'sha256' => fidelity.canonical_sha256([style]),
+        'payload' => [style],
+        'layer_name' => style[:layer_name],
+        'layer_visible' => style[:layer_visible],
+        'entity_visible' => style[:entity_visible],
+        'material' => style[:material],
+        'back_material' => style[:back_material]
+      }
+    end
+    expected
+  end
+
+  def fixture_geometry_payload(row)
+    payload = {
+      :type => row['typename'].to_s,
+      :bounds => row['bounds'],
+      :transformation => row['transformation']
+    }
+    if row['typename'].to_s == 'Text'
+      content = row['content_evidence'] || {}
+      payload[:anchor] = content['anchor']
+      payload[:text_sha256] = Digest::SHA256.hexdigest(content['text'].to_s)
+    end
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    payload[:children] = Array(row['children']).map do |child|
+      fixture_geometry_payload(child)
+    end.sort_by { |entry| fidelity.canonical_json(entry) }
+    payload
+  end
+
+  def fixture_style_payload(row)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    payload = {
+      :type => row['typename'].to_s,
+      :entity_visible => true,
+      :layer_name => nil, :layer_visible => nil,
+      :material => nil, :back_material => nil,
+      :casts_shadows => nil, :receives_shadows => nil
+    }
+    payload[:children] = Array(row['children']).map do |child|
+      fixture_style_payload(child)
+    end.sort_by { |entry| fidelity.canonical_json(entry) }
+    payload
+  end
+
+  def fixture_row_count(row)
+    1 + Array(row['children']).inject(0) do |total, child|
+      total + fixture_row_count(child)
+    end
+  end
+
+  def fixture_visit_rows(rows, &block)
+    Array(rows).each do |row|
+      block.call(row)
+      fixture_visit_rows(row['children'], &block)
+    end
   end
 
   def bound_report(pdf)

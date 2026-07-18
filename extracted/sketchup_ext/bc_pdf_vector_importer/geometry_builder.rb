@@ -727,6 +727,10 @@ module BlueCollarSystems
           height_verified: false,
           content_verified: false,
           entity_type_verified: false,
+          physical_geometry_verified: false,
+          physical_style_verified: false,
+          transform_verified: false,
+          expected_evidence: nil,
           attempt_history: []
         }
         @text_attempts << attempt
@@ -742,7 +746,13 @@ module BlueCollarSystems
           mode: normalize_text_mode_symbol(mode), outcome: :attempting,
           reason: nil, created_entity_ids: [], resulting_entity_ids: [],
           cleaned_entity_ids: [], cleanup_outcome: :not_required,
-          visual_fidelity_verified: false
+          visual_fidelity_verified: false,
+          placement_verified: false, rotation_verified: false,
+          content_verified: false, entity_type_verified: false,
+          physical_geometry_verified: false,
+          physical_style_verified: false,
+          transform_verified: false,
+          expected_evidence: nil
         }
         attempt[:attempt_history] << rung
         rung
@@ -798,7 +808,14 @@ module BlueCollarSystems
         valid = evidence.is_a?(Hash) && ids &&
                 evidence[:placement_verified] == true &&
                 evidence[:rotation_verified] == true &&
-                evidence[:entity_type_verified] == true
+                evidence[:entity_type_verified] == true &&
+                evidence[:content_verified] == true &&
+                evidence[:physical_geometry_verified] == true &&
+                evidence[:physical_style_verified] == true &&
+                evidence[:transform_verified] == true &&
+                valid_source_expected_evidence?(evidence[:expected_evidence],
+                                                normalized_mode,
+                                                attempt[:source_span_id])
         if normalized_mode == :text3d
           valid = valid && evidence[:width_verified] == true &&
             evidence[:height_verified] == true &&
@@ -825,6 +842,10 @@ module BlueCollarSystems
         rung[:content_verified] = evidence[:content_verified] == true
         rung[:leader_verified] = evidence[:leader_verified] == true
         rung[:entity_type_verified] = true
+        rung[:physical_geometry_verified] = true
+        rung[:physical_style_verified] = true
+        rung[:transform_verified] = true
+        rung[:expected_evidence] = evidence[:expected_evidence]
         attempt[:delivered_mode] = normalized_mode
         attempt[:resulting_entity_ids] = ids
         attempt[:visual_fidelity_verified] = true
@@ -837,6 +858,68 @@ module BlueCollarSystems
         attempt[:content_verified] = evidence[:content_verified] == true
         attempt[:leader_verified] = evidence[:leader_verified] == true
         attempt[:entity_type_verified] = evidence[:entity_type_verified] == true
+        attempt[:physical_geometry_verified] = true
+        attempt[:physical_style_verified] = true
+        attempt[:transform_verified] = true
+        attempt[:expected_evidence] = evidence[:expected_evidence]
+      end
+
+      def valid_source_expected_evidence?(value, mode, source_id)
+        value.is_a?(Hash) &&
+          value[:schema].to_s == RepresentationFidelity::SOURCE_EXPECTED_SCHEMA &&
+          value[:source_span_id].to_s == source_id.to_s &&
+          RepresentationFidelity.normalize_mode(value[:representation]) == mode &&
+          value[:source_text_sha256].to_s =~ /\A[0-9a-f]{64}\z/ &&
+          value[:source_font_sha256].to_s =~ /\A[0-9a-f]{64}\z/ &&
+          value[:physical_geometry_sha256].to_s =~ /\A[0-9a-f]{64}\z/ &&
+          value[:physical_style_sha256].to_s =~ /\A[0-9a-f]{64}\z/ &&
+          value[:evidence_sha256].to_s =~ /\A[0-9a-f]{64}\z/ &&
+          value[:physical_entity_count].to_i > 0
+      rescue StandardError
+        false
+      end
+
+      def created_bounds_payload(created)
+        bounds = RepresentationFidelity.bounds(created)
+        {
+          :min => [bounds[:min_x], bounds[:min_y], bounds[:min_z]],
+          :max => [bounds[:max_x], bounds[:max_y], bounds[:max_z]]
+        }
+      rescue StandardError
+        nil
+      end
+
+      def source_expected_for_created!(item, mode, created, anchor,
+                                       display_angle, dimensions, renderer)
+        point = RepresentationFidelity.numeric_point(anchor)
+        raise RepresentationFidelity::ContractError,
+              'source evidence anchor is unavailable' unless point
+        values = dimensions.is_a?(Hash) ? dimensions.dup : {}
+        values[:entities] = Array(created)
+        values[:source_anchor] = point
+        values[:source_rotation_radians] =
+          display_angle.to_f * Math::PI / 180.0
+        values[:expected_bounds] ||= created_bounds_payload(created)
+        unless values.key?(:expected_transformation)
+          transforms = Array(created).map do |entity|
+            RepresentationFidelity.entity_transformation_payload(entity)
+          end.compact
+          values[:expected_transformation] = if transforms.empty?
+                                               {
+                                                 :kind => 'baked_geometry',
+                                                 :entity_count => Array(created).length
+                                               }
+                                             else
+                                               transforms
+                                             end
+        end
+        expected = RepresentationFidelity.source_expected_evidence(
+          item, mode, values
+        )
+        RepresentationFidelity.attach_source_evidence!(
+          created, expected, renderer
+        )
+        expected
       end
 
       def stop_requested_text_delivery!(requested_mode, item, attempt, rung,
@@ -1040,6 +1123,23 @@ module BlueCollarSystems
         apply_text_face_material(text_faces)
         @face_count += text_faces.length
         created.each { |entity| set_layer(entity, layer) }
+        evidence[:content_verified] = true
+        evidence[:physical_geometry_verified] = true
+        evidence[:physical_style_verified] = true
+        evidence[:transform_verified] = true
+        evidence[:expected_evidence] = source_expected_for_created!(
+          item, :text3d, created, anchor, display_angle,
+          {
+            :expected_width => evidence[:target_width_in],
+            :expected_height => evidence[:target_height_in],
+            :expected_depth => extrusion_depth,
+            :source_font_identity => {
+              :pdf_font_identity => font_identity[:pdf_font_identity],
+              :installed_family => font_identity[:installed_family]
+            }
+          },
+          'sketchup_native_3d_text'
+        )
         entity_ids = RepresentationFidelity.stable_ids(created)
         @text_count += 1
         record_mesh_text_height_sample(height)
@@ -1351,6 +1451,27 @@ module BlueCollarSystems
               text, item.text, pt, display_angle, true
             )
             set_layer(text, layer)
+            bbox = item_source_bbox_pdf(item)
+            expected_width = bbox ? (bbox[2].to_f - bbox[0].to_f).abs *
+              @scale_factor.to_f / 72.0 : 0.0
+            expected_height = bbox ? (bbox[3].to_f - bbox[1].to_f).abs *
+              @scale_factor.to_f / 72.0 : 0.0
+            evidence[:physical_geometry_verified] = true
+            evidence[:physical_style_verified] = true
+            evidence[:transform_verified] = true
+            evidence[:expected_evidence] = source_expected_for_created!(
+              item, :labels, [text], pt, display_angle,
+              {
+                :expected_width => expected_width,
+                :expected_height => expected_height,
+                :expected_depth => 0.0,
+                :expected_transformation => {
+                  :kind => 'native_text_anchor',
+                  :anchor => RepresentationFidelity.numeric_point(pt)
+                }
+              },
+              'sketchup_native_text'
+            )
             entity_ids = [identity]
             @text_count += 1
             record_text_span_provenance(item, 'native_label', entity_ids, :labels)

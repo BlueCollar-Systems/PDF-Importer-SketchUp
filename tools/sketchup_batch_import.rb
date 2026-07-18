@@ -16,6 +16,7 @@ module SketchupBatchImport
 
     def perform(job, binding)
       require_batch_environment!
+      host_identity = require_su2017_ruby_identity!
       verify_plugins_disabled!
       install_modal_guard!
       plugin_root = File.expand_path('../extracted/sketchup_ext', __dir__)
@@ -123,6 +124,7 @@ module SketchupBatchImport
         'loaded_importer_version' => loaded_version,
         'report_schema' => importer::QAReport::SCHEMA,
         'host_version' => Sketchup.version.to_s,
+        'ruby_gate_identity' => host_identity,
         'requested_text_mode' => job[:text_mode].to_s,
         'source_pdf_path' => job[:pdf_path],
         'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
@@ -163,6 +165,29 @@ module SketchupBatchImport
         'representation_fidelity' => stats[:representation_fidelity],
         'import_contract_ready' => stats[:import_contract_ready]
       }
+    end
+
+    def require_su2017_ruby_identity!
+      host_version = Sketchup.version.to_s
+      host_major = host_version.split('.').first.to_i
+      raise "guarded host must be SketchUp 2017 (major 17), got #{host_version}" unless
+        host_major == 17
+      engine = defined?(RUBY_ENGINE) ? RUBY_ENGINE.to_s : 'ruby'
+      version = RUBY_VERSION.to_s
+      patchlevel = defined?(RUBY_PATCHLEVEL) ? RUBY_PATCHLEVEL.to_i : -1
+      verified = engine == 'ruby' && version == '2.2.4' && patchlevel == 230
+      identity = {
+        'engine' => engine,
+        'version' => version,
+        'patchlevel' => patchlevel,
+        'target' => 'sketchup-2017-ruby-2.2.4-p230',
+        'verified' => verified
+      }
+      unless verified
+        raise "guarded Ruby identity must be ruby 2.2.4-p230, got " \
+              "#{engine} #{version}-p#{patchlevel}"
+      end
+      identity
     end
 
     def discard!

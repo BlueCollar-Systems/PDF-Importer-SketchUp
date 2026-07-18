@@ -134,16 +134,27 @@ class AllModesPlacementContractTest < Minitest::Test
                  rung[:transition_proof][:reason_code]
   end
 
-  # Geometry and Glyphs may share free SVG extraction, but their host entity
-  # structures are deliberately distinct: raw edges vs reusable components.
+  # Geometry and Glyphs may share free SVG extraction, but every source item
+  # owns a distinct physical structure: raw edges vs glyph groups.
   def test_geometry_and_glyphs_force_distinct_host_entity_structures
     # Explicit UTF-8 for the bare ruby:2.2 container (US-ASCII default).
     main = File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
                      encoding: 'UTF-8')
-    assert_match(/requested_text_mode == :geometry/, main)
-    assert_match(/raw_edge_glyphs: true,\s*\n\s*flatten_glyph_instances: true/, main)
-    assert_match(/raw_edge_glyphs: false,\s*\n\s*flatten_glyph_instances: false/, main)
-    assert_match(/Raw Text Path Geometry/, main)
-    assert_match(/Glyph Components/, main)
+    renderer = File.read(
+      File.join(
+        SRC_ROOT, 'bc_pdf_vector_importer',
+        'svg_item_representation_renderer.rb'
+      ),
+      encoding: 'UTF-8'
+    )
+    assert_match(/Array\(text_items\)\.each do \|source_item\|/, main)
+    assert_match(/FallbackController\.new\(\s*requested_text_mode, source_id/m, main)
+    assert_match(/SvgItemRepresentationRenderer\.render_svg/, main)
+    assert_match(/build_flat_geometry!/, renderer)
+    assert_match(/build_glyph_groups!/, renderer)
+    assert_match(/entity_type\(entity\) == 'Edge'/, renderer)
+    assert_match(/entity_type\(glyph\) == 'Group'/, renderer)
+    assert_match(/assign_identity!\(\s*edge, source_id, mode/m, renderer)
+    assert_match(/assign_identity!\(\s*glyph, source_id, :glyphs/m, renderer)
   end
 end

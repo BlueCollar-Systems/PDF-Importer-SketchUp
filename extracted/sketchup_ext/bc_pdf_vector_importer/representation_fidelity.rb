@@ -1,6 +1,9 @@
 # bc_pdf_vector_importer/representation_fidelity.rb
 # Shared fail-closed evidence and cleanup helpers for requested import modes.
 
+require 'digest'
+require 'json'
+
 module BlueCollarSystems
   module PDFVectorImporter
     module RepresentationFidelity
@@ -9,6 +12,7 @@ module BlueCollarSystems
       SOURCE_ID = /\Atext_span:([1-9]\d*):(0|[1-9]\d*)\z/.freeze
       ENTITY_ID = /\A(?:persistent_id|entity_id):[1-9]\d*\z/.freeze
       IMPORTER_ID = 'sketchup_pdf_vector_importer'.freeze
+      SOURCE_EXPECTED_SCHEMA = 'bcs.source_expected/1.0'.freeze
       MODES = [:labels, :text3d, :glyphs, :geometry, :raster].freeze
       LADDERS = {
         # Closest structural representation first; the final rung is always a
@@ -365,6 +369,332 @@ module BlueCollarSystems
         end
         { min_x: xs.min, max_x: xs.max, min_y: ys.min, max_y: ys.max,
           width: xs.max - xs.min, height: ys.max - ys.min }
+      end
+
+      # Evidence is deliberately derived from the physical host entities, not
+      # from the report flags which describe them.  The same canonical payload
+      # is captured again by the guarded host after save/reopen.
+      def canonical_number(value)
+        number = value.to_f
+        raise ContractError, 'evidence contains a non-finite number' unless number.finite?
+        rounded = (number * 1.0e9).round / 1.0e9
+        rounded == -0.0 ? 0.0 : rounded
+      end
+
+      def canonical_value(value)
+        case value
+        when Hash
+          result = {}
+          value.keys.map { |key| key.to_s }.uniq.sort.each do |name|
+            key = value.keys.find { |candidate| candidate.to_s == name }
+            result[name] = canonical_value(value[key])
+          end
+          result
+        when Array
+          value.map { |entry| canonical_value(entry) }
+        when Numeric
+          canonical_number(value)
+        when Symbol
+          value.to_s
+        when true, false, nil
+          value
+        else
+          value.to_s
+        end
+      end
+
+      def canonical_json(value)
+        JSON.generate(canonical_value(value))
+      end
+
+      def canonical_sha256(value)
+        Digest::SHA256.hexdigest(canonical_json(value))
+      end
+
+      def entity_type(entity)
+        return entity.typename.to_s if entity.respond_to?(:typename)
+        entity.class.name.to_s.split('::').last
+      rescue StandardError
+        ''
+      end
+
+      def entity_children(entity)
+        collection = if entity.respond_to?(:entities)
+                       entity.entities
+                     elsif entity.respond_to?(:definition) && entity.definition &&
+                           entity.definition.respond_to?(:entities)
+                       entity.definition.entities
+                     end
+        return [] unless collection && collection.respond_to?(:to_a)
+        Array(collection.to_a)
+      rescue StandardError
+        []
+      end
+
+      def entity_bounds_payload(entity)
+        return nil unless entity.respond_to?(:bounds)
+        box = entity.bounds
+        return nil unless box && box.respond_to?(:min) && box.respond_to?(:max)
+        low = numeric_point(box.min)
+        high = numeric_point(box.max)
+        return nil unless low && high
+        { :min => low, :max => high }
+      rescue StandardError
+        nil
+      end
+
+      def entity_transformation_payload(entity)
+        return nil unless entity.respond_to?(:transformation)
+        transform = entity.transformation
+        return nil unless transform && transform.respond_to?(:to_a)
+        values = Array(transform.to_a)
+        return nil if values.empty?
+        values.map { |value| canonical_number(value) }
+      rescue StandardError
+        nil
+      end
+
+      def vertex_position(vertex)
+        point = vertex.respond_to?(:position) ? vertex.position : vertex
+        numeric_point(point)
+      rescue StandardError
+        nil
+      end
+
+      def ordered_points(values)
+        points = Array(values).map { |value| vertex_position(value) }.compact
+        points.map { |point| point.map { |number| canonical_number(number) } }.sort_by do |point|
+          point.join(',')
+        end
+      end
+
+      def edge_points(entity)
+        return [] unless entity.respond_to?(:start) && entity.respond_to?(:end)
+        ordered_points([entity.start, entity.end])
+      rescue StandardError
+        []
+      end
+
+      def face_loops(entity)
+        if entity.respond_to?(:loops)
+          loops = Array(entity.loops).map do |loop|
+            vertices = loop.respond_to?(:vertices) ? loop.vertices : []
+            ordered_points(vertices)
+          end
+          return loops.reject { |points| points.empty? }.sort_by do |points|
+            canonical_json(points)
+          end
+        end
+        vertices = entity.respond_to?(:vertices) ? entity.vertices : []
+        points = ordered_points(vertices)
+        points.empty? ? [] : [points]
+      rescue StandardError
+        []
+      end
+
+      def geometry_entity_payload(entity)
+        type = entity_type(entity)
+        payload = {
+          :type => type,
+          :bounds => entity_bounds_payload(entity),
+          :transformation => entity_transformation_payload(entity)
+        }
+        if type == 'Edge'
+          payload[:endpoints] = edge_points(entity)
+        elsif type == 'Face'
+          payload[:loops] = face_loops(entity)
+        elsif type == 'Text'
+          payload[:anchor] = numeric_point(entity.point) if entity.respond_to?(:point)
+          payload[:text_sha256] = Digest::SHA256.hexdigest(entity.text.to_s) if
+            entity.respond_to?(:text)
+        elsif type == 'Image'
+          payload[:width] = canonical_number(entity.width) if entity.respond_to?(:width)
+          payload[:height] = canonical_number(entity.height) if entity.respond_to?(:height)
+        end
+        children = entity_children(entity).map do |child|
+          geometry_entity_payload(child)
+        end
+        payload[:children] = children.sort_by { |child| canonical_json(child) }
+        payload
+      end
+
+      def visible_state(entity)
+        return false if entity.respond_to?(:hidden?) && entity.hidden? == true
+        return false if entity.respond_to?(:visible?) && entity.visible? == false
+        true
+      rescue StandardError
+        nil
+      end
+
+      def layer_payload(entity)
+        layer = entity.respond_to?(:layer) ? entity.layer : nil
+        return { :name => nil, :visible => nil } unless layer
+        visible = if layer.respond_to?(:visible?)
+                    layer.visible?
+                  elsif layer.respond_to?(:visible)
+                    layer.visible
+                  end
+        {
+          :name => layer.respond_to?(:name) ? layer.name.to_s : layer.to_s,
+          :visible => visible == true ? true : (visible == false ? false : nil)
+        }
+      rescue StandardError
+        { :name => nil, :visible => nil }
+      end
+
+      def color_payload(color)
+        return nil unless color
+        values = {}
+        [:red, :green, :blue, :alpha].each do |name|
+          values[name] = color.send(name).to_i if color.respond_to?(name)
+        end
+        values.empty? ? color.to_s : values
+      rescue StandardError
+        nil
+      end
+
+      def material_payload(material)
+        return nil unless material
+        {
+          :name => material.respond_to?(:name) ? material.name.to_s : material.to_s,
+          :color => material.respond_to?(:color) ? color_payload(material.color) : nil,
+          :alpha => material.respond_to?(:alpha) ? canonical_number(material.alpha) : nil
+        }
+      rescue StandardError
+        nil
+      end
+
+      def style_entity_payload(entity)
+        layer = layer_payload(entity)
+        payload = {
+          :type => entity_type(entity),
+          :entity_visible => visible_state(entity),
+          :layer_name => layer[:name],
+          :layer_visible => layer[:visible],
+          :material => entity.respond_to?(:material) ?
+            material_payload(entity.material) : nil,
+          :back_material => entity.respond_to?(:back_material) ?
+            material_payload(entity.back_material) : nil,
+          :casts_shadows => entity.respond_to?(:casts_shadows?) ?
+            entity.casts_shadows? : nil,
+          :receives_shadows => entity.respond_to?(:receives_shadows?) ?
+            entity.receives_shadows? : nil
+        }
+        children = entity_children(entity).map { |child| style_entity_payload(child) }
+        payload[:children] = children.sort_by { |child| canonical_json(child) }
+        payload
+      end
+
+      def recursive_entity_count(entity)
+        1 + entity_children(entity).inject(0) do |total, child|
+          total + recursive_entity_count(child)
+        end
+      end
+
+      def physical_evidence(entities)
+        values = Array(entities).compact
+        raise ContractError, 'physical evidence has no entities' if values.empty?
+        geometry = values.map { |entity| geometry_entity_payload(entity) }
+        geometry = geometry.sort_by { |entry| canonical_json(entry) }
+        style = values.map { |entity| style_entity_payload(entity) }
+        style = style.sort_by { |entry| canonical_json(entry) }
+        {
+          :geometry_payload => geometry,
+          :style_payload => style,
+          :physical_geometry_sha256 => canonical_sha256(geometry),
+          :physical_style_sha256 => canonical_sha256(style),
+          :physical_entity_count => values.inject(0) do |total, entity|
+            total + recursive_entity_count(entity)
+          end
+        }
+      end
+
+      def source_bbox_pdf(item)
+        names = [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1]
+        return nil unless names.all? { |name| item.respond_to?(name) }
+        names.map { |name| canonical_number(item.send(name)) }
+      rescue StandardError
+        nil
+      end
+
+      def source_font_descriptor(item, supplied = nil)
+        return supplied unless supplied.nil? || supplied.to_s.empty?
+        descriptor = {}
+        [:font_name, :font_family, :font, :font_size, :font_size_pts,
+         :font_flags, :bold, :italic].each do |name|
+          descriptor[name] = item.send(name) if item.respond_to?(name)
+        end
+        descriptor
+      rescue StandardError
+        {}
+      end
+
+      def source_rotation_degrees(item)
+        [:angle, :rotation_degrees, :rotation, :angle_degrees].each do |name|
+          next unless item.respond_to?(name)
+          value = item.send(name)
+          return canonical_number(value) unless value.nil?
+        end
+        0.0
+      rescue StandardError
+        0.0
+      end
+
+      def source_expected_evidence(item, mode, values)
+        raise ContractError, 'source evidence values must be a Hash' unless values.is_a?(Hash)
+        normalized_mode = normalize_mode(mode)
+        raise ContractError, 'source evidence representation is invalid' unless normalized_mode
+        source_id = source_span_id(item)
+        text = item.respond_to?(:text) ? item.text.to_s : values[:source_text].to_s
+        physical = physical_evidence(values[:entities])
+        evidence = {
+          :schema => SOURCE_EXPECTED_SCHEMA,
+          :source_span_id => source_id,
+          :representation => normalized_mode,
+          :source_text_sha256 => Digest::SHA256.hexdigest(text),
+          :source_bbox_pdf => values[:source_bbox_pdf] || source_bbox_pdf(item),
+          :source_anchor => values[:source_anchor],
+          :source_rotation_radians => canonical_number(values[:source_rotation_radians] || 0.0),
+          :source_font_sha256 => canonical_sha256(
+            source_font_descriptor(item, values[:source_font_identity])
+          ),
+          :expected_width => canonical_number(values[:expected_width] || 0.0),
+          :expected_height => canonical_number(values[:expected_height] || 0.0),
+          :expected_depth => canonical_number(values[:expected_depth] || 0.0),
+          :expected_bounds => values[:expected_bounds],
+          :expected_transformation => values[:expected_transformation],
+          :physical_geometry_sha256 => physical[:physical_geometry_sha256],
+          :physical_style_sha256 => physical[:physical_style_sha256],
+          :physical_entity_count => physical[:physical_entity_count]
+        }
+        evidence[:evidence_sha256] = canonical_sha256(evidence)
+        evidence
+      end
+
+      def attach_source_evidence!(entities, evidence, renderer = nil)
+        unless evidence.is_a?(Hash) &&
+               evidence[:schema].to_s == SOURCE_EXPECTED_SCHEMA &&
+               evidence[:evidence_sha256].to_s =~ /\A[0-9a-f]{64}\z/
+          raise ContractError, 'source expected evidence is incomplete'
+        end
+        Array(entities).compact.each do |entity|
+          if entity.respond_to?(:set_attribute)
+            dictionary = 'BC_PDF_Importer'
+            entity.set_attribute(dictionary, 'source_span_id', evidence[:source_span_id].to_s)
+            entity.set_attribute(dictionary, 'source_kind', 'text_span')
+            entity.set_attribute(dictionary, 'representation', evidence[:representation].to_s)
+            entity.set_attribute(dictionary, 'renderer', renderer.to_s) unless renderer.to_s.empty?
+            entity.set_attribute(dictionary, 'source_evidence_sha256', evidence[:evidence_sha256])
+            entity.set_attribute(dictionary, 'source_text_sha256', evidence[:source_text_sha256])
+            entity.set_attribute(dictionary, 'physical_geometry_sha256',
+                                 evidence[:physical_geometry_sha256])
+            entity.set_attribute(dictionary, 'physical_style_sha256',
+                                 evidence[:physical_style_sha256])
+          end
+          attach_source_evidence!(entity_children(entity), evidence, renderer) unless
+            entity_children(entity).empty?
+        end
+        true
       end
     end
   end
