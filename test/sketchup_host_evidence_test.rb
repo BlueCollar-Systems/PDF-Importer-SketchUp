@@ -65,6 +65,20 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  class CountingBoundsEntity < FakeEntity
+    attr_reader :bounds_calls
+
+    def initialize(entity_id, typename, options = {})
+      super
+      @bounds_calls = 0
+    end
+
+    def bounds
+      @bounds_calls += 1
+      @bounds
+    end
+  end
+
   class CountingCollection
     attr_reader :to_a_calls
 
@@ -216,6 +230,22 @@ class SketchupHostEvidenceTest < Minitest::Test
                  'root host children must be enumerated once per snapshot'
     assert_equal 1, nested_entities.to_a_calls,
                  'nested host children must be enumerated once per snapshot'
+  end
+
+  def test_snapshot_reads_each_entity_bounds_once
+    bounds = FakeBounds.new(
+      FakePoint.new(1, 2, 3), FakePoint.new(4, 5, 6)
+    )
+    entity = CountingBoundsEntity.new(32, 'Face', :bounds => bounds)
+
+    row = SketchupHostEvidence.snapshot_entities([entity]).first
+
+    assert_equal({
+      'min' => [1.0, 2.0, 3.0],
+      'max' => [4.0, 5.0, 6.0]
+    }, row['bounds'])
+    assert_equal 1, entity.bounds_calls,
+                 'physical evidence and manifest must share one bounds read'
   end
 
   def test_snapshot_preserves_representation_identity_attributes

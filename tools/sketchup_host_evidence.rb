@@ -412,8 +412,8 @@ module SketchupHostEvidence
       'typename' => typename,
       'valid' => boolean_state(entity, :valid?),
       'deleted' => boolean_state(entity, :deleted?),
-      'bounds' => bounds_payload(entity),
-      'transformation' => transformation_payload(entity),
+      'bounds' => physical_tree_bounds(physical_tree),
+      'transformation' => physical_tree_transformation(physical_tree),
       'representation_evidence' => representation_identity_evidence(entity),
       'content_evidence' => host_content_evidence(entity, typename),
       'geometry_evidence' => physical['geometry_evidence'],
@@ -447,6 +447,28 @@ module SketchupHostEvidence
     raise EvidenceError, "host physical evidence failed: #{error.message}"
   end
   private_class_method :physical_tree_evidence
+
+  def self.physical_tree_bounds(tree)
+    geometry = tree.is_a?(Hash) ? tree[:geometry_payload] : nil
+    bounds = geometry.is_a?(Hash) ? geometry[:bounds] : nil
+    return nil unless bounds.is_a?(Hash)
+    minimum = bounds[:min]
+    maximum = bounds[:max]
+    return nil unless minimum.is_a?(Array) && maximum.is_a?(Array)
+    { 'min' => minimum, 'max' => maximum }
+  rescue StandardError
+    nil
+  end
+  private_class_method :physical_tree_bounds
+
+  def self.physical_tree_transformation(tree)
+    geometry = tree.is_a?(Hash) ? tree[:geometry_payload] : nil
+    value = geometry.is_a?(Hash) ? geometry[:transformation] : nil
+    value.is_a?(Array) ? value : nil
+  rescue StandardError
+    nil
+  end
+  private_class_method :physical_tree_transformation
 
   def self.host_positive_id(entity, method_name, label)
     unless entity.respond_to?(method_name)
