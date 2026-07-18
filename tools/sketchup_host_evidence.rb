@@ -575,7 +575,7 @@ module SketchupHostEvidence
       [
         'source_span_id', 'raster_page_number', 'raster_pixel_width',
         'raster_pixel_height', 'raster_content_sha256',
-        'raster_content_bytes'
+        'raster_content_bytes', 'raster_source_pdf_sha256'
       ].each do |key|
         attributes[key] = entity.get_attribute(dictionary, key, nil)
       end
@@ -589,6 +589,7 @@ module SketchupHostEvidence
       'raster_pixel_height' => attributes['raster_pixel_height'],
       'raster_content_sha256' => attributes['raster_content_sha256'],
       'raster_content_bytes' => attributes['raster_content_bytes'],
+      'raster_source_pdf_sha256' => attributes['raster_source_pdf_sha256'],
       'source_span_id' => attributes['source_span_id']
     }
   rescue StandardError => error
@@ -1775,7 +1776,8 @@ module SketchupHostEvidence
   end
   private_class_method :manifest_claim_rows
 
-  def self.verify_raster_artifact_binding!(record, row, claim, selected_pages)
+  def self.verify_raster_artifact_binding!(record, row, claim, selected_pages,
+                                           stats = nil)
     page = exact_positive_integer!(
       hash_value(record, :page), 'raster delivery page'
     )
@@ -1854,7 +1856,20 @@ module SketchupHostEvidence
         raise EvidenceError, 'item raster is not bound to its exact source span'
       end
     elsif scope == 'page_raster'
-      unless hash_value(artifact, :box_binding_verified) == true &&
+      expected_source_sha = source_sha256_value(
+        stats, :normalized_input_sha256, :normalized_pdf_sha256
+      )
+      artifact_source_sha = hash_value(
+        artifact, :source_pdf_sha256
+      ).to_s.downcase
+      host_source_sha = hash_value(
+        content, :raster_source_pdf_sha256
+      ).to_s.downcase
+      unless expected_source_sha =~ /\A[0-9a-f]{64}\z/ &&
+             artifact_source_sha == expected_source_sha &&
+             host_source_sha == expected_source_sha &&
+             hash_value(artifact, :source_pdf_binding_verified) == true &&
+             hash_value(artifact, :box_binding_verified) == true &&
              ['not_required', 'verified'].include?(
                hash_value(record, :cleanup_outcome).to_s
              )
@@ -1891,7 +1906,7 @@ module SketchupHostEvidence
       unless row
         raise EvidenceError, "raster delivery identity is absent from manifest: #{claim}"
       end
-      verify_raster_artifact_binding!(record, row, claim, pages)
+      verify_raster_artifact_binding!(record, row, claim, pages, stats)
       page = exact_positive_integer!(
         hash_value(record, :page), 'raster delivery page'
       )
@@ -2068,17 +2083,36 @@ module SketchupHostEvidence
 
   def self.verify_empty_source_proof!(stats, pages)
     inspections = Array(hash_value(stats, :empty_page_source_inspections))
-    proven_pages = inspections.select do |row|
-      hash_value(row, :semantic_text_extraction_complete) == true &&
-        hash_value(row, :decoded_stream_text_operators) == false &&
-        hash_value(row, :decoded_form_stream_text_operators) == false &&
-        exact_positive_integer!(
-          hash_value(row, :page), 'empty-source inspection page'
-        ) > 0
-    end.map do |row|
-      exact_positive_integer!(
+    immutable_sha = source_sha256_value(
+      stats, :source_input_sha256, :immutable_pdf_sha256
+    )
+    rendered_sha = source_sha256_value(
+      stats, :normalized_input_sha256, :normalized_pdf_sha256
+    )
+    unless immutable_sha =~ /\A[0-9a-f]{64}\z/ &&
+           rendered_sha =~ /\A[0-9a-f]{64}\z/
+      raise EvidenceError, 'empty-source proof lacks exact source PDF SHA256 bindings'
+    end
+    proven_pages = inspections.map do |row|
+      page = exact_positive_integer!(
         hash_value(row, :page), 'empty-source inspection page'
       )
+      source_page = exact_positive_integer!(
+        hash_value(row, :source_page_number),
+        'empty-source inspection source_page_number'
+      )
+      canonical_count = hash_value(row, :canonical_text_item_count)
+      unless source_page == page && canonical_count.is_a?(Integer) &&
+             canonical_count == 0 &&
+             hash_value(row, :immutable_pdf_sha256).to_s.downcase == immutable_sha &&
+             hash_value(row, :rendered_pdf_sha256).to_s.downcase == rendered_sha &&
+             hash_value(row, :semantic_text_extraction_complete) == true &&
+             hash_value(row, :decoded_stream_text_operators) == false &&
+             hash_value(row, :decoded_form_stream_text_operators) == false
+        raise EvidenceError,
+              'empty-source proof is not bound to exact PDF/page/zero canonical items'
+      end
+      page
     end
     if proven_pages.uniq.length != proven_pages.length
       raise EvidenceError, 'empty-source inspection pages are duplicated'
@@ -2090,6 +2124,15 @@ module SketchupHostEvidence
     end
   end
   private_class_method :verify_empty_source_proof!
+
+  def self.source_sha256_value(stats, *keys)
+    Array(keys).each do |key|
+      value = hash_value(stats, key).to_s.downcase
+      return value if value =~ /\A[0-9a-f]{64}\z/
+    end
+    ''
+  end
+  private_class_method :source_sha256_value
 
   def self.normalized_pages(selected_pages, stats)
     if selected_pages == :all || selected_pages.to_s == 'all'

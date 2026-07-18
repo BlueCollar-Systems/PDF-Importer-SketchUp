@@ -598,11 +598,15 @@ class SketchupHostEvidenceTest < Minitest::Test
   end
 
   def test_empty_text_ledger_requires_decoded_stream_no_text_proof
+    immutable_sha = 'a' * 64
+    rendered_sha = 'b' * 64
     stats = ready_stats(
       :text_source_span_ids => [],
       :text_attempts => [],
       :source_provenance_objects => [],
-      :empty_page_source_inspections => []
+      :empty_page_source_inspections => [],
+      :source_input_sha256 => immutable_sha,
+      :normalized_input_sha256 => rendered_sha
     )
     error = assert_raises(StandardError) do
         SketchupHostEvidence.verify_delivery_evidence!(stats, label_manifest, :labels, [1])
@@ -611,6 +615,10 @@ class SketchupHostEvidenceTest < Minitest::Test
 
     stats[:empty_page_source_inspections] = [{
       :page => 1,
+      :source_page_number => 1,
+      :canonical_text_item_count => 0,
+      :immutable_pdf_sha256 => immutable_sha,
+      :rendered_pdf_sha256 => rendered_sha,
       :semantic_text_extraction_complete => true,
       :decoded_stream_text_operators => false,
       :decoded_form_stream_text_operators => false
@@ -618,6 +626,32 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert SketchupHostEvidence.verify_delivery_evidence!(
       stats, label_manifest, :labels, [1]
     )
+
+    terminal_schema = Marshal.load(Marshal.dump(stats))
+    terminal_schema[:immutable_pdf_sha256] =
+      terminal_schema.delete(:source_input_sha256)
+    terminal_schema[:normalized_pdf_sha256] =
+      terminal_schema.delete(:normalized_input_sha256)
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      terminal_schema, label_manifest, :labels, [1]
+    )
+
+    mutations = {
+      :source_page_number => 2,
+      :canonical_text_item_count => 1,
+      :immutable_pdf_sha256 => 'c' * 64,
+      :rendered_pdf_sha256 => 'd' * 64
+    }
+    mutations.each do |field, value|
+      invalid = Marshal.load(Marshal.dump(stats))
+      invalid[:empty_page_source_inspections][0][field] = value
+      error = assert_raises(StandardError, "#{field} must be source-bound") do
+        SketchupHostEvidence.verify_delivery_evidence!(
+          invalid, label_manifest, :labels, [1]
+        )
+      end
+      assert_match(/empty|source|page|canonical|sha/i, error.message)
+    end
   end
 
   def test_source_span_attempt_and_delivery_sets_must_be_equal
@@ -863,11 +897,14 @@ class SketchupHostEvidenceTest < Minitest::Test
 
   def test_requested_raster_requires_real_image_manifest_content_binding
     sha256 = 'a' * 64
+    source_sha256 = 'b' * 64
     artifact = {
       :page_number => 1, :pixel_width => 1200, :pixel_height => 1600,
       :png_signature_verified => true, :page_binding_verified => true,
       :box_binding_verified => true, :content_sha256 => sha256,
-      :content_byte_size => 48_000
+      :content_byte_size => 48_000,
+      :source_pdf_sha256 => source_sha256,
+      :source_pdf_binding_verified => true
     }
     record = {
       :page => 1, :source_span_ids => [], :requested_mode => :raster,
@@ -880,6 +917,8 @@ class SketchupHostEvidenceTest < Minitest::Test
     stats = ready_stats(
       :requested_text_mode => :raster, :text_source_span_ids => [],
       :text_attempts => [], :source_provenance_objects => [],
+      :source_input_sha256 => source_sha256,
+      :normalized_input_sha256 => source_sha256,
       :terminal_text_delivery_records => [record],
       :raster_delivery_records => [record]
     )
@@ -900,12 +939,31 @@ class SketchupHostEvidenceTest < Minitest::Test
         ['BC_PDF_Importer', 'raster_pixel_width'] => 1200,
         ['BC_PDF_Importer', 'raster_pixel_height'] => 1600,
         ['BC_PDF_Importer', 'raster_content_sha256'] => sha256,
-        ['BC_PDF_Importer', 'raster_content_bytes'] => 48_000
+        ['BC_PDF_Importer', 'raster_content_bytes'] => 48_000,
+        ['BC_PDF_Importer', 'raster_source_pdf_sha256'] => source_sha256
       })
     ])
     assert SketchupHostEvidence.verify_delivery_evidence!(
       stats, image_manifest, :raster, [1]
     )
+
+    terminal_schema = Marshal.load(Marshal.dump(stats))
+    terminal_schema[:immutable_pdf_sha256] =
+      terminal_schema.delete(:source_input_sha256)
+    terminal_schema[:normalized_pdf_sha256] =
+      terminal_schema.delete(:normalized_input_sha256)
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      terminal_schema, image_manifest, :raster, [1]
+    )
+
+    artifact[:source_pdf_sha256] = 'c' * 64
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, image_manifest, :raster, [1]
+      )
+    end
+    assert_match(/source|sha|raster/i, error.message)
+    artifact[:source_pdf_sha256] = source_sha256
 
     record[:page] = 1.5
     artifact[:page_number] = 1.5

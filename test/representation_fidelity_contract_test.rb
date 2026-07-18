@@ -1195,6 +1195,9 @@ class RepresentationFidelityContractTest < Minitest::Test
   def test_terminal_raster_must_be_a_new_owned_nonempty_image
     entities = FidelityEntities.new
     model = Struct.new(:active_entities).new(entities)
+    pdf_path = File.join(Dir.tmpdir, "bc_terminal_raster_#{Process.pid}.pdf")
+    File.binwrite(pdf_path, "%PDF-1.4\n%%EOF\n")
+    source_sha = Digest::SHA256.file(pdf_path).hexdigest
     renderer = lambda do |*_args|
       image = entities.add_test_entity(2.0, 3.0, 'Image')
       {
@@ -1202,14 +1205,17 @@ class RepresentationFidelityContractTest < Minitest::Test
         artifact_evidence: {
           png_signature_verified: true, page_binding_verified: true,
           box_binding_verified: true, aspect_verified: true,
-          page_number: 1, page_rotation: 0
+          page_number: 1, page_rotation: 0,
+          source_pdf_path: File.expand_path(pdf_path),
+          source_pdf_sha256: source_sha,
+          source_pdf_binding_verified: true
         }
       }
     end
 
     proof = IMP.stub(:import_page_as_raster, renderer) do
       IMP.verified_raster_entity!(
-        model, 'fixture.pdf', 1, [0, 0, 144, 216], {}, Time.now,
+        model, pdf_path, 1, [0, 0, 144, 216], {}, Time.now,
         0.0, [0, 0, 144, 216]
       )
     end
@@ -1220,6 +1226,8 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal true, proof[:visual_fidelity_verified]
     assert_in_delta 2.0, proof[:bounds][:width], 1e-12
     assert_in_delta 3.0, proof[:bounds][:height], 1e-12
+  ensure
+    File.delete(pdf_path) if pdf_path && File.exist?(pdf_path)
   end
 
   def write_png_header(path, width, height, signature = true)
@@ -1231,14 +1239,19 @@ class RepresentationFidelityContractTest < Minitest::Test
 
   def test_raster_artifact_verifier_binds_png_page_box_aspect_and_rotation
     path = File.join(Dir.tmpdir, "bc_raster_contract_#{Process.pid}.png")
+    pdf_path = File.join(Dir.tmpdir, "bc_raster_contract_#{Process.pid}.pdf")
+    other_pdf = File.join(Dir.tmpdir, "bc_raster_contract_other_#{Process.pid}.pdf")
+    File.binwrite(pdf_path, "%PDF-1.4\nsource-a\n%%EOF\n")
+    File.binwrite(other_pdf, "%PDF-1.4\nsource-b\n%%EOF\n")
     write_png_header(path, 612, 792)
     args = [
       'pdftocairo', '-png', '-singlefile', '-r', '300',
-      '-f', '1', '-l', '1', 'aws.pdf', path.sub(/\.png\z/, '')
+      '-f', '1', '-l', '1', pdf_path, path.sub(/\.png\z/, '')
     ]
 
     proof = IMP.verify_raster_artifact!(
-      path, 1, [0, 0, 792, 612], [0, 0, 792, 612], 90, args
+      path, 1, [0, 0, 792, 612], [0, 0, 792, 612], 90, args,
+      pdf_path
     )
 
     assert_equal 612, proof[:pixel_width]
@@ -1250,6 +1263,18 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal true, proof[:page_binding_verified]
     assert_equal true, proof[:box_binding_verified]
     assert_equal true, proof[:aspect_verified]
+    assert_equal Digest::SHA256.file(pdf_path).hexdigest,
+                 proof[:source_pdf_sha256]
+    assert_equal File.expand_path(pdf_path), proof[:source_pdf_path]
+
+    wrong_source_args = args.dup
+    wrong_source_args[-2] = other_pdf
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.verify_raster_artifact!(
+        path, 1, [0, 0, 792, 612], [0, 0, 792, 612], 90,
+        wrong_source_args, pdf_path
+      )
+    end
 
     bad_page = args.dup
     bad_page[bad_page.index('-f') + 1] = '2'
@@ -1267,6 +1292,8 @@ class RepresentationFidelityContractTest < Minitest::Test
     end
   ensure
     File.delete(path) if path && File.exist?(path)
+    File.delete(pdf_path) if pdf_path && File.exist?(pdf_path)
+    File.delete(other_pdf) if other_pdf && File.exist?(other_pdf)
   end
 
   def test_raster_artifact_verifier_rejects_non_png_and_wrong_box_binding
@@ -1962,6 +1989,47 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert image[:visible_nontext_source]
     assert_equal 1, image[:source_uses]
     assert_equal 1, image[:image_definitions]
+  end
+
+  def test_extracted_embedded_asset_cannot_suppress_empty_artifact_source_inspection
+    ccitt_asset = Struct.new(:file_path).new('page_001_image_001.ccitt')
+
+    assert IMP.empty_requested_page_artifacts?([], [])
+    assert IMP.empty_requested_page_artifacts?([], [], [ccitt_asset]),
+           'extraction is not host delivery and cannot suppress source inspection'
+    refute IMP.empty_requested_page_artifacts?([:path], [], [ccitt_asset])
+    refute IMP.empty_requested_page_artifacts?([], [:text], [ccitt_asset])
+  end
+
+  def test_empty_page_source_inspection_is_one_exact_source_bound_record
+    stats = {
+      :empty_page_source_inspections => [],
+      :source_input_sha256 => 'a' * 64,
+      :normalized_input_sha256 => 'b' * 64
+    }
+    IMP.record_empty_page_source_inspection!(stats, 1, {
+      :semantic_text_extraction_complete => true,
+      :decoded_stream_text_operators => false,
+      :decoded_form_stream_text_operators => false,
+      :canonical_text_item_count => 0
+    })
+    IMP.record_empty_page_source_inspection!(stats, 1, {
+      :visible_nontext_source => true,
+      :source_glyph_placements => 0,
+      :embedded_image_asset_count => 1,
+      :embedded_image_placed_count => 0
+    })
+
+    assert_equal 1, stats[:empty_page_source_inspections].length
+    proof = stats[:empty_page_source_inspections].first
+    assert_equal 1, proof[:page]
+    assert_equal 1, proof[:source_page_number]
+    assert_equal 0, proof[:canonical_text_item_count]
+    assert_equal 'a' * 64, proof[:immutable_pdf_sha256]
+    assert_equal 'b' * 64, proof[:rendered_pdf_sha256]
+    assert_equal true, proof[:visible_nontext_source]
+    assert_equal 1, proof[:embedded_image_asset_count]
+    assert_equal 0, proof[:embedded_image_placed_count]
   end
 
   def test_svg_source_classification_includes_direct_and_generic_image_references

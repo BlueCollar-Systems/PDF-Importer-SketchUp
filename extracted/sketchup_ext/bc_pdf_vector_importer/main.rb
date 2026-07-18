@@ -830,12 +830,17 @@ module BlueCollarSystems
       artifact = delivery[:artifact_evidence]
       required_artifact_checks = [
         :png_signature_verified, :page_binding_verified,
-        :box_binding_verified, :aspect_verified
+        :box_binding_verified, :aspect_verified,
+        :source_pdf_binding_verified
       ]
       unless required_artifact_checks.all? { |key| artifact[key] == true } &&
              artifact[:page_number].to_i == page_num.to_i &&
              artifact[:page_rotation].to_i ==
-               PageTransform.normalize_rotation(page_rotation)
+               PageTransform.normalize_rotation(page_rotation) &&
+             artifact[:source_pdf_sha256].to_s.downcase ==
+               Digest::SHA256.file(pdf_path).hexdigest &&
+             File.expand_path(artifact[:source_pdf_path].to_s).downcase ==
+               File.expand_path(pdf_path.to_s).downcase
         raise RepresentationFidelity::ContractError,
               'terminal raster artifact evidence is incomplete or misbound'
       end
@@ -1015,6 +1020,60 @@ module BlueCollarSystems
         :visible_source => false,
         :inspection_error => e.message.to_s
       }
+    end
+
+    # Extraction is not delivery. In particular, CCITT/JBIG2 image streams may
+    # be preserved for diagnostics while remaining unplaceable by SketchUp.
+    # Therefore an extracted embedded asset can never suppress inspection of a
+    # page for which neither path nor semantic-text artifacts were produced.
+    def self.empty_requested_page_artifacts?(paths, text_items,
+                                             _embedded_assets = nil)
+      Array(paths).empty? && Array(text_items).empty?
+    end
+
+    def self.record_empty_page_source_inspection!(stats, page_num, details = {})
+      unless stats.is_a?(Hash)
+        raise RepresentationFidelity::ContractError,
+              'empty-page source inspection stats are unavailable'
+      end
+      page = page_num.to_i
+      if page <= 0
+        raise RepresentationFidelity::ContractError,
+              'empty-page source inspection page is invalid'
+      end
+      immutable_sha = stats[:source_input_sha256].to_s.downcase
+      rendered_sha = stats[:normalized_input_sha256].to_s.downcase
+      unless immutable_sha =~ /\A[0-9a-f]{64}\z/ &&
+             rendered_sha =~ /\A[0-9a-f]{64}\z/
+        raise RepresentationFidelity::ContractError,
+              'empty-page source inspection is not bound to exact PDF bytes'
+      end
+
+      rows = stats[:empty_page_source_inspections]
+      rows = [] unless rows.is_a?(Array)
+      stats[:empty_page_source_inspections] = rows
+      matches = rows.select do |row|
+        row.is_a?(Hash) && row[:page].to_i == page
+      end
+      if matches.length > 1
+        raise RepresentationFidelity::ContractError,
+              "Page #{page}: duplicate empty-page source inspections"
+      end
+      row = matches.first
+      unless row
+        row = {}
+        rows << row
+      end
+      if details.is_a?(Hash)
+        details.each { |key, value| row[key] = value }
+      end
+      # These bindings are authoritative and cannot be overwritten by a caller.
+      row[:page] = page
+      row[:source_page_number] = page
+      row[:canonical_text_item_count] = 0
+      row[:immutable_pdf_sha256] = immutable_sha
+      row[:rendered_pdf_sha256] = rendered_sha
+      row
     end
 
     def self.record_svg_3d_text_delivery!(stats, page_num, text_items,
@@ -2844,12 +2903,13 @@ module BlueCollarSystems
             page_num, requested_text_mode, text_items, streams,
             referenced_form_streams
           )
-          stats[:empty_page_source_inspections] << {
-            :page => page_num,
+          record_empty_page_source_inspection!(stats, page_num, {
             :semantic_text_extraction_complete => true,
             :decoded_stream_text_operators => false,
-            :decoded_form_stream_text_operators => false
-          }
+            :decoded_form_stream_text_operators => false,
+            :embedded_image_asset_count => Array(embedded_assets).length,
+            :embedded_image_placed_count => 0
+          })
         end
 
         if svg_renderer_required_for_page?(
@@ -2858,7 +2918,7 @@ module BlueCollarSystems
           enforce_svg_renderer_available!(model, stats, requested_text_mode)
         end
 
-        if paths.empty? && text_items.empty? && embedded_assets.empty?
+        if empty_requested_page_artifacts?(paths, text_items, embedded_assets)
           if svg_renderer_required_for_page?(
             requested_text_mode, opts[:import_text], text_items, true
           )
@@ -2885,12 +2945,14 @@ module BlueCollarSystems
             source_svg_document[:svg], media_box,
             :svg_page_box => svg_page_box
           )
-          stats[:empty_page_source_inspections] << source_summary.merge(
-            :page => page_num,
+          record_empty_page_source_inspection!(stats, page_num,
+            source_summary.merge(
             :semantic_text_extraction_complete => true,
             :decoded_stream_text_operators => false,
-            :decoded_form_stream_text_operators => false
-          )
+            :decoded_form_stream_text_operators => false,
+            :embedded_image_asset_count => Array(embedded_assets).length,
+            :embedded_image_placed_count => 0
+          ))
 
           if requested_text_mode == :text3d &&
              source_summary[:source_glyph_placements].to_i > 0
@@ -2917,6 +2979,12 @@ module BlueCollarSystems
               :affirmative_impossibility => true,
               :requested_text_mode => requested_text_mode,
               :source_text_items => 0,
+              :canonical_text_item_count => 0,
+              :source_page_number => page_num,
+              :immutable_pdf_sha256 => stats[:source_input_sha256],
+              :rendered_pdf_sha256 => stats[:normalized_input_sha256],
+              :embedded_image_asset_count => Array(embedded_assets).length,
+              :embedded_image_placed_count => 0,
               :source_summary => source_summary,
               :delivered_mode => :raster,
               :resulting_entity_ids => [raster[:entity_id]],
@@ -2930,6 +2998,10 @@ module BlueCollarSystems
                 :requested_mode => requested_text_mode,
                 :delivered_mode => :raster,
                 :no_semantic_text => true,
+                :canonical_text_item_count => 0,
+                :source_page_number => page_num,
+                :immutable_pdf_sha256 => stats[:source_input_sha256],
+                :rendered_pdf_sha256 => stats[:normalized_input_sha256],
                 :resulting_entity_ids => [raster[:entity_id]],
                 :created_entity_type => 'raster_image',
                 :real_raster_verified => true,
@@ -3595,7 +3667,8 @@ module BlueCollarSystems
     end
 
     def self.verify_raster_artifact!(png_path, page_num, media_box, render_box,
-                                     page_rotation, arguments)
+                                     page_rotation, arguments,
+                                     source_pdf_path = nil)
       raise RepresentationFidelity::ContractError,
             'raster artifact file is missing' unless
         png_path && File.file?(png_path)
@@ -3621,6 +3694,27 @@ module BlueCollarSystems
              Array(arguments).map { |value| value.to_s }.include?('-singlefile')
         raise RepresentationFidelity::ContractError,
               'raster command is not bound to exactly the requested page'
+      end
+
+      source_binding = {}
+      if source_pdf_path
+        source_path = File.expand_path(source_pdf_path.to_s)
+        unless File.file?(source_path)
+          raise RepresentationFidelity::ContractError,
+                'raster source PDF is missing'
+        end
+        argv = Array(arguments).map { |value| value.to_s }
+        command_source = argv.length >= 2 ? argv[-2] : nil
+        unless command_source &&
+               File.expand_path(command_source).downcase == source_path.downcase
+          raise RepresentationFidelity::ContractError,
+                'raster command source does not match the selected PDF'
+        end
+        source_binding = {
+          :source_pdf_path => source_path,
+          :source_pdf_sha256 => Digest::SHA256.file(source_path).hexdigest,
+          :source_pdf_binding_verified => true
+        }
       end
 
       crop_expected = distinct_page_box?(render_box, media_box)
@@ -3655,7 +3749,7 @@ module BlueCollarSystems
         :page_binding_verified => true,
         :box_binding_verified => true,
         :aspect_verified => true
-      }
+      }.merge(source_binding)
     rescue RepresentationFidelity::ContractError
       raise
     rescue StandardError => e
@@ -4001,7 +4095,7 @@ module BlueCollarSystems
         begin
           proof = verify_raster_artifact!(
             candidate, page_num, media_box, variant[:render_box],
-            page_rotation, args
+            page_rotation, args, pdf_path
           )
           actual_png = candidate
           actual_box = variant[:render_box]
@@ -4056,6 +4150,8 @@ module BlueCollarSystems
                               artifact_evidence[:content_sha256])
             img.set_attribute(dictionary, 'raster_content_bytes',
                               artifact_evidence[:content_byte_size])
+            img.set_attribute(dictionary, 'raster_source_pdf_sha256',
+                              artifact_evidence[:source_pdf_sha256])
           end
         rescue StandardError => e
           Logger.warn('Raster', "image evidence attributes unavailable: #{e.message}")
