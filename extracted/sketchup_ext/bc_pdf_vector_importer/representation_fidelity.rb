@@ -657,12 +657,42 @@ module BlueCollarSystems
         style = style_entity_payload(
           entity, children.map { |child| child[:style_payload] }
         )
+        direct_types = children.map do |child|
+          child[:topology][:root_type].to_s
+        end.sort
+        descendant_counts = {}
+        children.each do |child|
+          child_topology = child[:topology]
+          root_type = child_topology[:root_type].to_s
+          descendant_counts[root_type] =
+            descendant_counts.fetch(root_type, 0) + 1
+          child_topology[:descendant_type_counts].each do |name, count|
+            key = name.to_s
+            descendant_counts[key] =
+              descendant_counts.fetch(key, 0) + count.to_i
+          end
+        end
+        descendant_counts = descendant_counts.keys.sort.inject({}) do |memo, key|
+          memo[key] = descendant_counts[key]
+          memo
+        end
+        live = entity.respond_to?(:valid?) && entity.valid? == true &&
+          entity.respond_to?(:deleted?) && entity.deleted? == false
         {
           :geometry_payload => geometry,
           :style_payload => style,
           :physical_entity_count => 1 + children.inject(0) do |total, child|
             total + child[:physical_entity_count].to_i
-          end
+          end,
+          :topology => {
+            :root_type => geometry[:type].to_s,
+            :direct_child_types => direct_types,
+            :descendant_type_counts => descendant_counts,
+            :descendant_entity_count => descendant_counts.values.inject(0, :+),
+            :live_entity_count => (live ? 1 : 0) + children.inject(0) do |total, child|
+              total + child[:topology][:live_entity_count].to_i
+            end
+          }
         }
       end
 
@@ -764,6 +794,7 @@ module BlueCollarSystems
         Array(entities).compact.each do |entity|
           if entity.respond_to?(:set_attribute)
             dictionary = 'BC_PDF_Importer'
+            entity.set_attribute(dictionary, 'source_claim_root', true)
             entity.set_attribute(dictionary, 'source_span_id', evidence[:source_span_id].to_s)
             entity.set_attribute(dictionary, 'source_kind', 'text_span')
             entity.set_attribute(dictionary, 'representation', evidence[:representation].to_s)
@@ -775,8 +806,6 @@ module BlueCollarSystems
             entity.set_attribute(dictionary, 'physical_style_sha256',
                                  evidence[:physical_style_sha256])
           end
-          attach_source_evidence!(entity_children(entity), evidence, renderer) unless
-            entity_children(entity).empty?
         end
         true
       end

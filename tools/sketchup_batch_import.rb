@@ -45,7 +45,7 @@ module SketchupBatchImport
         job, binding, 'baseline_evidence_snapshot_started'
       )
       before_manifest = SketchupHostEvidence.snapshot_entities(
-        @model.active_entities
+        @model.active_entities, :compact => true
       )
       SketchupBatchImport.write_progress!(
         job, binding, 'baseline_evidence_snapshot_completed'
@@ -62,7 +62,7 @@ module SketchupBatchImport
         job, binding, 'post_import_evidence_snapshot_started'
       )
       after_manifest = SketchupHostEvidence.snapshot_entities(
-        @model.active_entities
+        @model.active_entities, :compact => true
       )
       SketchupBatchImport.write_progress!(
         job, binding, 'post_import_evidence_snapshot_completed'
@@ -127,7 +127,7 @@ module SketchupBatchImport
         job, binding, 'reopen_evidence_snapshot_started'
       )
       reopened_manifest = SketchupHostEvidence.snapshot_entities(
-        reopened_model.active_entities
+        reopened_model.active_entities, :compact => true
       )
       SketchupBatchImport.write_progress!(
         job, binding, 'reopen_evidence_snapshot_completed'

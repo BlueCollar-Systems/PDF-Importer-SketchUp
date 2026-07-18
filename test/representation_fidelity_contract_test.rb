@@ -1325,6 +1325,21 @@ class RepresentationFidelityContractTest < Minitest::Test
     File.delete(path) if path && File.exist?(path)
   end
 
+  def test_item_raster_renderer_persists_source_claim_representation_identity
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+      encoding: 'UTF-8'
+    )
+    body = main[/def self\.import_item_as_raster\b.*?(?=^    def self\.)/m]
+
+    refute_nil body
+    assert_includes body, "'source_claim_root', true"
+    assert_includes body, "'source_kind', 'text_span'"
+    assert_includes body, "'representation', 'raster'"
+    assert_includes body,
+                    "'renderer', 'pdftocairo_real_item_raster'"
+  end
+
   def test_terminal_item_raster_must_be_new_owned_and_source_bound
     entities = FidelityEntities.new
     model = Struct.new(:active_entities).new(entities)

@@ -84,13 +84,16 @@ module SketchupHostEvidence
     true
   end
 
-  def self.snapshot_entities(entities)
+  def self.snapshot_entities(entities, options = {})
     unless entities.respond_to?(:to_a)
       raise EvidenceError, 'host entity collection cannot be enumerated'
     end
+    compact = options.is_a?(Hash) && options[:compact] == true
     Array(entities.to_a).map do |entity|
-      snapshot_entity_with_physical_tree(entity, []).first
-    end
+      snapshot_entity_with_physical_tree(
+        entity, [], compact, true
+      ).first
+    end.compact
   rescue EvidenceError
     raise
   rescue StandardError => error
@@ -384,11 +387,12 @@ module SketchupHostEvidence
   private_class_method :normalized_path
 
   def self.snapshot_entity(entity, ancestors)
-    snapshot_entity_with_physical_tree(entity, ancestors).first
+    snapshot_entity_with_physical_tree(entity, ancestors, false, false).first
   end
   private_class_method :snapshot_entity
 
-  def self.snapshot_entity_with_physical_tree(entity, ancestors)
+  def self.snapshot_entity_with_physical_tree(entity, ancestors, compact,
+                                              top_level)
     raise EvidenceError, 'entity manifest contains nil' if entity.nil?
     identity = entity.object_id
     if ancestors.include?(identity)
@@ -396,14 +400,28 @@ module SketchupHostEvidence
     end
     children = child_entities(entity)
     child_results = children.map do |child|
-      snapshot_entity_with_physical_tree(child, ancestors + [identity])
+      snapshot_entity_with_physical_tree(
+        child, ancestors + [identity], compact, false
+      )
     end
-    child_rows = child_results.map { |result| result[0] }
-    child_trees = child_results.map { |result| result[1] }
+    child_rows = child_results.map { |result| result[0] }.compact
+    child_trees = if compact
+                    child_results.select { |result| result[0].nil? }.map do |result|
+                      result[1]
+                    end
+                  else
+                    child_results.map { |result| result[1] }
+                  end
     typename = host_typename(entity)
+    representation = representation_identity_evidence(entity)
     fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
     physical_tree = fidelity.physical_entity_tree(entity, child_trees)
-    physical = physical_tree_evidence(physical_tree)
+    include_row = !compact || top_level || source_claim_root?(representation) ||
+      !child_rows.empty?
+    return [nil, physical_tree] unless include_row
+
+    compact_partition = compact && compact_owner_typename?(typename)
+    physical = physical_tree_evidence(physical_tree, compact_partition)
     row = {
       'entity_id' => host_positive_id(entity, :entityID, 'entityID'),
       'persistent_id' => host_positive_id(
@@ -414,7 +432,7 @@ module SketchupHostEvidence
       'deleted' => boolean_state(entity, :deleted?),
       'bounds' => physical_tree_bounds(physical_tree),
       'transformation' => physical_tree_transformation(physical_tree),
-      'representation_evidence' => representation_identity_evidence(entity),
+      'representation_evidence' => representation,
       'content_evidence' => host_content_evidence(entity, typename),
       'geometry_evidence' => physical['geometry_evidence'],
       'style_evidence' => physical['style_evidence'],
@@ -424,29 +442,72 @@ module SketchupHostEvidence
   end
   private_class_method :snapshot_entity_with_physical_tree
 
-  def self.physical_tree_evidence(tree)
+  def self.physical_tree_evidence(tree, compact = false)
     fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
     evidence = fidelity.physical_evidence_from_trees([tree])
     style_root = Array(evidence[:style_payload]).first || {}
-    {
-      'geometry_evidence' => {
-        'sha256' => evidence[:physical_geometry_sha256],
-        'payload' => evidence[:geometry_payload]
-      },
-      'style_evidence' => {
-        'sha256' => evidence[:physical_style_sha256],
-        'payload' => evidence[:style_payload],
-        'layer_name' => style_root[:layer_name],
-        'layer_visible' => style_root[:layer_visible],
-        'entity_visible' => style_root[:entity_visible],
-        'material' => style_root[:material],
-        'back_material' => style_root[:back_material]
-      }
+    geometry = {
+      'sha256' => evidence[:physical_geometry_sha256]
     }
+    style = {
+      'sha256' => evidence[:physical_style_sha256],
+      'layer_name' => style_root[:layer_name],
+      'layer_visible' => style_root[:layer_visible],
+      'entity_visible' => style_root[:entity_visible],
+      'material' => style_root[:material],
+      'back_material' => style_root[:back_material]
+    }
+    if compact
+      schema = 'bcs.host_physical_partition/1.0'
+      geometry['schema'] = schema
+      geometry['physical_entity_count'] = evidence[:physical_entity_count]
+      geometry['topology'] = physical_tree_topology(tree)
+      style['schema'] = schema
+      style['physical_entity_count'] = evidence[:physical_entity_count]
+    else
+      geometry['payload'] = evidence[:geometry_payload]
+      style['payload'] = evidence[:style_payload]
+    end
+    { 'geometry_evidence' => geometry, 'style_evidence' => style }
   rescue StandardError => error
     raise EvidenceError, "host physical evidence failed: #{error.message}"
   end
   private_class_method :physical_tree_evidence
+
+  def self.compact_owner_typename?(typename)
+    ['Group', 'ComponentInstance', 'Text', 'Image'].include?(typename.to_s)
+  end
+  private_class_method :compact_owner_typename?
+
+  def self.physical_tree_topology(tree)
+    topology = tree.is_a?(Hash) ? tree[:topology] : nil
+    unless topology.is_a?(Hash)
+      raise EvidenceError, 'host physical topology is unavailable'
+    end
+    counts = topology[:descendant_type_counts]
+    unless counts.is_a?(Hash)
+      raise EvidenceError, 'host physical topology counts are unavailable'
+    end
+    {
+      'root_type' => topology[:root_type].to_s,
+      'direct_child_types' => Array(topology[:direct_child_types]).map(&:to_s),
+      'descendant_type_counts' => counts.keys.sort.inject({}) do |memo, key|
+        memo[key.to_s] = counts[key].to_i
+        memo
+      end,
+      'descendant_entity_count' => topology[:descendant_entity_count].to_i,
+      'live_entity_count' => topology[:live_entity_count].to_i
+    }
+  end
+  private_class_method :physical_tree_topology
+
+  def self.source_claim_root?(representation)
+    representation.is_a?(Hash) &&
+      hash_value(representation, :source_claim_root) == true
+  rescue StandardError
+    false
+  end
+  private_class_method :source_claim_root?
 
   def self.physical_tree_bounds(tree)
     geometry = tree.is_a?(Hash) ? tree[:geometry_payload] : nil
@@ -574,6 +635,8 @@ module SketchupHostEvidence
     base_keys.each do |key|
       values[key] = entity.get_attribute(dictionary, key, nil)
     end
+    claim_root = entity.get_attribute(dictionary, 'source_claim_root', nil)
+    values['source_claim_root'] = claim_root unless claim_root.nil?
     [
       'source_evidence_sha256', 'source_text_sha256',
       'physical_geometry_sha256', 'physical_style_sha256'
@@ -892,24 +955,29 @@ module SketchupHostEvidence
     end
     verify_record_expected_consistency!(record, expected, label)
 
-    geometry_payload = manifest_evidence_payload!(rows, :geometry_evidence, label)
-    style_payload = manifest_evidence_payload!(rows, :style_evidence, label)
-    unless fidelity.canonical_sha256(geometry_payload) ==
+    geometry = manifest_evidence_summary!(
+      rows, :geometry_evidence, label, true
+    )
+    style = manifest_evidence_summary!(
+      rows, :style_evidence, label, false
+    )
+    unless geometry[:sha256] ==
            hash_value(expected, :physical_geometry_sha256).to_s.downcase
       raise EvidenceError, "#{label} physical geometry differs from source expectation"
     end
-    unless fidelity.canonical_sha256(style_payload) ==
+    unless style[:sha256] ==
            hash_value(expected, :physical_style_sha256).to_s.downcase
       raise EvidenceError, "#{label} physical style differs from source expectation"
     end
-    count = geometry_payload.inject(0) do |total, payload|
-      total + geometry_payload_entity_count(payload)
-    end
-    unless count == exact_positive_integer!(
+    unless geometry[:physical_entity_count] == exact_positive_integer!(
       hash_value(expected, :physical_entity_count),
       "#{label} physical entity count"
     )
       raise EvidenceError, "#{label} physical entity count differs from expectation"
+    end
+    if style[:physical_entity_count] &&
+       style[:physical_entity_count] != geometry[:physical_entity_count]
+      raise EvidenceError, "#{label} physical style entity count differs"
     end
     verify_expected_identity_tree!(
       rows, spans[0], mode,
@@ -971,20 +1039,60 @@ module SketchupHostEvidence
   end
   private_class_method :verify_source_expected_attempts!
 
-  def self.manifest_evidence_payload!(rows, key, label)
-    payload = []
-    Array(rows).each do |row|
+  def self.manifest_evidence_summary!(rows, key, label, count_geometry)
+    values = Array(rows)
+    compact = values.select do |row|
       evidence = hash_value(row, key)
-      values = hash_value(evidence, :payload) if evidence.is_a?(Hash)
-      unless values.is_a?(Array) && !values.empty?
+      hash_value(evidence, :schema).to_s ==
+        'bcs.host_physical_partition/1.0'
+    end
+    unless compact.empty?
+      unless compact.length == values.length && values.length == 1
+        raise EvidenceError,
+              "#{label} #{key} compact partitions must identify one claim root"
+      end
+      unless compact_physical_partition_row?(values.first)
+        raise EvidenceError, "#{label} compact physical partition is invalid"
+      end
+      evidence = hash_value(values.first, key)
+      sha = hash_value(evidence, :sha256).to_s.downcase
+      unless sha =~ /\A[0-9a-f]{64}\z/
+        raise EvidenceError, "#{label} #{key} digest is unavailable"
+      end
+      count = exact_positive_integer!(
+        hash_value(evidence, :physical_entity_count),
+        "#{label} #{key} physical entity count"
+      )
+      return { :sha256 => sha, :physical_entity_count => count }
+    end
+
+    payload = []
+    values.each do |row|
+      evidence = hash_value(row, key)
+      row_payload = hash_value(evidence, :payload) if evidence.is_a?(Hash)
+      unless row_payload.is_a?(Array) && !row_payload.empty?
         raise EvidenceError, "#{label} #{key} is unavailable"
       end
-      payload.concat(values)
+      fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+      unless fidelity.canonical_sha256(row_payload) ==
+             hash_value(evidence, :sha256).to_s.downcase
+        raise EvidenceError, "#{label} #{key} row digest is invalid"
+      end
+      payload.concat(row_payload)
     end
     fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
-    payload.sort_by { |entry| fidelity.canonical_json(entry) }
+    payload = payload.sort_by { |entry| fidelity.canonical_json(entry) }
+    count = if count_geometry
+              payload.inject(0) do |total, entry|
+                total + geometry_payload_entity_count(entry)
+              end
+            end
+    {
+      :sha256 => fidelity.canonical_sha256(payload),
+      :physical_entity_count => count
+    }
   end
-  private_class_method :manifest_evidence_payload!
+  private_class_method :manifest_evidence_summary!
 
   def self.geometry_payload_entity_count(payload)
     children = hash_value(payload, :children)
@@ -995,7 +1103,14 @@ module SketchupHostEvidence
   private_class_method :geometry_payload_entity_count
 
   def self.verify_expected_identity_tree!(rows, source_id, mode, digest, label)
-    visit_manifest(Array(rows)) do |row|
+    compact = Array(rows).all? { |row| compact_physical_partition_row?(row) }
+    targets = []
+    if compact
+      targets = Array(rows)
+    else
+      visit_manifest(Array(rows)) { |row| targets << row }
+    end
+    targets.each do |row|
       evidence = hash_value(row, :representation_evidence)
       unless evidence.is_a?(Hash) &&
              hash_value(evidence, :source_span_id).to_s == source_id &&
@@ -1004,10 +1119,66 @@ module SketchupHostEvidence
         raise EvidenceError,
               "#{label} physical descendant lacks exact source evidence identity"
       end
+      if compact && hash_value(evidence, :source_claim_root) != true
+        raise EvidenceError, "#{label} compact evidence is not a source claim root"
+      end
     end
     true
   end
   private_class_method :verify_expected_identity_tree!
+
+  def self.compact_physical_partition_row?(row)
+    geometry = hash_value(row, :geometry_evidence)
+    style = hash_value(row, :style_evidence)
+    valid_evidence = [geometry, style].all? do |evidence|
+      evidence.is_a?(Hash) &&
+        hash_value(evidence, :schema).to_s ==
+          'bcs.host_physical_partition/1.0' &&
+        hash_value(evidence, :sha256).to_s.downcase =~ /\A[0-9a-f]{64}\z/ &&
+        hash_value(evidence, :physical_entity_count).is_a?(Integer) &&
+        hash_value(evidence, :physical_entity_count) > 0
+    end
+    return false unless valid_evidence
+    count = hash_value(geometry, :physical_entity_count)
+    return false unless hash_value(style, :physical_entity_count) == count
+    topology = hash_value(geometry, :topology)
+    return false unless topology.is_a?(Hash)
+    root_type = hash_value(topology, :root_type).to_s
+    direct_types = hash_value(topology, :direct_child_types)
+    type_counts = hash_value(topology, :descendant_type_counts)
+    descendant_count = hash_value(topology, :descendant_entity_count)
+    live_count = hash_value(topology, :live_entity_count)
+    return false if root_type.empty? ||
+      root_type != hash_value(row, :typename).to_s
+    return false unless direct_types.is_a?(Array) && direct_types.all? do |type|
+      type.is_a?(String) && !type.empty?
+    end
+    return false unless type_counts.is_a?(Hash) && type_counts.all? do |type, value|
+      !type.to_s.empty? && value.is_a?(Integer) && value > 0
+    end
+    return false unless descendant_count.is_a?(Integer) && descendant_count >= 0 &&
+      descendant_count == count - 1 &&
+      descendant_count == type_counts.values.inject(0, :+)
+    return false unless live_count.is_a?(Integer) && live_count == count
+    direct_counts = direct_types.inject({}) do |memo, type|
+      memo[type] = memo.fetch(type, 0) + 1
+      memo
+    end
+    direct_counts.all? do |type, value|
+      type_counts.fetch(type, 0) >= value
+    end
+  rescue StandardError
+    false
+  end
+  private_class_method :compact_physical_partition_row?
+
+  def self.compact_topology!(row, label)
+    unless compact_physical_partition_row?(row)
+      raise EvidenceError, "#{label} compact physical topology is invalid"
+    end
+    hash_value(hash_value(row, :geometry_evidence), :topology)
+  end
+  private_class_method :compact_topology!
 
   def self.verify_expected_dimensions!(expected, rows, mode, label)
     anchor = hash_value(expected, :source_anchor)
@@ -1070,7 +1241,7 @@ module SketchupHostEvidence
       actual_text = hash_value(content, :text).to_s
       hash_value(row, :typename).to_s == 'Text' &&
         content.is_a?(Hash) && hash_value(content, :text_like) == true &&
-        !actual_text.strip.empty? &&
+        !actual_text.empty? &&
         Digest::SHA256.hexdigest(actual_text) == expected_digest &&
         hash_value(content, :text_sha256).to_s.downcase == expected_digest &&
         numeric_point_payload?(hash_value(content, :anchor)) &&
@@ -1096,6 +1267,17 @@ module SketchupHostEvidence
                !hash_value(evidence, :renderer).to_s.strip.empty?
           raise EvidenceError, "#{label} lacks persisted 3D Text identity"
         end
+        if compact_physical_partition_row?(row)
+          topology = compact_topology!(row, label)
+          counts = hash_value(topology, :descendant_type_counts)
+          types = counts.keys.map(&:to_s)
+          unless counts.fetch('Face', 0) > 0 && counts.fetch('Edge', 0) > 0 &&
+                 (types - ['Group', 'Face', 'Edge']).empty? &&
+                 positive_z_depth?(hash_value(row, :bounds))
+            raise EvidenceError, "#{label} is not positive-depth 3D Text geometry"
+          end
+          next
+        end
         descendants = descendant_manifest_rows(row)
         descendants.each do |child|
           verify_live_manifest_row!(child, "#{label} physical child")
@@ -1105,7 +1287,7 @@ module SketchupHostEvidence
         end
         unless descendant_types.include?('Face') &&
                descendant_types.include?('Edge') &&
-               (descendant_types - ['Face', 'Edge']).empty? &&
+               (descendant_types - ['Group', 'Face', 'Edge']).empty? &&
                positive_z_depth?(hash_value(row, :bounds))
           raise EvidenceError, "#{label} is not positive-depth 3D Text geometry"
         end
@@ -1130,6 +1312,19 @@ module SketchupHostEvidence
       raise EvidenceError, "#{label} must identify one owned Geometry group"
     end
     children = Array(hash_value(rows[0], :children))
+    if compact_physical_partition_row?(rows[0])
+      topology = compact_topology!(rows[0], label)
+      direct = hash_value(topology, :direct_child_types)
+      counts = hash_value(topology, :descendant_type_counts)
+      unless !direct.empty? && direct.all? { |type| type == 'Edge' } &&
+             counts.keys.map(&:to_s) == ['Edge'] &&
+             counts['Edge'] == direct.length &&
+             !positive_z_depth?(hash_value(rows[0], :bounds))
+        raise EvidenceError, "#{label} is not flat raw-edge Geometry"
+      end
+      verify_item_group_identity_if_required!(rows[0], record, :geometry, label)
+      return true
+    end
     children.each do |child|
       verify_live_manifest_row!(child, "#{label} physical child")
     end
@@ -1149,6 +1344,20 @@ module SketchupHostEvidence
       raise EvidenceError, "#{label} must identify one owned Glyphs group"
     end
     children = Array(hash_value(rows[0], :children))
+    if compact_physical_partition_row?(rows[0])
+      topology = compact_topology!(rows[0], label)
+      direct = hash_value(topology, :direct_child_types)
+      counts = hash_value(topology, :descendant_type_counts)
+      allowed = ['Group', 'ComponentInstance', 'Edge']
+      unless !direct.empty? && direct.all? do |type|
+        ['Group', 'ComponentInstance'].include?(type)
+      end && counts.fetch('Edge', 0) > 0 &&
+             (counts.keys.map(&:to_s) - allowed).empty?
+        raise EvidenceError, "#{label} is not a physical Glyphs hierarchy"
+      end
+      verify_item_group_identity_if_required!(rows[0], record, :glyphs, label)
+      return true
+    end
     descendants = descendant_manifest_rows(rows[0])
     descendants.each do |child|
       verify_live_manifest_row!(child, "#{label} physical child")

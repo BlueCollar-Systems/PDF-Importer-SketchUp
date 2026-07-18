@@ -185,6 +185,8 @@ class SketchupBatchHostContractTest < Minitest::Test
     assert_includes source, "'post_import_evidence_snapshot_completed'"
     assert_includes source, "'reopen_evidence_snapshot_started'"
     assert_includes source, "'reopen_evidence_snapshot_completed'"
+    assert_equal 3, source.scan(':compact => true').length,
+                 'baseline, post-import, and reopen must use compact physical partitions'
   end
 
   def test_pipeline_binds_report_to_immutable_input_and_records_salvage_lineage

@@ -3865,7 +3865,13 @@ module BlueCollarSystems
       begin
         if image.respond_to?(:set_attribute)
           dictionary = 'BC_PDF_Importer'
+          image.set_attribute(dictionary, 'source_claim_root', true)
           image.set_attribute(dictionary, 'source_span_id', source_id)
+          image.set_attribute(dictionary, 'source_kind', 'text_span')
+          image.set_attribute(dictionary, 'representation', 'raster')
+          image.set_attribute(
+            dictionary, 'renderer', 'pdftocairo_real_item_raster'
+          )
           image.set_attribute(dictionary, 'raster_page_number', page_num.to_i)
           image.set_attribute(
             dictionary, 'raster_page_rotation',

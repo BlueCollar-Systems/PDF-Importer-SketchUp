@@ -54,6 +54,10 @@ class SketchupHostEvidenceTest < Minitest::Test
     def get_attribute(dictionary, key, default_value = nil)
       @attributes.fetch([dictionary, key], default_value)
     end
+
+    def set_attribute(dictionary, key, value)
+      @attributes[[dictionary, key]] = value
+    end
   end
 
   class FakeGroup < FakeEntity
@@ -246,6 +250,145 @@ class SketchupHostEvidenceTest < Minitest::Test
     }, row['bounds'])
     assert_equal 1, entity.bounds_calls,
                  'physical evidence and manifest must share one bounds read'
+  end
+
+  def test_compact_snapshot_partitions_raw_geometry_under_claim_roots
+    dictionary = 'BC_PDF_Importer'
+    claim = FakeGroup.new(
+      42, [FakeEntity.new(43, 'Face')],
+      :attributes => {
+        [dictionary, 'source_span_id'] => 'text_span:1:0',
+        [dictionary, 'source_kind'] => 'text_span',
+        [dictionary, 'representation'] => 'text3d',
+        [dictionary, 'renderer'] => 'svg_source_3d_text',
+        [dictionary, 'source_claim_root'] => true
+      }
+    )
+    page = FakeGroup.new(40, [FakeEntity.new(41, 'Edge'), claim])
+
+    manifest = SketchupHostEvidence.snapshot_entities(
+      [page], :compact => true
+    )
+
+    assert_equal [40, 42],
+                 SketchupHostEvidence.manifest_entity_ids(manifest).sort
+    assert_equal [42], manifest.first['children'].map { |row| row['entity_id'] }
+    assert_empty manifest.first['children'].first['children']
+    assert_equal 2,
+                 manifest.first['geometry_evidence']['physical_entity_count']
+    assert_equal 2,
+                 manifest.first['children'].first['geometry_evidence'][
+                   'physical_entity_count'
+                 ]
+    assert_equal({
+      'root_type' => 'Group',
+      'direct_child_types' => ['Face'],
+      'descendant_type_counts' => { 'Face' => 1 },
+      'descendant_entity_count' => 1,
+      'live_entity_count' => 2
+    }, manifest.first['children'].first['geometry_evidence']['topology'])
+    refute manifest.first['geometry_evidence'].key?('payload')
+  end
+
+  def test_compact_snapshot_keeps_native_face_and_edge_claim_roots_expanded
+    dictionary = 'BC_PDF_Importer'
+    attributes = {
+      [dictionary, 'source_span_id'] => 'text_span:1:0',
+      [dictionary, 'source_kind'] => 'text_span',
+      [dictionary, 'representation'] => 'text3d',
+      [dictionary, 'renderer'] => 'sketchup_native_3d_text',
+      [dictionary, 'source_claim_root'] => true
+    }
+    bounds = FakeBounds.new(
+      FakePoint.new(0, 0, 0), FakePoint.new(1, 1, 0.1)
+    )
+    face = FakeEntity.new(
+      44, 'Face', :attributes => attributes.dup, :bounds => bounds
+    )
+    edge = FakeEntity.new(
+      45, 'Edge', :attributes => attributes.dup, :bounds => bounds
+    )
+
+    manifest = SketchupHostEvidence.snapshot_entities(
+      [face, edge], :compact => true
+    )
+
+    assert_equal [44, 45], manifest.map { |row| row['entity_id'] }
+    manifest.each do |row|
+      refute_equal 'bcs.host_physical_partition/1.0',
+                   row['geometry_evidence']['schema']
+      assert row['geometry_evidence']['payload'].is_a?(Array)
+      assert row['style_evidence']['payload'].is_a?(Array)
+    end
+  end
+
+  def test_nested_item_raster_claim_survives_compact_snapshot_and_binding
+    dictionary = 'BC_PDF_Importer'
+    sha256 = 'a' * 64
+    image = FakeImage.new(52, :attributes => {
+      [dictionary, 'source_claim_root'] => true,
+      [dictionary, 'source_span_id'] => 'text_span:1:0',
+      [dictionary, 'source_kind'] => 'text_span',
+      [dictionary, 'representation'] => 'raster',
+      [dictionary, 'renderer'] => 'pdftocairo_real_item_raster',
+      [dictionary, 'raster_page_number'] => 1,
+      [dictionary, 'raster_pixel_width'] => 120,
+      [dictionary, 'raster_pixel_height'] => 40,
+      [dictionary, 'raster_content_sha256'] => sha256,
+      [dictionary, 'raster_content_bytes'] => 4800
+    })
+    page = FakeGroup.new(50, [image])
+    manifest = SketchupHostEvidence.snapshot_entities(
+      [page], :compact => true
+    )
+    row = manifest.first['children'].first
+    record = {
+      :page => 1, :source_span_id => 'text_span:1:0',
+      :requested_mode => :labels, :delivered_mode => :raster,
+      :created_entity_type => 'raster_image',
+      :real_raster_verified => true, :visual_fidelity_verified => true,
+      :source_crop_binding_verified => true,
+      :delivery_scope => :item_raster, :cleanup_outcome => :not_required,
+      :artifact_evidence => {
+        :source_span_id => 'text_span:1:0', :page_number => 1,
+        :png_signature_verified => true, :page_binding_verified => true,
+        :source_crop_binding_verified => true,
+        :pixel_width => 120, :pixel_height => 40,
+        :content_sha256 => sha256, :content_byte_size => 4800
+      }
+    }
+
+    assert_equal true,
+                 row['representation_evidence']['source_claim_root']
+    assert_equal 'raster', row['representation_evidence']['representation']
+    assert_equal 'pdftocairo_real_item_raster',
+                 row['representation_evidence']['renderer']
+    assert SketchupHostEvidence.send(
+      :verify_raster_artifact_binding!, record, row, 'entity_id:52', [1]
+    )
+  end
+
+  def test_source_evidence_is_attached_to_owned_root_not_every_face
+    child = FakeEntity.new(51, 'Face')
+    root = FakeGroup.new(50, [child])
+    evidence = {
+      :schema => 'bcs.source_expected/1.0',
+      :source_span_id => 'text_span:1:0',
+      :representation => :text3d,
+      :source_text_sha256 => 'a' * 64,
+      :physical_geometry_sha256 => 'b' * 64,
+      :physical_style_sha256 => 'c' * 64,
+      :evidence_sha256 => 'd' * 64
+    }
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+
+    assert fidelity.attach_source_evidence!([root], evidence, 'fixture')
+
+    assert_equal true,
+                 root.get_attribute('BC_PDF_Importer', 'source_claim_root')
+    assert_equal 'text_span:1:0',
+                 root.get_attribute('BC_PDF_Importer', 'source_span_id')
+    assert_nil child.get_attribute('BC_PDF_Importer', 'source_span_id')
   end
 
   def test_snapshot_preserves_representation_identity_attributes
@@ -941,7 +1084,227 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  def test_compact_claim_root_hashes_verify_without_face_rows
+    rows = text3d_manifest
+    stats = strict_text3d_stats
+    expected = stats[:text_attempts].first[:expected_evidence]
+    root = rows.first
+    root['children'] = []
+    root['representation_evidence']['source_claim_root'] = true
+    schema = 'bcs.host_physical_partition/1.0'
+    root['geometry_evidence'] = {
+      'schema' => schema,
+      'sha256' => expected[:physical_geometry_sha256],
+      'physical_entity_count' => expected[:physical_entity_count],
+      'topology' => {
+        'root_type' => 'Group',
+        'direct_child_types' => ['Edge', 'Face'],
+        'descendant_type_counts' => { 'Edge' => 1, 'Face' => 1 },
+        'descendant_entity_count' => 2,
+        'live_entity_count' => 3
+      }
+    }
+    root['style_evidence'] = {
+      'schema' => schema,
+      'sha256' => expected[:physical_style_sha256],
+      'physical_entity_count' => expected[:physical_entity_count]
+    }
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, rows, :text3d, [1]
+    )
+
+    root['geometry_evidence']['sha256'] = '0' * 64
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, rows, :text3d, [1]
+      )
+    end
+    assert_match(/physical geometry differs/, error.message)
+  end
+
+  def test_compact_text3d_rejects_flat_or_edge_only_topology
+    rows, stats = compact_fixture(:text3d)
+    topology = rows.first['geometry_evidence']['topology']
+    topology['direct_child_types'] = ['Edge', 'Edge']
+    topology['descendant_type_counts'] = { 'Edge' => 2 }
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, rows, :text3d, [1]
+      )
+    end
+    assert_match(/3D Text|topology|Face/i, error.message)
+  end
+
+  def test_compact_text3d_accepts_tolerance_safe_nested_group
+    rows = text3d_manifest
+    root = rows.first
+    raw_children = root['children']
+    root['children'] = [{
+      'entity_id' => 16, 'persistent_id' => 1016,
+      'typename' => 'Group', 'valid' => true, 'deleted' => false,
+      'children' => raw_children
+    }]
+    expected = decorate_fixture_manifest!(
+      rows, :text3d, 'text_span:1:0', 'A'
+    )
+    stats = strict_text3d_stats
+    attempt = stats[:text_attempts].first
+    attempt[:expected_evidence] = expected
+    attempt[:attempt_history].last[:expected_evidence] = expected
+    root['children'] = []
+    root['representation_evidence']['source_claim_root'] = true
+    schema = 'bcs.host_physical_partition/1.0'
+    root['geometry_evidence'] = {
+      'schema' => schema,
+      'sha256' => expected[:physical_geometry_sha256],
+      'physical_entity_count' => expected[:physical_entity_count],
+      'topology' => {
+        'root_type' => 'Group',
+        'direct_child_types' => ['Group'],
+        'descendant_type_counts' => {
+          'Edge' => 1, 'Face' => 1, 'Group' => 1
+        },
+        'descendant_entity_count' => 3,
+        'live_entity_count' => 4
+      }
+    }
+    root['style_evidence'] = {
+      'schema' => schema,
+      'sha256' => expected[:physical_style_sha256],
+      'physical_entity_count' => expected[:physical_entity_count]
+    }
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, rows, :text3d, [1]
+    )
+  end
+
+  def test_compact_geometry_rejects_face_or_nested_container_topology
+    rows, stats = compact_fixture(:geometry)
+    topology = rows.first['geometry_evidence']['topology']
+    topology['direct_child_types'] = ['Face']
+    topology['descendant_type_counts'] = { 'Face' => 1 }
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, rows, :geometry, [1]
+      )
+    end
+    assert_match(/Geometry|topology|edge/i, error.message)
+  end
+
+  def test_compact_glyphs_rejects_direct_edge_without_glyph_container
+    rows, stats = compact_fixture(:glyphs)
+    topology = rows.first['geometry_evidence']['topology']
+    topology['direct_child_types'] = ['Edge']
+    topology['descendant_type_counts'] = { 'Edge' => 2 }
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, rows, :glyphs, [1]
+      )
+    end
+    assert_match(/Glyphs|topology|hierarchy|container/i, error.message)
+  end
+
+  def test_multiple_native_3d_text_claim_roots_verify_as_one_source_partition
+    rows = Marshal.load(Marshal.dump(text3d_manifest.first['children']))
+    rows[0]['bounds'] = {
+      'min' => [0.0, 0.0, 0.0], 'max' => [1.0, 1.0, 0.1]
+    }
+    rows[1]['bounds'] = {
+      'min' => [0.0, 0.0, 0.0], 'max' => [1.0, 1.0, 0.1]
+    }
+    identity = [
+      1.0, 0.0, 0.0, 0.0,
+      0.0, 1.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      0.0, 0.0, 0.0, 1.0
+    ]
+    rows.each { |row| row['transformation'] = identity }
+    expected = decorate_fixture_manifest!(
+      rows, :text3d, 'text_span:1:0', 'A'
+    )
+    stats = strict_text3d_stats
+    claim_ids = rows.map { |row| "entity_id:#{row['entity_id']}" }
+    attempt = stats[:text_attempts].first
+    attempt[:resulting_entity_ids] = claim_ids
+    attempt[:expected_evidence] = expected
+    attempt[:attempt_history].last[:resulting_entity_ids] = claim_ids
+    attempt[:attempt_history].last[:expected_evidence] = expected
+    stats[:source_provenance_objects].first[:resulting_entity_ids] = claim_ids
+    stats[:source_provenance_objects].first[:created_entity_type] =
+      'native_3d_text'
+    stats[:source_provenance_objects].first[:renderer] =
+      'sketchup_native_3d_text'
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, rows, :text3d, [1]
+    )
+  end
+
+  def test_native_label_verifier_preserves_exact_whitespace_content
+    row = label_manifest.first
+    text = '   '
+    digest = Digest::SHA256.hexdigest(text)
+    row['content_evidence']['text'] = text
+    row['content_evidence']['text_sha256'] = digest
+    record = {
+      :source_text_sha256 => digest,
+      :expected_evidence => {
+        :source_anchor => row['content_evidence']['anchor'],
+        :source_rotation_radians => 0.0
+      }
+    }
+
+    assert SketchupHostEvidence.send(
+      :verify_native_labels!, [row], record, 'whitespace label'
+    )
+  end
+
   private
+
+  def compact_fixture(mode)
+    rows = case mode
+           when :text3d then text3d_manifest
+           when :geometry then geometry_manifest
+           when :glyphs then glyph_manifest
+           else raise ArgumentError, "unsupported compact fixture #{mode}"
+           end
+    stats = mode == :text3d ? strict_text3d_stats :
+      strict_page_mode_stats(mode, mode, 1)
+    expected = stats[:text_attempts].first[:expected_evidence]
+    root = rows.first
+    child_types = Array(root['children']).map { |child| child['typename'] }.sort
+    counts = {}
+    fixture_visit_rows(root['children']) do |child|
+      type = child['typename'].to_s
+      counts[type] = counts.fetch(type, 0) + 1
+    end
+    root['children'] = []
+    root['representation_evidence']['source_claim_root'] = true
+    schema = 'bcs.host_physical_partition/1.0'
+    root['geometry_evidence'] = {
+      'schema' => schema,
+      'sha256' => expected[:physical_geometry_sha256],
+      'physical_entity_count' => expected[:physical_entity_count],
+      'topology' => {
+        'root_type' => root['typename'],
+        'direct_child_types' => child_types,
+        'descendant_type_counts' => counts,
+        'descendant_entity_count' => counts.values.inject(0, :+),
+        'live_entity_count' => expected[:physical_entity_count]
+      }
+    }
+    root['style_evidence'] = {
+      'schema' => schema,
+      'sha256' => expected[:physical_style_sha256],
+      'physical_entity_count' => expected[:physical_entity_count]
+    }
+    [rows, stats]
+  end
 
   def manifest
     [{
