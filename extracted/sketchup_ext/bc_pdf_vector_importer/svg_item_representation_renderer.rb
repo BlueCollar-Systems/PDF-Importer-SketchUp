@@ -91,6 +91,7 @@ module BlueCollarSystems
           :placement_indices => indices,
           :association_strategy => selection[:strategy],
           :glyph_ids => entries.map { |entry| entry[:glyph_id].to_s },
+          :source_extent => expected.map { |value| value.to_f },
           :edge_count => build[:edge_count],
           :glyph_group_count => build[:glyph_group_count],
           :identity_verified => true,
@@ -153,20 +154,52 @@ module BlueCollarSystems
         box = bounds_hash(group)
         transform = RepresentationFidelity.entity_transformation_payload(group)
         transform ||= { :kind => 'baked_geometry', :entity_count => 1 }
+        expected_box = nil
+        source_extent = result[:source_extent]
+        if source_extent
+          unless result[:page_transform_verified] == true &&
+                 Array(result[:source_page_transformation]).length == 16
+            raise RepresentationFidelity::ContractError,
+                  'item vector source page transform was not independently verified'
+          end
+          expected_box = RepresentationFidelity.transformed_extent_bounds(
+            source_extent, result[:source_page_transformation], 0.0, 0.0
+          )
+          expected_min = expected_box[:min]
+          expected_max = expected_box[:max]
+          actual_values = [
+            box[:min_x], box[:min_y], box[:min_z],
+            box[:max_x], box[:max_y], box[:max_z]
+          ]
+          expected_values = expected_min + expected_max
+          tolerance = [
+            SIZE_TOLERANCE_INCHES,
+            (expected_max[0] - expected_min[0]).abs * 1.0e-5,
+            (expected_max[1] - expected_min[1]).abs * 1.0e-5
+          ].max
+          unless actual_values.each_with_index.all? do |value, index|
+            (value.to_f - expected_values[index].to_f).abs <= tolerance
+          end
+            raise RepresentationFidelity::ContractError,
+                  'item vector final bounds differ from source outlines and page transform'
+          end
+          transform = result[:source_page_transformation]
+        end
+        expected_box ||= {
+          :min => [box[:min_x], box[:min_y], box[:min_z]],
+          :max => [box[:max_x], box[:max_y], box[:max_z]]
+        }
         expected = RepresentationFidelity.source_expected_evidence(
           item, result[:mode],
           :entities => [group],
-          :source_anchor => [box[:min_x], box[:min_y], box[:min_z]],
+          :source_anchor => expected_box[:min],
           :source_rotation_radians =>
             (RepresentationFidelity.source_rotation_degrees(item) +
              page_rotation.to_f) * Math::PI / 180.0,
-          :expected_width => box[:width],
-          :expected_height => box[:height],
-          :expected_depth => box[:max_z].to_f - box[:min_z].to_f,
-          :expected_bounds => {
-            :min => [box[:min_x], box[:min_y], box[:min_z]],
-            :max => [box[:max_x], box[:max_y], box[:max_z]]
-          },
+          :expected_width => expected_box[:max][0] - expected_box[:min][0],
+          :expected_height => expected_box[:max][1] - expected_box[:min][1],
+          :expected_depth => expected_box[:max][2] - expected_box[:min][2],
+          :expected_bounds => expected_box,
           :expected_transformation => transform
         )
         renderer = result[:mode] == :glyphs ?
@@ -545,7 +578,12 @@ module BlueCollarSystems
         nonempty = expected_width.abs > SIZE_TOLERANCE_INCHES ||
           expected_height.abs > SIZE_TOLERANCE_INCHES
         accurate = (actual[:width] - expected_width.abs).abs <= tolerance &&
-          (actual[:height] - expected_height.abs).abs <= tolerance
+          (actual[:height] - expected_height.abs).abs <= tolerance &&
+          (actual[:min_x] - expected[0].to_f).abs <= tolerance &&
+          (actual[:min_y] - expected[1].to_f).abs <= tolerance &&
+          (actual[:max_x] - expected[2].to_f).abs <= tolerance &&
+          (actual[:max_y] - expected[3].to_f).abs <= tolerance &&
+          actual[:min_z].abs <= tolerance && actual[:max_z].abs <= tolerance
         unless nonempty && accurate
           raise RepresentationFidelity::ContractError,
                 "#{source_id}: item vector bounds do not match source outlines"

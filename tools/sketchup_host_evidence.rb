@@ -855,11 +855,7 @@ module SketchupHostEvidence
            hash_value(expected, :evidence_sha256).to_s.downcase
       raise EvidenceError, "#{label} expected evidence digest is invalid"
     end
-    top_digest = hash_value(record, :source_text_sha256).to_s.downcase
-    if !top_digest.empty? && top_digest !=
-       hash_value(expected, :source_text_sha256).to_s.downcase
-      raise EvidenceError, "#{label} source content digest conflicts"
-    end
+    verify_record_expected_consistency!(record, expected, label)
 
     geometry_payload = manifest_evidence_payload!(rows, :geometry_evidence, label)
     style_payload = manifest_evidence_payload!(rows, :style_evidence, label)
@@ -888,6 +884,38 @@ module SketchupHostEvidence
     true
   end
   private_class_method :verify_source_expected_evidence!
+
+  def self.verify_record_expected_consistency!(record, expected, label)
+    bindings = {
+      :source_text_sha256 => :source_text_sha256,
+      :source_font_sha256 => :source_font_sha256,
+      :source_bbox_pdf => :source_bbox_pdf,
+      :source_anchor => :source_anchor,
+      :source_rotation_radians => :source_rotation_radians,
+      :expected_width => :expected_width,
+      :expected_height => :expected_height,
+      :expected_depth => :expected_depth,
+      :expected_bounds => :expected_bounds,
+      :expected_transform => :expected_transformation,
+      :expected_transformation => :expected_transformation,
+      :source_geometry_sha256 => :physical_geometry_sha256,
+      :physical_geometry_sha256 => :physical_geometry_sha256,
+      :source_style_sha256 => :physical_style_sha256,
+      :physical_style_sha256 => :physical_style_sha256,
+      :physical_entity_count => :physical_entity_count
+    }
+    bindings.each do |record_field, expected_field|
+      next unless hash_key?(record, record_field)
+      unless evidence_payload_equal?(
+        hash_value(record, record_field), hash_value(expected, expected_field)
+      )
+        raise EvidenceError,
+              "#{label} #{record_field} conflicts with source-bound expectation"
+      end
+    end
+    true
+  end
+  private_class_method :verify_record_expected_consistency!
 
   def self.verify_source_expected_attempts!(attempts, rows_by_claim)
     Array(attempts).each_with_index do |attempt, index|
@@ -1294,7 +1322,8 @@ module SketchupHostEvidence
   end
   private_class_method :transition_signature!
 
-  def self.verify_completed_rung!(rung, mode, expected_ids, source_id)
+  def self.verify_completed_rung!(rung, mode, expected_ids, source_id,
+                                  attempt_expected)
     unless rung.is_a?(Hash) && normalize_mode(hash_value(rung, :mode)) == mode &&
            hash_value(rung, :outcome).to_s == 'complete' &&
            canonical_claims!(
@@ -1305,6 +1334,12 @@ module SketchupHostEvidence
       raise EvidenceError, "#{source_id} completed rung is not bound to delivery"
     end
     verify_mode_flags!(rung, mode, "#{source_id} completed rung")
+    rung_expected = hash_value(rung, :expected_evidence)
+    unless attempt_expected.is_a?(Hash) && rung_expected.is_a?(Hash) &&
+           evidence_payload_equal?(rung_expected, attempt_expected)
+      raise EvidenceError,
+            "#{source_id} completed rung changed its source-bound expectation"
+    end
     if mode == :raster &&
        (hash_value(rung, :real_raster_verified) != true ||
         hash_value(rung, :source_crop_binding_verified) != true)
@@ -1398,7 +1433,10 @@ module SketchupHostEvidence
         history.each_with_index do |rung, rung_index|
           mode = ladder[rung_index]
           if rung_index == delivered_index
-            verify_completed_rung!(rung, mode, ids, source_id)
+            verify_completed_rung!(
+              rung, mode, ids, source_id,
+              hash_value(attempt, :expected_evidence)
+            )
           else
             unless rung.is_a?(Hash) &&
                    normalize_mode(hash_value(rung, :mode)) == mode &&
@@ -1958,7 +1996,10 @@ module SketchupHostEvidence
   def self.hash_value(hash, key)
     return nil unless hash.is_a?(Hash)
     return hash[key] if hash.key?(key)
-    hash[key.to_s]
+    text = key.to_s
+    return hash[text] if hash.key?(text)
+    alternate = hash.keys.find { |candidate| candidate.to_s == text }
+    alternate.nil? ? nil : hash[alternate]
   end
   private_class_method :hash_value
 end

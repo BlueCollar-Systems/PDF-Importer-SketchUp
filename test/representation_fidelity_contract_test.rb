@@ -334,6 +334,22 @@ class RepresentationFidelityContractTest < Minitest::Test
                  builder(:labels).send(:normalize_text_mode_symbol, 'Text')
   end
 
+  def test_source_extent_bounds_are_derived_from_the_required_page_transform
+    matrix = [
+      0.0, 1.0, 0.0, 0.0,
+      -1.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      10.0, 20.0, 0.0, 1.0
+    ]
+
+    bounds = IMP::RepresentationFidelity.transformed_extent_bounds(
+      [1.0, 2.0, 3.0, 5.0], matrix, 0.0, 0.5
+    )
+
+    assert_equal [5.0, 21.0, 0.0], bounds[:min]
+    assert_equal [8.0, 23.0, 0.5], bounds[:max]
+  end
+
   def test_native_3d_text_stops_before_creation_without_exact_font_identity_proof
     source = item('NO SUBSTITUTE')
     b = GB.new(nil, [], [], [0, 0, 612, 792],

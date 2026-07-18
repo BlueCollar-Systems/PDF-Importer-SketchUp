@@ -160,20 +160,45 @@ module BlueCollarSystems
         actual = bounds_hash(row[:group])
         transform = RepresentationFidelity.entity_transformation_payload(row[:group])
         transform ||= { :kind => 'baked_geometry', :entity_count => 1 }
+        expected_box = nil
+        source_extent = row[:source_extent]
+        if source_extent
+          unless row[:page_transform_verified] == true &&
+                 Array(row[:source_page_transformation]).length == 16
+            raise RepresentationFidelity::ContractError,
+                  '3D Text source page transform was not independently verified'
+          end
+          expected_box = RepresentationFidelity.transformed_extent_bounds(
+            source_extent, row[:source_page_transformation], 0.0, row[:depth]
+          )
+          expected_values = expected_box[:min] + expected_box[:max]
+          actual_values = [
+            actual[:min_x], actual[:min_y], actual[:min_z],
+            actual[:max_x], actual[:max_y], actual[:max_z]
+          ]
+          unless actual_values.each_with_index.all? do |value, index|
+            close_size?(value, expected_values[index])
+          end
+            raise RepresentationFidelity::ContractError,
+                  '3D Text final bounds differ from source outlines and page transform'
+          end
+          transform = row[:source_page_transformation]
+        end
+        expected_box ||= {
+          :min => [actual[:min_x], actual[:min_y], actual[:min_z]],
+          :max => [actual[:max_x], actual[:max_y], actual[:max_z]]
+        }
         expected = RepresentationFidelity.source_expected_evidence(
           item, :text3d,
           :entities => [row[:group]],
-          :source_anchor => [actual[:min_x], actual[:min_y], actual[:min_z]],
+          :source_anchor => expected_box[:min],
           :source_rotation_radians =>
             (RepresentationFidelity.source_rotation_degrees(item) +
              page_rotation.to_f) * Math::PI / 180.0,
-          :expected_width => actual[:max_x].to_f - actual[:min_x].to_f,
-          :expected_height => actual[:max_y].to_f - actual[:min_y].to_f,
-          :expected_depth => actual[:max_z].to_f - actual[:min_z].to_f,
-          :expected_bounds => {
-            :min => [actual[:min_x], actual[:min_y], actual[:min_z]],
-            :max => [actual[:max_x], actual[:max_y], actual[:max_z]]
-          },
+          :expected_width => expected_box[:max][0] - expected_box[:min][0],
+          :expected_height => expected_box[:max][1] - expected_box[:min][1],
+          :expected_depth => expected_box[:max][2] - expected_box[:min][2],
+          :expected_bounds => expected_box,
           :expected_transformation => transform,
           :source_font_identity => {
             :source => 'pdf_renderer_svg_glyph_outlines',
@@ -227,12 +252,18 @@ module BlueCollarSystems
         actual_width = actual[:max_x] - actual[:min_x]
         actual_height = actual[:max_y] - actual[:min_y]
         actual_depth = actual[:max_z] - actual[:min_z]
+        position_ok = close_size?(actual[:min_x], expected[0]) &&
+          close_size?(actual[:min_y], expected[1]) &&
+          close_size?(actual[:max_x], expected[2]) &&
+          close_size?(actual[:max_y], expected[3]) &&
+          close_size?(actual[:min_z], 0.0) &&
+          close_size?(actual[:max_z], depth)
         width_ok = close_size?(actual_width, expected_width)
         height_ok = close_size?(actual_height, expected_height)
         depth_ok = actual_depth > SIZE_TOLERANCE_INCHES &&
           close_size?(actual_depth, depth)
         raise 'extruded source glyph width/height verification failed' unless
-          width_ok && height_ok
+          width_ok && height_ok && position_ok
         raise 'extruded source glyph has no verified positive Z depth' unless depth_ok
 
         matrices = entries.map { |entry| Array(entry[:svg_matrix]).map { |v| v.to_f } }
@@ -248,6 +279,7 @@ module BlueCollarSystems
           :glyph_ids => ids,
           :placement_indices => placement_indices,
           :source_matrices => matrices.uniq,
+          :source_extent => expected.map { |value| value.to_f },
           :source_placement_count => placement_indices.length,
           :face_count => faces.length,
           :extruded_face_count => extruded,

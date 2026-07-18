@@ -1127,12 +1127,32 @@ module BlueCollarSystems
         evidence[:physical_geometry_verified] = true
         evidence[:physical_style_verified] = true
         evidence[:transform_verified] = true
+        source_planar_bounds = RepresentationFidelity.expected_rotated_bounds(
+          anchor, evidence[:target_width_in], evidence[:target_height_in],
+          display_angle
+        )
+        source_anchor = RepresentationFidelity.numeric_point(anchor)
+        source_bounds = {
+          :min => [
+            source_planar_bounds[:min_x], source_planar_bounds[:min_y],
+            source_anchor[2]
+          ],
+          :max => [
+            source_planar_bounds[:max_x], source_planar_bounds[:max_y],
+            source_anchor[2] + extrusion_depth
+          ]
+        }
         evidence[:expected_evidence] = source_expected_for_created!(
           item, :text3d, created, anchor, display_angle,
           {
             :expected_width => evidence[:target_width_in],
             :expected_height => evidence[:target_height_in],
             :expected_depth => extrusion_depth,
+            :expected_bounds => source_bounds,
+            :expected_transformation => {
+              :kind => 'baked_geometry',
+              :entity_count => created.length
+            },
             :source_font_identity => {
               :pdf_font_identity => font_identity[:pdf_font_identity],
               :installed_family => font_identity[:installed_family]

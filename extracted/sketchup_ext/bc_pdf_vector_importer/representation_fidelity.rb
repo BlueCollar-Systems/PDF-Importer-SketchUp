@@ -371,6 +371,44 @@ module BlueCollarSystems
           width: xs.max - xs.min, height: ys.max - ys.min }
       end
 
+      # Build expected host-space bounds from source outlines and the required
+      # page transform. Created host bounds must never become their own source
+      # expectation, because that would allow a translated artifact to certify
+      # itself.
+      def transformed_extent_bounds(extent, transformation, min_z = 0.0,
+                                    max_z = 0.0)
+        unless extent.is_a?(Array) && extent.length >= 4
+          raise ContractError, 'source outline extent is unavailable'
+        end
+        matrix = Array(transformation)
+        unless matrix.length == 16
+          raise ContractError, 'source page transformation is unavailable'
+        end
+        values = matrix.map { |value| canonical_number(value) }
+        xs = [canonical_number(extent[0]), canonical_number(extent[2])]
+        ys = [canonical_number(extent[1]), canonical_number(extent[3])]
+        zs = [canonical_number(min_z), canonical_number(max_z)]
+        points = []
+        xs.each do |x|
+          ys.each do |y|
+            zs.each do |z|
+              points << [
+                (values[0] * x) + (values[4] * y) +
+                  (values[8] * z) + values[12],
+                (values[1] * x) + (values[5] * y) +
+                  (values[9] * z) + values[13],
+                (values[2] * x) + (values[6] * y) +
+                  (values[10] * z) + values[14]
+              ].map { |number| canonical_number(number) }
+            end
+          end
+        end
+        {
+          :min => 3.times.map { |axis| points.map { |point| point[axis] }.min },
+          :max => 3.times.map { |axis| points.map { |point| point[axis] }.max }
+        }
+      end
+
       # Evidence is deliberately derived from the physical host entities, not
       # from the report flags which describe them.  The same canonical payload
       # is captured again by the guarded host after save/reopen.

@@ -100,6 +100,12 @@ class Svg3DEntities
 
   def add_face(points)
     raise 'synthetic face creation failure' if @options[:fail_add_face]
+    if @options[:translate_created_faces]
+      dx, dy = @options[:translate_created_faces]
+      points = Array(points).map do |point|
+        Geom::Point3d.new(point.x + dx.to_f, point.y + dy.to_f, point.z)
+      end
+    end
     face = Svg3DFace.new(self, next_id, points)
     @items << face
     face
@@ -364,6 +370,45 @@ class SvgText3DRendererTest < Minitest::Test
       assert_empty result[:transition_proofs]
       assert_equal :nonpositive_extrusion_depth, result[:failures][0][:reason_code]
     end
+  end
+
+  def test_same_size_3d_text_at_wrong_coordinates_is_rejected_and_cleaned
+    entities = Svg3DEntities.new(
+      :translate_created_faces => [3.0, -2.0]
+    )
+
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, [span], :depth => 0.05
+    )
+
+    refute result[:ok]
+    assert_empty result[:transition_proofs]
+    assert_match(/width\/height verification failed/i,
+                 result[:failures][0][:detail])
+    assert_empty entities.groups
+  end
+
+  def test_final_evidence_rejects_post_verification_3d_translation
+    result = RENDERER.render_svg(
+      Svg3DEntities.new, square_svg, MEDIA_BOX, [span], :depth => 0.05
+    )
+    row = result[:span_results][0]
+    row[:source_page_transformation] = [
+      1.0, 0.0, 0.0, 0.0,
+      0.0, 1.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      0.0, 0.0, 0.0, 1.0
+    ]
+    row[:page_transform_verified] = true
+    row[:group].entities.to_a.each do |face|
+      face.instance_variable_get(:@points).each { |point| point.y -= 2.0 }
+    end
+
+    error = assert_raises(FIDELITY::ContractError) do
+      RENDERER.finalize_source_evidence!(row, span)
+    end
+
+    assert_match(/final bounds differ from source outlines/i, error.message)
   end
 
   def test_svg_rotation_matrix_is_preserved_and_reported

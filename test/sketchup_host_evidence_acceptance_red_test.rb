@@ -206,6 +206,43 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  def test_review_red_source_fields_cannot_disagree_with_bound_expected_evidence
+    stats = strict_text3d_stats
+    attempt = stats[:text_attempts][0]
+    attempt[:source_anchor] = [99.0, 98.0, 97.0]
+    attempt[:source_rotation_radians] = 1.2345
+    attempt[:expected_width] = 91.0
+    attempt[:expected_height] = 92.0
+    attempt[:expected_depth] = 93.0
+    attempt[:source_style_sha256] = Digest::SHA256.hexdigest('different-style')
+    attempt[:source_geometry_sha256] = Digest::SHA256.hexdigest('different-geometry')
+    attempt[:expected_transform] = [2.0, 0.0, 0.0, 2.0, 50.0, 60.0]
+
+    assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, text3d_manifest, :text3d, [1]
+      )
+    end
+  end
+
+  def test_review_red_completed_rung_cannot_swap_bound_expected_evidence
+    stats = strict_text3d_stats
+    rung = stats[:text_attempts][0][:attempt_history][0]
+    swapped = Marshal.load(Marshal.dump(rung[:expected_evidence]))
+    swapped[:source_anchor] = [99.0, 98.0, 97.0]
+    swapped.delete(:evidence_sha256)
+    swapped[:evidence_sha256] =
+      BlueCollarSystems::PDFVectorImporter::RepresentationFidelity.
+        canonical_sha256(swapped)
+    rung[:expected_evidence] = swapped
+
+    assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, text3d_manifest, :text3d, [1]
+      )
+    end
+  end
+
   private
 
   def label_attempt_with_anchor(source_id, entity_id, digest, source_anchor)

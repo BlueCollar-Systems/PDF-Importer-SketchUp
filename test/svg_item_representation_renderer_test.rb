@@ -88,6 +88,12 @@ class ItemVectorEntities
   end
 
   def add_edges(points)
+    if @options[:translate_created_edges]
+      dx, dy = @options[:translate_created_edges]
+      points = Array(points).map do |point|
+        Geom::Point3d.new(point.x + dx.to_f, point.y + dy.to_f, point.z)
+      end
+    end
     created = []
     Array(points).each_cons(2) do |first, last|
       edge = ItemVectorEdge.new(next_id, first, last)
@@ -311,6 +317,40 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     assert_equal [preexisting], entities.to_a
     assert_equal ['persistent_id:101'],
                  entities.erased.map { |entity| FIDELITY.stable_entity_id(entity) }
+  end
+
+  def test_same_size_geometry_at_wrong_coordinates_is_rejected_and_cleaned
+    entities = ItemVectorEntities.new(
+      nil, :translate_created_edges => [3.0, -2.0]
+    )
+
+    error = assert_raises(FIDELITY::ContractError) do
+      render(entities, :geometry)
+    end
+
+    assert_match(/bounds do not match source outlines/i, error.message)
+    assert_empty entities.to_a
+  end
+
+  def test_final_evidence_rejects_post_verification_translation
+    entities = ItemVectorEntities.new
+    result = render(entities, :geometry)
+    result[:source_page_transformation] = [
+      1.0, 0.0, 0.0, 0.0,
+      0.0, 1.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      0.0, 0.0, 0.0, 1.0
+    ]
+    result[:page_transform_verified] = true
+    result[:group].entities.to_a.each do |edge|
+      edge.instance_variable_get(:@points).each { |point| point.x += 3.0 }
+    end
+
+    error = assert_raises(FIDELITY::ContractError) do
+      RENDERER.finalize_source_evidence!(result, item)
+    end
+
+    assert_match(/final bounds differ from source outlines/i, error.message)
   end
 
   def test_incomplete_page_inventory_is_a_hard_stop_not_a_fallback_proof

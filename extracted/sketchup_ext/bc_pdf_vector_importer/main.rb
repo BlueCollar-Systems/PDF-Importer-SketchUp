@@ -534,7 +534,8 @@ module BlueCollarSystems
         if result[:ok] == true
           begin
             transformed = apply_and_verify_page_representation_transform(
-              result[:group], media_box, opts[:scale], page_rotation, y_offset
+              result[:group], media_box, opts[:scale], page_rotation, y_offset,
+              result
             )
             unless transformed &&
                    SvgItemRepresentationRenderer.verify_transformed_delivery!(
@@ -742,7 +743,7 @@ module BlueCollarSystems
       rows = Array(result[:span_results])
       transforms_ok = rows.all? do |row|
         apply_and_verify_page_representation_transform(
-          row[:group], media_box, opts[:scale], page_rotation, y_offset
+          row[:group], media_box, opts[:scale], page_rotation, y_offset, row
         )
       end
       unless transforms_ok
@@ -1523,7 +1524,8 @@ module BlueCollarSystems
 
     def self.apply_and_verify_page_representation_transform(group, media_box,
                                                             scale, rotation,
-                                                            y_offset)
+                                                            y_offset,
+                                                            evidence_record = nil)
       expected = page_representation_transform(
         media_box, scale, rotation, y_offset
       )
@@ -1535,9 +1537,15 @@ module BlueCollarSystems
       expected_values = expected.to_a
       actual_values = actual.to_a
       return false unless expected_values.length == actual_values.length
-      expected_values.each_with_index.all? do |value, index|
+      verified = expected_values.each_with_index.all? do |value, index|
         (value.to_f - actual_values[index].to_f).abs <= 1.0e-8
       end
+      if verified && evidence_record.is_a?(Hash)
+        evidence_record[:source_page_transformation] =
+          expected_values.map { |value| value.to_f }
+        evidence_record[:page_transform_verified] = true
+      end
+      verified
     rescue StandardError
       false
     end
@@ -3226,7 +3234,7 @@ module BlueCollarSystems
             transforms_ok = all_source_rows.all? do |row|
               apply_and_verify_page_representation_transform(
                 row[:group], media_box, opts[:scale], page_rotation,
-                page_y_offset
+                page_y_offset, row
               )
             end
             unless transforms_ok
