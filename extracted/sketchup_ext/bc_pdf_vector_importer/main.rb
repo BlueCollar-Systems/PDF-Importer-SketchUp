@@ -1759,11 +1759,39 @@ module BlueCollarSystems
       # creates the requested representation or records an explicit failure.
       semantic_whitespace = hints.select do |hint|
         normalize_text_key(hint.text).empty?
+      end.reject do |hint|
+        whitespace_hint_shadowed_by_visible_bbox?(hint, text_items)
       end
       merged + semantic_whitespace
     rescue StandardError => e
       Logger.warn("Pipeline", "apply internal text angle hints failed: #{e.message}")
       text_items
+    end
+
+    # An internal decoder can recover only trailing spaces from a painted run
+    # whose preceding source codes have no usable Unicode mapping.  Poppler can
+    # still expose that painted run as a visible bbox item.  Appending the
+    # whitespace fragment as a second source span would duplicate the same PDF
+    # text-show operation and later bind its anchor to unrelated visible ink.
+    # Suppress only that independently observable overlap; a standalone
+    # whitespace span outside every visible bbox remains real source content.
+    def self.whitespace_hint_shadowed_by_visible_bbox?(hint, text_items)
+      return false unless hint && normalize_text_key(hint.text).empty?
+      hx = hint.x.to_f
+      hy = hint.y.to_f
+      Array(text_items).any? do |item|
+        next false unless item && !normalize_text_key(item.text).empty?
+        next false unless item.respond_to?(:bbox_x0)
+        values = [item.bbox_x0, item.bbox_y0, item.bbox_x1, item.bbox_y1]
+        next false if values.any? { |value| value.nil? }
+        x0, x1 = [values[0].to_f, values[2].to_f].minmax
+        y0, y1 = [values[1].to_f, values[3].to_f].minmax
+        tolerance = [item.font_size.to_f.abs * 0.05, 0.25].max
+        hx >= x0 - tolerance && hx <= x1 + tolerance &&
+          hy >= y0 - tolerance && hy <= y1 + tolerance
+      end
+    rescue StandardError
+      false
     end
 
     def self.nearest_text_angle_hint(item, hints)

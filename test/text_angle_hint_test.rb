@@ -102,6 +102,24 @@ assert_true(semantic_merged[0].text == ' A ',
 assert_true(semantic_merged.any? { |item| item.text == '   ' },
             'whitespace-only internal source spans must not disappear')
 
+# A decoder can recover only trailing spaces from an otherwise undecodable
+# painted source run.  If that internal anchor is already owned by Poppler's
+# visible bbox item, appending the whitespace fragment would invent a second
+# source span at the same ink and make exact delivery impossible.
+shadow_external = [
+  ti.new("\u03A61", 724.7812, 552.8345, 7.0, 0.0, 'pdftotext', nil,
+         724.7812, 552.8345, 734.2592, 562.1515, nil)
+]
+shadow_internal = [
+  ti.new('   ', 724.7812, 552.8345, 7.0, 0.0, '/T1_0', 1.0,
+         nil, nil, nil, nil, nil)
+]
+shadow_merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hints(
+  shadow_external, shadow_internal
+)
+assert_true(shadow_merged.length == 1 && shadow_merged[0].text == "\u03A61",
+            'bbox-owned visible ink must suppress an incomplete whitespace-only decode')
+
 puts
 if $failures.empty?
   puts "PASS: #{$pass_count} assertions"
