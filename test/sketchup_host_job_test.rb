@@ -34,6 +34,7 @@ class SketchupHostJobTest < Minitest::Test
       assert_equal [1], job[:pages]
       assert_equal File.join(output, 'drawing with spaces-text3d.skp'), job[:model_path]
       assert_equal File.join(output, 'host_acceptance.json'), job[:result_path]
+      assert_equal File.join(output, 'host_progress.json'), job[:progress_path]
     end
   end
 

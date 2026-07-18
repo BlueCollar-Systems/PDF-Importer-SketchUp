@@ -15,6 +15,7 @@ module SketchupBatchImport
     end
 
     def perform(job, binding)
+      SketchupBatchImport.write_progress!(job, binding, 'host_initializing')
       require_batch_environment!
       host_identity = require_su2017_ruby_identity!
       verify_plugins_disabled!
@@ -27,6 +28,7 @@ module SketchupBatchImport
       SketchupHostEvidence.verify_source_locations!(
         expected_root, source_locations
       )
+      SketchupBatchImport.write_progress!(job, binding, 'source_verified')
 
       worktree_version = metadata_version(plugin_root)
       loaded_version = importer::VERSION.to_s
@@ -42,11 +44,13 @@ module SketchupBatchImport
       before_manifest = SketchupHostEvidence.snapshot_entities(
         @model.active_entities
       )
+      SketchupBatchImport.write_progress!(job, binding, 'import_started')
       stats = importer.run_pipeline(
         @model, job[:pdf_path], import_options(importer, job)
       )
       raise 'run_pipeline returned nil' unless stats.is_a?(Hash)
       source_lineage = verified_source_lineage!(stats, job)
+      SketchupBatchImport.write_progress!(job, binding, 'import_completed')
 
       after_manifest = SketchupHostEvidence.snapshot_entities(
         @model.active_entities
@@ -68,8 +72,10 @@ module SketchupBatchImport
         'objects' => Array(stats[:source_provenance_objects])
       }
 
+      SketchupBatchImport.write_progress!(job, binding, 'model_save_started')
       raise 'model save failed' unless @model.save(job[:model_path])
       raise 'saved model missing' unless File.file?(job[:model_path])
+      SketchupBatchImport.write_progress!(job, binding, 'model_saved')
 
       report_source = stats[:import_report_path]
       report_copy = File.join(job[:output_dir], 'import_report.json')
@@ -103,6 +109,7 @@ module SketchupBatchImport
       )
       SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
 
+      SketchupBatchImport.write_progress!(job, binding, 'reopen_started')
       reopened_model = reopen_model!(job[:model_path])
       reopened_manifest = SketchupHostEvidence.snapshot_entities(
         reopened_model.active_entities
@@ -113,6 +120,7 @@ module SketchupBatchImport
       manifest_payload['reopened_entities'] = reopened_manifest
       manifest_payload['reopen_persistent_id_verified'] = true
       SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
+      SketchupBatchImport.write_progress!(job, binding, 'reopen_verified')
 
       {
         'plugins_disabled_verified' => true,
@@ -335,6 +343,17 @@ module SketchupBatchImport
 
   module_function
 
+  def write_progress!(job, binding, phase, detail = nil)
+    payload = binding.merge(
+      'status' => 'RUNNING',
+      'phase' => phase.to_s,
+      'updated_at_unix' => Time.now.to_f
+    )
+    payload['detail'] = detail.to_s unless detail.nil?
+    SketchupHostEvidence.atomic_write_json(job[:progress_path], payload)
+    payload
+  end
+
   def run_argv!(arguments, session = nil, environment = ENV)
     unless arguments.is_a?(Array) && arguments.length == 1
       raise ArgumentError, 'exactly one host job argument is required'
@@ -362,6 +381,12 @@ module SketchupBatchImport
       end
       result = binding.merge('status' => 'OK').merge(payload)
     rescue Exception => error
+      begin
+        write_progress!(job, binding, 'failed',
+                        "#{error.class}: #{error.message}")
+      rescue StandardError
+        # The bound terminal result remains authoritative if progress fails.
+      end
       discard_error = nil
       begin
         active_session.discard!

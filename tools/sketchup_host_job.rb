@@ -69,7 +69,8 @@ module SketchupHostJob
       :import_mode => import_mode,
       :pages => pages,
       :model_path => File.join(output_dir, "#{base}-#{text_mode}.skp"),
-      :result_path => File.join(output_dir, 'host_acceptance.json')
+      :result_path => File.join(output_dir, 'host_acceptance.json'),
+      :progress_path => File.join(output_dir, 'host_progress.json')
     }
   end
 

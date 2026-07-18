@@ -10,6 +10,7 @@ require File.expand_path('sketchup_host_evidence', __dir__)
 
 module SketchupHostLauncher
   class LaunchError < StandardError; end
+  DEFAULT_TIMEOUT_SECONDS = 3600.0
 
   # SketchUp's documented Sketchup.plugins_disabled= preference is persisted
   # here for the next process start. The launcher changes only this value and
@@ -158,6 +159,88 @@ module SketchupHostLauncher
     end
   end
 
+  class SystemCommandRunner
+    def run(command)
+      system(
+        *Array(command),
+        :out => File::NULL, :err => File::NULL
+      ) == true
+    rescue StandardError
+      false
+    end
+  end
+
+  # SketchUp Make 2017 always presents its Welcome window, even when a model
+  # path and -RubyStartup are supplied. The Ruby startup callback pauses at
+  # Sketchup.active_model until that window is advanced. Post Enter directly to
+  # the exact spawned PID's exact legacy-title window; never activate a window,
+  # synthesize global keyboard input, or target a model/unrelated process.
+  class WelcomeWindowAdvancer
+    def initialize(options = {})
+      @runner = options[:runner] || SystemCommandRunner.new
+      @retry_seconds = options[:retry_seconds].to_f
+      @retry_seconds = 0.5 unless @retry_seconds > 0.0
+      @last_attempt = {}
+      @advanced = {}
+    end
+
+    def advance(pid, now = Time.now.to_f)
+      process_id = Integer(pid)
+      return false unless process_id > 0
+      return true if @advanced[process_id]
+      last = @last_attempt[process_id]
+      return false if last && (now.to_f - last) < @retry_seconds
+      @last_attempt[process_id] = now.to_f
+      if @runner.run(command(process_id))
+        @advanced[process_id] = true
+        return true
+      end
+      false
+    rescue StandardError
+      false
+    end
+
+    private
+
+    def command(process_id)
+      system_root = ENV['SystemRoot'].to_s.strip
+      executable = if system_root.empty?
+                     'powershell.exe'
+                   else
+                     File.join(
+                       system_root, 'System32', 'WindowsPowerShell',
+                       'v1.0', 'powershell.exe'
+                     )
+                   end
+      loop_body = [
+        "$p=Get-Process -Id #{process_id} -ErrorAction SilentlyContinue",
+        'if($null -eq $p){exit 4}',
+        '$title=$p.MainWindowTitle',
+        "if($title -ceq 'Welcome to SketchUp'){" \
+          '$sawWelcome=$true; $handle=$p.MainWindowHandle; ' \
+          'if($handle -ne [IntPtr]::Zero){' \
+          '$down=[BcPdf.NativeMethods]::PostMessage($handle,0x0100,[IntPtr]0x0D,[IntPtr]::Zero); ' \
+          '$up=[BcPdf.NativeMethods]::PostMessage($handle,0x0101,[IntPtr]0x0D,[IntPtr]::Zero); ' \
+          'if(-not ($down -and $up)){exit 5}}}',
+        "if($sawWelcome -and $p.MainWindowTitle -cne 'Welcome to SketchUp'){exit 0}",
+        "if(-not $sawWelcome -and -not [String]::IsNullOrEmpty($title) -and " \
+          "$title -cne 'Welcome to SketchUp'){exit 0}",
+        'Start-Sleep -Milliseconds 250'
+      ].join('; ')
+      script = [
+        "Add-Type -MemberDefinition '[System.Runtime.InteropServices.DllImport(\"user32.dll\")] public static extern bool PostMessage(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam);' -Name NativeMethods -Namespace BcPdf",
+        '$deadline=[DateTime]::UtcNow.AddSeconds(45)',
+        '$sawWelcome=$false',
+        "while([DateTime]::UtcNow -lt $deadline){#{loop_body}}",
+        'exit 3'
+      ].join('; ')
+      [
+        executable, '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass', '-Command', script
+      ]
+    end
+  end
+
   module_function
 
   def run(job_path, options = {})
@@ -172,8 +255,16 @@ module SketchupHostLauncher
     backend = options[:backend] || ProcessBackend.new
     clock = options[:clock] || SystemClock.new
     timeout = options[:timeout_seconds].to_f
-    timeout = 900.0 unless timeout > 0.0
+    if timeout <= 0.0
+      configured = ENV['BC_SKETCHUP_HOST_TIMEOUT_SECONDS'].to_f
+      timeout = configured > 0.0 ? configured : DEFAULT_TIMEOUT_SECONDS
+    end
     guard = options[:plugin_state_guard] || PluginStateGuard.new
+    welcome_advancer = if options.key?(:welcome_advancer)
+                         options[:welcome_advancer]
+                       elsif backend.is_a?(ProcessBackend)
+                         WelcomeWindowAdvancer.new
+                       end
 
     job_id = "su-host-#{SecureRandom.hex(12)}"
     snapshot = prepare_controlled_job!(path, original_job, job_id)
@@ -235,12 +326,19 @@ module SketchupHostLauncher
           break
         end
 
+        welcome_advancer.advance(pid, clock.now) if
+          welcome_advancer && welcome_advancer.respond_to?(:advance)
+
         if clock.now - started_at >= timeout
           backend.kill(pid)
           process_done = true
+          progress = read_bound_progress(job[:progress_path], binding)
+          phase = progress && progress['phase'].to_s
+          phase_detail = phase && !phase.empty? ? " during phase #{phase}" : ''
           result = error_result(
             binding,
-            'SketchUp host timeout while result remained STARTED or process did not exit'
+            'SketchUp host timeout' + phase_detail +
+              ' while result remained STARTED or process did not exit'
           )
           break
         end
@@ -603,6 +701,18 @@ module SketchupHostLauncher
     return nil unless parsed['job_id'] == binding['job_id'] &&
                       parsed['job_sha256'] == binding['job_sha256']
     return nil unless ['OK', 'ERROR'].include?(parsed['status'])
+    parsed
+  rescue StandardError
+    nil
+  end
+
+  def read_bound_progress(path, binding)
+    return nil unless File.file?(path)
+    parsed = JSON.parse(File.read(path, :encoding => 'UTF-8'))
+    return nil unless parsed.is_a?(Hash)
+    return nil unless parsed['job_id'] == binding['job_id'] &&
+                      parsed['job_sha256'] == binding['job_sha256']
+    return nil if parsed['phase'].to_s.strip.empty?
     parsed
   rescue StandardError
     nil

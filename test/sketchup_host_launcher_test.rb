@@ -94,6 +94,20 @@ class SketchupHostLauncherTest < Minitest::Test
     end
   end
 
+  class FakeCommandRunner
+    attr_reader :commands
+
+    def initialize(results)
+      @results = results.dup
+      @commands = []
+    end
+
+    def run(command)
+      @commands << command
+      @results.shift == true
+    end
+  end
+
   def setup
     Object.send(:remove_const, :SketchupHostLauncher) if
       defined?(SketchupHostLauncher)
@@ -167,9 +181,17 @@ class SketchupHostLauncherTest < Minitest::Test
     Dir.mktmpdir('su-launch') do |dir|
       job_path, result_path, _pdf = write_job(dir)
       guard = FakePluginStateGuard.new
-      backend = FakeBackend.new([
-        { :state => :running }, { :state => :running }
-      ])
+      progress_path = File.join(File.dirname(result_path), 'host_progress.json')
+      backend = FakeBackend.new(
+        [{ :state => :running }, { :state => :running }],
+        :on_spawn => lambda do |environment, _command|
+          File.write(progress_path, JSON.generate(
+            'job_id' => environment['BC_HOST_JOB_ID'],
+            'job_sha256' => environment['BC_HOST_JOB_SHA256'],
+            'status' => 'RUNNING', 'phase' => 'model_save_started'
+          ))
+        end
+      )
       result = SketchupHostLauncher.run(
         job_path,
         :sketchup_exe => 'SketchUp.exe',
@@ -181,10 +203,15 @@ class SketchupHostLauncherTest < Minitest::Test
 
       assert_equal 'ERROR', result['status']
       assert_match(/timeout/, result['error'])
+      assert_match(/model_save_started/, result['error'])
       assert_equal [4242], backend.killed
       assert_equal [:suppress, :restore], guard.calls
       assert_equal result, JSON.parse(File.read(result_path))
     end
+  end
+
+  def test_default_timeout_allows_large_verified_model_persistence
+    assert_operator SketchupHostLauncher::DEFAULT_TIMEOUT_SECONDS, :>=, 3600.0
   end
 
   def test_nonzero_child_exit_rejects_even_complete_ok_and_restores_preference
@@ -358,6 +385,34 @@ class SketchupHostLauncherTest < Minitest::Test
     assert_equal 7, state[:exit_code]
   ensure
     backend.kill(pid) if pid && state && state[:state] == :running
+  end
+
+  def test_welcome_advancer_is_exact_pid_title_scoped_and_throttled
+    runner = FakeCommandRunner.new([false, true])
+    advancer = SketchupHostLauncher::WelcomeWindowAdvancer.new(
+      :runner => runner, :retry_seconds => 0.5
+    )
+
+    assert_equal false, advancer.advance(4242, 0.0)
+    assert_equal false, advancer.advance(4242, 0.1)
+    assert_equal true, advancer.advance(4242, 0.6)
+    assert_equal true, advancer.advance(4242, 1.2)
+    assert_equal 2, runner.commands.length
+    command = runner.commands.first
+    assert command.is_a?(Array)
+    script = command.last
+    assert_includes script, 'Get-Process -Id 4242'
+    assert_includes script, "MainWindowTitle -cne 'Welcome to SketchUp'"
+    assert_includes script, '$p.MainWindowHandle'
+    assert_includes script, 'PostMessage'
+    assert_includes script, '0x0100'
+    assert_includes script, '0x0101'
+    assert_includes script, '$sawWelcome'
+    assert_includes script, 'while('
+    assert_includes script, 'Start-Sleep -Milliseconds 250'
+    assert_match(/sawWelcome.*title.*Welcome to SketchUp.*exit 0/i, script)
+    refute_includes script, 'AppActivate'
+    refute_includes script, 'SendKeys'
   end
 
   private
