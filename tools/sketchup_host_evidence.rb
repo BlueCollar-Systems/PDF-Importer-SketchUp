@@ -3,8 +3,13 @@
 require 'json'
 require 'digest'
 require 'fileutils'
+require 'tmpdir'
 require File.expand_path(
   '../extracted/sketchup_ext/bc_pdf_vector_importer/representation_fidelity',
+  __dir__
+)
+require File.expand_path(
+  '../extracted/sketchup_ext/bc_pdf_vector_importer/png_cropper',
   __dir__
 )
 
@@ -38,6 +43,7 @@ module SketchupHostEvidence
   SOURCE_SPAN_ID = /\Atext_span:([1-9][0-9]*):(0|[1-9][0-9]*)\z/.freeze unless
     const_defined?(:SOURCE_SPAN_ID, false)
   MODE_LADDERS = {
+    :text => [:text, :labels, :text3d, :glyphs, :geometry, :raster],
     :labels => [:labels, :text3d, :glyphs, :geometry, :raster],
     :text3d => [:text3d, :glyphs, :geometry, :raster],
     :glyphs => [:glyphs, :geometry, :raster],
@@ -561,6 +567,73 @@ module SketchupHostEvidence
   end
   private_class_method :image_typename?
 
+  # Export the texture through the real host API and decode the resulting PNG.
+  # This is deliberately independent of importer-written attributes: those
+  # attributes describe the claim, while these pixels prove what SketchUp owns.
+  def self.texture_pixel_evidence(entity)
+    unless defined?(Sketchup) &&
+           Sketchup.respond_to?(:create_texture_writer)
+      raise EvidenceError, 'SketchUp TextureWriter is unavailable'
+    end
+    directory = Dir.mktmpdir('bc_host_texture_proof_')
+    png_path = File.join(directory, 'texture.png')
+    raw_path = File.join(directory, 'texture.rgba')
+    writer = Sketchup.create_texture_writer
+    raise EvidenceError, 'SketchUp TextureWriter creation failed' unless writer
+    texture_id = writer.load(entity)
+    unless texture_id.is_a?(Integer) && texture_id > 0
+      raise EvidenceError, 'SketchUp TextureWriter did not load the image'
+    end
+    status = writer.write(entity, png_path)
+    unless status.is_a?(Integer) && status == 0
+      raise EvidenceError,
+            "SketchUp TextureWriter export failed with status #{status.inspect}"
+    end
+    unless File.file?(png_path) && File.size(png_path).to_i > 0
+      raise EvidenceError,
+            'SketchUp TextureWriter reported success without an output file'
+    end
+    prepared = BlueCollarSystems::PDFVectorImporter::PngCropper.prepare_rgba!(
+      png_path, raw_path, false
+    )
+    visual_sha = prepared[:visual_pixel_sha256].to_s.downcase
+    unless visual_sha =~ /\A[0-9a-f]{64}\z/
+      raise EvidenceError, 'host texture visual pixel digest is invalid'
+    end
+    {
+      'host_texture_export_verified' => true,
+      'host_visual_pixel_sha256' => visual_sha,
+      'host_pixel_width' => prepared[:pixel_width].to_i,
+      'host_pixel_height' => prepared[:pixel_height].to_i,
+      'host_texture_export_byte_size' => File.size(png_path).to_i
+    }
+  rescue EvidenceError
+    raise
+  rescue StandardError => error
+    raise EvidenceError, "host texture pixel evidence failed: #{error.message}"
+  ensure
+    cleanup_failures = []
+    [raw_path, png_path].compact.each do |path|
+      begin
+        File.delete(path) if File.file?(path)
+      rescue StandardError => error
+        cleanup_failures << "#{path}: #{error.message}"
+      end
+    end
+    if directory
+      begin
+        FileUtils.remove_entry(directory) if File.directory?(directory)
+      rescue StandardError => error
+        cleanup_failures << "#{directory}: #{error.message}"
+      end
+    end
+    unless cleanup_failures.empty?
+      raise EvidenceError,
+            "host texture proof cleanup failed: #{cleanup_failures.join('; ')}"
+    end
+  end
+  private_class_method :texture_pixel_evidence
+
   def self.image_content_evidence(entity, typename)
     return nil unless image_typename?(typename)
     width = entity.respond_to?(:width) ? entity.width.to_f : 0.0
@@ -578,12 +651,17 @@ module SketchupHostEvidence
       [
         'source_span_id', 'raster_page_number', 'raster_pixel_width',
         'raster_pixel_height', 'raster_content_sha256',
-        'raster_content_bytes', 'raster_source_pdf_sha256'
+        'raster_visual_pixel_sha256',
+        'raster_content_bytes', 'raster_source_pdf_sha256',
+        'raster_alpha_verified',
+        'raster_transparent_background_verified',
+        'raster_visible_pixel_verified',
+        'raster_page_render_once_verified', 'raster_page_render_sha256'
       ].each do |key|
         attributes[key] = entity.get_attribute(dictionary, key, nil)
       end
     end
-    {
+    evidence = {
       'image_like' => true,
       'display_width' => width,
       'display_height' => height,
@@ -591,10 +669,25 @@ module SketchupHostEvidence
       'raster_pixel_width' => attributes['raster_pixel_width'],
       'raster_pixel_height' => attributes['raster_pixel_height'],
       'raster_content_sha256' => attributes['raster_content_sha256'],
+      'raster_visual_pixel_sha256' =>
+        attributes['raster_visual_pixel_sha256'],
       'raster_content_bytes' => attributes['raster_content_bytes'],
       'raster_source_pdf_sha256' => attributes['raster_source_pdf_sha256'],
+      'raster_alpha_verified' => attributes['raster_alpha_verified'],
+      'raster_transparent_background_verified' =>
+        attributes['raster_transparent_background_verified'],
+      'raster_visible_pixel_verified' =>
+        attributes['raster_visible_pixel_verified'],
+      'raster_page_render_once_verified' =>
+        attributes['raster_page_render_once_verified'],
+      'raster_page_render_sha256' =>
+        attributes['raster_page_render_sha256'],
       'source_span_id' => attributes['source_span_id']
     }
+    claimed_visual_sha = attributes['raster_visual_pixel_sha256'].to_s.strip
+    evidence.merge!(texture_pixel_evidence(entity)) unless
+      claimed_visual_sha.empty?
+    evidence
   rescue StandardError => error
     raise EvidenceError, "host image content evidence failed: #{error.message}"
   end
@@ -1509,7 +1602,7 @@ module SketchupHostEvidence
   private_class_method :canonical_claims!
 
   def self.transition_signature!(proof, expected_mode, source_id, from_mode,
-                                 to_mode, selected_pages)
+                                 to_mode, selected_pages, attempt = nil)
     raise EvidenceError, 'fallback transition proof is missing' unless
       proof.is_a?(Hash)
     proof_source = hash_value(proof, :source_span_id).to_s.strip
@@ -1551,6 +1644,31 @@ module SketchupHostEvidence
     unless evidence.is_a?(Hash) && !evidence.empty?
       raise EvidenceError, 'fallback transition evidence is missing'
     end
+    evidence_digest = nil
+    if actual_from == :text
+      fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+      begin
+        fidelity.validate_flat_editable_text_transition!(
+          proof, expected_mode, source_id
+        )
+      rescue StandardError => error
+        raise EvidenceError,
+              "flat Text capability transition is invalid: #{error.message}"
+      end
+      evidence_digest = hash_value(evidence, :evidence_sha256).to_s.downcase
+      if attempt
+        attempt_sha = hash_value(attempt, :source_text_sha256).to_s.downcase
+        proof_sha = hash_value(evidence, :source_text_sha256).to_s.downcase
+        attempt_bbox = hash_value(attempt, :source_bbox_pdf)
+        proof_bbox = hash_value(evidence, :source_bbox_pdf)
+        unless attempt_sha =~ /\A[0-9a-f]{64}\z/ && attempt_sha == proof_sha &&
+               fidelity.canonical_json(attempt_bbox) ==
+                 fidelity.canonical_json(proof_bbox)
+          raise EvidenceError,
+                'flat Text capability proof conflicts with source attempt'
+        end
+      end
+    end
     created = canonical_claims!(
       hash_value(proof, :created_entity_ids), 'created', true
     )
@@ -1566,12 +1684,12 @@ module SketchupHostEvidence
       raise EvidenceError, 'fallback transition did not clean every owned artifact'
     end
     [source_id, actual_from.to_s, actual_to.to_s, reason,
-     created.sort, cleaned.sort, cleanup]
+     created.sort, cleaned.sort, cleanup, evidence_digest]
   end
   private_class_method :transition_signature!
 
   def self.verify_completed_rung!(rung, mode, expected_ids, source_id,
-                                  attempt_expected)
+                                  attempt)
     unless rung.is_a?(Hash) && normalize_mode(hash_value(rung, :mode)) == mode &&
            hash_value(rung, :outcome).to_s == 'complete' &&
            canonical_claims!(
@@ -1582,16 +1700,28 @@ module SketchupHostEvidence
       raise EvidenceError, "#{source_id} completed rung is not bound to delivery"
     end
     verify_mode_flags!(rung, mode, "#{source_id} completed rung")
-    rung_expected = hash_value(rung, :expected_evidence)
-    unless attempt_expected.is_a?(Hash) && rung_expected.is_a?(Hash) &&
-           evidence_payload_equal?(rung_expected, attempt_expected)
-      raise EvidenceError,
-            "#{source_id} completed rung changed its source-bound expectation"
-    end
-    if mode == :raster &&
-       (hash_value(rung, :real_raster_verified) != true ||
-        hash_value(rung, :source_crop_binding_verified) != true)
-      raise EvidenceError, "#{source_id} raster rung lacks item crop evidence"
+    if mode == :raster
+      rung_artifact = hash_value(rung, :artifact_evidence)
+      attempt_artifact = hash_value(attempt, :artifact_evidence)
+      unless hash_value(rung, :real_raster_verified) == true &&
+             hash_value(rung, :source_crop_binding_verified) == true &&
+             rung_artifact.is_a?(Hash) && attempt_artifact.is_a?(Hash) &&
+             evidence_payload_equal?(rung_artifact, attempt_artifact) &&
+             hash_value(rung_artifact, :source_span_id).to_s == source_id &&
+             hash_value(rung_artifact, :source_crop_binding_verified) == true &&
+             hash_value(rung_artifact, :source_pdf_binding_verified) == true &&
+             hash_value(rung_artifact, :source_pdf_sha256).to_s.downcase =~
+               /\A[0-9a-f]{64}\z/
+        raise EvidenceError, "#{source_id} raster rung lacks item crop evidence"
+      end
+    else
+      attempt_expected = hash_value(attempt, :expected_evidence)
+      rung_expected = hash_value(rung, :expected_evidence)
+      unless attempt_expected.is_a?(Hash) && rung_expected.is_a?(Hash) &&
+             evidence_payload_equal?(rung_expected, attempt_expected)
+        raise EvidenceError,
+              "#{source_id} completed rung changed its source-bound expectation"
+      end
     end
     true
   end
@@ -1638,6 +1768,82 @@ module SketchupHostEvidence
   end
   private_class_method :verify_mode_flags!
 
+  def self.verify_zero_canonical_page_inspection!(stats, page)
+    immutable_sha = source_sha256_value(
+      stats, :source_input_sha256, :immutable_pdf_sha256
+    )
+    rendered_sha = source_sha256_value(
+      stats, :normalized_input_sha256, :normalized_pdf_sha256
+    )
+    matches = Array(hash_value(stats, :empty_page_source_inspections)).select do |row|
+      row.is_a?(Hash) && hash_value(row, :page).is_a?(Integer) &&
+        hash_value(row, :page) == page
+    end
+    unless matches.length == 1 &&
+           immutable_sha =~ /\A[0-9a-f]{64}\z/ &&
+           rendered_sha =~ /\A[0-9a-f]{64}\z/
+      raise EvidenceError,
+            'zero-canonical-text delivery lacks one exact source inspection'
+    end
+    row = matches[0]
+    source_page = exact_positive_integer!(
+      hash_value(row, :source_page_number),
+      'zero-canonical-text inspection source page'
+    )
+    canonical_count = hash_value(row, :canonical_text_item_count)
+    unless source_page == page && canonical_count.is_a?(Integer) &&
+           canonical_count == 0 &&
+           hash_value(row, :immutable_pdf_sha256).to_s.downcase ==
+             immutable_sha &&
+           hash_value(row, :rendered_pdf_sha256).to_s.downcase ==
+             rendered_sha &&
+           hash_value(row, :semantic_text_extraction_complete) == true &&
+           hash_value(row, :decoded_stream_text_operators) == false &&
+           hash_value(row, :decoded_form_stream_text_operators) == false
+      raise EvidenceError,
+            'zero-canonical-text inspection is not bound to exact PDF/page proof'
+    end
+    true
+  end
+  private_class_method :verify_zero_canonical_page_inspection!
+
+  def self.verify_page_raster_delivery_basis!(stats, record, expected_mode,
+                                              selected_pages)
+    page = exact_positive_integer!(
+      hash_value(record, :page), 'page raster delivery page'
+    )
+    unless selected_pages.empty? || selected_pages.include?(page)
+      raise EvidenceError, 'page raster delivery is outside the selected page set'
+    end
+    basis = hash_value(record, :delivery_basis).to_s
+    case basis
+    when 'explicit_full_page_raster'
+      unless expected_mode == :raster &&
+             normalize_mode(hash_value(record, :requested_mode)) == :raster &&
+             hash_value(record, :full_page_raster_request) == true &&
+             hash_value(record, :semantic_text_evaluated) == false &&
+             hash_value(record, :no_semantic_text) != true &&
+             !hash_key?(record, :canonical_text_item_count)
+        raise EvidenceError,
+              'explicit full-page Raster is mislabeled as semantic-text proof'
+      end
+    when 'verified_zero_canonical_text'
+      canonical_count = hash_value(record, :canonical_text_item_count)
+      unless hash_value(record, :full_page_raster_request) != true &&
+             hash_value(record, :semantic_text_evaluated) == true &&
+             hash_value(record, :no_semantic_text) == true &&
+             canonical_count.is_a?(Integer) && canonical_count == 0
+        raise EvidenceError,
+              'zero-canonical-text page Raster basis is incomplete'
+      end
+      verify_zero_canonical_page_inspection!(stats, page)
+    else
+      raise EvidenceError, 'page Raster delivery basis is missing or invalid'
+    end
+    true
+  end
+  private_class_method :verify_page_raster_delivery_basis!
+
   def self.verify_fallback_contracts!(stats, requested_mode, selected_pages)
     expected_mode = normalize_mode(requested_mode)
     pages = normalized_pages(selected_pages, stats)
@@ -1682,8 +1888,7 @@ module SketchupHostEvidence
           mode = ladder[rung_index]
           if rung_index == delivered_index
             verify_completed_rung!(
-              rung, mode, ids, source_id,
-              hash_value(attempt, :expected_evidence)
+              rung, mode, ids, source_id, attempt
             )
           else
             unless rung.is_a?(Hash) &&
@@ -1694,7 +1899,7 @@ module SketchupHostEvidence
             end
             attempt_signatures << transition_signature!(
               hash_value(rung, :transition_proof), expected_mode, source_id,
-              mode, ladder[rung_index + 1], pages
+              mode, ladder[rung_index + 1], pages, attempt
             )
           end
         end
@@ -1730,8 +1935,10 @@ module SketchupHostEvidence
         if spans.empty?
           allowed_page_raster = collection_name ==
             :terminal_text_delivery_records &&
-            normalize_mode(hash_value(record, :delivered_mode)) == :raster &&
-            hash_value(record, :no_semantic_text) == true
+            normalize_mode(hash_value(record, :delivered_mode)) == :raster
+          verify_page_raster_delivery_basis!(
+            stats, record, expected_mode, pages
+          ) if allowed_page_raster
           unless allowed_page_raster
             raise EvidenceError,
                   "#{collection_name}[#{index}] has no source span delivery binding"
@@ -1808,6 +2015,7 @@ module SketchupHostEvidence
       raise EvidenceError, 'raster image content evidence is missing'
     end
     sha256 = hash_value(artifact, :content_sha256).to_s.downcase
+    visual_sha256 = hash_value(artifact, :visual_pixel_sha256).to_s.downcase
     byte_size = exact_positive_integer!(
       hash_value(artifact, :content_byte_size), 'raster content byte size'
     )
@@ -1846,17 +2054,85 @@ module SketchupHostEvidence
            ) == byte_size
       raise EvidenceError, 'raster image content/page/identity evidence is incomplete'
     end
+    if hash_value(artifact, :visual_pixel_binding_verified) == true ||
+       !visual_sha256.empty?
+      unless visual_sha256 =~ /\A[0-9a-f]{64}\z/ &&
+             hash_value(artifact, :visual_pixel_binding_verified) == true &&
+             hash_value(content, :raster_visual_pixel_sha256).to_s.downcase ==
+               visual_sha256 &&
+             hash_value(content, :host_texture_export_verified) == true &&
+             hash_value(content, :host_visual_pixel_sha256).to_s.downcase ==
+               visual_sha256 &&
+             exact_positive_integer!(
+               hash_value(content, :host_pixel_width),
+               'host texture pixel width'
+             ) == pixel_width &&
+             exact_positive_integer!(
+               hash_value(content, :host_pixel_height),
+               'host texture pixel height'
+             ) == pixel_height &&
+             exact_positive_integer!(
+               hash_value(content, :host_texture_export_byte_size),
+               'host texture export byte size'
+             ) > 0
+        raise EvidenceError,
+              'raster delivery lacks physical host texture pixel binding'
+      end
+    end
     scope = hash_value(record, :delivery_scope).to_s
     spans = source_span_ids(record, :span_id => false)
     if scope == 'item_raster'
+      expected_source_sha = source_sha256_value(
+        stats, :normalized_input_sha256, :normalized_pdf_sha256
+      )
+      artifact_source_sha = hash_value(
+        artifact, :source_pdf_sha256
+      ).to_s.downcase
+      host_source_sha = hash_value(
+        content, :raster_source_pdf_sha256
+      ).to_s.downcase
+      source_box = hash_value(artifact, :source_box)
+      pixel_crop = hash_value(artifact, :pixel_crop)
+      valid_source_box = source_box.is_a?(Array) && source_box.length == 4 &&
+        source_box.all? do |value|
+          value.is_a?(Numeric) && value.to_f.finite?
+        end &&
+        source_box[2].to_f > source_box[0].to_f &&
+        source_box[3].to_f > source_box[1].to_f
+      valid_pixel_crop = pixel_crop.is_a?(Array) && pixel_crop.length == 4 &&
+        pixel_crop.all? { |value| value.is_a?(Integer) && value >= 0 } &&
+        pixel_crop[2].to_i > 0 && pixel_crop[3].to_i > 0
+      page_render_sha = hash_value(
+        artifact, :page_render_content_sha256
+      ).to_s.downcase
       unless spans.length == 1 &&
              source_span_page!(spans[0]) == page &&
              hash_value(record, :source_crop_binding_verified) == true &&
              hash_value(artifact, :source_span_id).to_s == spans[0] &&
              hash_value(artifact, :source_crop_binding_verified) == true &&
+             hash_value(artifact, :source_pdf_binding_verified) == true &&
+             !hash_value(artifact, :source_pdf_path).to_s.strip.empty? &&
+             expected_source_sha =~ /\A[0-9a-f]{64}\z/ &&
+             artifact_source_sha == expected_source_sha &&
+             host_source_sha == expected_source_sha &&
+             valid_source_box && valid_pixel_crop &&
+             pixel_width == pixel_crop[2].to_i &&
+             pixel_height == pixel_crop[3].to_i &&
+             hash_value(artifact, :alpha_channel_verified) == true &&
+             hash_value(artifact, :transparent_background_verified) == true &&
+             hash_value(artifact, :visible_pixel_verified) == true &&
+             hash_value(artifact, :page_render_once_verified) == true &&
+             page_render_sha =~ /\A[0-9a-f]{64}\z/ &&
+             hash_value(content, :raster_alpha_verified) == true &&
+             hash_value(content, :raster_transparent_background_verified) == true &&
+             hash_value(content, :raster_visible_pixel_verified) == true &&
+             hash_value(content, :raster_page_render_once_verified) == true &&
+             hash_value(content, :raster_page_render_sha256).to_s.downcase ==
+               page_render_sha &&
              hash_value(content, :source_span_id).to_s == spans[0] &&
              hash_value(record, :cleanup_outcome).to_s == 'not_required'
-        raise EvidenceError, 'item raster is not bound to its exact source span'
+        raise EvidenceError,
+              'item raster lacks exact source/alpha/transparent page-crop binding'
       end
     elsif scope == 'page_raster'
       expected_source_sha = source_sha256_value(
@@ -1885,6 +2161,40 @@ module SketchupHostEvidence
   end
   private_class_method :verify_raster_artifact_binding!
 
+  def self.terminal_item_raster_fallback_authorized?(stats, record,
+                                                     expected_mode, span,
+                                                     claims)
+    return false if expected_mode == :raster
+    return false unless hash_value(record, :explicit_request) == false &&
+                        hash_value(record, :degraded) == true &&
+                        hash_value(stats, :raster_fallback_used) == true &&
+                        !Array(hash_value(stats, :fallback_transitions)).empty?
+    ladder = MODE_LADDERS[expected_mode] || []
+    return false unless ladder.last == :raster
+    record_artifact = hash_value(record, :artifact_evidence)
+    matches = Array(hash_value(stats, :text_attempts)).select do |attempt|
+      source_span_ids(attempt, :span_id => false) == [span] &&
+        normalize_mode(hash_value(attempt, :requested_mode)) == expected_mode &&
+        normalize_mode(hash_value(attempt, :delivered_mode)) == :raster &&
+        canonical_claims!(
+          hash_value(attempt, :resulting_entity_ids), 'raster fallback', false
+        ).sort == claims.sort &&
+        evidence_payload_equal?(
+          hash_value(attempt, :artifact_evidence), record_artifact
+        )
+    end
+    return false unless matches.length == 1
+    history = hash_value(matches[0], :attempt_history)
+    return false unless history.is_a?(Array) && history.length == ladder.length
+    final = history[-1]
+    normalize_mode(hash_value(final, :mode)) == :raster &&
+      hash_value(final, :outcome).to_s == 'complete' &&
+      evidence_payload_equal?(
+        hash_value(final, :artifact_evidence), record_artifact
+      )
+  end
+  private_class_method :terminal_item_raster_fallback_authorized?
+
   def self.verify_raster_deliveries!(stats, manifest, requested_mode,
                                      selected_pages)
     expected_mode = normalize_mode(requested_mode)
@@ -1892,6 +2202,8 @@ module SketchupHostEvidence
     rows = manifest_claim_rows(manifest)
     signatures = []
     delivery_pages = []
+    item_span_ids = []
+    page_delivery_pages = []
     Array(hash_value(stats, :raster_delivery_records)).each_with_index do |record, index|
       unless record.is_a?(Hash) &&
              normalize_mode(hash_value(record, :requested_mode)) == expected_mode
@@ -1913,6 +2225,30 @@ module SketchupHostEvidence
       page = exact_positive_integer!(
         hash_value(record, :page), 'raster delivery page'
       )
+      scope = hash_value(record, :delivery_scope).to_s
+      spans = source_span_ids(record, :span_id => false)
+      if scope == 'item_raster'
+        explicit_request = expected_mode == :raster &&
+          hash_value(record, :explicit_request) == true
+        terminal_fallback = spans.length == 1 &&
+          terminal_item_raster_fallback_authorized?(
+            stats, record, expected_mode, spans[0], claims
+          )
+        unless spans.length == 1 && (explicit_request || terminal_fallback)
+          raise EvidenceError,
+                'item Raster is neither explicit nor a proven terminal fallback'
+        end
+        item_span_ids << spans[0]
+      elsif scope == 'page_raster'
+        unless spans.empty?
+          raise EvidenceError,
+                'requested page Raster is not source-free page delivery'
+        end
+        verify_page_raster_delivery_basis!(
+          stats, record, expected_mode, pages
+        )
+        page_delivery_pages << page
+      end
       delivery_pages << page
       signatures << [page, claim]
     end
@@ -1941,15 +2277,35 @@ module SketchupHostEvidence
 
     return true unless expected_mode == :raster
     source_ids = Array(hash_value(stats, :text_source_span_ids))
-    unless source_ids.empty? &&
-           Array(hash_value(stats, :text_attempts)).empty? &&
-           Array(hash_value(stats, :source_provenance_objects)).empty? &&
-           Array(hash_value(stats, :page_text_delivery_records)).empty?
-      raise EvidenceError, 'requested Raster contains non-raster span evidence'
+    source_pages = source_ids.map { |source_id| source_span_page!(source_id) }.
+      uniq.sort
+    expected_page_deliveries = pages.empty? ? page_delivery_pages.sort :
+      (pages - source_pages).sort
+    unless item_span_ids.uniq.length == item_span_ids.length &&
+           item_span_ids.sort == source_ids.map { |value| value.to_s }.sort
+      raise EvidenceError, 'requested Raster item delivery set mismatch'
     end
-    if signatures.empty? || delivery_pages.uniq.length != delivery_pages.length ||
-       (!pages.empty? && delivery_pages.sort != pages.sort)
+    if signatures.empty? ||
+       page_delivery_pages.uniq.length != page_delivery_pages.length ||
+       page_delivery_pages.sort != expected_page_deliveries
       raise EvidenceError, 'Raster page delivery set mismatch'
+    end
+    unless Array(hash_value(stats, :source_provenance_objects)).empty? &&
+           Array(hash_value(stats, :page_text_delivery_records)).empty?
+      raise EvidenceError, 'requested Raster contains non-raster delivery evidence'
+    end
+    if hash_value(stats, :raster_fallback_used) == true ||
+       !Array(hash_value(stats, :fallback_transitions)).empty? ||
+       !Array(hash_value(stats, :page_representation_fallbacks)).empty?
+      raise EvidenceError, 'requested Raster is mislabeled as fallback'
+    end
+    renderers = Array(hash_value(stats, :text_renderers))
+    unless renderers.all? do |renderer|
+             normalize_mode(hash_value(renderer, :requested_mode)) == :raster &&
+               normalize_mode(hash_value(renderer, :delivered_mode)) == :raster &&
+               hash_value(renderer, :degraded) == false
+           end
+      raise EvidenceError, 'requested Raster renderer is degraded or misbound'
     end
     terminal_signatures = terminal_records.map do |record|
       claims = canonical_claims!(
@@ -2043,9 +2399,12 @@ module SketchupHostEvidence
     raster_signatures = Array(hash_value(stats, :raster_delivery_records)).map do |record|
       next unless hash_value(record, :delivery_scope).to_s == 'page_raster'
       next unless normalize_mode(hash_value(record, :requested_mode)) == expected_mode
-      unless hash_value(record, :no_semantic_text) == true
+      unless hash_value(record, :delivery_basis).to_s ==
+               'verified_zero_canonical_text' &&
+             hash_value(record, :semantic_text_evaluated) == true &&
+             hash_value(record, :no_semantic_text) == true
         raise EvidenceError,
-              'page raster fallback is not marked as zero semantic text'
+              'page raster fallback lacks verified zero-canonical-text basis'
       end
       claims = canonical_claims!(
         hash_value(record, :resulting_entity_ids), 'page raster fallback', false
@@ -2089,11 +2448,13 @@ module SketchupHostEvidence
       end
     end
 
-    if mode == :raster
-      unless source_ids.empty?
-        raise EvidenceError, 'Raster source span ledger must be empty'
-      end
+    if mode == :raster && source_ids.empty?
       delivered_pages = Array(hash_value(stats, :raster_delivery_records)).map do |row|
+        unless hash_value(row, :delivery_scope).to_s == 'page_raster' &&
+               source_span_ids(row, :span_id => false).empty?
+          raise EvidenceError,
+                'source-free Raster delivery must be one page image per page'
+        end
         exact_positive_integer!(
           hash_value(row, :page), 'raster delivery page'
         )
@@ -2273,7 +2634,7 @@ module SketchupHostEvidence
   def self.normalize_mode(value)
     text = value.to_s.strip.downcase
     return :text3d if ['text3d', '3d_text', '3d text'].include?(text)
-    return text.to_sym if %w[labels glyphs geometry raster].include?(text)
+    return text.to_sym if %w[text labels glyphs geometry raster].include?(text)
     nil
   end
   private_class_method :normalize_mode

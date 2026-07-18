@@ -107,15 +107,19 @@ class TextModeRoutingTest < Minitest::Test
 
   def test_labels_with_layer_matching_disables_svg_text
     assert_match(
-      /if\s+match_pdf_layers\s*&&\s*!ocg\.layer_list\.empty\?\s*&&\s*requested_text_mode\s*==\s*:labels\s+use_svg_text\s*=\s*false/m,
+      /if\s+match_pdf_layers\s*&&\s*!ocg\.layer_list\.empty\?\s*&&\s*\[:text,\s*:labels\]\.include\?\(requested_text_mode\)\s+use_svg_text\s*=\s*false/m,
       @main,
-      'Labels with PDF-layer matching must use internal parsing, not SVG text'
+      'Text/Labels with PDF-layer matching must use internal parsing, not SVG text'
     )
   end
 
   def test_import_dialog_maps_labels_string_to_labels_symbol
     assert_match(
-      /when\s+'labels',\s*'label',\s*'text'\s+then\s+:labels/m,
+      /when\s+'text',\s*'flat_text',\s*'editable_text'\s+then\s+:text/m,
+      @import_dialog
+    )
+    assert_match(
+      /when\s+'labels',\s*'label',\s*'add_text'\s+then\s+:labels/m,
       @import_dialog
     )
     assert_match(/when\s+'glyphs'\s+then\s+:glyphs/, @import_dialog)

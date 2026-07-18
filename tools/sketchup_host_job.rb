@@ -3,7 +3,7 @@ require 'json'
 require 'digest'
 
 module SketchupHostJob
-  TEXT_MODES = [:labels, :text3d, :glyphs, :geometry, :raster].freeze unless const_defined?(:TEXT_MODES, false)
+  TEXT_MODES = [:text, :labels, :text3d, :glyphs, :geometry, :raster].freeze unless const_defined?(:TEXT_MODES, false)
   IMPORT_MODES = ['auto', 'vector', 'raster', 'hybrid'].freeze unless const_defined?(:IMPORT_MODES, false)
 
   def self.load(argument)

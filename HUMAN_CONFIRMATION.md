@@ -13,9 +13,12 @@ For each representative shop drawing you import:
 
 | Check | Pass |
 |-------|------|
-| **3D Text default** — BOM, dimensions, notes, rotation, and scale visually match Adobe Reader at the same zoom | ☐ |
-| **Outlines/Glyphs** — linework and symbols are faithful to the PDF when selected | ☐ |
-| **Labels** — editable text remains readable when selected, with expected SketchUp screen-space/horizontal behavior | ☐ |
+| **Text** — when selected, the result is distinct flat editable model text, or the report contains the exact item-bound host capability proof before any Label attempt | ☐ |
+| **Labels** — editable annotations preserve exact content/anchor and never claim rotated glyphs when the host cannot express them | ☐ |
+| **3D Text** (first-run default) — BOM, dimensions, notes, rotation, and scale visually match Adobe Reader at the same zoom | ☐ |
+| **Glyphs** — per-glyph grouped outlines, placement, rotation, and scale are faithful when selected | ☐ |
+| **Geometry** — source/page path edges remain distinct from Glyph groups and are faithful when selected | ☐ |
+| **Raster** — requested item crops or zero-canonical-text page image are source-bound and visually faithful; a verification failure stops truthfully | ☐ |
 | Scale plausible vs the source drawing | ☐ |
 | Multi-page import behaves as expected | ☐ |
 

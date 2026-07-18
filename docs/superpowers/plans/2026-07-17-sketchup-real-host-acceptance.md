@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status (2026-07-18): SUPERSEDED — historical reference only.** Current
+> authority is `AGENTS.md`, `.cursor/rules/text-mode-fidelity.mdc`, current source,
+> and current tests. This dated plan must not block corrections, restore a
+> Labels-only/five-option assumption, or accept importer attributes in place of
+> physical saved/reopened host evidence.
+
 **Goal:** Replace the modal, Labels-only SketchUp batch probe with a Ruby 2.2-compatible, single-job-file real-host acceptance runner that can verify each requested representation, save the model, and emit a truthful machine-readable result.
 
 **Architecture:** SketchUp 2017 reliably supplies one `-RubyStartupArg`, so a small host-independent job parser will load a JSON job from that argument and normalize paths, pages, import mode, and requested representation. The host runner will consume the normalized job, load the source tree, run the production pipeline, save the model, snapshot resulting entities and representation evidence, write `host_acceptance.json` on success or failure, and close only the batch-created SketchUp process without modal UI.
@@ -10,7 +16,7 @@
 
 ## Global Constraints
 
-- Labels, 3D Text, Glyphs, Geometry, and Raster remain distinct requested outcomes; the runner must never change the requested type to hide a transform defect.
+- Text, Labels, 3D Text, Glyphs, Geometry, and Raster remain distinct requested outcomes; the runner must never change the requested type to hide a transform defect.
 - Fallback remains production-controlled, item-scoped, finite, and evidence-gated; the runner records it but does not manufacture or bypass proof.
 - One `-RubyStartupArg` carries one JSON job path; paths containing spaces must remain intact.
 - The runner must write an ERROR result for any exception, nil pipeline result, missing report, missing saved model, or incomplete representation evidence.

@@ -5,18 +5,24 @@ alwaysApply: true
 
 # Text mode fidelity (hard contract)
 
-**Requested mode wins.** Geometry / Glyphs / Labels / 3D Text / raster means that representation. Alignment, rotation, and scale bugs are **transform bugs inside that mode** — especially when they worked in past versions.
+**Requested mode wins.** Text / Labels / 3D Text / Glyphs / Geometry / Raster means that distinct representation. Alignment, rotation, and scale bugs are **transform bugs inside that mode** — especially when they worked in past versions.
 
 ## MUST
 
 1. **Stay in the requested mode** and fix transforms / placement / height there.
 2. Treat fallback as unauthorized unless affirmative evidence proves the requested representation impossible for the exact source item and the alternative has its own certified type-and-visual attempt.
-3. After affirmative item-scoped impossibility, advance exactly one rung in the finite closest ladder, certify that attempt, and continue only as needed: Labels → 3D Text → Glyphs → Geometry → Raster; 3D Text → Glyphs → Geometry → Raster; Glyphs → Geometry → Raster; Geometry → Raster. Without that proof, erase partial artifacts, identify the exact source span, and stop.
+3. After affirmative item-scoped impossibility, advance exactly one rung in the requested-specific finite closest ladder and certify that attempt: Text → Labels → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; Geometry → item Raster. Without that proof, erase partial artifacts, identify the exact source span, and stop.
 4. **Free only** — bundled / host-native. No paid-only path.
+5. Prove Raster from actual saved/reopened host pixels. A real SketchUp `TextureWriter` export, successful output file, decoded RGB/RGBA visual digest, and dimensions must match; importer attributes are not physical evidence. Item crops retain RGBA provenance and visible pixels, but a valid opaque crop need not contain an `alpha < 255` pixel.
+
+Raster has no next rung. Requested Raster uses a verified item crop for each
+canonical source span or a verified page image for a selected zero-canonical-text
+page; fallback Raster is item-scoped. Terminal Raster can still fail verification.
+Report that failure and stop—never relabel it as successful delivery.
 
 ## MUST NOT (instant reject)
 
-- Switch Labels ↔ 3D Text / Geometry / Glyphs / raster to “fix” alignment, rotation, or scale.
+- Switch Text / Labels / 3D Text / Glyphs / Geometry / Raster to “fix” alignment, rotation, or scale.
 - Treat a missing/skipped helper, generic host/API limit, exception, empty artifact, or currently broken implementation as proof of item-specific impossibility.
 - Record a “proven unavailable” placeholder or advance to a peer/next rung without a real attempt and type-and-visual certificate.
 - Treat SIZE-1 or R20-2 as permission to change representation (they are **in-mode** height contracts).

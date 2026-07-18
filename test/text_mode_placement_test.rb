@@ -163,6 +163,46 @@ class DummyMeshEntity
   end
 end
 
+class DummyModeStagingEntities
+  def initialize(parent)
+    @parent = parent
+    @entities = []
+  end
+
+  def add_3d_text(*args)
+    before = Array(@parent.to_a).dup
+    begin
+      @parent.add_3d_text(*args)
+    ensure
+      generated = @parent.to_a.reject { |entity| before.include?(entity) }
+      @parent.detach_staged_entities(generated)
+      @entities.concat(generated)
+    end
+  end
+
+  def to_a
+    @entities.dup
+  end
+end
+
+class DummyModeStagingGroup
+  attr_reader :entities, :persistent_id
+
+  def initialize(id, parent)
+    @persistent_id = id
+    @parent = parent
+    @entities = DummyModeStagingEntities.new(parent)
+  end
+
+  def typename
+    'Group'
+  end
+
+  def explode
+    @parent.explode_staging_group(self, @entities.to_a)
+  end
+end
+
 class DummyEntities
   attr_reader :texts, :mesh_calls, :entities, :transforms
 
@@ -181,6 +221,23 @@ class DummyEntities
 
   def to_a
     @entities
+  end
+
+  def add_group
+    @next_id += 1
+    group = DummyModeStagingGroup.new(@next_id, self)
+    @entities << group
+    group
+  end
+
+  def detach_staged_entities(entities)
+    @entities.reject! { |entity| entities.include?(entity) }
+  end
+
+  def explode_staging_group(group, children)
+    @entities.delete(group)
+    @entities.concat(children)
+    children
   end
 
   def add_text(text, point, vector = nil)

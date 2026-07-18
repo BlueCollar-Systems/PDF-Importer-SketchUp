@@ -15,7 +15,7 @@ module BlueCollarSystems
 BlueCollar PDF Vector Importer — SketchUp preflight (offline batch CLI)
 
 Modes (BCS-ARCH-001): auto, vector, raster, hybrid — all target maximum fidelity.
-Text modes (orthogonal): geometry, glyphs, labels, 3d_text.
+Text modes (orthogonal): text, labels, 3d_text, glyphs, geometry, raster.
 
 Offline batch CLI (this tool):
   ruby tools/su_batch_cli.rb --preflight

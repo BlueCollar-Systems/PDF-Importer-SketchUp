@@ -84,6 +84,12 @@ class ItemVectorEntities
   def add_group
     group = ItemVectorGroup.new(self, next_id, @options, @counter)
     @items << group
+    if @owner.nil? && @options[:add_top_level_peer_after_group]
+      @options.delete(:add_top_level_peer_after_group)
+      @items << ItemVectorEdge.new(
+        next_id, Geom::Point3d.new, Geom::Point3d.new(1, 1, 0)
+      )
+    end
     group
   end
 
@@ -317,6 +323,22 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     assert_equal [preexisting], entities.to_a
     assert_equal ['persistent_id:101'],
                  entities.erased.map { |entity| FIDELITY.stable_entity_id(entity) }
+  end
+
+  def test_failed_item_renderer_never_erases_a_concurrent_top_level_peer
+    entities = ItemVectorEntities.new(
+      nil,
+      :raise_after_first_edge => true,
+      :add_top_level_peer_after_group => true
+    )
+
+    error = assert_raises(FIDELITY::ContractError) do
+      render(entities, :geometry)
+    end
+
+    assert_match(/host edge failure/i, error.message)
+    assert_equal ['Edge'], entities.to_a.map(&:typename)
+    assert_equal ['Group'], entities.erased.map(&:typename)
   end
 
   def test_same_size_geometry_at_wrong_coordinates_is_rejected_and_cleaned

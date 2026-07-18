@@ -13,12 +13,18 @@ module BlueCollarSystems
       ENTITY_ID = /\A(?:persistent_id|entity_id):[1-9]\d*\z/.freeze
       IMPORTER_ID = 'sketchup_pdf_vector_importer'.freeze
       SOURCE_EXPECTED_SCHEMA = 'bcs.source_expected/1.0'.freeze
-      MODES = [:labels, :text3d, :glyphs, :geometry, :raster].freeze
+      FLAT_TEXT_CAPABILITY_SCHEMA =
+        'bcs.sketchup_flat_text_capability/1.0'.freeze
+      FLAT_TEXT_HOST_API_FACT =
+        'Sketchup::Entities#add_text exposes Sketchup::Text annotations/labels; ' \
+        'no distinct flat editable model Text constructor is exposed'.freeze
+      MODES = [:text, :labels, :text3d, :glyphs, :geometry, :raster].freeze
       LADDERS = {
         # Closest structural representation first; the final rung is always a
         # verified real raster. FallbackController is the only authority that
         # may advance this finite ladder, and it accepts only affirmative,
         # item-specific impossibility evidence with verified owned cleanup.
+        text:     [:text, :labels, :text3d, :glyphs, :geometry, :raster],
         labels:   [:labels, :text3d, :glyphs, :geometry, :raster],
         text3d:   [:text3d, :glyphs, :geometry, :raster],
         glyphs:   [:glyphs, :geometry, :raster],
@@ -136,6 +142,11 @@ module BlueCollarSystems
                  evidence.values.any? { |value| !value.to_s.strip.empty? }
             raise ContractError, 'transition proof has no affirmative evidence'
           end
+          if from_mode == :text
+            RepresentationFidelity.validate_flat_editable_text_transition!(
+              proof, @requested_mode, @source_span_id, binding
+            )
+          end
 
           created = validated_entity_ids(proof[:created_entity_ids], 'created')
           cleaned = validated_entity_ids(proof[:cleaned_entity_ids], 'cleaned')
@@ -183,7 +194,8 @@ module BlueCollarSystems
 
       def normalize_mode(value)
         case value.to_s.strip.downcase
-        when 'labels', 'label', 'text', 'add_text' then :labels
+        when 'text', 'flat_text', 'editable_text' then :text
+        when 'labels', 'label', 'add_text' then :labels
         when 'text3d', '3d_text', '3d text', 'add_3d_text' then :text3d
         when 'glyphs', 'glyph', 'glyph_outline' then :glyphs
         when 'geometry', 'outlines', 'outline', 'page_path_geometry' then :geometry
@@ -204,6 +216,211 @@ module BlueCollarSystems
           :importer_id => IMPORTER_ID,
           :page_number => match[1].to_i
         }
+      end
+
+      def strict_source_bbox_pdf(item)
+        names = [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1]
+        unless item && names.all? { |name| item.respond_to?(name) }
+          raise ContractError, 'source text bbox is unavailable'
+        end
+        values = names.map do |name|
+          raw = item.send(name)
+          raise ContractError, 'source text bbox is incomplete' if raw.nil?
+          value = Float(raw)
+          raise ContractError, 'source text bbox is non-finite' unless value.finite?
+          canonical_number(value)
+        end
+        values
+      rescue ContractError
+        raise
+      rescue StandardError => e
+        raise ContractError, "source text bbox is unreadable: #{e.message}"
+      end
+
+      def sketchup_instance_method_names(constant_name)
+        unless defined?(Sketchup) && Sketchup.const_defined?(constant_name)
+          raise ContractError,
+                "SketchUp #{constant_name} API class is unavailable"
+        end
+        klass = Sketchup.const_get(constant_name)
+        names = klass.instance_methods.map { |name| name.to_s }.uniq.sort
+        raise ContractError,
+              "SketchUp #{constant_name} API inventory is empty" if names.empty?
+        names
+      rescue ContractError
+        raise
+      rescue StandardError => e
+        raise ContractError,
+              "SketchUp #{constant_name} API inventory failed: #{e.message}"
+      end
+
+      # SketchUp has an annotation entity named Sketchup::Text, created by
+      # Entities#add_text.  It is the Labels representation: its vector is the
+      # leader, not a model-space glyph rotation.  This observation-only probe
+      # never creates an entity.  It proves, for one exact source item, that
+      # the distinct flat editable Text representation is absent before the
+      # controller may advance to Labels.
+      def flat_editable_text_impossibility_proof(item)
+        source_id = source_span_id(item)
+        binding = proof_binding(source_id)
+        source_text = item.respond_to?(:text) ? item.text.to_s : ''
+        raise ContractError, 'source text content is unavailable' if source_text.empty?
+        bbox = strict_source_bbox_pdf(item)
+        entities_methods = sketchup_instance_method_names(:Entities)
+        text_methods = sketchup_instance_method_names(:Text)
+        add_text_observed = entities_methods.include?('add_text')
+        annotation_methods = ['text', 'point', 'vector']
+        annotation_observed = annotation_methods.all? do |name|
+          text_methods.include?(name)
+        end
+        distinct_candidates = entities_methods.select do |name|
+          name =~ /\Aadd_(?:flat|model|editable).*text\z/ ||
+            name =~ /\Aadd_text_(?:flat|model|editable)\z/
+        end
+        unless add_text_observed && annotation_observed &&
+               distinct_candidates.empty?
+          raise ContractError,
+                'SketchUp flat Text capability cannot be affirmatively classified'
+        end
+        host_version = if defined?(Sketchup) && Sketchup.respond_to?(:version)
+                         Sketchup.version.to_s
+                       else
+                         ''
+                       end
+        host_major = host_version.split('.').first.to_i
+        raise ContractError, 'SketchUp host version is unavailable' unless host_major > 0
+        observed_entities_text_methods = entities_methods.select do |name|
+          name.include?('text')
+        end
+        observed_text_annotation_methods = text_methods.select do |name|
+          ['text', 'text=', 'point', 'point=', 'vector', 'vector=',
+           'display_leader', 'display_leader=', 'display_leader?'].include?(name)
+        end
+        evidence = {
+          :schema => FLAT_TEXT_CAPABILITY_SCHEMA,
+          :source_span_id => source_id,
+          :importer_id => binding[:importer_id],
+          :page_number => binding[:page_number],
+          :requested_mode => :text,
+          :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
+          :source_bbox_pdf => bbox,
+          :host_product => 'SketchUp',
+          :host_version => host_version,
+          :host_major_version => host_major,
+          :entities_add_text_observed => true,
+          :sketchup_text_class_observed => true,
+          :sketchup_text_annotation_api_observed => true,
+          :observed_entities_text_methods => observed_entities_text_methods,
+          :observed_sketchup_text_annotation_methods =>
+            observed_text_annotation_methods,
+          :distinct_flat_text_constructor_observed => false,
+          :native_flat_editable_text_available => false,
+          :capability_observation_only => true,
+          :host_api_fact => FLAT_TEXT_HOST_API_FACT
+        }
+        evidence[:evidence_sha256] = canonical_sha256(evidence)
+        {
+          :source_span_id => source_id,
+          :importer_id => binding[:importer_id],
+          :page_number => binding[:page_number],
+          :requested_mode => :text,
+          :scope => :item,
+          :category => :exact_representation_impossible,
+          :affirmative_impossibility => true,
+          :generic_failure => false,
+          :from_mode => :text,
+          :to_mode => :labels,
+          :reason_code => :host_representation_unsupported,
+          :attempted_renderer =>
+            'sketchup_flat_editable_text_capability_observation',
+          :created_entity_ids => [],
+          :cleaned_entity_ids => [],
+          :cleanup_outcome => :not_required,
+          :evidence => evidence
+        }
+      end
+
+      def validate_flat_editable_text_transition!(proof, requested_mode,
+                                                   source_id, binding = nil)
+        unless proof.is_a?(Hash) &&
+               normalize_mode(contract_hash_value(proof, :requested_mode)) == :text &&
+               normalize_mode(requested_mode) == :text
+          raise ContractError, 'flat Text capability proof request is misbound'
+        end
+        expected_binding = binding || proof_binding(source_id)
+        evidence = contract_hash_value(proof, :evidence)
+        bbox = contract_hash_value(evidence, :source_bbox_pdf)
+        unless evidence.is_a?(Hash) &&
+               contract_hash_value(evidence, :schema).to_s ==
+                 FLAT_TEXT_CAPABILITY_SCHEMA &&
+               contract_hash_value(evidence, :source_span_id).to_s ==
+                 source_id.to_s &&
+               contract_hash_value(evidence, :importer_id).to_s ==
+                 expected_binding[:importer_id] &&
+               contract_hash_value(evidence, :page_number).to_i ==
+                 expected_binding[:page_number] &&
+               normalize_mode(contract_hash_value(evidence, :requested_mode)) ==
+                 :text &&
+               contract_hash_value(
+                 evidence, :source_text_sha256
+               ).to_s.downcase =~ /\A[0-9a-f]{64}\z/ &&
+               bbox.is_a?(Array) && bbox.length == 4 && bbox.all? do |value|
+                  value.is_a?(Numeric) && value.to_f.finite?
+                end
+          raise ContractError, 'flat Text capability evidence source binding is invalid'
+        end
+        host_version = contract_hash_value(evidence, :host_version).to_s
+        host_major = contract_hash_value(evidence, :host_major_version)
+        entity_methods = contract_hash_value(
+          evidence, :observed_entities_text_methods
+        )
+        annotation_methods = contract_hash_value(
+          evidence, :observed_sketchup_text_annotation_methods
+        )
+        unless contract_hash_value(evidence, :host_product).to_s == 'SketchUp' &&
+               !host_version.strip.empty? && host_major.is_a?(Integer) &&
+               host_major > 0 && host_version.split('.').first.to_i == host_major &&
+               contract_hash_value(evidence, :entities_add_text_observed) == true &&
+               contract_hash_value(evidence, :sketchup_text_class_observed) == true &&
+               contract_hash_value(
+                 evidence, :sketchup_text_annotation_api_observed
+               ) == true &&
+               entity_methods.is_a?(Array) && entity_methods.include?('add_text') &&
+               annotation_methods.is_a?(Array) &&
+               ['text', 'point', 'vector'].all? do |name|
+                  annotation_methods.include?(name)
+                end &&
+               contract_hash_value(
+                 evidence, :distinct_flat_text_constructor_observed
+               ) == false &&
+               contract_hash_value(
+                 evidence, :native_flat_editable_text_available
+               ) == false &&
+               contract_hash_value(evidence, :capability_observation_only) == true &&
+               contract_hash_value(evidence, :host_api_fact).to_s ==
+                 FLAT_TEXT_HOST_API_FACT
+          raise ContractError, 'flat Text host capability evidence is invalid'
+        end
+        unsigned = evidence.dup
+        digest = contract_hash_value(unsigned, :evidence_sha256).to_s.downcase
+        unsigned.delete(:evidence_sha256)
+        unsigned.delete('evidence_sha256')
+        unless digest =~ /\A[0-9a-f]{64}\z/ &&
+               canonical_sha256(unsigned) == digest
+          raise ContractError, 'flat Text capability evidence digest is invalid'
+        end
+        true
+      end
+
+      def contract_hash_value(hash, key)
+        return nil unless hash.is_a?(Hash)
+        symbol_present = hash.key?(key)
+        string_present = hash.key?(key.to_s)
+        if symbol_present && string_present &&
+           canonical_json(hash[key]) != canonical_json(hash[key.to_s])
+          raise ContractError, "conflicting #{key} evidence aliases"
+        end
+        symbol_present ? hash[key] : hash[key.to_s]
       end
 
       # Exact SVG representations need a single owned page container. It is
@@ -280,6 +497,26 @@ module BlueCollarSystems
         before_ids = before_snapshot[:by_id].keys
         ids = after_snapshot[:by_id].keys.reject { |identity| before_ids.include?(identity) }
         ids.map { |identity| after_snapshot[:by_id][identity] }
+      end
+
+      # Validate an explicit ownership claim without treating every concurrent
+      # addition to the collection as importer-owned. A renderer may clean up
+      # only references it actually received from the host API.
+      def claimed_created_entities!(before_snapshot, after_snapshot, claims)
+        claimed = Array(claims).compact
+        return [] if claimed.empty?
+        ids = stable_ids(claimed)
+        preexisting = ids.select { |identity| before_snapshot[:by_id].key?(identity) }
+        missing = ids.reject { |identity| after_snapshot[:by_id].key?(identity) }
+        unless preexisting.empty?
+          raise ContractError,
+                "ownership claim includes pre-existing entities: #{preexisting.join(', ')}"
+        end
+        unless missing.empty?
+          raise ContractError,
+                "ownership claim is absent from the host collection: #{missing.join(', ')}"
+        end
+        claimed
       end
 
       def stable_ids(values)

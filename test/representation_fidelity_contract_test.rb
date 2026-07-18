@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
 require 'minitest/autorun'
+require 'zlib'
 
 REPO_ROOT = File.expand_path('..', __dir__) unless defined?(REPO_ROOT)
 SRC_ROOT = File.join(REPO_ROOT, 'extracted', 'sketchup_ext') unless defined?(SRC_ROOT)
@@ -95,6 +96,24 @@ end
 
 ORIGIN = Geom::Point3d.new(0, 0, 0) unless defined?(ORIGIN)
 Z_AXIS = Geom::Vector3d.new(0, 0, 1) unless defined?(Z_AXIS)
+
+module Sketchup
+  def self.version
+    '17.2.2555'
+  end unless respond_to?(:version)
+
+  class Entities
+    def add_text(*_args); end
+    def add_3d_text(*_args); end
+  end unless const_defined?(:Entities)
+
+  class Text
+    def text; end
+    def point; end
+    def vector; end
+    def display_leader?; end
+  end unless const_defined?(:Text)
+end
 
 load File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb')
 require 'bc_pdf_vector_importer/main'
@@ -193,7 +212,35 @@ class FidelityEntities
     @next_id += 1
     @entities << FidelityEntity.new(@next_id, width, actual_height, 'Edge', extrusion)
     raise 'mesh API raised after partial creation' if @options[:mesh] == :raise_after_create
+    add_test_entity(0.25, 0.25, 'Edge') if @options[:peer_after_mesh]
     true
+  end
+
+  def add_group
+    @next_id += 1
+    group = FidelityMeshGroup.new(@next_id, self)
+    @entities << group
+    group
+  end
+
+  def add_group_mesh(collection, height, extrusion)
+    return false if @options[:mesh] == :false
+    width = @options.fetch(:natural_width, height.to_f * 3.0)
+    actual_height = height.to_f * @options.fetch(:natural_height_factor, 0.75)
+    @next_id += 1
+    collection.append(
+      FidelityEntity.new(@next_id, width, actual_height, 'Edge', extrusion)
+    )
+    raise 'mesh API raised after partial creation' if @options[:mesh] == :raise_after_create
+    add_test_entity(0.25, 0.25, 'Edge') if @options[:peer_after_mesh]
+    true
+  end
+
+  def explode_mesh_group(group)
+    @entities.delete(group)
+    children = group.entities.to_a
+    @entities.concat(children)
+    children
   end
 
   def add_test_entity(width = 1.0, height = 1.0, typename = 'Edge')
@@ -229,6 +276,7 @@ class FidelityEntities
     @entities << label
     @created_labels << label
     raise 'label API raised after partial creation' if @options[:label] == :raise_after_create
+    add_test_entity(0.25, 0.25, 'Edge') if @options[:peer_after_label]
     label
   end
 
@@ -245,6 +293,44 @@ class FidelityEntities
       @erased << entity
     end
     nil
+  end
+end
+
+class FidelityMeshGroupEntities
+  def initialize(parent)
+    @parent = parent
+    @entities = []
+  end
+
+  def add_3d_text(_text, _align, _font, _bold, _italic, height,
+                  _tolerance, _z, _filled, extrusion)
+    @parent.add_group_mesh(self, height, extrusion)
+  end
+
+  def append(entity)
+    @entities << entity
+  end
+
+  def to_a
+    @entities.dup
+  end
+end
+
+class FidelityMeshGroup
+  attr_reader :persistent_id, :entities
+
+  def initialize(id, parent)
+    @persistent_id = id
+    @parent = parent
+    @entities = FidelityMeshGroupEntities.new(parent)
+  end
+
+  def typename
+    'Group'
+  end
+
+  def explode
+    @parent.explode_mesh_group(self)
   end
 end
 
@@ -327,11 +413,297 @@ class RepresentationFidelityContractTest < Minitest::Test
            page_number: 1)
   end
 
-  def test_text_alias_normalizes_to_native_labels_across_fidelity_boundaries
-    assert_equal :labels, IMP.normalize_text_renderer_mode('Text')
-    assert_equal :labels, IMP::RepresentationFidelity.normalize_mode('Text')
-    assert_equal :labels,
-                 builder(:labels).send(:normalize_text_mode_symbol, 'Text')
+  def test_text_and_labels_remain_distinct_across_fidelity_boundaries
+    assert_equal :text, IMP.normalize_text_renderer_mode('Text')
+    assert_equal :text, IMP::RepresentationFidelity.normalize_mode('Text')
+    assert_equal :text,
+                 builder(:text).send(:normalize_text_mode_symbol, 'Text')
+    assert_equal :labels, IMP.normalize_text_renderer_mode('Labels')
+    refute_equal IMP.normalize_text_renderer_mode('Text'),
+                 IMP.normalize_text_renderer_mode('Labels')
+  end
+
+  def test_explicit_item_raster_is_requested_delivery_not_fallback
+    source = item('RASTER', 0.0, 24.0, 10.0)
+    artifact = {
+      source_span_id: source.source_span_id,
+      page_number: 1,
+      source_crop_binding_verified: true,
+      page_binding_verified: true,
+      png_signature_verified: true,
+      aspect_verified: true,
+      source_pdf_sha256: 'a' * 64,
+      source_pdf_binding_verified: true,
+      content_sha256: 'b' * 64,
+      content_byte_size: 4096,
+      pixel_width: 300,
+      pixel_height: 120,
+      source_box: [20.0, 30.0, 44.0, 40.0],
+      pixel_crop: [100, 200, 300, 120],
+      alpha_channel_verified: true,
+      transparent_background_verified: true,
+      visible_pixel_verified: true,
+      page_render_once_verified: true,
+      page_render_content_sha256: 'c' * 64
+    }
+    raster = {
+      entity_id: 'persistent_id:404', artifact_evidence: artifact,
+      real_raster_verified: true, visual_fidelity_verified: true
+    }
+    stats = {
+      requested_text_mode: :raster, text_mode: :raster,
+      selected_pages: [1], text_source_span_ids: [source.source_span_id],
+      text_attempts: [], terminal_text_delivery_records: [],
+      raster_delivery_records: [], text_renderers: [],
+      source_provenance_objects: [], page_text_delivery_records: [],
+      page_representation_fallbacks: [], source_glyph_physical_deliveries: [],
+      fallback_transitions: [], raster_fallback_used: false, text: 0,
+      source_input_sha256: 'a' * 64, normalized_input_sha256: 'a' * 64
+    }
+
+    assert IMP.record_item_raster_delivery!(
+      stats, 1, source, :raster, raster, [], []
+    )
+
+    attempt = stats[:text_attempts].first
+    record = stats[:terminal_text_delivery_records].first
+    renderer = stats[:text_renderers].first
+    assert_equal :raster, attempt[:requested_mode]
+    assert_equal :raster, attempt[:delivered_mode]
+    assert_equal :raster, record[:requested_mode]
+    assert_equal :raster, record[:delivered_mode]
+    assert_equal false, stats[:raster_fallback_used]
+    assert_equal false, renderer[:degraded]
+    assert_empty stats[:fallback_transitions]
+    assert_equal 'a' * 64,
+                 record[:artifact_evidence][:source_pdf_sha256]
+    assert_equal true, IMP::QAReport.send(
+      :validate_representation_fidelity, stats
+    )[:ready]
+
+    mislabeled = Marshal.load(Marshal.dump(stats))
+    mislabeled[:raster_fallback_used] = true
+    assert_equal false, IMP::QAReport.send(
+      :validate_representation_fidelity, mislabeled
+    )[:ready]
+  end
+
+  def test_item_raster_record_rejects_missing_pdf_sha_binding
+    source = item('RASTER', 0.0, 24.0, 10.0)
+    raster = {
+      entity_id: 'persistent_id:405', real_raster_verified: true,
+      visual_fidelity_verified: true,
+      artifact_evidence: {
+        source_span_id: source.source_span_id, page_number: 1,
+        source_crop_binding_verified: true, content_sha256: 'b' * 64
+      }
+    }
+    stats = {}
+
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.record_item_raster_delivery!(
+        stats, 1, source, :raster, raster, [], []
+      )
+    end
+  end
+
+  def test_flat_text_capability_rung_is_bound_before_label_delivery
+    source = item('EDITABLE', 0.0, 24.0, 10.0)
+    prepared = IMP.prepare_flat_text_fallback_controllers!([source])
+    row = prepared.fetch(source.source_span_id)
+    attempt = {
+      source_span_id: source.source_span_id,
+      source_text_sha256: Digest::SHA256.hexdigest(source.text),
+      source_bbox_pdf: [source.bbox_x0, source.bbox_y0,
+                        source.bbox_x1, source.bbox_y1],
+      requested_mode: :text,
+      delivered_mode: :labels,
+      attempt_history: [{
+        mode: :labels, outcome: :complete,
+        resulting_entity_ids: ['persistent_id:501']
+      }]
+    }
+
+    IMP.bind_flat_text_capability_attempt!(attempt, row[:proof])
+
+    assert_equal [:text, :labels],
+                 attempt[:attempt_history].map { |entry| entry[:mode] }
+    text_rung = attempt[:attempt_history].first
+    assert_equal :failed, text_rung[:outcome]
+    assert_equal row[:proof], text_rung[:transition_proof]
+    assert_equal :labels, row[:controller].current_mode
+    assert_equal :text, attempt[:requested_mode]
+  end
+
+  def test_flat_text_capability_attempt_rejects_source_sha_mismatch
+    source = item('EDITABLE', 0.0, 24.0, 10.0)
+    proof = IMP.prepare_flat_text_fallback_controllers!([source]).
+      fetch(source.source_span_id).fetch(:proof)
+    attempt = {
+      source_span_id: source.source_span_id,
+      source_text_sha256: 'f' * 64,
+      source_bbox_pdf: [source.bbox_x0, source.bbox_y0,
+                        source.bbox_x1, source.bbox_y1],
+      requested_mode: :text, delivered_mode: :labels,
+      attempt_history: []
+    }
+
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.bind_flat_text_capability_attempt!(attempt, proof)
+    end
+  end
+
+  def test_qa_rebinds_flat_text_capability_proof_to_attempt_source_content
+    source = item('EDITABLE', 0.0, 24.0, 10.0)
+    proof = IMP.prepare_flat_text_fallback_controllers!([source]).
+      fetch(source.source_span_id).fetch(:proof)
+    flags = {
+      visual_fidelity_verified: true, placement_verified: true,
+      rotation_verified: true, content_verified: true,
+      entity_type_verified: true, leader_verified: true
+    }
+    complete = {
+      mode: :labels, outcome: :complete,
+      resulting_entity_ids: ['persistent_id:601'],
+      cleanup_outcome: :not_required
+    }.merge(flags)
+    failed = IMP.failed_item_rung_from_transition(proof)
+    valid = {
+      requested_text_mode: :text, text_mode: :text, selected_pages: [1],
+      text_source_span_ids: [source.source_span_id],
+      source_provenance_objects: [{
+        object_id: 'text_delivery:1:0', page: 1, source_kind: 'text_span',
+        span_id: source.source_span_id, created_entity_type: 'native_label',
+        resulting_entity_ids: ['persistent_id:601']
+      }],
+      text_attempts: [{
+        source_span_id: source.source_span_id,
+        source_text_sha256: Digest::SHA256.hexdigest(source.text),
+        source_bbox_pdf: [source.bbox_x0, source.bbox_y0,
+                          source.bbox_x1, source.bbox_y1],
+        requested_mode: :text, delivered_mode: :labels,
+        resulting_entity_ids: ['persistent_id:601'],
+        attempt_history: [failed, complete]
+      }.merge(flags)],
+      fallback_transitions: [Marshal.load(Marshal.dump(proof))]
+    }
+    valid_result = IMP::QAReport.send(:validate_representation_fidelity, valid)
+    assert_equal true, valid_result[:ready], valid_result[:errors].inspect
+
+    source_mismatch = Marshal.load(Marshal.dump(valid))
+    local = source_mismatch[:text_attempts][0][:attempt_history][0][
+      :transition_proof
+    ]
+    local[:evidence][:source_text_sha256] = 'c' * 64
+    unsigned = local[:evidence].dup
+    unsigned.delete(:evidence_sha256)
+    local[:evidence][:evidence_sha256] =
+      IMP::RepresentationFidelity.canonical_sha256(unsigned)
+    source_mismatch[:fallback_transitions] = [
+      Marshal.load(Marshal.dump(local))
+    ]
+    assert_equal false, IMP::QAReport.send(
+      :validate_representation_fidelity, source_mismatch
+    )[:ready]
+
+    ledger_mismatch = Marshal.load(Marshal.dump(valid))
+    global = ledger_mismatch[:fallback_transitions][0]
+    global[:evidence][:source_text_sha256] = 'd' * 64
+    unsigned = global[:evidence].dup
+    unsigned.delete(:evidence_sha256)
+    global[:evidence][:evidence_sha256] =
+      IMP::RepresentationFidelity.canonical_sha256(unsigned)
+    assert_equal false, IMP::QAReport.send(
+      :validate_representation_fidelity, ledger_mismatch
+    )[:ready]
+  end
+
+  def test_text_labels_text3d_terminal_record_preserves_source_bbox_chain
+    source = item('ROTATED', -90.0, 24.0, 10.0)
+    source_id = source.source_span_id
+    source_bbox = [source.bbox_x0, source.bbox_y0,
+                   source.bbox_x1, source.bbox_y1]
+    text_proof = IMP.prepare_flat_text_fallback_controllers!([source]).
+      fetch(source_id).fetch(:proof)
+    label_builder = builder(:labels)
+    label_x, label_y, = label_builder.send(:label_insertion_pdf, source)
+    label_anchor = label_builder.send(
+      :text_point_to_su, source, label_x, label_y, 0.0, 0.0
+    )
+    label_proof = label_builder.send(
+      :host_unsupported_label_rotation_proof, source, -90.0, label_anchor
+    )
+    prior = {
+      source_span_id: source_id,
+      source_text_sha256: Digest::SHA256.hexdigest(source.text),
+      source_bbox_pdf: source_bbox,
+      requested_mode: :text,
+      delivered_mode: nil,
+      attempt_history: [
+        IMP.failed_item_rung_from_transition(text_proof),
+        IMP.failed_item_rung_from_transition(label_proof)
+      ]
+    }
+    expected = {
+      source_text_sha256: Digest::SHA256.hexdigest(source.text),
+      source_bbox_pdf: source_bbox,
+      source_anchor: [1.0, 2.0, 0.0],
+      source_rotation_radians: -Math::PI / 2.0,
+      expected_width: 10.0 / 72.0,
+      expected_height: 24.0 / 72.0,
+      expected_depth: 0.015625,
+      physical_style_sha256: 'a' * 64,
+      physical_geometry_sha256: 'b' * 64,
+      expected_transformation: { kind: 'source_glyph_3d_text' }
+    }
+    row = {
+      source_span_id: source_id,
+      group_entity_id: 'persistent_id:701',
+      identity_verified: true,
+      placement_verified: true,
+      rotation_verified: true,
+      size_verified: true,
+      depth_verified: true,
+      content_verified: true,
+      physical_geometry_verified: true,
+      physical_style_verified: true,
+      transform_verified: true,
+      depth: 0.015625,
+      width: 10.0 / 72.0,
+      height: 24.0 / 72.0,
+      extruded_face_count: 4,
+      expected_evidence: expected
+    }
+    stats = {
+      requested_text_mode: :text,
+      text_mode: :text,
+      selected_pages: [1],
+      text_source_span_ids: [source_id],
+      text_attempts: [],
+      text_renderers: [],
+      source_provenance_objects: [],
+      fallback_transitions: [
+        Marshal.load(Marshal.dump(text_proof)),
+        Marshal.load(Marshal.dump(label_proof))
+      ]
+    }
+
+    IMP::Svg3DTextRenderer.stub(
+      :finalize_source_evidence!,
+      lambda { |_result, _source, _page_rotation| true }
+    ) do
+      IMP.record_svg_3d_text_delivery!(
+        stats, 1, [source], { span_results: [row] }, :text,
+        { source_id => prior }, 0.0
+      )
+    end
+
+    terminal = stats[:text_attempts].fetch(0)
+    assert_equal source_bbox, terminal[:source_bbox_pdf]
+    assert_equal [:text, :labels, :text3d],
+                 terminal[:attempt_history].map { |rung| rung[:mode] }
+    result = IMP::QAReport.send(:validate_representation_fidelity, stats)
+    assert_equal true, result[:ready], result[:errors].inspect
   end
 
   def test_source_extent_bounds_are_derived_from_the_required_page_transform
@@ -457,21 +829,40 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_empty entities.to_a
   end
 
-  def test_label_api_exceptions_clean_each_partial_label_and_stop_in_labels
+  def test_text3d_cleanup_erases_only_exploded_owned_geometry_not_a_peer
+    source = item('owned mesh')
+    b = builder(:text3d)
+    entities = FidelityEntities.new(peer_after_mesh: true)
+
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      b.send(:place_mesh_text, entities, source, 0, 0, nil)
+    end
+    assert_equal [103], entities.to_a.map(&:persistent_id)
+    assert_equal [102], entities.erased.map(&:persistent_id)
+  end
+
+  def test_label_api_exception_never_claims_an_unreturned_partial_label
     source = item('partial label')
     b = builder(:labels)
     entities = FidelityEntities.new(label: :raise_after_create)
 
-    refute b.send(:place_annotation_label, entities, source, 0, 0, nil)
-    failed = b.text_attempts.first[:attempt_history].first
-    assert_equal :labels, failed[:mode]
-    assert_equal :failed, failed[:outcome]
-    assert_equal ['persistent_id:101', 'persistent_id:102', 'persistent_id:103'],
-                 failed[:created_entity_ids]
-    assert_equal failed[:created_entity_ids], failed[:cleaned_entity_ids]
-    assert_equal [101, 102, 103], entities.erased.map(&:persistent_id)
-    assert_empty b.text_attempts.first[:resulting_entity_ids]
-    assert_empty entities.to_a
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      b.send(:place_annotation_label, entities, source, 0, 0, nil)
+    end
+    assert_equal [101], entities.to_a.map(&:persistent_id)
+    assert_empty entities.erased
+  end
+
+  def test_label_cleanup_erases_only_the_explicit_label_not_a_peer
+    source = item('owned label')
+    b = builder(:labels)
+    entities = FidelityEntities.new(peer_after_label: true)
+
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      b.send(:place_annotation_label, entities, source, 0, 0, nil)
+    end
+    assert_equal [102], entities.to_a.map(&:persistent_id)
+    assert_equal [101], entities.erased.map(&:persistent_id)
   end
 
   def test_identityless_label_is_erased_and_never_certified
@@ -479,13 +870,12 @@ class RepresentationFidelityContractTest < Minitest::Test
     b = builder(:labels, provenance)
     entities = FidelityEntities.new(identityless_label: true)
 
-    refute b.send(:place_annotation_label, entities, item, 0, 0, nil, :labels)
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      b.send(:place_annotation_label, entities, item, 0, 0, nil, :labels)
+    end
     assert_equal 1, entities.erased.length
     assert_empty entities.to_a
     assert_empty provenance
-    rung = b.text_attempts.last[:attempt_history].last
-    assert_equal :verified, rung[:cleanup_outcome]
-    assert_empty rung[:resulting_entity_ids]
   end
 
   def test_missing_source_identity_fails_before_creating_any_entity
@@ -523,8 +913,9 @@ class RepresentationFidelityContractTest < Minitest::Test
     provenance = []
     b = builder(:labels, provenance)
     entities = FidelityEntities.new
+    source = item('ROT', 31.0)
 
-    refute b.send(:place_annotation_label, entities, item('ROT', 31.0), 0, 0, nil, :labels)
+    refute b.send(:place_annotation_label, entities, source, 0, 0, nil, :labels)
     assert_empty entities.to_a
     assert_empty provenance
     attempt = b.text_attempts.last
@@ -533,6 +924,42 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal :labels, proof[:from_mode]
     assert_equal :text3d, proof[:to_mode]
     assert_equal :host_representation_unsupported, proof[:reason_code]
+    evidence = proof.fetch(:evidence)
+    assert_equal IMP::RepresentationFidelity.strict_source_bbox_pdf(source),
+                 evidence.fetch(:source_bbox_pdf)
+    assert_equal 3, evidence.fetch(:source_anchor).length
+    assert evidence.fetch(:source_anchor).all? { |value| value.is_a?(Numeric) }
+    assert_in_delta 31.0 * Math::PI / 180.0,
+                    evidence.fetch(:source_rotation_radians), 1.0e-9
+    assert_operator evidence.fetch(:expected_width), :>, 0.0
+    assert_operator evidence.fetch(:expected_height), :>, 0.0
+  end
+
+  def test_native_label_expected_dimensions_use_the_configured_import_scale
+    source = item('SCALED LABEL', 0.0, 24.0, 10.0)
+    b = GB.new(nil, [], [], [0, 0, 612, 792],
+               import_text: true,
+               requested_text_mode: :labels,
+               scale_factor: 2.5,
+               provenance_bucket: [],
+               page_number: 1)
+    entities = FidelityEntities.new
+
+    assert b.send(
+      :place_annotation_label, entities, source, 0.0, 0.0, nil, :labels
+    )
+
+    expected = b.text_attempts.fetch(0).fetch(:expected_evidence)
+    assert_in_delta 24.0 * 2.5 / 72.0,
+                    expected.fetch(:expected_width), 1.0e-9
+    assert_in_delta 10.0 * 2.5 / 72.0,
+                    expected.fetch(:expected_height), 1.0e-9
+    label_x, label_y, = b.send(:label_insertion_pdf, source)
+    expected_anchor = IMP::RepresentationFidelity.numeric_point(
+      b.send(:text_point_to_su, source, label_x, label_y, 0.0, 0.0)
+    )
+    assert_equal expected_anchor, expected.fetch(:source_anchor)
+    assert_equal 0.0, expected.fetch(:source_rotation_radians)
   end
 
   def test_label_wrong_visual_or_entity_evidence_is_cleaned_and_never_certified
@@ -1081,6 +1508,7 @@ class RepresentationFidelityContractTest < Minitest::Test
 
   def test_runtime_ladders_are_finite_closest_to_farthest_and_end_in_real_raster
     expected = {
+      text: [:text, :labels, :text3d, :glyphs, :geometry, :raster],
       labels: [:labels, :text3d, :glyphs, :geometry, :raster],
       text3d: [:text3d, :glyphs, :geometry, :raster],
       glyphs: [:glyphs, :geometry, :raster],
@@ -1121,6 +1549,9 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_match(/verified_raster_entity!/, body)
     assert_match(/page_rotation/, body)
     assert_match(/artifact_evidence/, body)
+    assert_match(/delivery_basis\s*=>\s*:explicit_full_page_raster/, body)
+    assert_match(/semantic_text_evaluated\s*=>\s*false/, body)
+    refute_match(/no_semantic_text\s*=>\s*true/, body)
     refute_match(/page_num\s*=\s*1|pages\.first/, body)
   end
 
@@ -1237,6 +1668,248 @@ class RepresentationFidelityContractTest < Minitest::Test
     File.open(path, 'wb') { |file| file.write(bytes) }
   end
 
+  def png_chunk(type, data)
+    payload = type.to_s.b + data.to_s.b
+    [data.bytesize].pack('N') + payload + [Zlib.crc32(payload)].pack('N')
+  end
+
+  def write_rgba_png(path, width, height, pixels)
+    rows = (0...height).map do |y|
+      "\x00".b + pixels.slice(y * width, width).flatten.pack('C*')
+    end.join
+    bytes = "\x89PNG\r\n\x1a\n".b
+    bytes << png_chunk('IHDR', [width, height, 8, 6, 0, 0, 0].pack('N2C5'))
+    bytes << png_chunk('IDAT', Zlib::Deflate.deflate(rows))
+    bytes << png_chunk('IEND', ''.b)
+    File.open(path, 'wb') { |file| file.write(bytes) }
+  end
+
+  def test_rgba_page_crop_preserves_visible_pixels_and_transparent_background
+    page = File.join(Dir.tmpdir, "bc_rgba_page_#{Process.pid}.png")
+    crop = File.join(Dir.tmpdir, "bc_rgba_crop_#{Process.pid}.png")
+    raw = File.join(Dir.tmpdir, "bc_rgba_page_#{Process.pid}.rgba")
+    crop_raw = File.join(Dir.tmpdir, "bc_rgba_crop_#{Process.pid}.rgba")
+    transparent = [255, 255, 255, 0]
+    pixels = Array.new(12) { transparent.dup }
+    pixels[5] = [10, 20, 30, 255]
+    write_rgba_png(page, 4, 3, pixels)
+
+    prepared = IMP::PngCropper.prepare_rgba!(page, raw)
+    proof = IMP::PngCropper.crop_rgba!(
+      prepared, [1, 1, 2, 1], crop
+    )
+    cropped = IMP::PngCropper.prepare_rgba!(crop, crop_raw)
+
+    assert_equal [2, 1], [proof[:pixel_width], proof[:pixel_height]]
+    assert_equal true, proof[:alpha_channel_verified]
+    assert_equal true, proof[:transparent_background_verified]
+    assert_equal true, proof[:visible_pixel_verified]
+    assert_equal [2, 1], [cropped[:pixel_width], cropped[:pixel_height]]
+    assert_equal true, cropped[:transparent_pixel_present]
+  ensure
+    [page, crop, raw, crop_raw].each do |path|
+      File.delete(path) if path && File.exist?(path)
+    end
+  end
+
+  def test_rgba_item_crop_rejects_fully_transparent_delivery
+    page = File.join(Dir.tmpdir, "bc_rgba_empty_#{Process.pid}.png")
+    crop = File.join(Dir.tmpdir, "bc_rgba_empty_crop_#{Process.pid}.png")
+    raw = File.join(Dir.tmpdir, "bc_rgba_empty_#{Process.pid}.rgba")
+    write_rgba_png(page, 2, 2, Array.new(4) { [255, 255, 255, 0] })
+    prepared = IMP::PngCropper.prepare_rgba!(page, raw)
+
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP::PngCropper.crop_rgba!(prepared, [0, 0, 2, 2], crop)
+    end
+    refute File.exist?(crop)
+  ensure
+    [page, crop, raw].each do |path|
+      File.delete(path) if path && File.exist?(path)
+    end
+  end
+
+  def test_rgba_item_crop_accepts_visible_fully_opaque_source_ink
+    page = File.join(Dir.tmpdir, "bc_rgba_opaque_#{Process.pid}.png")
+    crop = File.join(Dir.tmpdir, "bc_rgba_opaque_crop_#{Process.pid}.png")
+    raw = File.join(Dir.tmpdir, "bc_rgba_opaque_#{Process.pid}.rgba")
+    crop_raw = File.join(Dir.tmpdir, "bc_rgba_opaque_crop_#{Process.pid}.rgba")
+    write_rgba_png(page, 2, 2, Array.new(4) { [10, 20, 30, 255] })
+    prepared = IMP::PngCropper.prepare_rgba!(page, raw)
+
+    proof = IMP::PngCropper.crop_rgba!(prepared, [0, 0, 2, 2], crop)
+    cropped = IMP::PngCropper.prepare_rgba!(crop, crop_raw)
+
+    assert_equal true, proof[:alpha_channel_verified]
+    assert_equal true, proof[:transparent_background_verified]
+    assert_equal false, proof[:transparent_pixel_present]
+    assert_equal true, proof[:visible_pixel_verified]
+    assert_equal false, cropped[:transparent_pixel_present]
+    assert_equal true, cropped[:visible_pixel_present]
+  ensure
+    [page, crop, raw, crop_raw].each do |path|
+      File.delete(path) if path && File.exist?(path)
+    end
+  end
+
+  def test_item_raster_page_cache_fetches_each_exact_page_key_once
+    opts = {}
+    calls = 0
+    first = IMP.fetch_item_raster_page_cache!(opts, 'source:1:400') do
+      calls += 1
+      { :sentinel => Object.new }
+    end
+    second = IMP.fetch_item_raster_page_cache!(opts, 'source:1:400') do
+      calls += 1
+      { :sentinel => Object.new }
+    end
+
+    assert_same first, second
+    assert_equal 1, calls
+  end
+
+  def test_every_text_import_initializes_one_persistent_page_raster_cache
+    [:text, :labels, :text3d, :glyphs, :geometry, :raster].each do |_mode|
+      opts = {}
+      IMP.initialize_item_raster_import_cache!(opts, true)
+
+      assert_kind_of Hash, opts[:item_raster_page_cache]
+      assert_kind_of Hash, opts[:source_pdf_digest_cache]
+      assert_equal true, opts[:item_raster_cache_persistent]
+    end
+
+    disabled = {}
+    IMP.initialize_item_raster_import_cache!(disabled, false)
+    refute disabled.key?(:item_raster_page_cache)
+    refute disabled.key?(:source_pdf_digest_cache)
+    refute disabled.key?(:item_raster_cache_persistent)
+
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+      :encoding => 'UTF-8'
+    )
+    assert_includes main,
+                    'initialize_item_raster_import_cache!(opts, opts[:import_text])'
+  end
+
+  def test_item_raster_uses_explicit_import_scope_not_mutable_cache_presence
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+      :encoding => 'UTF-8'
+    )
+    body = main[/def self\.import_item_as_raster\b.*?(?=^    def self\.)/m]
+
+    refute_nil body
+    assert_includes body, 'opts[:item_raster_cache_persistent] != true'
+    refute_includes body, '!opts[:item_raster_page_cache].is_a?(Hash)'
+  end
+
+  def test_item_raster_source_digest_freezes_and_rejects_source_rebinding
+    pdf = File.join(Dir.tmpdir, "bc_digest_cache_#{Process.pid}.pdf")
+    File.binwrite(pdf, "%PDF-1.4\nsource-a\n%%EOF\n")
+    calls = 0
+    original = Digest::SHA256.method(:file)
+    Digest::SHA256.define_singleton_method(:file) do |path|
+      calls += 1
+      original.call(path)
+    end
+    opts = {}
+
+    first = IMP.cached_source_pdf_sha256!(opts, pdf)
+    second = IMP.cached_source_pdf_sha256!(opts, pdf)
+    assert_equal first, second
+    assert_equal 1, calls
+
+    original_time = File.mtime(pdf)
+    File.binwrite(pdf, "%PDF-1.4\nsource-b\n%%EOF\n")
+    File.utime(original_time, original_time, pdf)
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.verify_cached_source_pdf_bindings!(opts)
+    end
+  ensure
+    Digest::SHA256.define_singleton_method(:file, original) if original
+    File.delete(pdf) if pdf && File.exist?(pdf)
+  end
+
+  def test_render_binding_rejects_source_mutation_during_command_window
+    pdf = File.join(Dir.tmpdir, "bc_render_binding_#{Process.pid}.pdf")
+    File.binwrite(pdf, "%PDF-1.4\nsource-a\n%%EOF\n")
+    opts = {}
+    binding = IMP.begin_source_pdf_render_binding!(opts, pdf)
+    original_time = File.mtime(pdf)
+
+    File.binwrite(pdf, "%PDF-1.4\nsource-b\n%%EOF\n")
+    File.utime(original_time, original_time, pdf)
+
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.verify_source_pdf_render_binding!(binding)
+    end
+  ensure
+    File.delete(pdf) if pdf && File.exist?(pdf)
+  end
+
+  def test_full_page_raster_production_binding_decodes_visual_pixels
+    png = File.join(Dir.tmpdir, "bc_raster_pixels_#{Process.pid}.png")
+    pdf = File.join(Dir.tmpdir, "bc_raster_pixels_#{Process.pid}.pdf")
+    pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+    write_rgba_png(png, 2, 1, pixels)
+    File.binwrite(pdf, "%PDF-1.4\nsource\n%%EOF\n")
+    opts = {}
+    binding = IMP.begin_source_pdf_render_binding!(opts, pdf)
+    IMP.verify_source_pdf_render_binding!(binding)
+    arguments = [
+      'pdftocairo', '-png', '-singlefile', '-r', '300',
+      '-f', '1', '-l', '1', pdf, png.sub(/\.png\z/, '')
+    ]
+
+    proof = IMP.verify_raster_artifact!(
+      png, 1, [0, 0, 2, 1], [0, 0, 2, 1], 0, arguments,
+      pdf, binding
+    )
+
+    assert_equal Digest::SHA256.hexdigest(pixels.flatten.pack('C*')),
+                 proof[:visual_pixel_sha256]
+    assert_equal true, proof[:visual_pixel_binding_verified]
+  ensure
+    File.delete(png) if png && File.exist?(png)
+    File.delete(pdf) if pdf && File.exist?(pdf)
+  end
+
+  def test_owned_temp_cleanup_failure_is_authoritative
+    directory = Dir.mktmpdir('bc_cleanup_failure_')
+    original = FileUtils.method(:remove_entry)
+    FileUtils.define_singleton_method(:remove_entry) do |path, *args|
+      if File.expand_path(path.to_s) == File.expand_path(directory)
+        raise IOError, 'forced cleanup refusal'
+      end
+      original.call(path, *args)
+    end
+
+    error = assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.cleanup_owned_temp_artifacts!([], [directory])
+    end
+    assert_match(/cleanup failed|forced cleanup refusal/i, error.message)
+    assert File.directory?(directory)
+  ensure
+    FileUtils.define_singleton_method(:remove_entry, original) if original
+    FileUtils.remove_entry(directory) if directory && File.directory?(directory)
+  end
+
+  def test_every_import_commit_cleans_raster_cache_and_rebinds_source_first
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+      :encoding => 'UTF-8'
+    )
+    guarded_commits = main.scan(
+      /cleanup_item_raster_page_cache!\(opts\)\s+
+       verify_cached_source_pdf_bindings!\(opts\)\s+
+       model\.commit_operation/x
+    )
+
+    assert_equal 2, guarded_commits.length,
+                 'both import transactions must clean/rebind before commit'
+  end
+
   def test_raster_artifact_verifier_binds_png_page_box_aspect_and_rotation
     path = File.join(Dir.tmpdir, "bc_raster_contract_#{Process.pid}.png")
     pdf_path = File.join(Dir.tmpdir, "bc_raster_contract_#{Process.pid}.pdf")
@@ -1322,6 +1995,8 @@ class RepresentationFidelityContractTest < Minitest::Test
 
   def test_item_raster_artifact_verifier_binds_source_crop_and_page
     path = File.join(Dir.tmpdir, "bc_item_raster_#{Process.pid}.png")
+    pdf_path = File.join(Dir.tmpdir, "bc_item_raster_#{Process.pid}.pdf")
+    File.binwrite(pdf_path, "%PDF-1.4\n%%EOF\n")
     item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
       'AB', 100, 200, 12, 0, 'F1', 12,
       100, 200, 160, 220, nil, 'text_span:1:0'
@@ -1329,27 +2004,53 @@ class RepresentationFidelityContractTest < Minitest::Test
     crop = IMP.item_raster_crop_geometry(
       item, [0, 0, 792, 612], 90, 144, 1.5
     )
-    write_png_header(path, 46, 126)
+    pixels = Array.new(46 * 126) { [255, 255, 255, 0] }
+    pixels[47] = [0, 0, 0, 255]
+    write_rgba_png(path, 46, 126, pixels)
     args = [
-      'pdftocairo', '-png', '-singlefile', '-r', '144',
-      '-x', '397', '-y', '197', '-W', '46', '-H', '126',
-      '-f', '1', '-l', '1', 'fixture.pdf', path.sub(/\.png\z/, '')
+      'pdftocairo', '-png', '-transp', '-singlefile', '-r', '144',
+      '-f', '1', '-l', '1', pdf_path, path.sub(/\.png\z/, '')
     ]
+    crop_proof = {
+      :alpha_channel_verified => true,
+      :transparent_background_verified => true,
+      :visible_pixel_verified => true,
+      :page_render_once_verified => true,
+      :page_render_content_sha256 => 'c' * 64,
+      :visual_pixel_sha256 => 'd' * 64
+    }
     proof = IMP.verify_item_raster_artifact!(
-      path, item, 1, crop, args
+      path, item, 1, crop, args, pdf_path, crop_proof,
+      Digest::SHA256.file(pdf_path).hexdigest
     )
     assert_equal 'text_span:1:0', proof[:source_span_id]
     assert_equal true, proof[:source_crop_binding_verified]
     assert_equal true, proof[:page_binding_verified]
     assert_equal [397, 197, 46, 126], proof[:pixel_crop]
+    assert_equal true, proof[:alpha_channel_verified]
+    assert_equal true, proof[:transparent_background_verified]
+    assert_equal true, proof[:page_render_once_verified]
+    assert_equal 'd' * 64, proof[:visual_pixel_sha256]
+    assert_equal true, proof[:visual_pixel_binding_verified]
 
     bad = args.dup
-    bad[bad.index('-W') + 1] = '47'
+    bad.delete('-transp')
     assert_raises(IMP::RepresentationFidelity::ContractError) do
-      IMP.verify_item_raster_artifact!(path, item, 1, crop, bad)
+      IMP.verify_item_raster_artifact!(
+        path, item, 1, crop, bad, pdf_path, crop_proof,
+        Digest::SHA256.file(pdf_path).hexdigest
+      )
+    end
+    invisible = crop_proof.merge(:visible_pixel_verified => false)
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.verify_item_raster_artifact!(
+        path, item, 1, crop, args, pdf_path, invisible,
+        Digest::SHA256.file(pdf_path).hexdigest
+      )
     end
   ensure
     File.delete(path) if path && File.exist?(path)
+    File.delete(pdf_path) if pdf_path && File.exist?(pdf_path)
   end
 
   def test_item_raster_renderer_persists_source_claim_representation_identity
@@ -1364,7 +2065,31 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_includes body, "'source_kind', 'text_span'"
     assert_includes body, "'representation', 'raster'"
     assert_includes body,
-                    "'renderer', 'pdftocairo_real_item_raster'"
+                    "'renderer', 'pdftocairo_transparent_page_crop'"
+    assert_includes body, "'raster_alpha_verified'"
+    assert_includes body, "'raster_transparent_background_verified'"
+    assert_includes body, "'raster_visible_pixel_verified'"
+    assert_includes body, "'raster_page_render_once_verified'"
+  end
+
+  def test_active_docs_lock_page_raster_evidence_and_item_cache_contract
+    readme = File.read(File.join(REPO_ROOT, 'README.md'), :encoding => 'UTF-8')
+    host = File.read(
+      File.join(REPO_ROOT, 'HOST_COMPATIBILITY.md'), :encoding => 'UTF-8'
+    )
+    agents = File.read(File.join(REPO_ROOT, 'AGENTS.md'), :encoding => 'UTF-8')
+
+    [readme, host, agents].each do |document|
+      assert_includes document, 'Explicit full-page Raster'
+      assert_includes document, 'semantic text not evaluated'
+      assert_includes document, 'verified zero-canonical-text proof'
+      assert_match(/(?:transparent.*RGBA|RGBA.*transparent)/m, document)
+      assert_includes document, 'alpha < 255'
+      assert_match(/(?:reference.*digest|digest.*reference)/m, document)
+    end
+    assert_includes agents, 'TextureWriter'
+    assert_includes host, 'TextureWriter'
+    assert_includes readme, 'actual SketchUp texture'
   end
 
   def test_terminal_item_raster_must_be_new_owned_and_source_bound
@@ -1374,30 +2099,40 @@ class RepresentationFidelityContractTest < Minitest::Test
       'AB', 10, 20, 12, 0, 'F1', 12,
       9, 19, 20, 30, nil, 'text_span:1:0'
     )
+    pdf_path = File.join(Dir.tmpdir, "bc_owned_item_raster_#{Process.pid}.pdf")
+    File.binwrite(pdf_path, "%PDF-1.4\n%%EOF\n")
+    pdf_sha256 = Digest::SHA256.file(pdf_path).hexdigest
     renderer = lambda do |*_args|
       image = entities.add_test_entity(1.0, 0.5, 'Image')
       {
         entity: image,
         artifact_evidence: {
           source_span_id: 'text_span:1:0', page_number: 1,
+          source_pdf_path: pdf_path, source_pdf_sha256: pdf_sha256,
+          source_pdf_binding_verified: true,
           page_rotation: 0, png_signature_verified: true,
           page_binding_verified: true, source_crop_binding_verified: true,
-          aspect_verified: true
+          aspect_verified: true, alpha_channel_verified: true,
+          transparent_background_verified: true,
+          visible_pixel_verified: true, page_render_once_verified: true,
+          page_render_content_sha256: 'c' * 64
         }
       }
     end
     proof = IMP.stub(:import_item_as_raster, renderer) do
       IMP.verified_item_raster_entity!(
-        model, entities, 'fixture.pdf', 1, item, [0, 0, 100, 100],
+        model, entities, pdf_path, 1, item, [0, 0, 100, 100],
         {}, Time.now, 0.0, 0
       )
     end
     assert_equal 'persistent_id:101', proof[:entity_id]
     assert_equal 'text_span:1:0', proof[:artifact_evidence][:source_span_id]
     assert_equal true, proof[:real_raster_verified]
+  ensure
+    File.delete(pdf_path) if pdf_path && File.exist?(pdf_path)
   end
 
-  def test_failed_terminal_raster_probe_cleans_its_owned_artifact
+  def test_failed_terminal_raster_probe_does_not_claim_an_unreturned_peer
     entities = FidelityEntities.new
     model = Struct.new(:active_entities).new(entities)
     renderer = lambda do |*_args|
@@ -1413,11 +2148,11 @@ class RepresentationFidelityContractTest < Minitest::Test
       end
     end
 
-    assert_empty entities.to_a
-    assert_equal [101], entities.erased.map(&:persistent_id)
+    assert_equal [101], entities.to_a.map(&:persistent_id)
+    assert_empty entities.erased
   end
 
-  def test_terminal_page_raster_rejects_and_cleans_escaped_peer_artifacts
+  def test_terminal_page_raster_rejects_peer_but_cleans_only_returned_image
     entities = FidelityEntities.new
     model = Struct.new(:active_entities).new(entities)
     renderer = lambda do |*_args|
@@ -1441,11 +2176,38 @@ class RepresentationFidelityContractTest < Minitest::Test
         )
       end
     end
-    assert_empty entities.to_a
-    assert_equal [101, 102], entities.erased.map(&:persistent_id).sort
+    assert_equal [101], entities.to_a.map(&:persistent_id)
+    assert_equal [102], entities.erased.map(&:persistent_id)
   end
 
-  def test_terminal_raster_rejects_image_without_verified_png_binding
+  def test_terminal_item_raster_failure_cleans_only_explicit_owned_claim
+    entities = FidelityEntities.new
+    model = Struct.new(:active_entities).new(entities)
+    renderer = lambda do |*_args|
+      peer = entities.add_test_entity(0.5, 0.5, 'Edge')
+      image = entities.add_test_entity(2.0, 3.0, 'Image')
+      {
+        failure: true,
+        error: 'synthetic post-image failure',
+        owned_entities: [image],
+        peer: peer
+      }
+    end
+
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.stub(:import_item_as_raster, renderer) do
+        IMP.verified_item_raster_entity!(
+          model, entities, 'fixture.pdf', 1, item, [0, 0, 144, 216],
+          {}, Time.now, 0.0, 0
+        )
+      end
+    end
+
+    assert_equal [101], entities.to_a.map(&:persistent_id)
+    assert_equal [102], entities.erased.map(&:persistent_id)
+  end
+
+  def test_terminal_raster_does_not_claim_unreturned_unverified_image
     entities = FidelityEntities.new
     model = Struct.new(:active_entities).new(entities)
     renderer = lambda do |*_args|
@@ -1460,11 +2222,12 @@ class RepresentationFidelityContractTest < Minitest::Test
         )
       end
     end
-    assert_empty entities.to_a,
-                 'unverified image must be removed from the owned snapshot'
+    assert_equal [101], entities.to_a.map(&:persistent_id)
+    assert_empty entities.erased,
+                 'an unreturned host artifact is not an importer ownership claim'
   end
 
-  def test_terminal_item_raster_rejects_and_cleans_escaped_peer_artifacts
+  def test_terminal_item_raster_rejects_peer_but_cleans_only_returned_image
     entities = FidelityEntities.new
     model = Struct.new(:active_entities).new(entities)
     source = item('A', 0, 12, 8, 'text_span:1:0')
@@ -1490,8 +2253,8 @@ class RepresentationFidelityContractTest < Minitest::Test
         )
       end
     end
-    assert_empty entities.to_a
-    assert_equal [101, 102], entities.erased.map(&:persistent_id).sort
+    assert_equal [101], entities.to_a.map(&:persistent_id)
+    assert_equal [102], entities.erased.map(&:persistent_id)
   end
 
   def valid_transition_proof(from_mode, to_mode, source_id = 'text_span:1:0')
@@ -1643,7 +2406,8 @@ class RepresentationFidelityContractTest < Minitest::Test
       fallback_transitions: [], terminal_text_delivery_records: [],
       text_attempts: [], text_renderers: [], page_text_sources: {},
       source_provenance_objects: [], raster_delivery_records: [],
-      raster_fallback_used: false, text: 0, edges: 0
+      raster_fallback_used: false, text: 0, edges: 0,
+      normalized_input_sha256: 'a' * 64
     }
     modes = []
     vector = lambda do |_entities, _svg, _media_box, _item, mode, _opts|
@@ -1663,8 +2427,21 @@ class RepresentationFidelityContractTest < Minitest::Test
         artifact_evidence: {
           source_span_id: 'text_span:1:0', page_number: 1,
           source_crop_binding_verified: true,
+          source_pdf_path: 'C:/fixtures/source.pdf',
+          source_pdf_sha256: 'a' * 64,
+          source_pdf_binding_verified: true,
+          content_sha256: 'b' * 64,
+          content_byte_size: 4096,
           png_signature_verified: true, page_binding_verified: true,
-          aspect_verified: true
+          aspect_verified: true,
+          source_box: [20.0, 30.0, 44.0, 40.0],
+          pixel_crop: [100, 200, 300, 120],
+          pixel_width: 300, pixel_height: 120,
+          alpha_channel_verified: true,
+          transparent_background_verified: true,
+          visible_pixel_verified: true,
+          page_render_once_verified: true,
+          page_render_content_sha256: 'c' * 64
         },
         visual_fidelity_verified: true,
         real_raster_verified: true
@@ -1999,6 +2776,24 @@ class RepresentationFidelityContractTest < Minitest::Test
            'extraction is not host delivery and cannot suppress source inspection'
     refute IMP.empty_requested_page_artifacts?([:path], [], [ccitt_asset])
     refute IMP.empty_requested_page_artifacts?([], [:text], [ccitt_asset])
+  end
+
+  def test_requested_raster_requires_page_delivery_for_every_zero_canonical_page
+    assert IMP.requested_zero_canonical_page_raster?(:raster, true, [])
+    assert IMP.requested_zero_canonical_page_raster?('Raster', true, nil)
+    refute IMP.requested_zero_canonical_page_raster?(:raster, true, [:text])
+    refute IMP.requested_zero_canonical_page_raster?(:labels, true, [])
+    refute IMP.requested_zero_canonical_page_raster?(:raster, false, [])
+
+    main = File.read(File.join(
+      SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'
+    ), :encoding => 'UTF-8')
+    assert_match(
+      /empty_requested_page_artifacts\?\(paths, text_items, embedded_assets\)\s*\|\|\s*explicit_zero_canonical_page_raster/,
+      main
+    )
+    assert_match(/delivery_basis\s*=>\s*:verified_zero_canonical_text/, main)
+    assert_match(/semantic_text_evaluated\s*=>\s*true/, main)
   end
 
   def test_empty_page_source_inspection_is_one_exact_source_bound_record

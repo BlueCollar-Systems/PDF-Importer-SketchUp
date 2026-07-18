@@ -110,13 +110,31 @@ class SketchupBatchHostContractTest < Minitest::Test
   end
 
   def test_runner_maps_requested_modes_without_substitution
-    assert_includes source, 'opts[:text_mode] = job[:text_mode]'
     assert_includes source,
-                    'opts[:force_raster] = (job[:text_mode] == :raster)'
+                    'opts[:text_mode] = effective_requested_mode(job)'
     assert_includes source,
-                    'opts[:import_text] = (job[:text_mode] != :raster)'
+                    "full_page_raster = (job[:import_mode].to_s == 'raster')"
     assert_includes source,
-                    "'requested_text_mode' => job[:text_mode].to_s"
+                    'opts[:force_raster] = full_page_raster'
+    assert_includes source,
+                    'opts[:import_text] = !full_page_raster'
+    assert_includes source, 'requested_mode = effective_requested_mode(job)'
+    assert_includes source,
+                    "'requested_text_mode' => requested_mode.to_s"
+  end
+
+  def test_full_page_raster_job_uses_raster_as_effective_evidence_mode
+    load_runner_library
+    session = SketchupBatchImport::RealHostSession.new
+
+    assert_equal :raster, session.send(
+      :effective_requested_mode,
+      :import_mode => 'raster', :text_mode => :text3d
+    )
+    assert_equal :text3d, session.send(
+      :effective_requested_mode,
+      :import_mode => 'vector', :text_mode => :text3d
+    )
   end
 
   def test_real_session_uses_public_import_config_mode_factory

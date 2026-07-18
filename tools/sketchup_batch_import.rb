@@ -15,6 +15,7 @@ module SketchupBatchImport
     end
 
     def perform(job, binding)
+      requested_mode = effective_requested_mode(job)
       SketchupBatchImport.write_progress!(job, binding, 'host_initializing')
       require_batch_environment!
       host_identity = require_su2017_ruby_identity!
@@ -73,7 +74,7 @@ module SketchupBatchImport
       raise 'no recursively owned imported host entities found' if
         owned_manifest.empty?
       SketchupHostEvidence.verify_delivery_evidence!(
-        stats, owned_manifest, job[:text_mode], job[:pages]
+        stats, owned_manifest, requested_mode, job[:pages]
       )
 
       import_session_id = stats[:import_session_id].to_s.strip
@@ -95,7 +96,7 @@ module SketchupBatchImport
         report_source,
         report_copy,
         :pdf_path => job[:pdf_path],
-        :requested_mode => job[:text_mode],
+        :requested_mode => requested_mode,
         :schema => importer::QAReport::SCHEMA,
         :worktree_version => worktree_version,
         :loaded_version => loaded_version,
@@ -110,7 +111,7 @@ module SketchupBatchImport
 
       manifest_path = File.join(job[:output_dir], 'entity_manifest.json')
       manifest_payload = binding.merge(
-        'requested_text_mode' => job[:text_mode].to_s,
+        'requested_text_mode' => requested_mode.to_s,
         'source_pdf_path' => job[:pdf_path],
         'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
         'source_lineage' => source_lineage,
@@ -151,7 +152,7 @@ module SketchupBatchImport
         'report_schema' => importer::QAReport::SCHEMA,
         'host_version' => Sketchup.version.to_s,
         'ruby_gate_identity' => host_identity,
-        'requested_text_mode' => job[:text_mode].to_s,
+        'requested_text_mode' => requested_mode.to_s,
         'source_pdf_path' => job[:pdf_path],
         'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
         'original_pdf_path' => job[:original_pdf_path],
@@ -306,15 +307,24 @@ module SketchupBatchImport
       }
     end
 
+    def effective_requested_mode(job)
+      return :raster if job[:import_mode].to_s == 'raster'
+      job[:text_mode]
+    end
+
     def import_options(importer, job)
       mode_name = job[:import_mode].to_s.capitalize
       opts = importer::ImportConfig.from_mode(mode_name).to_opts
       opts[:pages] = job[:pages]
       opts[:import_mode] = job[:import_mode]
-      opts[:text_mode] = job[:text_mode]
-      opts[:force_raster] = (job[:text_mode] == :raster)
-      opts[:import_text] = (job[:text_mode] != :raster)
-      opts[:use_3d_text] = (job[:text_mode] == :text3d)
+      # text_mode Raster is an item representation: canonical text spans are
+      # extracted and cropped independently. Only import_mode=raster requests
+      # the separate full-page Raster pipeline.
+      full_page_raster = (job[:import_mode].to_s == 'raster')
+      opts[:text_mode] = effective_requested_mode(job)
+      opts[:force_raster] = full_page_raster
+      opts[:import_text] = !full_page_raster
+      opts[:use_3d_text] = (opts[:text_mode] == :text3d)
       opts[:group_per_page] = true
       opts[:source_lineage] = {
         :original_pdf_path => job[:original_pdf_path],

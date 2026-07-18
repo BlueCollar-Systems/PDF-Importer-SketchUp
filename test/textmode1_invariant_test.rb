@@ -117,6 +117,7 @@ class TextModeOneInvariantTest < Minitest::Test
     assert_match(/SvgItemRepresentationRenderer\.render_svg/, main)
     assert_match(/build_glyph_groups!/, renderer)
     assert_match(/build_flat_geometry!/, renderer)
-    assert_match(/cleanup_created_since/, renderer)
+    assert_match(/cleanup_claimed_group/, renderer)
+    refute_match(/cleanup_created_since/, renderer)
   end
 end

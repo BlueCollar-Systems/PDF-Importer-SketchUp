@@ -129,34 +129,37 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_equal true, opts[:import_text]
   end
 
-  def test_legacy_text_and_label_aliases_preserve_native_labels_mode
-    %w[Text text Label label].each do |raw|
+  def test_text_and_label_aliases_preserve_distinct_requested_modes
+    { 'Text' => :text, 'text' => :text,
+      'Label' => :labels, 'label' => :labels }.each do |raw, expected|
       opts = BID.send(:build_opts,
                       import_mode: 'auto',
                       import_text: 'Yes',
                       text_mode: raw)
 
-      assert_equal :labels, opts[:text_mode], "expected #{raw} -> Labels"
+      assert_equal expected, opts[:text_mode], "expected #{raw} -> #{expected}"
       assert_equal false, opts[:use_3d_text], raw
       assert_equal true, opts[:import_text], raw
     end
   end
 
-  def test_saving_legacy_text_alias_migrates_to_canonical_labels_preference
+  def test_saving_text_preserves_canonical_text_preference
     BID.send(:save_prefs, text_mode: 'Text')
     prefs = BID.send(:load_prefs)
 
-    assert_equal 'Labels', prefs[:text_mode]
-    assert_equal 'Labels', Sketchup.default_value(PREF_KEY, 'text_mode')
-    assert_equal 'Labels', BID.effective_text_mode(prefs)
+    assert_equal 'Text', prefs[:text_mode]
+    assert_equal 'Text', Sketchup.default_value(PREF_KEY, 'text_mode')
+    assert_equal 'Text', BID.effective_text_mode(prefs)
   end
 
   def test_cli_snake_case_text_mode_aliases_match_pdfcadcore_contract
     {
       '3d_text' => :text3d,
+      'text' => :text,
       'labels' => :labels,
       'glyphs' => :glyphs,
       'geometry' => :geometry,
+      'raster' => :raster,
       'no_text' => :none
     }.each do |raw, expected|
       opts = BID.send(:build_opts,
@@ -186,7 +189,7 @@ class ImportDialogDefaultsTest < Minitest::Test
   end
 
   def test_text_rendering_dropdown_lists_all_modes
-    expected = %w[Geometry Glyphs Labels 3D\ Text]
+    expected = ['Text', 'Labels', '3D Text', 'Glyphs', 'Geometry', 'Raster']
     assert_equal expected, BID::TEXT_MODES.split('|')
 
     d = {
@@ -197,6 +200,9 @@ class ImportDialogDefaultsTest < Minitest::Test
     }
     html = BID.send(:advanced_html, 'sample.pdf', d)
     expected.each { |mode| assert_includes html, ">#{mode}<" }
+
+    basic = BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', 'Text', 'Yes', 'Yes')
+    expected.each { |mode| assert_includes basic, ">#{mode}<" }
   end
 
   def test_basic_html_professional_flow

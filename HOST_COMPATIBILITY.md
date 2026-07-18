@@ -41,14 +41,29 @@ representation.
 
 | Option | SketchUp result |
 |--------|-----------------|
+| **Text** | Distinct flat editable model text when the host exposes a constructor; SketchUp 2017 does not, so an exact item-bound capability proof may advance only to Labels |
+| **Labels** | Editable `Sketchup::Text` when the host can represent the item; nonzero glyph rotation enters the verified closest fallback ladder |
 | **3D Text** | Source-glyph solid text with verified positive Z depth; preserves model-space size and PDF rotation |
 | **Glyphs** | Per-glyph edges; high-fidelity outline path when exact geometry is preferred |
 | **Geometry** | Text as edges only; outline geometry when the user selects that option |
-| **Labels** | Editable `Sketchup::Text` when the host can represent the item; nonzero glyph rotation enters the verified closest fallback ladder |
+| **Raster** | Verified source-bound item crop, or a verified page image for a selected zero-canonical-text page |
+
+Explicit full-page Raster records semantic text not evaluated and never
+masquerades as a no-text finding. A page image selected by the text-rendering
+Raster path requires verified zero-canonical-text proof for the exact PDF bytes
+and page. Item images retain the RGBA provenance of one transparent page render
+per page and contain visible pixels. A crop can validly be fully opaque; absence
+of an `alpha < 255` pixel inside that crop is not a failure. Cropping is streaming
+Ruby 2.2-safe code and adds no paid dependency. The importer caches one reference
+PDF digest, verifies the full bytes immediately before and after each renderer,
+and verifies them again before commit; it never renders or hashes once per item.
+Saved/reopened Raster evidence is physical: SketchUp `TextureWriter` must export
+the actual image, and its decoded visual-pixel digest and dimensions must match.
+Self-authored attributes alone cannot certify the texture.
 
 The dialog defaults to 3D Text on first run and restores the last text rendering option used after that. Labels are an editability tradeoff, not the default visual sign-off mode.
 
-**Mode fidelity:** honor the selected text option first. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. A missing helper, generic exception, empty artifact, or broken implementation cannot authorize fallback. The declared closest order is Labels → 3D Text → Glyphs → Geometry → item Raster; requested Raster directly renders every selected page. Each adjacent rung requires a distinct item renderer and its own type/visual certificate. The current implementation can deliver verified Labels → 3D Text items; when a distinct Glyphs/Geometry item renderer is unavailable, it stops truthfully and does not skip to Raster. Successful peer spans and page geometry remain intact. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
+**Mode fidelity:** honor the selected text option first. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. A missing helper, generic exception, empty artifact, or broken implementation cannot authorize fallback. The exact ladders are Text → Labels → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; and Geometry → item Raster. Raster has no next rung. Requested Raster uses verified item crops when canonical text spans exist and a verified page image for a selected zero-canonical-text page; fallback Raster is item-scoped. Each adjacent rung requires its own renderer and type/visual certificate. Terminal Raster can still fail verification, in which case the exact failure is reported and delivery stops. Successful peer spans and page geometry remain intact. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
 
 Native Labels are certified only after the host reads back a `Text` entity with
 the exact content, all three anchor/direction coordinates, and its leader hidden.

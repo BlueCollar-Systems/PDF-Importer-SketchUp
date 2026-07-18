@@ -86,7 +86,7 @@ Unified CLI flags forwarded to the extension CLI:
   --pages All|1|1-3|1,3,5
   --scale VALUE
   --text-mode MODE
-    labels, 3d_text, glyphs, geometry, or no_text (matches FC/LC/BL CLI)
+    text, labels, 3d_text, glyphs, geometry, raster, or no_text
   --no-text
   --extract-images / --no-extract-images
   --no-primitives-json

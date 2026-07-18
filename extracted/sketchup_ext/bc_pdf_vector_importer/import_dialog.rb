@@ -4,7 +4,7 @@
 #
 # Default UI: professional import (Auto per page internally). Vector/Raster/
 # Hybrid appear only in Advanced. Basic dialog shows:
-#   1. Text rendering selector (Geometry, Glyphs, Labels, 3D Text)
+#   1. Text rendering selector (Text, Labels, 3D Text, Glyphs, Geometry, Raster)
 #   2. Import text Yes/No toggle
 # Plus legitimate workflow controls: pages, scale, grouping, page
 # arrangement. Quality parameters are consolidated to the values in
@@ -56,12 +56,13 @@ module BlueCollarSystems
 
       YES_NO       = 'Yes|No'
       MODE_NAMES   = MODES.keys.join('|')
-      TEXT_MODES   = 'Geometry|Glyphs|Labels|3D Text'
+      TEXT_MODES   = 'Text|Labels|3D Text|Glyphs|Geometry|Raster'
       TEXT_MODE_CHOICES = TEXT_MODES.split('|').freeze
-      # Round 16 (R16-3): native Sketchup::Text labels are editable but glyphs stay
-      # horizontal; 3D Text / Glyphs / Geometry deliver PDF-faithful rotation.
+      # Sketchup::Text is the Labels representation, not the distinct flat Text
+      # representation. Text therefore begins with a host-capability proof and
+      # advances through the finite adjacent fallback ladder when unavailable.
       TEXT_MODE_HINT = '3D Text is the default visual mode: model-space size and rotation match the PDF. ' \
-                       'Use Labels only when editable SketchUp text matters more than PDF-like appearance.'.freeze
+                       'Text and Labels are distinct requests; Raster crops each canonical text item.'.freeze
       FIRST_RUN_TEXT_MODE = '3D Text'.freeze
       FIRST_RUN_MATCH_PDF_LAYERS = 'Yes'.freeze
 
@@ -236,14 +237,9 @@ module BlueCollarSystems
       CSS
 
       def self.basic_html(filename, _mode, pages, scale, text_mode, import_text, match_pdf_layers)
-        text_opts = [
-          ['Geometry', 'Geometry'],
-          ['Glyphs',   'Glyphs'],
-          ['Labels',   'Labels'],
-          ['3D Text',  '3D Text']
-        ].map { |v, label|
+        text_opts = TEXT_MODE_CHOICES.map { |v|
           sel = v == text_mode ? ' selected' : ''
-          "<option value=\"#{v}\"#{sel}>#{label}</option>"
+          "<option value=\"#{v}\"#{sel}>#{v}</option>"
         }.join
 
         itext_yes = import_text == 'Yes' ? ' selected' : ''
@@ -308,7 +304,7 @@ module BlueCollarSystems
           "<option value=\"#{esc(m)}\"#{sel}>#{esc(m)}</option>"
         }.join
 
-        text_opts = [['Geometry','Geometry'],['Glyphs','Glyphs'],['Labels','Labels'],['3D Text','3D Text']].map{|v,lbl|
+          text_opts = [['Text','Text'],['Labels','Labels'],['3D Text','3D Text'],['Glyphs','Glyphs'],['Geometry','Geometry'],['Raster','Raster']].map{|v,lbl|
           sel = d[:text_mode] == v ? ' selected' : ''
           "<option value=\"#{v}\"#{sel}>#{lbl}</option>"
         }.join
@@ -480,25 +476,30 @@ module BlueCollarSystems
           pages = :all if pages.empty?
         end
 
-        # BCS-ARCH-001 text resolver: Geometry|Glyphs|Labels|3D Text.
+        # Requested text representation identities remain distinct end to end.
         # Import Text checkbox is the orthogonal on/off control.
         import_text_flag = (raw[:import_text] || 'Yes') == 'Yes'
         text_mode_raw = (raw[:text_mode] || FIRST_RUN_TEXT_MODE).to_s.strip
         text_mode_key = text_mode_raw.downcase.gsub(/\s+/, '_')
         text_mode = case text_mode_key
                     when 'no_text', 'none'     then :none
+                    when 'text', 'flat_text',
+                         'editable_text'      then :text
                     when 'labels', 'label',
-                         'text'               then :labels
+                         'add_text'           then :labels
                     when '3d_text', 'text3d'  then :text3d
                     when 'glyphs'             then :glyphs
                     when 'geometry'           then :geometry
+                    when 'raster', 'image'    then :raster
                     else
                       case text_mode_raw
                       when /No text/i           then :none
-                      when /\A(?:Labels?|Text)\z/i then :labels
+                      when /\AText\z/i         then :text
+                      when /\ALabels?\z/i      then :labels
                       when /\A3D\s*Text\z/i     then :text3d
                       when /Glyphs/i            then :glyphs
                       when /Geometry/i          then :geometry
+                      when /Raster|Image/i      then :raster
                       else                            :geometry
                       end
                     end
@@ -571,7 +572,8 @@ module BlueCollarSystems
       def self.effective_text_mode(prefs)
         mode = prefs[:text_mode].to_s
         return mode if TEXT_MODE_CHOICES.include?(mode)
-        return 'Labels' if mode =~ /\A(?:Labels?|Text)\z/i
+        return 'Labels' if mode =~ /\ALabel\z/i
+        return 'Text' if mode =~ /\A(?:Flat|Editable)[ _]?Text\z/i
 
         FIRST_RUN_TEXT_MODE
       end

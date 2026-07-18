@@ -100,7 +100,7 @@ module BlueCollarSystems
           o.on('--mode MODE', 'auto, vector, raster, or hybrid') { |v| opts[:mode] = v }
           o.on('--pages SPEC', 'All, 1, 1-3, or 1,3,5') { |v| opts[:pages] = v }
           o.on('--scale VALUE', 'Scale factor') { |v| opts[:scale] = v }
-          o.on('--text-mode MODE', 'labels, 3d_text, glyphs, geometry, no_text (or GUI labels)') { |v| opts[:text_mode] = v }
+        o.on('--text-mode MODE', 'text, labels, 3d_text, glyphs, geometry, raster, or no_text') { |v| opts[:text_mode] = v }
           o.on('--no-text', 'Disable text extraction') { opts[:import_text] = 'No'; opts[:text_mode] = 'No text' }
           o.on('--extract-images', 'Extract embedded Image XObjects') { opts[:extract_images] = true }
           o.on('--no-extract-images', 'Do not extract embedded images') { opts[:extract_images] = false }

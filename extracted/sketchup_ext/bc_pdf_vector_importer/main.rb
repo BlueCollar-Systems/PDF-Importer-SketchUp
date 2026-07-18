@@ -6,6 +6,8 @@
 
 require 'zlib'
 require 'digest'
+require 'tmpdir'
+require 'fileutils'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -18,6 +20,7 @@ module BlueCollarSystems
     require File.join(dir, 'primitives')
     require File.join(dir, 'logger')
     require File.join(dir, 'command_runner')
+    require File.join(dir, 'png_cropper')
     require File.join(dir, 'dependency_resolver')
     require File.join(dir, 'batch_host_policy')
     require File.join(dir, 'pdf_open_gate')
@@ -297,6 +300,94 @@ module BlueCollarSystems
       rung
     end
 
+    def self.prepare_flat_text_fallback_controllers!(text_items)
+      prepared = {}
+      Array(text_items).each do |item|
+        source_id = RepresentationFidelity.source_span_id(item)
+        if prepared.key?(source_id)
+          raise RepresentationFidelity::ContractError,
+                "duplicate flat Text source item #{source_id}"
+        end
+        proof = RepresentationFidelity.
+          flat_editable_text_impossibility_proof(item)
+        controller = RepresentationFidelity::FallbackController.new(
+          :text, source_id
+        )
+        controller.advance!(proof)
+        prepared[source_id] = {
+          :item => item, :proof => proof, :controller => controller
+        }
+      end
+      prepared
+    end
+
+    def self.bind_flat_text_capability_attempt!(attempt, proof)
+      unless attempt.is_a?(Hash) && proof.is_a?(Hash)
+        raise RepresentationFidelity::ContractError,
+              'flat Text attempt/proof binding is unavailable'
+      end
+      source_id = RepresentationFidelity.source_span_id(
+        attempt[:source_span_id]
+      )
+      controller = RepresentationFidelity::FallbackController.new(
+        :text, source_id
+      )
+      controller.advance!(proof)
+      evidence = proof[:evidence]
+      unless RepresentationFidelity.normalize_mode(attempt[:requested_mode]) == :text &&
+             attempt[:source_text_sha256].to_s.downcase ==
+               evidence[:source_text_sha256].to_s.downcase &&
+             RepresentationFidelity.canonical_json(attempt[:source_bbox_pdf]) ==
+               RepresentationFidelity.canonical_json(
+                 evidence[:source_bbox_pdf]
+               )
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: flat Text proof conflicts with source attempt"
+      end
+      history = attempt[:attempt_history]
+      unless history.is_a?(Array)
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: flat Text attempt history is unavailable"
+      end
+      if history.any? do |entry|
+           RepresentationFidelity.normalize_mode(entry[:mode]) == :text
+         end
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: flat Text capability rung is duplicated"
+      end
+      history.unshift(failed_item_rung_from_transition(proof))
+      true
+    end
+
+    def self.bind_flat_text_capability_rows!(attempts, failures, prepared)
+      by_id = {}
+      Array(attempts).each do |attempt|
+        source_id = RepresentationFidelity.source_span_id(
+          attempt[:source_span_id]
+        )
+        row = prepared[source_id]
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: flat Text capability proof is missing" unless row
+        bind_flat_text_capability_attempt!(attempt, row[:proof])
+        by_id[source_id] = attempt
+      end
+      unless by_id.keys.sort == prepared.keys.sort
+        raise RepresentationFidelity::ContractError,
+              'flat Text capability attempt set does not equal source set'
+      end
+      Array(failures).each do |failure|
+        source_id = RepresentationFidelity.source_span_id(
+          failure[:source_span_id]
+        )
+        attempt = by_id[source_id]
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: flat Text failure has no attempt" unless attempt
+        failure[:requested] = :text
+        failure[:attempt_history] = attempt[:attempt_history]
+      end
+      true
+    end
+
     def self.record_item_vector_delivery!(stats, page_num, item,
                                           requested_mode, result, history,
                                           transitions)
@@ -440,7 +531,11 @@ module BlueCollarSystems
              artifact.is_a?(Hash) &&
              artifact[:source_span_id].to_s == source_id &&
              artifact[:page_number].to_i == page_num.to_i &&
-             artifact[:source_crop_binding_verified] == true
+             artifact[:source_crop_binding_verified] == true &&
+             artifact[:page_binding_verified] == true &&
+             artifact[:source_pdf_binding_verified] == true &&
+             artifact[:source_pdf_sha256].to_s.downcase =~ /\A[0-9a-f]{64}\z/ &&
+             artifact[:content_sha256].to_s.downcase =~ /\A[0-9a-f]{64}\z/
         raise RepresentationFidelity::ContractError,
               "#{source_id}: terminal item raster evidence is incomplete"
       end
@@ -457,6 +552,7 @@ module BlueCollarSystems
       }
       history << completed
       requested = RepresentationFidelity.normalize_mode(requested_mode)
+      explicit_request = requested == :raster
       attempt = {
         :source_span_id => source_id,
         :requested_mode => requested,
@@ -466,6 +562,9 @@ module BlueCollarSystems
         :real_raster_verified => true,
         :source_crop_binding_verified => true,
         :entity_type_verified => true,
+        :explicit_request => explicit_request,
+        :degraded => !explicit_request,
+        :artifact_evidence => artifact,
         :attempt_history => history
       }
       record = {
@@ -478,6 +577,8 @@ module BlueCollarSystems
         :real_raster_verified => true,
         :visual_fidelity_verified => true,
         :source_crop_binding_verified => true,
+        :explicit_request => explicit_request,
+        :degraded => !explicit_request,
         :artifact_evidence => artifact,
         :cleanup_outcome => :not_required,
         :delivery_scope => :item_raster
@@ -488,7 +589,7 @@ module BlueCollarSystems
       stats[:terminal_text_delivery_records] << record
       stats[:raster_delivery_records] ||= []
       stats[:raster_delivery_records] << record.dup
-      stats[:raster_fallback_used] = true
+      stats[:raster_fallback_used] = true unless explicit_request
       stats[:text] = stats[:text].to_i + 1
       record_fallback_transitions!(stats, page_num, transitions)
       record_text_renderer(
@@ -497,8 +598,10 @@ module BlueCollarSystems
         :mode => :raster,
         :requested_mode => requested,
         :delivered_mode => :raster,
-        :degraded => requested != :raster,
-        :reason => 'affirmative item-specific vector representation impossibility',
+        :degraded => !explicit_request,
+        :reason => explicit_request ?
+          'explicit requested item Raster' :
+          'affirmative item-specific vector representation impossibility',
         :count => 1,
         :resulting_entity_ids => [entity_id],
         :real_raster_verified => true,
@@ -691,7 +794,8 @@ module BlueCollarSystems
       stats, model, target_entities, pdf_path, page_num, text_items,
       media_box, render_box, page_rotation, opts, import_start, y_offset,
       svg_document, failures, prior_attempts, text_layer,
-      all_page_text_items = nil
+      all_page_text_items = nil, requested_mode = :labels,
+      prepared_controllers = nil
     )
       items_by_id = {}
       Array(text_items).each do |item|
@@ -713,9 +817,16 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError,
                 "#{source_id} Labels failure lacks an item-bound transition proof"
         end
-        controller = RepresentationFidelity::FallbackController.new(
-          :labels, source_id
+        prepared = prepared_controllers.is_a?(Hash) ?
+          prepared_controllers[source_id] : nil
+        controller = prepared.is_a?(Hash) ? prepared[:controller] : nil
+        controller ||= RepresentationFidelity::FallbackController.new(
+          requested_mode, source_id
         )
+        unless controller.current_mode == :labels
+          raise RepresentationFidelity::ContractError,
+                "#{source_id} controller is not at the Labels rung"
+        end
         controller.advance!(proof)
         controllers[source_id] = controller
         failed_items << item
@@ -768,7 +879,8 @@ module BlueCollarSystems
       end
       unless delivered_items.empty?
         record_svg_3d_text_delivery!(
-          stats, page_num, delivered_items, result, :labels, attempts_by_id,
+          stats, page_num, delivered_items, result, requested_mode,
+          attempts_by_id,
           page_rotation
         )
         stats[:text] = stats[:text].to_i + rows.length
@@ -799,7 +911,8 @@ module BlueCollarSystems
         append_failed_item_rung!(history, controller.transitions.first)
         append_failed_item_rung!(history, text3d_proof)
         complete_item_representation_ladder!(
-          stats, model, target_entities, pdf_path, page_num, item, :labels,
+          stats, model, target_entities, pdf_path, page_num, item,
+          requested_mode,
           controller, history, media_box, render_box, page_rotation, opts,
           import_start, y_offset, svg_document, text_layer,
           Array(all_page_text_items || text_items).reject do |peer|
@@ -815,6 +928,7 @@ module BlueCollarSystems
                                      page_rotation = 0)
       parent = nil
       before = nil
+      delivery = nil
       parent = model.active_entities
       before = RepresentationFidelity.snapshot(parent)
       delivery = import_page_as_raster(
@@ -878,7 +992,9 @@ module BlueCollarSystems
       if parent && before
         begin
           current = RepresentationFidelity.snapshot(parent)
-          owned = RepresentationFidelity.created_between(before, current)
+          owned = RepresentationFidelity.claimed_created_entities!(
+            before, current, raster_delivery_owned_claims(delivery)
+          )
           RepresentationFidelity.erase_owned!(parent, owned) unless owned.empty?
         rescue StandardError => cleanup_error
           raise RepresentationFidelity::ContractError,
@@ -896,6 +1012,7 @@ module BlueCollarSystems
                                           import_start, y_offset,
                                           page_rotation = 0)
       parent = target_entities
+      delivery = nil
       before = RepresentationFidelity.snapshot(parent)
       delivery = import_item_as_raster(
         model, parent, pdf_path, page_num, item, media_box, opts,
@@ -911,11 +1028,19 @@ module BlueCollarSystems
       source_id = RepresentationFidelity.source_span_id(item)
       required = [
         :png_signature_verified, :page_binding_verified,
-        :source_crop_binding_verified, :aspect_verified
+        :source_crop_binding_verified, :source_pdf_binding_verified,
+        :aspect_verified, :alpha_channel_verified,
+        :transparent_background_verified, :visible_pixel_verified,
+        :page_render_once_verified
       ]
+      source_sha256 = cached_source_pdf_sha256!(opts, pdf_path)
       unless required.all? { |key| artifact[key] == true } &&
              artifact[:source_span_id].to_s == source_id &&
-             artifact[:page_number].to_i == page_num.to_i &&
+              artifact[:page_number].to_i == page_num.to_i &&
+              artifact[:source_pdf_sha256].to_s.downcase ==
+                source_sha256 &&
+             File.expand_path(artifact[:source_pdf_path].to_s).downcase ==
+               File.expand_path(pdf_path.to_s).downcase &&
              artifact[:page_rotation].to_i ==
                PageTransform.normalize_rotation(page_rotation)
         raise RepresentationFidelity::ContractError,
@@ -953,7 +1078,9 @@ module BlueCollarSystems
       if parent && before
         begin
           current = RepresentationFidelity.snapshot(parent)
-          owned = RepresentationFidelity.created_between(before, current)
+          owned = RepresentationFidelity.claimed_created_entities!(
+            before, current, raster_delivery_owned_claims(delivery)
+          )
           RepresentationFidelity.erase_owned!(parent, owned) unless owned.empty?
         rescue StandardError => cleanup_error
           raise RepresentationFidelity::ContractError,
@@ -964,6 +1091,11 @@ module BlueCollarSystems
       raise e if e.is_a?(RepresentationFidelity::ContractError)
       raise RepresentationFidelity::ContractError,
             "terminal item raster verification failed: #{e.message}"
+    end
+
+    def self.raster_delivery_owned_claims(delivery)
+      return [] unless delivery.is_a?(Hash)
+      Array(delivery[:owned_entities]) + Array(delivery[:entity])
     end
 
     # Classify renderer-visible source material on a page whose semantic/path
@@ -1031,6 +1163,12 @@ module BlueCollarSystems
       Array(paths).empty? && Array(text_items).empty?
     end
 
+    def self.requested_zero_canonical_page_raster?(requested_mode,
+                                                   import_text, text_items)
+      normalize_text_renderer_mode(requested_mode) == :raster &&
+        import_text == true && Array(text_items).empty?
+    end
+
     def self.record_empty_page_source_inspection!(stats, page_num, details = {})
       unless stats.is_a?(Hash)
         raise RepresentationFidelity::ContractError,
@@ -1074,6 +1212,66 @@ module BlueCollarSystems
       row[:immutable_pdf_sha256] = immutable_sha
       row[:rendered_pdf_sha256] = rendered_sha
       row
+    end
+
+    def self.canonical_terminal_text_bbox(value, label)
+      return nil if value.nil?
+      unless value.is_a?(Array) && value.length == 4
+        raise RepresentationFidelity::ContractError,
+              "#{label} source bbox is missing or malformed"
+      end
+      value.map do |raw|
+        number = Float(raw)
+        unless number.finite?
+          raise RepresentationFidelity::ContractError,
+                "#{label} source bbox is non-finite"
+        end
+        RepresentationFidelity.canonical_number(number)
+      end
+    rescue RepresentationFidelity::ContractError
+      raise
+    rescue StandardError => e
+      raise RepresentationFidelity::ContractError,
+            "#{label} source bbox is unreadable: #{e.message}"
+    end
+
+    def self.terminal_text_attempt_source_bbox!(item, prior_attempt,
+                                                requested_mode,
+                                                expected_evidence)
+      requested = RepresentationFidelity.normalize_mode(requested_mode)
+      source_bbox = begin
+        RepresentationFidelity.strict_source_bbox_pdf(item)
+      rescue RepresentationFidelity::ContractError
+        raise if requested == :text
+        nil
+      end
+      prior_bbox = if prior_attempt.is_a?(Hash)
+                     RepresentationFidelity.contract_hash_value(
+                       prior_attempt, :source_bbox_pdf
+                     )
+                   end
+      evidence_bbox = if expected_evidence.is_a?(Hash)
+                        RepresentationFidelity.contract_hash_value(
+                          expected_evidence, :source_bbox_pdf
+                        )
+                      end
+      prior_bbox = canonical_terminal_text_bbox(prior_bbox, 'prior attempt')
+      evidence_bbox = canonical_terminal_text_bbox(
+        evidence_bbox, 'terminal 3D Text evidence'
+      )
+
+      if requested == :text && (!prior_attempt.is_a?(Hash) ||
+                                prior_bbox.nil? || evidence_bbox.nil?)
+        raise RepresentationFidelity::ContractError,
+              'Text fallback terminal record is missing its exact source bbox'
+      end
+
+      candidates = [source_bbox, prior_bbox, evidence_bbox].compact
+      unless candidates.empty? || candidates.all? { |bbox| bbox == candidates[0] }
+        raise RepresentationFidelity::ContractError,
+              'terminal 3D Text source bbox conflicts with its prior attempt'
+      end
+      candidates.first
     end
 
     def self.record_svg_3d_text_delivery!(stats, page_num, text_items,
@@ -1121,6 +1319,9 @@ module BlueCollarSystems
                 "#{row[:source_span_id]} is flat, not 3D text"
         end
         prior = prior_attempts[row[:source_span_id].to_s]
+        source_bbox = terminal_text_attempt_source_bbox!(
+          item, prior, requested_mode, row[:expected_evidence]
+        )
         history = prior.is_a?(Hash) ?
           Array(prior[:attempt_history]).map { |entry| entry.dup } : []
         history << {
@@ -1163,6 +1364,7 @@ module BlueCollarSystems
           :physical_style_verified => true,
           :transform_verified => true,
           :source_text_sha256 => row[:expected_evidence][:source_text_sha256],
+          :source_bbox_pdf => source_bbox,
           :source_anchor => row[:expected_evidence][:source_anchor],
           :source_rotation_radians =>
             row[:expected_evidence][:source_rotation_radians],
@@ -1633,8 +1835,9 @@ module BlueCollarSystems
 
     def self.normalize_text_renderer_mode(mode)
       case mode.to_s.strip.downcase
+      when 'text', 'flat_text', 'editable_text' then :text
       when 'text3d', '3d_text', '3d text', 'add_3d_text' then :text3d
-      when 'labels', 'label', 'text', 'add_text' then :labels
+      when 'labels', 'label', 'add_text' then :labels
       when 'glyphs', 'glyph' then :glyphs
       when 'geometry', 'outlines', 'outline' then :geometry
       when 'raster', 'image' then :raster
@@ -2531,7 +2734,11 @@ module BlueCollarSystems
           :artifact_evidence => artifact_evidence,
           :cleanup_outcome => :not_required,
           :delivery_scope => :page_raster,
-          :no_semantic_text => true
+          :delivery_basis => :explicit_full_page_raster,
+          :full_page_raster_request => true,
+          :semantic_text_evaluated => false,
+          :explicit_request => true,
+          :degraded => false
         }
         stats[:terminal_text_delivery_records] << record
         stats[:raster_delivery_records] << record.dup
@@ -2561,6 +2768,11 @@ module BlueCollarSystems
         stats[:pages] += 1
       end
 
+      # Raster page caches are importer-owned evidence artifacts.  They must be
+      # gone before the model transaction becomes durable; an ensure-only
+      # cleanup would report a failure after commit, when rollback is too late.
+      cleanup_item_raster_page_cache!(opts)
+      verify_cached_source_pdf_bindings!(opts)
       model.commit_operation
       operation_open = false
       stats[:elapsed_seconds] = (Time.now - import_start).round(1)
@@ -2671,6 +2883,7 @@ module BlueCollarSystems
       requested_text_mode = opts[:text_mode]
       requested_text_mode ||= (opts[:use_3d_text] ? :text3d : (opts[:import_text] ? :geometry : :none))
       requested_text_mode = :none unless opts[:import_text]
+      initialize_item_raster_import_cache!(opts, opts[:import_text])
 
       stats = { pages: 0, primitives: 0, edges: 0, faces: 0, arcs: 0,
                 text: 0, components: 0, layers: [], cleanup: {},
@@ -2738,6 +2951,7 @@ module BlueCollarSystems
           "text_offset_pts=(#{text_offset_x.round(3)},#{text_offset_y.round(3)})")
         stack_box = svg_page_box
         source_svg_document = nil
+        flat_text_fallbacks = {}
         curr_page_height_in = PageTransform.effective_height(stack_box, page_rotation) * (1.0 / 72.0) * opts[:scale].to_f
         curr_page_height_in = 11.0 * opts[:scale].to_f if curr_page_height_in <= 0.0
         page_y_offset = running_y_offset
@@ -2893,6 +3107,11 @@ module BlueCollarSystems
           end
         end
 
+        if requested_text_mode == :text && !Array(text_items).empty?
+          flat_text_fallbacks =
+            prepare_flat_text_fallback_controllers!(text_items)
+        end
+
         if opts[:import_text] && Array(text_items).empty?
           referenced_form_streams = xobj.form_xobjects.values.select do |form|
             form.respond_to?(:usage_count) && form.usage_count.to_i > 0
@@ -2918,7 +3137,12 @@ module BlueCollarSystems
           enforce_svg_renderer_available!(model, stats, requested_text_mode)
         end
 
-        if empty_requested_page_artifacts?(paths, text_items, embedded_assets)
+        explicit_zero_canonical_page_raster =
+          requested_zero_canonical_page_raster?(
+            requested_text_mode, opts[:import_text], text_items
+          )
+        if empty_requested_page_artifacts?(paths, text_items, embedded_assets) ||
+           explicit_zero_canonical_page_raster
           if svg_renderer_required_for_page?(
             requested_text_mode, opts[:import_text], text_items, true
           )
@@ -2933,18 +3157,28 @@ module BlueCollarSystems
             :failure_info => svg_failure,
             :use_cropbox => use_cropbox == true
           )
-          unless source_svg_document &&
-                 source_svg_document[:svg].to_s.length > 0
+          if source_svg_document &&
+             source_svg_document[:svg].to_s.length > 0
+            source_summary = svg_page_source_summary(
+              source_svg_document[:svg], media_box,
+              :svg_page_box => svg_page_box
+            )
+          elsif explicit_zero_canonical_page_raster
+            reason = svg_failure[:reason].to_s
+            reason = 'source_svg_inspection_failed' if reason.empty?
+            source_summary = {
+              :source_glyph_placements => 0,
+              :visible_nontext_source =>
+                (!Array(paths).empty? || !Array(embedded_assets).empty?),
+              :inspection_error => reason
+            }
+          else
             reason = svg_failure[:reason].to_s
             reason = 'source_svg_inspection_failed' if reason.empty?
             raise RepresentationFidelity::ContractError,
                   "Page #{page_num}: no requested-representation artifacts " \
                   "were certified and source inspection failed: #{reason}"
           end
-          source_summary = svg_page_source_summary(
-            source_svg_document[:svg], media_box,
-            :svg_page_box => svg_page_box
-          )
           record_empty_page_source_inspection!(stats, page_num,
             source_summary.merge(
             :semantic_text_extraction_complete => true,
@@ -2962,7 +3196,8 @@ module BlueCollarSystems
               "#{source_summary[:source_glyph_placements]} exact SVG source " \
               'glyph placement(s) remain eligible for 3D Text.'
             )
-          elsif source_summary[:visible_nontext_source] == true
+          elsif explicit_zero_canonical_page_raster ||
+                source_summary[:visible_nontext_source] == true
             raster = verified_raster_entity!(
               model, path, page_num, media_box, opts, import_start,
               page_y_offset, svg_page_box, page_rotation
@@ -2970,27 +3205,30 @@ module BlueCollarSystems
             stats[:pages] += 1
             stats[:xobjects] += xobj.form_xobjects.length
             stats[:mode_used] = :raster
-            stats[:raster_fallback_used] = true
+            explicit_page_raster = requested_text_mode == :raster
+            stats[:raster_fallback_used] = true unless explicit_page_raster
             stats[:text_mode] = :raster unless requested_text_mode == :none
-            stats[:page_representation_fallbacks] << {
-              :page => page_num,
-              :scope => :page,
-              :reason_code => :visible_nontext_source_only,
-              :affirmative_impossibility => true,
-              :requested_text_mode => requested_text_mode,
-              :source_text_items => 0,
-              :canonical_text_item_count => 0,
-              :source_page_number => page_num,
-              :immutable_pdf_sha256 => stats[:source_input_sha256],
-              :rendered_pdf_sha256 => stats[:normalized_input_sha256],
-              :embedded_image_asset_count => Array(embedded_assets).length,
-              :embedded_image_placed_count => 0,
-              :source_summary => source_summary,
-              :delivered_mode => :raster,
-              :resulting_entity_ids => [raster[:entity_id]],
-              :real_raster_verified => true,
-              :visual_fidelity_verified => true
-            }
+            unless explicit_page_raster
+              stats[:page_representation_fallbacks] << {
+                :page => page_num,
+                :scope => :page,
+                :reason_code => :visible_nontext_source_only,
+                :affirmative_impossibility => true,
+                :requested_text_mode => requested_text_mode,
+                :source_text_items => 0,
+                :canonical_text_item_count => 0,
+                :source_page_number => page_num,
+                :immutable_pdf_sha256 => stats[:source_input_sha256],
+                :rendered_pdf_sha256 => stats[:normalized_input_sha256],
+                :embedded_image_asset_count => Array(embedded_assets).length,
+                :embedded_image_placed_count => 0,
+                :source_summary => source_summary,
+                :delivered_mode => :raster,
+                :resulting_entity_ids => [raster[:entity_id]],
+                :real_raster_verified => true,
+                :visual_fidelity_verified => true
+              }
+            end
             unless requested_text_mode == :none
               stats[:terminal_text_delivery_records] << {
                 :page => page_num,
@@ -2998,6 +3236,8 @@ module BlueCollarSystems
                 :requested_mode => requested_text_mode,
                 :delivered_mode => :raster,
                 :no_semantic_text => true,
+                :delivery_basis => :verified_zero_canonical_text,
+                :semantic_text_evaluated => true,
                 :canonical_text_item_count => 0,
                 :source_page_number => page_num,
                 :immutable_pdf_sha256 => stats[:source_input_sha256],
@@ -3008,7 +3248,9 @@ module BlueCollarSystems
                 :visual_fidelity_verified => true,
                 :artifact_evidence => raster[:artifact_evidence],
                 :cleanup_outcome => :not_required,
-                :delivery_scope => :page_raster
+                :delivery_scope => :page_raster,
+                :explicit_request => explicit_page_raster,
+                :degraded => !explicit_page_raster
               }
               stats[:raster_delivery_records] <<
                 stats[:terminal_text_delivery_records].last.dup
@@ -3018,8 +3260,10 @@ module BlueCollarSystems
                 :mode => :raster,
                 :requested_mode => requested_text_mode,
                 :delivered_mode => :raster,
-                :degraded => true,
-                :reason => 'visible page source has no semantic or exact source-glyph text representation',
+                :degraded => !explicit_page_raster,
+                :reason => explicit_page_raster ?
+                  'explicit requested page Raster for a zero-canonical-text page' :
+                  'visible page source has no semantic or exact source-glyph text representation',
                 :count => 0,
                 :resulting_entity_ids => [raster[:entity_id]],
                 :real_raster_verified => true
@@ -3123,7 +3367,9 @@ module BlueCollarSystems
         use_svg_text = [:geometry, :glyphs].include?(requested_text_mode) &&
                        opts[:import_text]
         use_svg_3d_text = requested_text_mode == :text3d && opts[:import_text]
-        if match_pdf_layers && !ocg.layer_list.empty? && requested_text_mode == :labels
+        use_item_raster = requested_text_mode == :raster && opts[:import_text]
+        if match_pdf_layers && !ocg.layer_list.empty? &&
+           [:text, :labels].include?(requested_text_mode)
           use_svg_text = false
         end
         # Native add_3d_text cannot certify embedded PDF font identity. Exact
@@ -3131,7 +3377,8 @@ module BlueCollarSystems
         # text remains available only behind GeometryBuilder's explicit font
         # identity proof gate.
         builder_use_3d_text = false
-        builder_text_items = (use_svg_text || use_svg_3d_text) ? [] : text_items
+        builder_text_items =
+          (use_svg_text || use_svg_3d_text || use_item_raster) ? [] : text_items
         representation_renderer = if use_svg_3d_text
                                     :svg_3d_text
                                   elsif use_svg_text
@@ -3160,7 +3407,8 @@ module BlueCollarSystems
           flatten_to_2d: true, merge_tolerance: opts[:merge_tolerance],
           import_fills: (opts[:import_fills] || force_import_fills_for_page), group_by_color: opts[:group_by_color],
           detect_arcs: opts[:detect_arcs], map_dashes: opts[:map_dashes],
-          import_text: (use_svg_text || use_svg_3d_text) ? false : opts[:import_text],
+          import_text: (use_svg_text || use_svg_3d_text || use_item_raster) ?
+            false : opts[:import_text],
           use_3d_text: builder_use_3d_text,
           strict_text_fidelity: opts[:strict_text_fidelity],
           requested_text_mode: requested_text_mode,
@@ -3178,8 +3426,13 @@ module BlueCollarSystems
         merge_text_width_crosscheck!(stats, result)
 
         builder_failures = Array(result[:text_delivery_failures])
+        if requested_text_mode == :text
+          bind_flat_text_capability_rows!(
+            result[:text_attempts], builder_failures, flat_text_fallbacks
+          )
+        end
         label_fallback_failures = []
-        if requested_text_mode == :labels
+        if [:text, :labels].include?(requested_text_mode)
           label_fallback_failures = builder_failures.select do |failure|
             failure[:transition_proof].is_a?(Hash)
           end
@@ -3198,16 +3451,30 @@ module BlueCollarSystems
           fallback_source_ids.include?(attempt[:source_span_id].to_s)
         end
         merge_text_attempts!(stats, completed_builder_attempts)
+        if requested_text_mode == :text
+          completed_builder_attempts.each do |attempt|
+            source_id = RepresentationFidelity.source_span_id(
+              attempt[:source_span_id]
+            )
+            record_fallback_transitions!(
+              stats, page_num,
+              flat_text_fallbacks.fetch(source_id)[:controller].transitions
+            )
+          end
+        end
 
         if opts[:import_text] && !use_svg_text && !use_svg_3d_text &&
            result[:text_objects].to_i > 0
           renderer = builder_use_3d_text ? :add_3d_text : :labels
-          delivered_mode = requested_text_mode
+          delivered_mode = builder_use_3d_text ? :text3d : :labels
           record_text_renderer(stats, page_num,
             renderer: renderer, mode: delivered_mode,
             requested_mode: requested_text_mode,
             delivered_mode: delivered_mode,
-            degraded: false,
+            degraded: delivered_mode != requested_text_mode,
+            reason: (requested_text_mode == :text ?
+              'SketchUp has no distinct flat editable model Text entity; ' \
+              'item-bound capability proof advanced to Labels' : nil),
             count: result[:text_objects].to_i)
         end
 
@@ -3237,8 +3504,31 @@ module BlueCollarSystems
             stats, model, fallback_parent, path, page_num, fallback_items,
             media_box, svg_page_box, page_rotation, opts, import_start,
             page_y_offset, label_svg_document, label_fallback_failures,
-            result[:text_attempts], layer_mgr.text_fallback_layer, text_items
+            result[:text_attempts], layer_mgr.text_fallback_layer, text_items,
+            requested_text_mode, flat_text_fallbacks
           )
+        end
+
+
+        # Explicit text-mode Raster is item-scoped whenever canonical source
+        # spans exist. It is requested delivery, not a fallback, and therefore
+        # begins at the terminal Raster rung with no transition ledger.
+        if use_item_raster && !Array(text_items).empty?
+          raster_parent = builder.page_group ?
+            builder.page_group.entities : model.active_entities
+          Array(text_items).each do |source_item|
+            source_id = RepresentationFidelity.source_span_id(source_item)
+            controller = RepresentationFidelity::FallbackController.new(
+              :raster, source_id
+            )
+            complete_item_representation_ladder!(
+              stats, model, raster_parent, path, page_num, source_item,
+              :raster, controller, [], media_box, svg_page_box,
+              page_rotation, opts, import_start, page_y_offset, {},
+              layer_mgr.text_fallback_layer, text_items
+            )
+          end
+          stats[:text_mode] = :raster
         end
 
         # Exact 3D Text: build filled solids from the PDF renderer's own glyph
@@ -3499,6 +3789,8 @@ module BlueCollarSystems
         stats[:model_3d] = Model3DExtruder.extrude_imported(model, pre_import_entities, opts)
       end
 
+      cleanup_item_raster_page_cache!(opts)
+      verify_cached_source_pdf_bindings!(opts)
       model.commit_operation
 
       layer_mgr.register_imported_names!
@@ -3535,6 +3827,8 @@ module BlueCollarSystems
       end
       stats
     ensure
+      cleanup_item_raster_page_cache!(opts) if
+        defined?(opts) && opts.is_a?(Hash)
       Logger.flush_log
       PdfSalvage.cleanup(path) if defined?(PdfSalvage)
     end
@@ -3668,7 +3962,8 @@ module BlueCollarSystems
 
     def self.verify_raster_artifact!(png_path, page_num, media_box, render_box,
                                      page_rotation, arguments,
-                                     source_pdf_path = nil)
+                                     source_pdf_path = nil,
+                                     source_pdf_binding = nil)
       raise RepresentationFidelity::ContractError,
             'raster artifact file is missing' unless
         png_path && File.file?(png_path)
@@ -3697,6 +3992,7 @@ module BlueCollarSystems
       end
 
       source_binding = {}
+      pixel_binding = {}
       if source_pdf_path
         source_path = File.expand_path(source_pdf_path.to_s)
         unless File.file?(source_path)
@@ -3710,11 +4006,48 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError,
                 'raster command source does not match the selected PDF'
         end
+        binding_sha = nil
+        if source_pdf_binding.is_a?(Hash)
+          unless source_pdf_binding[:pre_render_verified] == true &&
+                 source_pdf_binding[:post_render_verified] == true &&
+                 File.expand_path(source_pdf_binding[:source_pdf_path].to_s).downcase ==
+                   source_path.downcase
+            raise RepresentationFidelity::ContractError,
+                  'raster source lacks a complete pre/post render binding'
+          end
+          binding_sha = source_pdf_binding[:source_pdf_sha256].to_s.downcase
+        else
+          # Kept for isolated verifier callers; production render paths always
+          # supply the pre/post command-window binding.
+          binding_sha = Digest::SHA256.file(source_path).hexdigest
+        end
         source_binding = {
           :source_pdf_path => source_path,
-          :source_pdf_sha256 => Digest::SHA256.file(source_path).hexdigest,
+          :source_pdf_sha256 => binding_sha,
           :source_pdf_binding_verified => true
         }
+
+        # Production render paths supply a command-window source binding.  At
+        # that boundary, decode the exact PNG as pixels as well; a valid header
+        # and self-authored attributes are not proof of visible raster content.
+        if source_pdf_binding.is_a?(Hash)
+          pixel_temp_dir = Dir.mktmpdir('bc_raster_pixel_proof_')
+          pixel_raw_path = File.join(pixel_temp_dir, 'pixels.rgba')
+          begin
+            prepared_pixels = PngCropper.prepare_rgba!(
+              png_path, pixel_raw_path, false
+            )
+            pixel_binding = {
+              :visual_pixel_sha256 =>
+                prepared_pixels[:visual_pixel_sha256].to_s.downcase,
+              :visual_pixel_binding_verified => true
+            }
+          ensure
+            cleanup_owned_temp_artifacts!(
+              [pixel_raw_path], [pixel_temp_dir]
+            ) if pixel_temp_dir
+          end
+        end
       end
 
       crop_expected = distinct_page_box?(render_box, media_box)
@@ -3749,7 +4082,7 @@ module BlueCollarSystems
         :page_binding_verified => true,
         :box_binding_verified => true,
         :aspect_verified => true
-      }.merge(source_binding)
+      }.merge(source_binding).merge(pixel_binding)
     rescue RepresentationFidelity::ContractError
       raise
     rescue StandardError => e
@@ -3758,7 +4091,9 @@ module BlueCollarSystems
     end
 
     def self.verify_item_raster_artifact!(png_path, item, page_num,
-                                          crop_geometry, arguments)
+                                          crop_geometry, arguments,
+                                          source_pdf_path, crop_proof = nil,
+                                          source_pdf_sha256 = nil)
       source_id = RepresentationFidelity.source_span_id(item)
       binding = RepresentationFidelity.proof_binding(source_id)
       unless binding[:page_number] == page_num.to_i
@@ -3768,6 +4103,18 @@ module BlueCollarSystems
       raise RepresentationFidelity::ContractError,
             'item raster artifact file is missing' unless
         png_path && File.file?(png_path)
+      source_path = File.expand_path(source_pdf_path.to_s)
+      unless File.file?(source_path)
+        raise RepresentationFidelity::ContractError,
+              'item raster source PDF is missing'
+      end
+      argv = Array(arguments).map { |value| value.to_s }
+      command_source = argv.length >= 2 ? argv[-2] : nil
+      unless command_source &&
+             File.expand_path(command_source).downcase == source_path.downcase
+        raise RepresentationFidelity::ContractError,
+              'item raster command source does not match the selected PDF'
+      end
       header = File.open(png_path, 'rb') { |file| file.read(24) }
       signature = "\x89PNG\r\n\x1a\n".dup
       signature.force_encoding(Encoding::BINARY) if
@@ -3784,21 +4131,17 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError,
               'item raster expected crop is invalid'
       end
-      actual_crop = ['-x', '-y', '-W', '-H'].map do |option|
-        value = raster_command_value(arguments, option)
+      crop_options = ['-x', '-y', '-W', '-H']
+      unless crop_options.none? { |option| argv.include?(option) }
         raise RepresentationFidelity::ContractError,
-              "item raster command is missing #{option}" if value.nil?
-        value.to_i
-      end
-      unless actual_crop == expected_crop
-        raise RepresentationFidelity::ContractError,
-              'item raster command crop is not bound to the source bbox'
+              'item raster page renderer must not launch once per crop'
       end
       requested_page = page_num.to_i
       args = Array(arguments).map { |value| value.to_s }
       unless raster_command_value(args, '-f').to_i == requested_page &&
              raster_command_value(args, '-l').to_i == requested_page &&
-             args.include?('-singlefile') && !args.include?('-cropbox')
+             args.include?('-singlefile') && args.include?('-transp') &&
+             !args.include?('-cropbox')
         raise RepresentationFidelity::ContractError,
               'item raster command is not bound to exactly one MediaBox page'
       end
@@ -3811,12 +4154,32 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError,
               'item raster PNG dimensions do not equal its source crop'
       end
+      proof = crop_proof.is_a?(Hash) ? crop_proof : {}
+      page_render_sha = proof[:page_render_content_sha256].to_s.downcase
+      visual_pixel_sha = proof[:visual_pixel_sha256].to_s.downcase
+      unless proof[:alpha_channel_verified] == true &&
+             proof[:transparent_background_verified] == true &&
+             proof[:visible_pixel_verified] == true &&
+             proof[:page_render_once_verified] == true &&
+             page_render_sha =~ /\A[0-9a-f]{64}\z/ &&
+             visual_pixel_sha =~ /\A[0-9a-f]{64}\z/
+        raise RepresentationFidelity::ContractError,
+              'item raster crop lacks transparent one-page-render pixel proof'
+      end
+      exact_source_sha = source_pdf_sha256.to_s.downcase
+      unless exact_source_sha =~ /\A[0-9a-f]{64}\z/
+        raise RepresentationFidelity::ContractError,
+              'item raster cached source PDF digest is missing'
+      end
       {
         :png_path => png_path.to_s,
         :content_sha256 => Digest::SHA256.file(png_path).hexdigest,
         :content_byte_size => File.size(png_path).to_i,
         :source_span_id => source_id,
         :page_number => requested_page,
+        :source_pdf_path => source_path,
+        :source_pdf_sha256 => exact_source_sha,
+        :source_pdf_binding_verified => true,
         :page_rotation => crop_geometry[:page_rotation].to_i,
         :source_box => Array(crop_geometry[:source_box]).map { |value| value.to_f },
         :display_box => Array(crop_geometry[:display_box]).map { |value| value.to_f },
@@ -3826,13 +4189,278 @@ module BlueCollarSystems
         :png_signature_verified => true,
         :page_binding_verified => true,
         :source_crop_binding_verified => true,
-        :aspect_verified => true
+        :aspect_verified => true,
+        :alpha_channel_verified => true,
+        :transparent_background_verified => true,
+        :page_render_once_verified => true,
+        :page_render_content_sha256 => page_render_sha,
+        :visual_pixel_sha256 => visual_pixel_sha,
+        :visual_pixel_binding_verified => true,
+        :visible_pixel_verified => proof[:visible_pixel_verified] == true
       }
     rescue RepresentationFidelity::ContractError
       raise
     rescue StandardError => e
       raise RepresentationFidelity::ContractError,
             "item raster artifact verification failed: #{e.message}"
+    end
+
+    def self.fetch_item_raster_page_cache!(opts, cache_key)
+      raise ArgumentError, 'item raster options must be a Hash' unless
+        opts.is_a?(Hash)
+      cache = opts[:item_raster_page_cache]
+      cache = {} unless cache.is_a?(Hash)
+      opts[:item_raster_page_cache] = cache
+      return cache[cache_key] if cache.key?(cache_key)
+      value = yield
+      unless value.is_a?(Hash)
+        raise RepresentationFidelity::ContractError,
+              'item raster page cache producer returned no artifact'
+      end
+      cache[cache_key] = value
+    end
+
+    def self.initialize_item_raster_import_cache!(opts, import_text)
+      raise ArgumentError, 'item raster options must be a Hash' unless
+        opts.is_a?(Hash)
+      unless import_text == true
+        opts.delete(:item_raster_page_cache)
+        opts.delete(:source_pdf_digest_cache)
+        opts.delete(:item_raster_cache_persistent)
+        return opts
+      end
+      # Every finite text-representation ladder can legitimately terminate at
+      # Raster. Own one cache for the entire import regardless of the requested
+      # starting rung so a terminal fallback cannot render the same page twice.
+      opts[:item_raster_page_cache] = {}
+      opts[:source_pdf_digest_cache] = {}
+      opts[:item_raster_cache_persistent] = true
+      opts
+    end
+
+    def self.cached_source_pdf_sha256!(opts, pdf_path)
+      source_path = File.expand_path(pdf_path.to_s)
+      raise RepresentationFidelity::ContractError,
+            'item raster source PDF is missing' unless File.file?(source_path)
+      identity = source_pdf_file_identity!(source_path)
+      cache = opts[:source_pdf_digest_cache]
+      cache = {} unless cache.is_a?(Hash)
+      opts[:source_pdf_digest_cache] = cache
+      key = source_path.downcase
+      entry = cache[key]
+      if entry.is_a?(Hash) && entry[:sha256].to_s =~ /\A[0-9a-f]{64}\z/
+        unless entry[:file_identity] == identity
+          raise RepresentationFidelity::ContractError,
+                'source PDF identity changed after the import digest was frozen'
+        end
+        return entry[:sha256]
+      end
+      sha256 = Digest::SHA256.file(source_path).hexdigest
+      cache[key] = {
+        :source_pdf_path => source_path,
+        :file_identity => identity,
+        :sha256 => sha256
+      }
+      sha256
+    end
+
+    def self.source_pdf_file_identity!(pdf_path)
+      source_path = File.expand_path(pdf_path.to_s)
+      stat = File.stat(source_path)
+      {
+        :path => source_path.downcase,
+        :size => stat.size.to_i,
+        :mtime => stat.mtime.to_f,
+        :ctime => stat.ctime.to_f,
+        :device => (stat.dev.to_i rescue 0),
+        :inode => (stat.ino.to_i rescue 0)
+      }
+    rescue StandardError => e
+      raise RepresentationFidelity::ContractError,
+            "source PDF identity is unavailable: #{e.message}"
+    end
+
+    def self.begin_source_pdf_render_binding!(opts, pdf_path)
+      source_path = File.expand_path(pdf_path.to_s)
+      frozen_sha = cached_source_pdf_sha256!(opts, source_path)
+      identity = source_pdf_file_identity!(source_path)
+      actual_sha = Digest::SHA256.file(source_path).hexdigest
+      unless actual_sha == frozen_sha
+        raise RepresentationFidelity::ContractError,
+              'source PDF content changed before page rendering began'
+      end
+      {
+        :source_pdf_path => source_path,
+        :source_pdf_sha256 => frozen_sha,
+        :file_identity => identity,
+        :pre_render_verified => true
+      }
+    end
+
+    def self.verify_source_pdf_render_binding!(binding)
+      unless binding.is_a?(Hash) && binding[:pre_render_verified] == true
+        raise RepresentationFidelity::ContractError,
+              'source PDF pre-render binding is missing'
+      end
+      source_path = File.expand_path(binding[:source_pdf_path].to_s)
+      identity = source_pdf_file_identity!(source_path)
+      sha256 = Digest::SHA256.file(source_path).hexdigest
+      unless identity == binding[:file_identity] &&
+             sha256 == binding[:source_pdf_sha256].to_s
+        raise RepresentationFidelity::ContractError,
+              'source PDF changed while the page renderer was running'
+      end
+      binding[:post_render_verified] = true
+      true
+    end
+
+    def self.verify_cached_source_pdf_bindings!(opts)
+      cache = opts.is_a?(Hash) ? opts[:source_pdf_digest_cache] : nil
+      Array(cache && cache.values).each do |entry|
+        unless entry.is_a?(Hash)
+          raise RepresentationFidelity::ContractError,
+                'source PDF digest cache contains an invalid entry'
+        end
+        path = File.expand_path(entry[:source_pdf_path].to_s)
+        identity = source_pdf_file_identity!(path)
+        sha256 = Digest::SHA256.file(path).hexdigest
+        unless identity == entry[:file_identity] && sha256 == entry[:sha256].to_s
+          raise RepresentationFidelity::ContractError,
+                'source PDF changed before the SketchUp operation committed'
+        end
+      end
+      true
+    end
+
+    def self.cleanup_item_raster_page_cache!(opts)
+      return true unless opts.is_a?(Hash)
+      cache = opts[:item_raster_page_cache]
+      paths = []
+      directories = []
+      Array(cache && cache.values).each do |entry|
+        next unless entry.is_a?(Hash)
+        paths.concat(Array(entry[:owned_temp_paths]))
+        directories.concat(Array(entry[:owned_temp_directories]))
+      end
+      cleanup_owned_temp_artifacts!(paths, directories)
+      cache.clear if cache.respond_to?(:clear)
+      true
+    end
+
+    def self.cleanup_owned_temp_artifacts!(paths, directories = [])
+      failures = []
+      Array(paths).compact.uniq.each do |path|
+        begin
+          File.delete(path) if File.file?(path)
+        rescue StandardError => e
+          failures << "#{path}: #{e.message}"
+        end
+      end
+      Array(directories).compact.uniq.sort_by { |path| -path.to_s.length }.each do |path|
+        begin
+          FileUtils.remove_entry(path) if File.directory?(path)
+        rescue StandardError => e
+          failures << "#{path}: #{e.message}"
+        end
+      end
+      remaining = (Array(paths) + Array(directories)).compact.uniq.select do |path|
+        File.exist?(path)
+      end
+      failures << "still present: #{remaining.join(', ')}" unless remaining.empty?
+      unless failures.empty?
+        raise RepresentationFidelity::ContractError,
+              "owned temporary artifact cleanup failed: #{failures.join('; ')}"
+      end
+      true
+    end
+
+    def self.prepare_item_raster_page!(pdf_path, page_num, media_box,
+                                       page_rotation, opts)
+      exe = safe_find_pdftocairo
+      raise RepresentationFidelity::ContractError,
+            'pdftocairo is unavailable for item Raster' unless exe
+      page_width = PageTransform.effective_width(media_box, page_rotation)
+      page_height = PageTransform.effective_height(media_box, page_rotation)
+      dpi_plan = compute_effective_raster_dpi(opts, page_width, page_height)
+      dpi = dpi_plan[:effective].to_i
+      source_path = File.expand_path(pdf_path.to_s)
+      source_sha = cached_source_pdf_sha256!(opts, source_path)
+      key = [source_path.downcase, source_sha, page_num.to_i, dpi,
+             PageTransform.normalize_rotation(page_rotation)].join('|')
+      candidates = []
+      raw_path = nil
+      owned_temp_dir = nil
+      fetch_item_raster_page_cache!(opts, key) do
+        owned_temp_dir = Dir.mktmpdir("bc_item_page_p#{page_num}_")
+        png_path = File.join(owned_temp_dir, 'page.png')
+        raw_path = File.join(owned_temp_dir, 'page.rgba')
+        base_path = png_path.sub(/\.png\z/, '')
+        candidates = [
+          png_path, "#{base_path}-#{page_num}.png",
+          "#{base_path}-01.png", "#{base_path}-1.png"
+        ]
+        args = [
+          exe, '-png', '-transp', '-singlefile', '-r', dpi.to_s,
+          '-f', page_num.to_i.to_s, '-l', page_num.to_i.to_s,
+          source_path, base_path
+        ]
+        source_binding = begin_source_pdf_render_binding!(opts, source_path)
+        run = CommandRunner.run(
+          args, :timeout_s => 180, :context => 'Raster.item_page.pdftocairo'
+        )
+        verify_source_pdf_render_binding!(source_binding)
+        validation = PopplerResultValidator.validate(
+          run,
+          :executable => exe, :argv => args,
+          :context => 'Raster.item_page.pdftocairo',
+          :page => page_num, :attempt => 1,
+          :representation => :item_raster_page,
+          :artifacts => candidates, :artifact_policy => :any_nonempty
+        )
+        PopplerResultValidator.log_rejection(validation, 'Raster') unless
+          validation[:ok]
+        unless validation[:ok] && !run[:timed_out]
+          raise RepresentationFidelity::ContractError,
+                'transparent item Raster page render was rejected'
+        end
+        actual_png = candidates.find { |candidate| File.file?(candidate) }
+        raise RepresentationFidelity::ContractError,
+              'transparent item Raster page PNG is missing' unless actual_png
+        prepared = PngCropper.prepare_rgba!(actual_png, raw_path)
+        expected_width = page_width.to_f * dpi.to_f / 72.0
+        expected_height = page_height.to_f * dpi.to_f / 72.0
+        unless (prepared[:pixel_width].to_f - expected_width).abs <= 2.0 &&
+               (prepared[:pixel_height].to_f - expected_height).abs <= 2.0
+          raise RepresentationFidelity::ContractError,
+                'transparent item Raster page dimensions are misbound'
+        end
+        prepared.merge(
+          :page_number => page_num.to_i,
+          :page_rotation => PageTransform.normalize_rotation(page_rotation),
+          :dpi => dpi,
+          :arguments => args,
+          :source_pdf_path => source_path,
+          :source_pdf_sha256 => source_sha,
+          :source_pdf_render_binding => source_binding,
+          :source_pdf_binding_verified => true,
+          :page_render_once_verified => true,
+          :render_count => 1,
+          :owned_temp_paths => (candidates + [raw_path]).uniq,
+          :owned_temp_directories => [owned_temp_dir]
+        )
+      end
+    rescue StandardError => original_error
+      cleanup_paths = Array(defined?(candidates) && candidates)
+      cleanup_paths << raw_path if defined?(raw_path) && raw_path
+      begin
+        cleanup_owned_temp_artifacts!(
+          cleanup_paths, [defined?(owned_temp_dir) && owned_temp_dir].compact
+        )
+      rescue StandardError => cleanup_error
+        raise RepresentationFidelity::ContractError,
+              "#{original_error.message}; #{cleanup_error.message}"
+      end
+      raise original_error
     end
 
     def self.compute_effective_raster_dpi(opts, page_w_pts, page_h_pts)
@@ -3874,65 +4502,24 @@ module BlueCollarSystems
     def self.import_item_as_raster(model, target_entities, pdf_path, page_num,
                                    item, media_box, opts, import_start,
                                    y_offset = 0.0, page_rotation = 0)
-      exe = safe_find_pdftocairo
-      return false unless exe
+      image = nil
+      owned_crop_dir = nil
+      standalone_cache = opts[:item_raster_cache_persistent] != true
       source_id = RepresentationFidelity.source_span_id(item)
-      initial = item_raster_crop_geometry(
-        item, media_box, page_rotation, (opts[:raster_dpi] || 300).to_i
-      )
-      dpi_plan = compute_effective_raster_dpi(
-        opts, initial[:display_width], initial[:display_height]
+      page_render = prepare_item_raster_page!(
+        pdf_path, page_num, media_box, page_rotation, opts
       )
       crop = item_raster_crop_geometry(
-        item, media_box, page_rotation, dpi_plan[:effective]
+        item, media_box, page_rotation, page_render[:dpi]
       )
-      pixel_x, pixel_y, pixel_width, pixel_height = crop[:pixel_crop]
-      png_path = File.join(
-        Dir.tmpdir,
-        "bc_item_raster_#{Process.pid}_#{(Time.now.to_f * 1_000_000).to_i}_" \
-          "p#{page_num}.png"
+      owned_crop_dir = Dir.mktmpdir("bc_item_crop_p#{page_num}_")
+      png_path = File.join(owned_crop_dir, 'crop.png')
+      crop_proof = PngCropper.crop_rgba!(
+        page_render, crop[:pixel_crop], png_path
       )
-      candidates = [
-        png_path, png_path.sub(/\.png$/, "-#{page_num}.png"),
-        png_path.sub(/\.png$/, '-01.png'), png_path.sub(/\.png$/, '-1.png')
-      ]
-      candidates.each do |candidate|
-        begin
-          File.delete(candidate) if File.exist?(candidate)
-        rescue StandardError
-          # Stale artifacts are rejected below.
-        end
-      end
-      args = [
-        exe, '-png', '-singlefile', '-r', crop[:dpi].to_s,
-        '-x', pixel_x.to_s, '-y', pixel_y.to_s,
-        '-W', pixel_width.to_s, '-H', pixel_height.to_s,
-        '-f', page_num.to_s, '-l', page_num.to_s,
-        pdf_path, png_path.sub(/\.png$/, '')
-      ]
-      run = CommandRunner.run(
-        args, :timeout_s => 180, :context => 'Raster.item.pdftocairo'
-      )
-      validation = PopplerResultValidator.validate(
-        run,
-        :executable => exe,
-        :argv => args,
-        :context => 'Raster.item.pdftocairo',
-        :page => page_num,
-        :attempt => 1,
-        :representation => :item_raster,
-        :span_id => source_id,
-        :artifacts => candidates,
-        :artifact_policy => :any_nonempty
-      )
-      PopplerResultValidator.log_rejection(
-        validation, 'Raster'
-      ) unless validation[:ok]
-      return false unless validation[:ok] && !run[:timed_out]
-      actual_png = candidates.find { |candidate| File.file?(candidate) }
-      return false unless actual_png
       artifact = verify_item_raster_artifact!(
-        actual_png, item, page_num, crop, args
+        png_path, item, page_num, crop, page_render[:arguments], pdf_path,
+        crop_proof, page_render[:source_pdf_sha256]
       )
       scale = opts[:scale].to_f
       scale = 1.0 if scale <= 0.0
@@ -3946,7 +4533,7 @@ module BlueCollarSystems
       }
       point = Geom::Point3d.new(placement[:x], placement[:y], 0.0)
       image = target_entities.add_image(
-        actual_png, point, placement[:width], placement[:height]
+        png_path, point, placement[:width], placement[:height]
       )
       return false unless image
       begin
@@ -3964,7 +4551,7 @@ module BlueCollarSystems
           image.set_attribute(dictionary, 'source_kind', 'text_span')
           image.set_attribute(dictionary, 'representation', 'raster')
           image.set_attribute(
-            dictionary, 'renderer', 'pdftocairo_real_item_raster'
+            dictionary, 'renderer', 'pdftocairo_transparent_page_crop'
           )
           image.set_attribute(dictionary, 'raster_page_number', page_num.to_i)
           image.set_attribute(
@@ -3979,7 +4566,35 @@ module BlueCollarSystems
             dictionary, 'raster_content_sha256', artifact[:content_sha256]
           )
           image.set_attribute(
+            dictionary, 'raster_visual_pixel_sha256',
+            artifact[:visual_pixel_sha256]
+          )
+          image.set_attribute(
+            dictionary, 'raster_source_pdf_sha256',
+            artifact[:source_pdf_sha256]
+          )
+          image.set_attribute(
             dictionary, 'raster_content_bytes', artifact[:content_byte_size]
+          )
+          image.set_attribute(
+            dictionary, 'raster_alpha_verified',
+            artifact[:alpha_channel_verified]
+          )
+          image.set_attribute(
+            dictionary, 'raster_transparent_background_verified',
+            artifact[:transparent_background_verified]
+          )
+          image.set_attribute(
+            dictionary, 'raster_visible_pixel_verified',
+            artifact[:visible_pixel_verified]
+          )
+          image.set_attribute(
+            dictionary, 'raster_page_render_once_verified',
+            artifact[:page_render_once_verified]
+          )
+          image.set_attribute(
+            dictionary, 'raster_page_render_sha256',
+            artifact[:page_render_content_sha256]
           )
         end
       rescue StandardError => e
@@ -3991,30 +4606,35 @@ module BlueCollarSystems
           "#{artifact[:pixel_width]}x#{artifact[:pixel_height]} px at " \
           "#{crop[:dpi]} DPI [#{(Time.now - import_start).round(1)}s]"
       )
-      {
+      delivery = {
         :entity => image,
         :artifact_evidence => artifact,
         :placement => placement,
-        :command => args
+        :command => page_render[:arguments]
       }
+      cleanup_owned_temp_artifacts!([png_path], [owned_crop_dir])
+      owned_crop_dir = nil
+      png_path = nil
+      delivery
     rescue StandardError => e
       Logger.warn('Raster', "Item raster failed: #{e.message}")
-      false
+      image ? {
+        :failure => true,
+        :error => e.message.to_s,
+        :owned_entities => [image]
+      } : false
     ensure
-      if defined?(candidates) && candidates
-        candidates.each do |candidate|
-          begin
-            File.delete(candidate) if File.exist?(candidate)
-          rescue StandardError => e
-            Logger.warn('Raster', "item temp PNG cleanup failed: #{e.message}")
-          end
-        end
-      end
+      cleanup_owned_temp_artifacts!(
+        [defined?(png_path) && png_path].compact,
+        [defined?(owned_crop_dir) && owned_crop_dir].compact
+      )
+      cleanup_item_raster_page_cache!(opts) if standalone_cache
     end
 
     def self.import_page_as_raster(model, pdf_path, page_num, media_box, opts,
                                    import_start, y_offset = 0.0,
                                    render_box = nil, page_rotation = 0)
+      img = nil
       exe = safe_find_pdftocairo
       return false unless exe
 
@@ -4030,8 +4650,8 @@ module BlueCollarSystems
       use_cropbox = distinct_page_box?(render_box, media_box)
 
       # Render page to PNG
-      png_path = File.join(Dir.tmpdir,
-        "bc_raster_#{Process.pid}_#{(Time.now.to_f * 1_000_000).to_i}_p#{page_num}.png")
+      owned_page_dir = Dir.mktmpdir("bc_page_raster_p#{page_num}_")
+      png_path = File.join(owned_page_dir, 'page.png')
       candidates = [png_path,
        png_path.sub(/\.png$/, "-#{page_num}.png"),
        png_path.sub(/\.png$/, "-01.png"),
@@ -4059,11 +4679,13 @@ module BlueCollarSystems
           '-f', page_num.to_s, '-l', page_num.to_s,
           pdf_path, png_path.sub(/\.png$/, '')
         ]
+        source_binding = begin_source_pdf_render_binding!(opts, pdf_path)
         run = CommandRunner.run(
           args,
           timeout_s: 180,
           context: "Raster.pdftocairo"
         )
+        verify_source_pdf_render_binding!(source_binding)
         validation = PopplerResultValidator.validate(
           run,
           :executable => exe,
@@ -4095,7 +4717,7 @@ module BlueCollarSystems
         begin
           proof = verify_raster_artifact!(
             candidate, page_num, media_box, variant[:render_box],
-            page_rotation, args, pdf_path
+            page_rotation, args, pdf_path, source_binding
           )
           actual_png = candidate
           actual_box = variant[:render_box]
@@ -4148,6 +4770,8 @@ module BlueCollarSystems
                               artifact_evidence[:pixel_height])
             img.set_attribute(dictionary, 'raster_content_sha256',
                               artifact_evidence[:content_sha256])
+            img.set_attribute(dictionary, 'raster_visual_pixel_sha256',
+                              artifact_evidence[:visual_pixel_sha256])
             img.set_attribute(dictionary, 'raster_content_bytes',
                               artifact_evidence[:content_byte_size])
             img.set_attribute(dictionary, 'raster_source_pdf_sha256',
@@ -4171,28 +4795,37 @@ module BlueCollarSystems
           "pixels=#{artifact_evidence[:pixel_width]}x#{artifact_evidence[:pixel_height]}, " \
           "dpi req=#{req}, eff=#{dpi}, cap=#{cap}, budget=#{dpi_plan[:pixel_budget]}"
         )
-        {
+        delivery = {
           :entity => img,
           :artifact_evidence => artifact_evidence,
           :placement => placement,
           :command => successful_args
         }
+        cleanup_owned_temp_artifacts!(candidates, [owned_page_dir])
+        owned_page_dir = nil
+        candidates = []
+        delivery
       rescue StandardError => e
         Logger.warn("Raster", "add_image failed: #{e.message}")
-        false
+        img ? {
+          :failure => true,
+          :error => e.message.to_s,
+          :owned_entities => [img]
+        } : false
       end
     rescue StandardError => e
       Logger.warn("Raster", "Failed: #{e.message}")
-      false
+      img ? {
+        :failure => true,
+        :error => e.message.to_s,
+        :owned_entities => [img]
+      } : false
     ensure
       if defined?(candidates) && candidates
-        candidates.each do |candidate|
-          begin
-            File.delete(candidate) if File.exist?(candidate)
-          rescue StandardError => e
-            Logger.warn("Main", "cleanup temp png failed: #{e.message}")
-          end
-        end
+        cleanup_owned_temp_artifacts!(
+          candidates,
+          [defined?(owned_page_dir) && owned_page_dir].compact
+        )
       end
     end
 

@@ -3,6 +3,10 @@ require 'minitest/autorun'
 require 'tmpdir'
 require 'json'
 require 'digest'
+require 'fileutils'
+require 'zlib'
+
+module Sketchup; end unless defined?(Sketchup)
 
 REPO_ROOT = File.expand_path('..', __dir__) unless defined?(REPO_ROOT)
 EVIDENCE_TOOL = File.join(
@@ -144,10 +148,156 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  class FakeTextureWriter
+    attr_accessor :source_path
+
+    def initialize(source_path, options = {})
+      @source_path = source_path
+      @status = options.fetch(:status, 0)
+      @load_result = options.fetch(:load_result, 1)
+      @write_file = options.fetch(:write_file, true)
+    end
+
+    def load(_entity)
+      @load_result
+    end
+
+    def write(_entity, destination)
+      FileUtils.cp(@source_path, destination) if @write_file
+      @status
+    end
+  end
+
   def setup
     assert File.file?(EVIDENCE_TOOL),
            'tools/sketchup_host_evidence.rb must exist'
     load EVIDENCE_TOOL unless defined?(SketchupHostEvidence)
+  end
+
+  def with_texture_writer(writer)
+    singleton = class << Sketchup; self; end
+    original = Sketchup.method(:create_texture_writer) if
+      Sketchup.respond_to?(:create_texture_writer)
+    singleton.send(:define_method, :create_texture_writer) { writer }
+    yield
+  ensure
+    if original
+      singleton.send(:define_method, :create_texture_writer, original)
+    elsif singleton && Sketchup.respond_to?(:create_texture_writer)
+      singleton.send(:remove_method, :create_texture_writer)
+    end
+  end
+
+  def png_chunk(type, payload)
+    [payload.bytesize].pack('N') + type + payload +
+      [Zlib.crc32(type + payload)].pack('N')
+  end
+
+  def write_rgba_png(path, width, height, pixels)
+    rows = ''.dup
+    rows.force_encoding(Encoding::BINARY) if rows.respond_to?(:force_encoding)
+    height.times do |row|
+      rows << "\x00"
+      rows << pixels.slice(row * width, width).flatten.pack('C*')
+    end
+    signature = "\x89PNG\r\n\x1a\n".dup
+    signature.force_encoding(Encoding::BINARY) if
+      signature.respond_to?(:force_encoding)
+    ihdr = [width, height, 8, 6, 0, 0, 0].pack('N2C5')
+    File.open(path, 'wb') do |file|
+      file.write(signature)
+      file.write(png_chunk('IHDR', ihdr))
+      file.write(png_chunk('IDAT', Zlib::Deflate.deflate(rows)))
+      file.write(png_chunk('IEND', ''.dup))
+    end
+  end
+
+  def raster_image_with_visual_sha(visual_sha)
+    dictionary = 'BC_PDF_Importer'
+    FakeImage.new(70, :persistent_id => 7070, :attributes => {
+      [dictionary, 'raster_page_number'] => 1,
+      [dictionary, 'raster_pixel_width'] => 2,
+      [dictionary, 'raster_pixel_height'] => 1,
+      [dictionary, 'raster_content_sha256'] => 'a' * 64,
+      [dictionary, 'raster_visual_pixel_sha256'] => visual_sha,
+      [dictionary, 'raster_content_bytes'] => 100,
+      [dictionary, 'raster_source_pdf_sha256'] => 'b' * 64
+    })
+  end
+
+  def test_texture_writer_pixels_are_physical_and_survive_reopen_verification
+    Dir.mktmpdir('bc_texture_writer_test_') do |directory|
+      first_path = File.join(directory, 'first.png')
+      second_path = File.join(directory, 'second.png')
+      first_pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+      second_pixels = [[0, 0, 255, 255], [0, 255, 0, 255]]
+      write_rgba_png(first_path, 2, 1, first_pixels)
+      write_rgba_png(second_path, 2, 1, second_pixels)
+      expected_sha = Digest::SHA256.hexdigest(first_pixels.flatten.pack('C*'))
+      writer = FakeTextureWriter.new(first_path)
+      image = raster_image_with_visual_sha(expected_sha)
+
+      saved = with_texture_writer(writer) do
+        SketchupHostEvidence.snapshot_entities([image])
+      end
+      content = saved.first['content_evidence']
+      assert_equal true, content['host_texture_export_verified']
+      assert_equal expected_sha, content['host_visual_pixel_sha256']
+      assert_equal 2, content['host_pixel_width']
+      assert_equal 1, content['host_pixel_height']
+
+      writer.source_path = second_path
+      reopened = with_texture_writer(writer) do
+        SketchupHostEvidence.snapshot_entities([image])
+      end
+      error = assert_raises(StandardError) do
+        SketchupHostEvidence.verify_reopen_continuity!(saved, reopened)
+      end
+      assert_match(/content/i, error.message)
+    end
+  end
+
+  def test_texture_writer_nonzero_status_fails_closed
+    Dir.mktmpdir('bc_texture_writer_test_') do |directory|
+      png_path = File.join(directory, 'source.png')
+      pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+      write_rgba_png(png_path, 2, 1, pixels)
+      image = raster_image_with_visual_sha(
+        Digest::SHA256.hexdigest(pixels.flatten.pack('C*'))
+      )
+      error = assert_raises(StandardError) do
+        with_texture_writer(FakeTextureWriter.new(png_path, :status => 7)) do
+          SketchupHostEvidence.snapshot_entities([image])
+        end
+      end
+      assert_match(/status 7/, error.message)
+    end
+  end
+
+  def test_texture_writer_missing_output_fails_closed
+    image = raster_image_with_visual_sha('c' * 64)
+    writer = FakeTextureWriter.new('unused.png', :write_file => false)
+    error = assert_raises(StandardError) do
+      with_texture_writer(writer) do
+        SketchupHostEvidence.snapshot_entities([image])
+      end
+    end
+    assert_match(/without an output file/, error.message)
+  end
+
+  def test_texture_writer_decoder_rejection_fails_closed
+    Dir.mktmpdir('bc_texture_writer_test_') do |directory|
+      invalid_path = File.join(directory, 'invalid.png')
+      File.open(invalid_path, 'wb') { |file| file.write('not a PNG') }
+      error = assert_raises(StandardError) do
+        with_texture_writer(FakeTextureWriter.new(invalid_path)) do
+          SketchupHostEvidence.snapshot_entities([
+            raster_image_with_visual_sha('d' * 64)
+          ])
+        end
+      end
+      assert_match(/PNG|texture pixel evidence/i, error.message)
+    end
   end
 
   def test_source_location_must_be_genuinely_below_expected_root
@@ -325,17 +475,24 @@ class SketchupHostEvidenceTest < Minitest::Test
   def test_nested_item_raster_claim_survives_compact_snapshot_and_binding
     dictionary = 'BC_PDF_Importer'
     sha256 = 'a' * 64
+    source_sha256 = 'b' * 64
     image = FakeImage.new(52, :attributes => {
       [dictionary, 'source_claim_root'] => true,
       [dictionary, 'source_span_id'] => 'text_span:1:0',
       [dictionary, 'source_kind'] => 'text_span',
       [dictionary, 'representation'] => 'raster',
-      [dictionary, 'renderer'] => 'pdftocairo_real_item_raster',
+      [dictionary, 'renderer'] => 'pdftocairo_transparent_page_crop',
       [dictionary, 'raster_page_number'] => 1,
       [dictionary, 'raster_pixel_width'] => 120,
       [dictionary, 'raster_pixel_height'] => 40,
       [dictionary, 'raster_content_sha256'] => sha256,
-      [dictionary, 'raster_content_bytes'] => 4800
+      [dictionary, 'raster_content_bytes'] => 4800,
+      [dictionary, 'raster_source_pdf_sha256'] => source_sha256,
+      [dictionary, 'raster_alpha_verified'] => true,
+      [dictionary, 'raster_transparent_background_verified'] => true,
+      [dictionary, 'raster_visible_pixel_verified'] => true,
+      [dictionary, 'raster_page_render_once_verified'] => true,
+      [dictionary, 'raster_page_render_sha256'] => sha256
     })
     page = FakeGroup.new(50, [image])
     manifest = SketchupHostEvidence.snapshot_entities(
@@ -353,7 +510,17 @@ class SketchupHostEvidenceTest < Minitest::Test
         :source_span_id => 'text_span:1:0', :page_number => 1,
         :png_signature_verified => true, :page_binding_verified => true,
         :source_crop_binding_verified => true,
+        :source_pdf_path => 'C:/fixtures/source.pdf',
+        :source_pdf_sha256 => source_sha256,
+        :source_pdf_binding_verified => true,
+        :source_box => [10.0, 20.0, 40.0, 30.0],
+        :pixel_crop => [100, 200, 120, 40],
         :pixel_width => 120, :pixel_height => 40,
+        :alpha_channel_verified => true,
+        :transparent_background_verified => true,
+        :visible_pixel_verified => true,
+        :page_render_once_verified => true,
+        :page_render_content_sha256 => sha256,
         :content_sha256 => sha256, :content_byte_size => 4800
       }
     }
@@ -361,10 +528,11 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_equal true,
                  row['representation_evidence']['source_claim_root']
     assert_equal 'raster', row['representation_evidence']['representation']
-    assert_equal 'pdftocairo_real_item_raster',
+    assert_equal 'pdftocairo_transparent_page_crop',
                  row['representation_evidence']['renderer']
     assert SketchupHostEvidence.send(
-      :verify_raster_artifact_binding!, record, row, 'entity_id:52', [1]
+      :verify_raster_artifact_binding!, record, row, 'entity_id:52', [1],
+      { :normalized_input_sha256 => source_sha256 }
     )
   end
 
@@ -921,7 +1089,10 @@ class SketchupHostEvidenceTest < Minitest::Test
       :delivered_mode => :raster, :resulting_entity_ids => ['entity_id:13'],
       :created_entity_type => 'raster_image', :real_raster_verified => true,
       :visual_fidelity_verified => true, :cleanup_outcome => :not_required,
-      :delivery_scope => :page_raster, :no_semantic_text => true,
+      :delivery_scope => :page_raster,
+      :delivery_basis => :explicit_full_page_raster,
+      :full_page_raster_request => true,
+      :semantic_text_evaluated => false,
       :artifact_evidence => artifact
     }
     stats = ready_stats(
@@ -956,6 +1127,25 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert SketchupHostEvidence.verify_delivery_evidence!(
       stats, image_manifest, :raster, [1]
     )
+
+    false_zero_text_claim = Marshal.load(Marshal.dump(stats))
+    false_zero_text_claim[:terminal_text_delivery_records][0].merge!(
+      :delivery_basis => :verified_zero_canonical_text,
+      :full_page_raster_request => false,
+      :semantic_text_evaluated => true,
+      :no_semantic_text => true,
+      :canonical_text_item_count => 0
+    )
+    false_zero_text_claim[:raster_delivery_records][0] =
+      Marshal.load(Marshal.dump(
+        false_zero_text_claim[:terminal_text_delivery_records][0]
+      ))
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        false_zero_text_claim, image_manifest, :raster, [1]
+      )
+    end
+    assert_match(/zero|semantic|source|inspection|basis/i, error.message)
 
     terminal_schema = Marshal.load(Marshal.dump(stats))
     terminal_schema[:immutable_pdf_sha256] =
@@ -994,6 +1184,119 @@ class SketchupHostEvidenceTest < Minitest::Test
       )
     end
     assert_match(/content|display|raster/i, error.message)
+  end
+
+  def test_requested_raster_accepts_exact_item_crops_without_fallback_relabeling
+    stats, image_manifest = strict_requested_item_raster_fixture
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, image_manifest, :raster, [1]
+    )
+
+    fallback = Marshal.load(Marshal.dump(stats))
+    fallback[:raster_fallback_used] = true
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        fallback, image_manifest, :raster, [1]
+      )
+    end
+    assert_match(/fallback|Raster/i, error.message)
+
+    wrong_source = Marshal.load(Marshal.dump(stats))
+    artifact = wrong_source[:text_attempts][0][:artifact_evidence]
+    artifact[:source_pdf_sha256] = 'c' * 64
+    wrong_source[:text_attempts][0][:attempt_history][0][
+      :artifact_evidence
+    ] = artifact
+    wrong_source[:terminal_text_delivery_records][0][
+      :artifact_evidence
+    ] = artifact
+    wrong_source[:raster_delivery_records][0][:artifact_evidence] = artifact
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        wrong_source, image_manifest, :raster, [1]
+      )
+    end
+    assert_match(/source|sha|PDF|raster/i, error.message)
+
+    opaque = Marshal.load(Marshal.dump(stats))
+    opaque_artifact = opaque[:text_attempts][0][:artifact_evidence]
+    opaque_artifact[:transparent_background_verified] = false
+    opaque[:text_attempts][0][:attempt_history][0][:artifact_evidence] =
+      opaque_artifact
+    opaque[:terminal_text_delivery_records][0][:artifact_evidence] =
+      opaque_artifact
+    opaque[:raster_delivery_records][0][:artifact_evidence] = opaque_artifact
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        opaque, image_manifest, :raster, [1]
+      )
+    end
+    assert_match(/alpha|transparent|raster/i, error.message)
+  end
+
+  def test_terminal_item_raster_accepts_only_a_complete_finite_fallback_chain
+    stats, image_manifest = strict_terminal_item_raster_fallback_fixture
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, image_manifest, :labels, [1]
+    )
+
+    missing_transition = Marshal.load(Marshal.dump(stats))
+    missing_transition[:fallback_transitions].pop
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        missing_transition, image_manifest, :labels, [1]
+      )
+    end
+    assert_match(/fallback|transition|ledger/i, error.message)
+
+    direct_stats, direct_manifest = strict_requested_item_raster_fixture
+    direct_stats[:terminal_text_delivery_records][0][:explicit_request] = false
+    direct_stats[:raster_delivery_records][0][:explicit_request] = false
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        direct_stats, direct_manifest, :raster, [1]
+      )
+    end
+    assert_match(/explicit|fallback|Raster/i, error.message)
+  end
+
+  def test_requested_text_rebinds_capability_proof_and_global_ledger_to_source
+    stats = strict_flat_text_to_label_stats
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, label_manifest, :text, [1]
+    )
+
+    source_mismatch = Marshal.load(Marshal.dump(stats))
+    local = source_mismatch[:text_attempts][0][:attempt_history][0][
+      :transition_proof
+    ]
+    local[:evidence][:source_text_sha256] = 'c' * 64
+    unsigned = local[:evidence].dup
+    unsigned.delete(:evidence_sha256)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    local[:evidence][:evidence_sha256] = fidelity.canonical_sha256(unsigned)
+    source_mismatch[:fallback_transitions] = [Marshal.load(Marshal.dump(local))]
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        source_mismatch, label_manifest, :text, [1]
+      )
+    end
+    assert_match(/source|Text|capability|transition/i, error.message)
+
+    ledger_mismatch = Marshal.load(Marshal.dump(stats))
+    global = ledger_mismatch[:fallback_transitions][0]
+    global[:evidence][:source_text_sha256] = 'd' * 64
+    unsigned = global[:evidence].dup
+    unsigned.delete(:evidence_sha256)
+    global[:evidence][:evidence_sha256] = fidelity.canonical_sha256(unsigned)
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        ledger_mismatch, label_manifest, :text, [1]
+      )
+    end
+    assert_match(/ledger|transition|source/i, error.message)
   end
 
   def test_empty_semantic_page_raster_requires_affirmative_source_bound_fallback
@@ -1670,6 +1973,218 @@ class SketchupHostEvidenceTest < Minitest::Test
     )
   end
 
+  def strict_flat_text_to_label_stats
+    source_id = 'text_span:1:0'
+    source_text = 'A'
+    source_bbox = [0.0, 0.0, 72.0, 72.0]
+    proof = flat_text_capability_proof(source_id, source_text, source_bbox)
+    expected = fixture_expected_evidence(:labels, source_id, source_text)
+    flags = fixture_mode_flags(:labels)
+    ready_stats(
+      :requested_text_mode => :text,
+      :text_source_span_ids => [source_id],
+      :text_attempts => [{
+        :source_span_id => source_id, :page => 1,
+        :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
+        :source_bbox_pdf => source_bbox,
+        :requested_mode => :text, :delivered_mode => :labels,
+        :resulting_entity_ids => ['entity_id:13'],
+        :expected_evidence => expected,
+        :attempt_history => [{
+          :mode => :text, :outcome => :failed,
+          :resulting_entity_ids => [], :created_entity_ids => [],
+          :cleaned_entity_ids => [], :cleanup_outcome => :not_required,
+          :transition_proof => proof
+        }, {
+          :mode => :labels, :outcome => :complete,
+          :resulting_entity_ids => ['entity_id:13'],
+          :expected_evidence => expected,
+          :cleanup_outcome => :not_required
+        }.merge(flags)]
+      }.merge(flags)],
+      :source_provenance_objects => [{
+        :span_id => source_id, :page => 1,
+        :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
+        :created_entity_type => 'native_label',
+        :resulting_entity_ids => ['entity_id:13']
+      }],
+      :fallback_transitions => [Marshal.load(Marshal.dump(proof))]
+    )
+  end
+
+  def flat_text_capability_proof(source_id, source_text, source_bbox)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    evidence = {
+      :schema => fidelity::FLAT_TEXT_CAPABILITY_SCHEMA,
+      :source_span_id => source_id,
+      :importer_id => fidelity::IMPORTER_ID,
+      :page_number => 1, :requested_mode => :text,
+      :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
+      :source_bbox_pdf => source_bbox,
+      :host_product => 'SketchUp', :host_version => '17.3.116',
+      :host_major_version => 17,
+      :entities_add_text_observed => true,
+      :sketchup_text_class_observed => true,
+      :sketchup_text_annotation_api_observed => true,
+      :observed_entities_text_methods => ['add_3d_text', 'add_text'],
+      :observed_sketchup_text_annotation_methods => ['point', 'text', 'vector'],
+      :distinct_flat_text_constructor_observed => false,
+      :native_flat_editable_text_available => false,
+      :capability_observation_only => true,
+      :host_api_fact => fidelity::FLAT_TEXT_HOST_API_FACT
+    }
+    evidence[:evidence_sha256] = fidelity.canonical_sha256(evidence)
+    {
+      :source_span_id => source_id, :importer_id => fidelity::IMPORTER_ID,
+      :page_number => 1, :requested_mode => :text, :scope => :item,
+      :category => :exact_representation_impossible,
+      :affirmative_impossibility => true, :generic_failure => false,
+      :from_mode => :text, :to_mode => :labels,
+      :reason_code => :host_representation_unsupported,
+      :attempted_renderer =>
+        'sketchup_flat_editable_text_capability_observation',
+      :created_entity_ids => [], :cleaned_entity_ids => [],
+      :cleanup_outcome => :not_required, :evidence => evidence
+    }
+  end
+
+  def strict_requested_item_raster_fixture
+    source_id = 'text_span:1:0'
+    source_sha = 'b' * 64
+    png_sha = 'a' * 64
+    artifact = {
+      :source_span_id => source_id, :page_number => 1,
+      :source_pdf_path => 'C:/fixtures/source.pdf',
+      :source_pdf_sha256 => source_sha,
+      :source_pdf_binding_verified => true,
+      :source_box => [10.0, 20.0, 40.0, 32.0],
+      :display_box => [10.0, 20.0, 40.0, 32.0],
+      :pixel_crop => [100, 200, 300, 120],
+      :pixel_width => 300, :pixel_height => 120,
+      :content_sha256 => png_sha, :content_byte_size => 48_000,
+      :png_signature_verified => true, :page_binding_verified => true,
+      :source_crop_binding_verified => true, :aspect_verified => true,
+      :alpha_channel_verified => true,
+      :transparent_background_verified => true,
+      :visible_pixel_verified => true,
+      :page_render_once_verified => true,
+      :page_render_content_sha256 => 'c' * 64
+    }
+    completed = {
+      :mode => :raster, :outcome => :complete,
+      :resulting_entity_ids => ['entity_id:13'],
+      :cleanup_outcome => :not_required,
+      :visual_fidelity_verified => true, :real_raster_verified => true,
+      :source_crop_binding_verified => true, :entity_type_verified => true,
+      :artifact_evidence => artifact
+    }
+    attempt = {
+      :source_span_id => source_id, :requested_mode => :raster,
+      :delivered_mode => :raster, :resulting_entity_ids => ['entity_id:13'],
+      :visual_fidelity_verified => true, :real_raster_verified => true,
+      :source_crop_binding_verified => true, :entity_type_verified => true,
+      :artifact_evidence => artifact, :attempt_history => [completed]
+    }
+    record = {
+      :page => 1, :source_span_ids => [source_id],
+      :requested_mode => :raster, :delivered_mode => :raster,
+      :created_entity_type => 'raster_image',
+      :resulting_entity_ids => ['entity_id:13'],
+      :real_raster_verified => true, :visual_fidelity_verified => true,
+      :source_crop_binding_verified => true, :artifact_evidence => artifact,
+      :cleanup_outcome => :not_required, :delivery_scope => :item_raster,
+      :explicit_request => true
+    }
+    stats = ready_stats(
+      :requested_text_mode => :raster,
+      :source_input_sha256 => source_sha,
+      :normalized_input_sha256 => source_sha,
+      :text_source_span_ids => [source_id], :text_attempts => [attempt],
+      :source_provenance_objects => [], :page_text_delivery_records => [],
+      :terminal_text_delivery_records => [record],
+      :raster_delivery_records => [record.dup],
+      :raster_fallback_used => false,
+      :text_renderers => [{
+        :requested_mode => :raster, :delivered_mode => :raster,
+        :degraded => false, :resulting_entity_ids => ['entity_id:13']
+      }]
+    )
+    manifest = SketchupHostEvidence.snapshot_entities([
+      FakeImage.new(13, :attributes => {
+        ['BC_PDF_Importer', 'source_span_id'] => source_id,
+        ['BC_PDF_Importer', 'raster_page_number'] => 1,
+        ['BC_PDF_Importer', 'raster_pixel_width'] => 300,
+        ['BC_PDF_Importer', 'raster_pixel_height'] => 120,
+        ['BC_PDF_Importer', 'raster_content_sha256'] => png_sha,
+        ['BC_PDF_Importer', 'raster_content_bytes'] => 48_000,
+        ['BC_PDF_Importer', 'raster_source_pdf_sha256'] => source_sha,
+        ['BC_PDF_Importer', 'raster_alpha_verified'] => true,
+        ['BC_PDF_Importer', 'raster_transparent_background_verified'] => true,
+        ['BC_PDF_Importer', 'raster_visible_pixel_verified'] => true,
+        ['BC_PDF_Importer', 'raster_page_render_once_verified'] => true,
+        ['BC_PDF_Importer', 'raster_page_render_sha256'] => 'c' * 64
+      })
+    ])
+    [stats, manifest]
+  end
+
+  def strict_terminal_item_raster_fallback_fixture
+    stats, manifest = strict_requested_item_raster_fixture
+    source_id = 'text_span:1:0'
+    artifact = stats[:text_attempts][0][:artifact_evidence]
+    entity_ids = ['entity_id:13']
+    ladder = [:labels, :text3d, :glyphs, :geometry, :raster]
+    proofs = []
+    history = ladder.each_with_index.map do |mode, index|
+      if mode == :raster
+        {
+          :mode => :raster, :outcome => :complete,
+          :resulting_entity_ids => entity_ids,
+          :cleanup_outcome => :not_required,
+          :visual_fidelity_verified => true, :real_raster_verified => true,
+          :source_crop_binding_verified => true,
+          :entity_type_verified => true, :artifact_evidence => artifact
+        }
+      else
+        proof = {
+          :source_span_id => source_id,
+          :importer_id => 'sketchup_pdf_vector_importer',
+          :page_number => 1, :scope => :item,
+          :category => :exact_representation_impossible,
+          :affirmative_impossibility => true, :generic_failure => false,
+          :from_mode => mode, :to_mode => ladder[index + 1],
+          :reason_code => :verified_source_representation_impossible,
+          :attempted_renderer => "#{mode}_renderer",
+          :evidence => { :fresh_inventory_evaluation => true },
+          :created_entity_ids => [], :cleaned_entity_ids => [],
+          :cleanup_outcome => :not_required
+        }
+        proofs << proof
+        {
+          :mode => mode, :outcome => :failed,
+          :resulting_entity_ids => [], :transition_proof => proof
+        }
+      end
+    end
+    attempt = stats[:text_attempts][0]
+    attempt[:requested_mode] = :labels
+    attempt[:delivered_mode] = :raster
+    attempt[:attempt_history] = history
+    record = stats[:terminal_text_delivery_records][0]
+    record[:requested_mode] = :labels
+    record[:explicit_request] = false
+    record[:degraded] = true
+    stats[:raster_delivery_records] = [Marshal.load(Marshal.dump(record))]
+    stats[:requested_text_mode] = :labels
+    stats[:fallback_transitions] = Marshal.load(Marshal.dump(proofs))
+    stats[:raster_fallback_used] = true
+    stats[:text_renderers] = [{
+      :requested_mode => :labels, :delivered_mode => :raster,
+      :degraded => true, :resulting_entity_ids => entity_ids
+    }]
+    [stats, manifest]
+  end
+
   def strict_empty_page_raster_fixture
     png_sha = 'a' * 64
     source_sha = 'b' * 64
@@ -1687,6 +2202,8 @@ class SketchupHostEvidenceTest < Minitest::Test
       :created_entity_type => 'raster_image', :real_raster_verified => true,
       :visual_fidelity_verified => true, :cleanup_outcome => :not_required,
       :delivery_scope => :page_raster, :no_semantic_text => true,
+      :delivery_basis => :verified_zero_canonical_text,
+      :semantic_text_evaluated => true,
       :canonical_text_item_count => 0, :source_page_number => 1,
       :immutable_pdf_sha256 => source_sha,
       :rendered_pdf_sha256 => source_sha,

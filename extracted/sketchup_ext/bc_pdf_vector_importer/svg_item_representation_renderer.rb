@@ -21,6 +21,7 @@ module BlueCollarSystems
         verify_source_context!(source_id, opts[:source_context])
         verify_source_bbox!(item, media_box)
 
+        group = nil
         before = RepresentationFidelity.snapshot(entities)
         placed = CairoGlyphSource.model_space_loops(svg, media_box, opts)
         pens = Array(placed).map do |entry|
@@ -107,7 +108,7 @@ module BlueCollarSystems
           :failures => []
         }
       rescue StandardError => error
-        cleanup_error = cleanup_created_since(entities, before)
+        cleanup_error = cleanup_claimed_group(entities, before, group)
         if cleanup_error
           raise RepresentationFidelity::ContractError,
                 "item #{mode || requested_mode} renderer failed: " \
@@ -656,10 +657,12 @@ module BlueCollarSystems
         ''
       end
 
-      def self.cleanup_created_since(entities, before)
-        return nil unless entities && before
+      def self.cleanup_claimed_group(entities, before, group)
+        return nil unless entities && before && group
         current = RepresentationFidelity.snapshot(entities)
-        owned = RepresentationFidelity.created_between(before, current)
+        owned = RepresentationFidelity.claimed_created_entities!(
+          before, current, [group]
+        )
         RepresentationFidelity.erase_owned!(entities, owned) unless owned.empty?
         nil
       rescue StandardError => cleanup_error

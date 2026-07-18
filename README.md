@@ -34,21 +34,38 @@ assets, checksums, license, and notes.
 
 - **4 Import Modes** (BCS-ARCH-001) — Auto (default, picks strategy per page),
   Vector, Raster, Hybrid. Every mode targets maximum fidelity.
-- **4 Text Rendering Options** — Geometry, Glyphs, Labels, 3D Text
-  (orthogonal to mode) + separate Import text toggle. The dialog reopens
+- **6 Text Rendering Options** — Text, Labels, 3D Text, Glyphs, Geometry,
+  Raster (orthogonal to mode) + separate Import text toggle. The dialog reopens
   with the last text rendering option used; the first-run default is 3D Text for
   full-page visual parity.
 
-  | Mode | Editability | Glyph rotation | Model-space size |
-  |------|-------------|----------------|------------------|
-  | **Labels** | Editable `Sketchup::Text` | Faithful when final host-vector readback matches | Screen-space (zoom-invariant) |
-  | **3D Text** | Not editable | Faithful to PDF | Faithful (nominal pt × scale) |
-  | **Glyphs** / **Geometry** | Not editable | Faithful to PDF | Faithful (nominal pt × scale) |
+  | Requested representation | Delivered object | Fidelity contract |
+  |--------------------------|------------------|-------------------|
+  | **Text** | Distinct flat editable model text | Never aliases to Labels. SketchUp 2017 exposes no distinct constructor, so only the exact signed item capability proof may advance to Labels. |
+  | **Labels** | Editable `Sketchup::Text` annotation | Exact content/anchor and hidden leader are read back; nonzero glyph rotation is a proven host limit for that item. |
+  | **3D Text** | Positive-depth source-glyph solid text | Model-space placement, rotation, size, source glyphs, and depth are verified. |
+  | **Glyphs** | Per-glyph grouped source outlines | Outline identity, grouping, placement, rotation, size, and visibility are verified. |
+  | **Geometry** | Source/page path edges | Geometry remains separate from Glyph groups and is verified as owned physical edges. |
+  | **Raster** | Source-bound image | Canonical text items use verified item crops; a zero-canonical-text selected page uses a verified page image. |
+
+  Evidence keeps two page-image cases distinct. Explicit full-page Raster from
+  the Raster import strategy records semantic text not evaluated; it
+  must not claim that the page contains no text. Text-rendering Raster may use a
+  page image only with verified zero-canonical-text proof bound to the exact PDF
+  bytes and page. Item crops come from one transparent RGBA page render per page
+  and use streaming Ruby cropping. A crop must retain alpha-channel provenance
+  and visible pixels, but may be fully opaque; it is not rejected merely because
+  it contains no `alpha < 255` pixel. One reference PDF digest is cached per
+  import, while full bytes are checked immediately before/after each renderer and
+  before commit—never once per item. Saved/reopened Raster acceptance exports the
+  actual SketchUp texture and matches its decoded visual-pixel digest and size;
+  importer attributes alone are not proof.
 
   Use **3D Text** for go-live visual comparison against Adobe at equal zoom.
   Use **Labels** only when you need to edit piece marks or notes after import.
-  Use **Glyphs/Geometry** when exact outline geometry is preferred over native
-  SketchUp 3D text. The selected option is sacred: fix transforms in-mode; do
+  Use **Text** only when the parent host exposes that distinct editable model
+  representation. Use **Glyphs** or **Geometry** when the corresponding exact
+  outline structure is preferred. The selected option is sacred: fix transforms in-mode; do
   not switch representation to paper over alignment/rotation/scale bugs
   just to make a defect less visible.
 
@@ -64,14 +81,22 @@ assets, checksums, license, and notes.
   impossible. They therefore cannot enter or skip through the fallback ladder.
 
   When an exact item-specific source/host inventory affirmatively proves the
-  current representation impossible, the declared order is Labels → 3D Text →
-  Glyphs → Geometry → item Raster. Requested Raster renders all selected pages
-  directly. Each adjacent rung must have a distinct item renderer and its own
-  ownership/visual proof. The current implementation can deliver the verified
-  Labels → 3D Text item transition; if the next distinct Glyphs/Geometry item
-  renderer is unavailable, it stops truthfully instead of relabeling an earlier
-  query or skipping to Raster. The finite controller never cycles or erases
-  successful peer spans/page geometry, and requires no paid component.
+  current representation impossible, only these requested-specific ladders apply:
+
+  - Text → Labels → 3D Text → Glyphs → Geometry → item Raster
+  - Labels → 3D Text → Glyphs → Geometry → item Raster
+  - 3D Text → Glyphs → Geometry → item Raster
+  - Glyphs → Geometry → item Raster
+  - Geometry → item Raster
+
+  Raster has no next rung. Requested Raster attempts a verified item crop for
+  each canonical text span, or a verified page image for each selected
+  zero-canonical-text page. Fallback Raster is always item-scoped. Each adjacent
+  rung has its own renderer and ownership/type/visual proof. Terminal Raster can
+  still fail verification: render, crop, ownership, placement, or visual failure
+  is reported and stops without pretending delivery succeeded. The finite
+  controller never cycles or erases successful peer spans/page geometry, and
+  requires no paid component.
 - **Built-in Ruby vector parser** — core vector import requires no gems or C extensions
 - **Adaptive Bezier subdivision** with configurable flatness tolerance
 - **Kasa algebraic circle fitting** for arc reconstruction from point sequences

@@ -21,9 +21,9 @@ $LOAD_PATH.unshift(SRC_ROOT)
 require 'bc_pdf_vector_importer/import_dialog'
 
 class TextModeDialogChoicesTest < Minitest::Test
-  def test_import_dialog_exposes_the_four_text_mode_choices
+  def test_import_dialog_exposes_all_distinct_text_mode_choices
     dialog = BlueCollarSystems::PDFVectorImporter::ImportDialog
-    assert_equal ['Geometry', 'Glyphs', 'Labels', '3D Text'],
+    assert_equal ['Text', 'Labels', '3D Text', 'Glyphs', 'Geometry', 'Raster'],
                  dialog::TEXT_MODE_CHOICES,
                  'dialog text-mode choices are the BCS-ARCH-001 contract'
   end

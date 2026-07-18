@@ -101,7 +101,7 @@ class SketchupHostJobTest < Minitest::Test
     load_job_tool
     Dir.mktmpdir('su-host-job') do |dir|
       output = File.join(dir, 'host output')
-      %w[labels text3d glyphs geometry raster].each do |mode|
+      %w[text labels text3d glyphs geometry raster].each do |mode|
         pdf, job_path = write_json_job(
           dir,
           'output_dir' => output,

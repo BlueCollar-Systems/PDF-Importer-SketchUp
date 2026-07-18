@@ -127,6 +127,46 @@ class TextFallbackEntity
   end
 end
 
+class TextFallbackStagingEntities
+  def initialize(parent)
+    @parent = parent
+    @entities = []
+  end
+
+  def add_3d_text(*args)
+    before = Array(@parent.to_a).dup
+    begin
+      @parent.add_3d_text(*args)
+    ensure
+      generated = @parent.to_a.reject { |entity| before.include?(entity) }
+      @parent.detach_staged_entities(generated)
+      @entities.concat(generated)
+    end
+  end
+
+  def to_a
+    @entities.dup
+  end
+end
+
+class TextFallbackStagingGroup
+  attr_reader :entities, :persistent_id
+
+  def initialize(id, parent)
+    @persistent_id = id
+    @parent = parent
+    @entities = TextFallbackStagingEntities.new(parent)
+  end
+
+  def typename
+    'Group'
+  end
+
+  def explode
+    @parent.explode_staging_group(self, @entities.to_a)
+  end
+end
+
 class TextFallbackEntities
   attr_reader :labels, :mesh_calls, :added_texts
 
@@ -142,6 +182,23 @@ class TextFallbackEntities
 
   def to_a
     @entities
+  end
+
+  def add_group
+    @next_id += 1
+    group = TextFallbackStagingGroup.new(@next_id, self)
+    @entities << group
+    group
+  end
+
+  def detach_staged_entities(entities)
+    @entities.reject! { |entity| entities.include?(entity) }
+  end
+
+  def explode_staging_group(group, children)
+    @entities.delete(group)
+    @entities.concat(children)
+    children
   end
 
   def add_3d_text(*)
@@ -302,6 +359,45 @@ class GeometryBuilderTextFallbackTest < Minitest::Test
     assert_equal 'label_native_api_unavailable', failure[:reason]
     assert_equal [:labels],
                  failure[:attempt_history].map { |rung| rung[:mode] }
+  end
+
+  def test_label_rejects_missing_degenerate_and_nonpositive_source_dimensions
+    invalid_boxes = [
+      [nil, 20.0, 25.0, 29.0],
+      [10.0, 20.0, 10.0, 29.0],
+      [10.0, 20.0, 25.0, 20.0],
+      [25.0, 20.0, 10.0, 29.0],
+      [10.0, 29.0, 25.0, 20.0],
+      [Float::INFINITY, 20.0, 25.0, 29.0]
+    ]
+
+    invalid_boxes.each_with_index do |box, index|
+      provenance = []
+      builder = make_builder(false, provenance, :labels)
+      entities = TextFallbackEntities.new(:success, :success)
+      item = Item.new(
+        'A1', 10.0, 20.0, 9.0, 0.0, 'Arial', nil,
+        box[0], box[1], box[2], box[3], nil,
+        "text_span:1:#{index}"
+      )
+
+      delivered = builder.send(
+        :place_annotation_label, entities, item, 0.0, 0.0, 'Text'
+      )
+
+      refute delivered, box.inspect
+      assert_empty entities.added_texts,
+                   'invalid source dimensions must fail before add_text'
+      assert_empty entities.to_a
+      assert_empty provenance
+      failure = builder.text_delivery_failures.fetch(0)
+      assert_equal 'label_source_dimensions_unavailable', failure[:reason]
+      rung = failure[:attempt_history].fetch(0)
+      assert_equal :failed, rung[:outcome]
+      assert_empty rung[:created_entity_ids]
+      assert_empty rung[:cleaned_entity_ids]
+      assert_equal :not_required, rung[:cleanup_outcome]
+    end
   end
 
   def test_whitespace_only_label_is_attempted_with_exact_source_content

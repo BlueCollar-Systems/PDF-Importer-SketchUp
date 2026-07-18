@@ -541,11 +541,17 @@ module BlueCollarSystems
         value.nil? ? hash[key.to_s] : value
       end
 
+      def telemetry_key?(hash, key)
+        hash.respond_to?(:key?) &&
+          (hash.key?(key) || hash.key?(key.to_s))
+      end
+
       def symbolized_transition_proof(entry)
         return nil unless entry.is_a?(Hash)
         proof = {}
         [
           :source_span_id, :importer_id, :page_number,
+          :requested_mode,
           :affirmative_impossibility, :generic_failure,
           :attempted_renderer, :created_entity_ids, :cleaned_entity_ids,
           :evidence
@@ -565,6 +571,13 @@ module BlueCollarSystems
       def transition_signature(entry)
         proof = symbolized_transition_proof(entry)
         return nil unless proof
+        evidence_digest = nil
+        if RepresentationFidelity.normalize_mode(proof[:from_mode]) == :text
+          evidence = proof[:evidence]
+          evidence_digest = telemetry_value(
+            evidence, :evidence_sha256
+          ).to_s.downcase
+        end
         [
           proof[:source_span_id].to_s,
           RepresentationFidelity.normalize_mode(proof[:from_mode]),
@@ -573,7 +586,7 @@ module BlueCollarSystems
           proof[:page_number].to_i,
           Array(proof[:created_entity_ids]).map { |value| value.to_s }.sort,
           Array(proof[:cleaned_entity_ids]).map { |value| value.to_s }.sort,
-          proof[:cleanup_outcome]
+          proof[:cleanup_outcome], evidence_digest
         ]
       end
 
@@ -682,6 +695,135 @@ module BlueCollarSystems
           telemetry_value(artifact, :content_byte_size).to_i > 0
       end
 
+      def fidelity_source_pdf_sha256(stats)
+        value = telemetry_value(stats, :normalized_input_sha256)
+        value = telemetry_value(stats, :normalized_pdf_sha256) if
+          value.to_s.strip.empty?
+        value.to_s.downcase
+      end
+
+      def fidelity_explicit_page_raster_artifact_valid?(artifact, page_number,
+                                                         source_pdf_sha256)
+        fidelity_raster_artifact_valid?(artifact, page_number) &&
+          source_pdf_sha256 =~ /\A[0-9a-f]{64}\z/ &&
+          telemetry_value(artifact, :source_pdf_sha256).to_s.downcase ==
+            source_pdf_sha256 &&
+          telemetry_value(artifact, :source_pdf_binding_verified) == true
+      end
+
+      def fidelity_item_raster_artifact_valid?(artifact, source_id,
+                                                page_number,
+                                                source_pdf_sha256)
+        return false unless artifact.is_a?(Hash)
+        source_box = telemetry_value(artifact, :source_box)
+        pixel_crop = telemetry_value(artifact, :pixel_crop)
+        content_sha = telemetry_value(artifact, :content_sha256).to_s.downcase
+        valid_box = source_box.is_a?(Array) && source_box.length == 4 &&
+          source_box.all? { |value| value.is_a?(Numeric) && value.to_f.finite? } &&
+          source_box[2].to_f > source_box[0].to_f &&
+          source_box[3].to_f > source_box[1].to_f
+        valid_crop = pixel_crop.is_a?(Array) && pixel_crop.length == 4 &&
+          pixel_crop.all? { |value| value.is_a?(Integer) } &&
+          pixel_crop[2].to_i > 0 && pixel_crop[3].to_i > 0
+        telemetry_value(artifact, :source_span_id).to_s == source_id.to_s &&
+          telemetry_value(artifact, :page_number).to_i == page_number.to_i &&
+          valid_box && valid_crop &&
+          telemetry_value(artifact, :pixel_width).to_i == pixel_crop[2].to_i &&
+          telemetry_value(artifact, :pixel_height).to_i == pixel_crop[3].to_i &&
+          telemetry_value(artifact, :png_signature_verified) == true &&
+          telemetry_value(artifact, :page_binding_verified) == true &&
+           telemetry_value(artifact, :source_crop_binding_verified) == true &&
+           telemetry_value(artifact, :aspect_verified) == true &&
+           telemetry_value(artifact, :alpha_channel_verified) == true &&
+           telemetry_value(
+             artifact, :transparent_background_verified
+           ) == true &&
+           telemetry_value(artifact, :visible_pixel_verified) == true &&
+           telemetry_value(
+             artifact, :page_render_once_verified
+           ) == true &&
+           telemetry_value(
+             artifact, :page_render_content_sha256
+           ).to_s.downcase =~ /\A[0-9a-f]{64}\z/ &&
+           content_sha =~ /\A[0-9a-f]{64}\z/ &&
+          telemetry_value(artifact, :content_byte_size).to_i > 0 &&
+          source_pdf_sha256 =~ /\A[0-9a-f]{64}\z/ &&
+          telemetry_value(artifact, :source_pdf_sha256).to_s.downcase ==
+            source_pdf_sha256 &&
+           telemetry_value(artifact, :source_pdf_binding_verified) == true
+      end
+
+      def fidelity_zero_canonical_inspection_valid?(stats, page_number)
+        immutable_sha = telemetry_value(stats, :source_input_sha256)
+        immutable_sha = telemetry_value(stats, :immutable_pdf_sha256) if
+          immutable_sha.to_s.strip.empty?
+        rendered_sha = telemetry_value(stats, :normalized_input_sha256)
+        rendered_sha = telemetry_value(stats, :normalized_pdf_sha256) if
+          rendered_sha.to_s.strip.empty?
+        immutable_sha = immutable_sha.to_s.downcase
+        rendered_sha = rendered_sha.to_s.downcase
+        return false unless immutable_sha =~ /\A[0-9a-f]{64}\z/ &&
+                            rendered_sha =~ /\A[0-9a-f]{64}\z/
+
+        inspections = Array(
+          telemetry_value(stats, :empty_page_source_inspections)
+        ).select do |entry|
+          entry.is_a?(Hash) && telemetry_value(entry, :page).is_a?(Integer) &&
+            telemetry_value(entry, :page) == page_number
+        end
+        return false unless inspections.length == 1
+
+        inspection = inspections[0]
+        source_page = telemetry_value(inspection, :source_page_number)
+        canonical_count = telemetry_value(
+          inspection, :canonical_text_item_count
+        )
+        source_page.is_a?(Integer) && source_page == page_number &&
+          canonical_count.is_a?(Integer) && canonical_count == 0 &&
+          telemetry_value(
+            inspection, :immutable_pdf_sha256
+          ).to_s.downcase == immutable_sha &&
+          telemetry_value(
+            inspection, :rendered_pdf_sha256
+          ).to_s.downcase == rendered_sha &&
+          telemetry_value(
+            inspection, :semantic_text_extraction_complete
+          ) == true &&
+          telemetry_value(
+            inspection, :decoded_stream_text_operators
+          ) == false &&
+          telemetry_value(
+            inspection, :decoded_form_stream_text_operators
+          ) == false
+      end
+
+      def fidelity_page_raster_delivery_basis_valid?(stats, entry,
+                                                      requested_mode,
+                                                      page_number)
+        case telemetry_value(entry, :delivery_basis).to_s
+        when 'explicit_full_page_raster'
+          requested_mode == :raster &&
+            RepresentationFidelity.normalize_mode(
+              telemetry_value(entry, :requested_mode)
+            ) == :raster &&
+            telemetry_value(entry, :full_page_raster_request) == true &&
+            telemetry_value(entry, :semantic_text_evaluated) == false &&
+            telemetry_value(entry, :no_semantic_text) != true &&
+            !telemetry_key?(entry, :canonical_text_item_count)
+        when 'verified_zero_canonical_text'
+          canonical_count = telemetry_value(
+            entry, :canonical_text_item_count
+          )
+          telemetry_value(entry, :full_page_raster_request) != true &&
+            telemetry_value(entry, :semantic_text_evaluated) == true &&
+            telemetry_value(entry, :no_semantic_text) == true &&
+            canonical_count.is_a?(Integer) && canonical_count == 0 &&
+            fidelity_zero_canonical_inspection_valid?(stats, page_number)
+        else
+          false
+        end
+      end
+
       def validate_representation_fidelity(stats, opts = {})
         execution_scope = (stats[:execution_scope] ||
                            stats['execution_scope']).to_s
@@ -759,7 +901,7 @@ module BlueCollarSystems
            !source_ids.all? { |identity| identity =~ RepresentationFidelity::SOURCE_ID }
           errors << 'source_span_ledger_invalid'
         end
-        unless requested_mode == :raster || selected_pages.empty?
+        unless selected_pages.empty?
           source_ids.each do |source_id|
             page = fidelity_source_page(source_id)
             unless page && selected_pages.include?(page)
@@ -870,6 +1012,7 @@ module BlueCollarSystems
 
         terminal_by_span = {}
         terminal_no_semantic_pages = {}
+        source_pdf_sha256 = fidelity_source_pdf_sha256(stats)
         terminal.each do |entry|
           unless entry.is_a?(Hash)
             errors << 'terminal_record_not_hash'
@@ -885,16 +1028,18 @@ module BlueCollarSystems
           delivered = RepresentationFidelity.normalize_mode(
             telemetry_value(entry, :delivered_mode)
           )
-          no_semantic_text = telemetry_value(entry, :no_semantic_text) == true
-          if span_ids.empty? && no_semantic_text
+          if span_ids.empty?
             page_number = telemetry_value(entry, :page).to_i
             valid_page_raster = page_number > 0 &&
               (selected_pages.empty? || selected_pages.include?(page_number)) &&
               !terminal_no_semantic_pages.key?(page_number) && ids &&
               cleanup == 'not_required' && delivered == :raster &&
-              telemetry_value(entry, :delivery_scope).to_s == 'page_raster' &&
-              telemetry_value(entry, :real_raster_verified) == true &&
-              telemetry_value(entry, :visual_fidelity_verified) == true
+               telemetry_value(entry, :delivery_scope).to_s == 'page_raster' &&
+               telemetry_value(entry, :real_raster_verified) == true &&
+               telemetry_value(entry, :visual_fidelity_verified) == true &&
+               fidelity_page_raster_delivery_basis_valid?(
+                 stats, entry, requested_mode, page_number
+               )
             unless valid_page_raster
               errors << 'terminal_no_semantic_page_record_invalid'
               next
@@ -916,10 +1061,9 @@ module BlueCollarSystems
           item_raster_valid = scope == 'item_raster' &&
             cleanup == 'not_required' && span_ids.length == 1 &&
             telemetry_value(entry, :source_crop_binding_verified) == true &&
-            artifact.is_a?(Hash) &&
-            telemetry_value(artifact, :source_span_id).to_s == span_ids[0] &&
-            telemetry_value(artifact, :page_number).to_i == page_number &&
-            telemetry_value(artifact, :source_crop_binding_verified) == true
+            fidelity_item_raster_artifact_valid?(
+              artifact, span_ids[0], page_number, source_pdf_sha256
+            )
           valid = !span_ids.empty? && span_ids.uniq.length == span_ids.length &&
                   span_ids.all? { |span_id| source_ids.include?(span_id) } &&
                   fidelity_span_pages_valid?(entry, span_ids, selected_pages) &&
@@ -990,7 +1134,8 @@ module BlueCollarSystems
 
         if requested_mode == :raster
           raster_signatures = []
-          raster_pages = []
+          item_span_ids = []
+          page_raster_pages = []
           raster_deliveries.each_with_index do |entry, index|
             unless entry.is_a?(Hash)
               errors << "raster_delivery_invalid:#{index}"
@@ -1008,29 +1153,61 @@ module BlueCollarSystems
             delivered = RepresentationFidelity.normalize_mode(
               telemetry_value(entry, :delivered_mode)
             )
-            valid = requested == :raster && delivered == :raster &&
-              spans == [] && ids && ids.length == 1 && page_number > 0 &&
+            scope = telemetry_value(entry, :delivery_scope).to_s
+            artifact = telemetry_value(entry, :artifact_evidence)
+            common_valid = requested == :raster && delivered == :raster &&
+              ids && ids.length == 1 && page_number > 0 &&
               (selected_pages.empty? || selected_pages.include?(page_number)) &&
               telemetry_value(entry, :created_entity_type).to_s == 'raster_image' &&
               telemetry_value(entry, :real_raster_verified) == true &&
               telemetry_value(entry, :visual_fidelity_verified) == true &&
-              telemetry_value(entry, :cleanup_outcome).to_s == 'not_required' &&
-              telemetry_value(entry, :delivery_scope).to_s == 'page_raster' &&
-              telemetry_value(entry, :no_semantic_text) == true &&
-              fidelity_raster_artifact_valid?(
-                telemetry_value(entry, :artifact_evidence), page_number
-              )
+              telemetry_value(entry, :cleanup_outcome).to_s == 'not_required'
+            valid = if scope == 'item_raster'
+                      source_id = spans.is_a?(Array) && spans.length == 1 ?
+                        spans[0].to_s : ''
+                      item_valid = common_valid && source_ids.include?(source_id) &&
+                        fidelity_source_page(source_id) == page_number &&
+                        telemetry_value(entry, :source_crop_binding_verified) == true &&
+                        telemetry_value(entry, :explicit_request) == true &&
+                        fidelity_item_raster_artifact_valid?(
+                          artifact, source_id, page_number, source_pdf_sha256
+                        )
+                      item_span_ids << source_id if item_valid
+                      item_valid
+                    elsif scope == 'page_raster'
+                      page_valid = common_valid && spans == [] &&
+                        fidelity_page_raster_delivery_basis_valid?(
+                          stats, entry, requested_mode, page_number
+                        ) &&
+                        fidelity_explicit_page_raster_artifact_valid?(
+                          artifact, page_number, source_pdf_sha256
+                        )
+                      page_raster_pages << page_number if page_valid
+                      page_valid
+                    else
+                      false
+                    end
             unless valid
               errors << "raster_delivery_invalid:#{index}"
               next
             end
-            raster_pages << page_number
             raster_signatures << [page_number, ids[0]]
           end
-          if raster_pages.uniq.length != raster_pages.length ||
-             raster_pages.sort.empty? ||
-             (!selected_pages.empty? && raster_pages.sort != selected_pages.sort)
+          source_pages = source_ids.map do |source_id|
+            fidelity_source_page(source_id)
+          end.compact.uniq.sort
+          expected_page_rasters = selected_pages.empty? ? page_raster_pages.sort :
+            (selected_pages - source_pages).sort
+          unless item_span_ids.uniq.length == item_span_ids.length &&
+                 item_span_ids.sort == source_ids.sort
+            errors << 'raster_delivery_item_set_mismatch'
+          end
+          if page_raster_pages.uniq.length != page_raster_pages.length ||
+             page_raster_pages.sort != expected_page_rasters
             errors << 'raster_delivery_page_set_mismatch'
+          end
+          if raster_signatures.empty?
+            errors << 'raster_delivery_set_empty'
           end
           terminal_signatures = terminal.map do |entry|
             next nil unless entry.is_a?(Hash)
@@ -1044,9 +1221,27 @@ module BlueCollarSystems
              terminal_signatures.sort != raster_signatures.sort
             errors << 'raster_delivery_terminal_crosslink_invalid'
           end
-          unless source_ids.empty? && attempts.empty? &&
-                 page_deliveries.empty? && provenance.empty?
-            errors << 'raster_delivery_contains_non_raster_span_evidence'
+          unless page_deliveries.empty? && provenance.empty?
+            errors << 'raster_delivery_contains_non_raster_delivery_evidence'
+          end
+          if telemetry_value(stats, :raster_fallback_used) == true ||
+             !fallback_transitions.empty? ||
+             !Array(
+               telemetry_value(stats, :page_representation_fallbacks)
+             ).empty?
+            errors << 'requested_raster_mislabeled_as_fallback'
+          end
+          renderers = Array(telemetry_value(stats, :text_renderers))
+          unless renderers.all? do |renderer|
+                   RepresentationFidelity.normalize_mode(
+                     telemetry_value(renderer, :requested_mode)
+                   ) == :raster &&
+                     RepresentationFidelity.normalize_mode(
+                       telemetry_value(renderer, :delivered_mode)
+                     ) == :raster &&
+                     telemetry_value(renderer, :degraded) == false
+                 end
+            errors << 'requested_raster_renderer_degraded'
           end
         end
 
@@ -1273,9 +1468,27 @@ module BlueCollarSystems
                   raise RepresentationFidelity::ContractError,
                         'failed rung transition does not match the ladder'
                 end
+                if mode == :text
+                  evidence = proof[:evidence]
+                  attempt_bbox = telemetry_value(attempt, :source_bbox_pdf)
+                  attempt_sha = telemetry_value(
+                    attempt, :source_text_sha256
+                  ).to_s.downcase
+                  proof_sha = telemetry_value(
+                    evidence, :source_text_sha256
+                  ).to_s.downcase
+                  proof_bbox = telemetry_value(evidence, :source_bbox_pdf)
+                  unless attempt_sha =~ /\A[0-9a-f]{64}\z/ &&
+                         attempt_sha == proof_sha &&
+                         RepresentationFidelity.canonical_json(attempt_bbox) ==
+                           RepresentationFidelity.canonical_json(proof_bbox)
+                    raise RepresentationFidelity::ContractError,
+                          'flat Text proof conflicts with source attempt'
+                  end
+                end
                 attempt_transition_signatures << transition_signature(proof)
-              rescue StandardError
-                errors << "failed_rung_transition_invalid:#{span_id}"
+              rescue StandardError => e
+                errors << "failed_rung_transition_invalid:#{span_id}:#{e.message}"
               end
             else
               errors << "rung_outcome_invalid:#{span_id}"

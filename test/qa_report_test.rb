@@ -448,11 +448,14 @@ class QAReportTest < Minitest::Test
       delivered_mode: :raster, resulting_entity_ids: [entity_id],
       created_entity_type: 'Group', real_raster_verified: true,
       visual_fidelity_verified: true, cleanup_outcome: :not_required,
-      delivery_scope: :page_raster, no_semantic_text: true
+      delivery_scope: :page_raster,
+      delivery_basis: :explicit_full_page_raster,
+      full_page_raster_request: true, semantic_text_evaluated: false
     }
     stats = {
       pages: 1, selected_pages: [1], primitives: 1, edges: 0, text: 0,
       layers: [], text_mode: :raster, requested_text_mode: :raster,
+      normalized_input_sha256: 'c' * 64,
       text_source_span_ids: [], text_attempts: [],
       source_provenance_objects: [], page_text_delivery_records: [],
       terminal_text_delivery_records: [record], raster_delivery_records: [record],
@@ -474,12 +477,21 @@ class QAReportTest < Minitest::Test
       page_number: 1, pixel_width: 1200, pixel_height: 1600,
       png_signature_verified: true, page_binding_verified: true,
       box_binding_verified: true, content_sha256: 'b' * 64,
-      content_byte_size: 48_000
+      content_byte_size: 48_000, source_pdf_sha256: 'c' * 64,
+      source_pdf_binding_verified: true
     }
     accepted = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
       'raster.pdf', { text_mode: :raster, pages: [1] }, stats
     )[:extra][:representation_fidelity]
     assert_equal true, accepted[:ready], accepted[:errors].join(', ')
+
+    record[:no_semantic_text] = true
+    mislabeled = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'raster.pdf', { text_mode: :raster, pages: [1] }, stats
+    )[:extra][:representation_fidelity]
+    assert_equal false, mislabeled[:ready]
+    assert mislabeled[:errors].any? { |error| error.include?('raster') },
+           mislabeled[:errors].join(', ')
   end
 
   def test_source_glyph_3d_text_requires_and_accepts_complete_host_evidence
@@ -547,9 +559,25 @@ class QAReportTest < Minitest::Test
       real_raster_verified: true, source_crop_binding_verified: true,
       visual_fidelity_verified: true
     }
+    source_sha = 'd' * 64
+    artifact = {
+      source_span_id: id, page_number: 1,
+      source_box: [10.0, 20.0, 40.0, 50.0],
+      pixel_crop: [20, 40, 60, 60], pixel_width: 60, pixel_height: 60,
+      png_signature_verified: true, page_binding_verified: true,
+      source_crop_binding_verified: true, aspect_verified: true,
+      alpha_channel_verified: true,
+      transparent_background_verified: true,
+      visible_pixel_verified: true,
+      page_render_once_verified: true,
+      page_render_content_sha256: 'e' * 64,
+      content_sha256: 'f' * 64, content_byte_size: 1024,
+      source_pdf_sha256: source_sha, source_pdf_binding_verified: true
+    }
     stats = {
       pages: 1, primitives: 1, edges: 0, text: 1, layers: [],
       text_mode: :text3d, text_source_span_ids: [id],
+      normalized_input_sha256: source_sha,
       fallback_transitions: transitions,
       source_provenance_objects: [],
       text_attempts: [{
@@ -565,8 +593,7 @@ class QAReportTest < Minitest::Test
         real_raster_verified: true, source_crop_binding_verified: true,
         visual_fidelity_verified: true, cleanup_outcome: :not_required,
         delivery_scope: :item_raster,
-        artifact_evidence: { source_span_id: id, page_number: 1,
-                             source_crop_binding_verified: true }
+        artifact_evidence: artifact
       }]
     }
     stats[:raster_delivery_records] = [
@@ -581,6 +608,23 @@ class QAReportTest < Minitest::Test
     assert_equal 'raster', actual['entity_type']
     assert_equal 1, actual['raster_image']
     assert_equal 1, actual['count']
+
+    stats[:terminal_text_delivery_records][0][:artifact_evidence][
+      :alpha_channel_verified
+    ] = false
+    stats[:raster_delivery_records][0][:artifact_evidence][
+      :alpha_channel_verified
+    ] = false
+    opaque = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'fallback.pdf', { text_mode: :text3d }, stats
+    )[:extra][:representation_fidelity]
+    assert_equal false, opaque[:ready]
+    stats[:terminal_text_delivery_records][0][:artifact_evidence][
+      :alpha_channel_verified
+    ] = true
+    stats[:raster_delivery_records][0][:artifact_evidence][
+      :alpha_channel_verified
+    ] = true
 
     stats[:fallback_transitions] = transitions.values_at(0, 2)
     broken = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
@@ -753,10 +797,14 @@ class QAReportTest < Minitest::Test
   def test_image_only_terminal_raster_is_valid_without_fabricating_text_span_ids
     stats = {
       pages: 1, primitives: 0, edges: 0, text: 0, layers: [],
+      source_input_sha256: 'a' * 64,
+      normalized_input_sha256: 'b' * 64,
       text_source_span_ids: [], text_attempts: [],
       source_provenance_objects: [],
       terminal_text_delivery_records: [{
         page: 1, source_span_ids: [], no_semantic_text: true,
+        delivery_basis: :verified_zero_canonical_text,
+        semantic_text_evaluated: true, canonical_text_item_count: 0,
         requested_mode: :text3d, delivered_mode: :raster,
         resulting_entity_ids: ['persistent_id:91'],
         created_entity_type: 'raster_image',
@@ -766,6 +814,13 @@ class QAReportTest < Minitest::Test
           page_number: 1, png_signature_verified: true,
           page_binding_verified: true, box_binding_verified: true
         }
+      }],
+      empty_page_source_inspections: [{
+        page: 1, source_page_number: 1, canonical_text_item_count: 0,
+        immutable_pdf_sha256: 'a' * 64, rendered_pdf_sha256: 'b' * 64,
+        semantic_text_extraction_complete: true,
+        decoded_stream_text_operators: false,
+        decoded_form_stream_text_operators: false
       }]
     }
     stats[:raster_delivery_records] = [
@@ -779,6 +834,14 @@ class QAReportTest < Minitest::Test
 
     assert_equal true, fidelity[:ready], fidelity[:errors].join(', ')
     assert_empty fidelity[:errors]
+
+    stats[:empty_page_source_inspections][0][
+      :semantic_text_extraction_complete
+    ] = false
+    false_proof = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'image-only.pdf', { text_mode: :text3d }, stats
+    )[:extra][:representation_fidelity]
+    assert_equal false, false_proof[:ready]
   end
 
   def test_image_only_page_fallback_and_physical_glyph_delivery_are_loud

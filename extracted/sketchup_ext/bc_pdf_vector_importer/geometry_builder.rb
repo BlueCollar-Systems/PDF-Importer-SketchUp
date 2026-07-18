@@ -714,10 +714,21 @@ module BlueCollarSystems
       # item-specific impossibility evidence.
       def begin_text_attempt(item, requested_mode)
         source_id = RepresentationFidelity.source_span_id(item)
+        normalized_mode = normalize_text_mode_symbol(requested_mode)
+        source_bbox = if normalized_mode == :text
+                        # The SU2017 flat-Text capability proof is bound to the
+                        # exact canonical source box. Other representations may
+                        # still attempt and then fail closed when a PDF span has
+                        # no usable box, preserving their cleanup ledger.
+                        RepresentationFidelity.strict_source_bbox_pdf(item)
+                      else
+                        item_source_bbox_pdf(item)
+                      end
         attempt = {
           source_span_id: source_id,
           source_text_sha256: Digest::SHA256.hexdigest(item.text.to_s),
-          requested_mode: normalize_text_mode_symbol(requested_mode),
+          source_bbox_pdf: source_bbox,
+          requested_mode: normalized_mode,
           delivered_mode: nil,
           resulting_entity_ids: [],
           visual_fidelity_verified: false,
@@ -768,14 +779,20 @@ module BlueCollarSystems
         true
       end
 
-      def cleanup_created_since_snapshot!(entities, before_snapshot, rung)
+      def cleanup_claimed_text_entities!(entities, before_snapshot, claims, rung)
         after_snapshot = RepresentationFidelity.snapshot(entities)
-        created = RepresentationFidelity.created_between(
-          before_snapshot, after_snapshot
+        claim_list = Array(claims).compact
+        return [] if claim_list.empty?
+        live = claim_list.select do |entity|
+          identity = RepresentationFidelity.stable_entity_id(entity)
+          after_snapshot[:by_id].key?(identity)
+        end
+        return [] if live.empty?
+        owned = RepresentationFidelity.claimed_created_entities!(
+          before_snapshot, after_snapshot, live
         )
-        return [] if created.empty?
-        created_ids = RepresentationFidelity.stable_ids(created)
-        cleaned_ids = RepresentationFidelity.erase_owned!(entities, created)
+        created_ids = RepresentationFidelity.stable_ids(owned)
+        cleaned_ids = RepresentationFidelity.erase_owned!(entities, owned)
         rung[:created_entity_ids] = (
           Array(rung[:created_entity_ids]) + created_ids
         ).uniq
@@ -783,23 +800,9 @@ module BlueCollarSystems
           Array(rung[:cleaned_entity_ids]) + cleaned_ids
         ).uniq
         rung[:cleanup_outcome] = :verified
-        created
-      end
-
-      def fail_created_since_snapshot!(entities, before_snapshot, rung, reason)
-        created = cleanup_created_since_snapshot!(
-          entities, before_snapshot, rung
-        )
-        if created.empty?
-          rung[:outcome] = :failed
-          rung[:reason] = reason.to_s
-          rung[:resulting_entity_ids] = []
-        else
-          rung[:outcome] = :failed
-          rung[:reason] = reason.to_s
-          rung[:resulting_entity_ids] = []
-        end
-        created
+        rung[:outcome] = :failed
+        rung[:resulting_entity_ids] = []
+        owned
       end
 
       def complete_text_rung!(attempt, rung, mode, entity_ids, evidence)
@@ -933,9 +936,24 @@ module BlueCollarSystems
         false
       end
 
-      def host_unsupported_label_rotation_proof(item, display_angle)
+      def host_unsupported_label_rotation_proof(item, display_angle, anchor)
         source_id = RepresentationFidelity.source_span_id(item)
         binding = RepresentationFidelity.proof_binding(source_id)
+        source_text = item.respond_to?(:text) ? item.text.to_s : ''
+        source_bbox = RepresentationFidelity.strict_source_bbox_pdf(item)
+        source_anchor = RepresentationFidelity.numeric_point(anchor)
+        expected_width = (source_bbox[2] - source_bbox[0]).abs *
+          PDF_POINT_TO_INCH * @scale.to_f
+        expected_height = (source_bbox[3] - source_bbox[1]).abs *
+          PDF_POINT_TO_INCH * @scale.to_f
+        rotation_radians = display_angle.to_f * Math::PI / 180.0
+        unless !source_text.empty? && source_anchor &&
+               expected_width.finite? && expected_width > 0.0 &&
+               expected_height.finite? && expected_height > 0.0 &&
+               rotation_radians.finite?
+          raise RepresentationFidelity::ContractError,
+                'rotated label impossibility source placement is unavailable'
+        end
         {
           :source_span_id => source_id,
           :importer_id => binding[:importer_id],
@@ -952,6 +970,15 @@ module BlueCollarSystems
           :cleaned_entity_ids => [],
           :cleanup_outcome => :not_required,
           :evidence => {
+            :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
+            :source_bbox_pdf => source_bbox,
+            :source_anchor => source_anchor,
+            :source_rotation_radians =>
+              RepresentationFidelity.canonical_number(rotation_radians),
+            :expected_width =>
+              RepresentationFidelity.canonical_number(expected_width),
+            :expected_height =>
+              RepresentationFidelity.canonical_number(expected_height),
             :source_rotation_degrees => display_angle.to_f,
             :host_entity_type => 'Sketchup::Text',
             :host_api_fact => 'Text vector controls the leader and does not rotate label glyphs',
@@ -1081,26 +1108,57 @@ module BlueCollarSystems
         end
 
         before = RepresentationFidelity.snapshot(entities)
-        success = entities.add_3d_text(
+        owned_group = entities.add_group
+        unless owned_group && owned_group.respond_to?(:entities)
+          raise RepresentationFidelity::ContractError,
+                'text3d host did not return an owned staging group'
+        end
+        success = owned_group.entities.add_3d_text(
           item.text, TextAlignLeft, font_identity[:installed_family], false, false,
           height, 0.0, 0.0, true, extrusion_depth
         )
         unless success
-          fail_created_since_snapshot!(
-            entities, before, rung, 'text3d_mesh_unavailable'
+          cleanup_claimed_text_entities!(
+            entities, before, [owned_group], rung
           )
+          owned_group = nil
+          rung[:reason] = 'text3d_mesh_unavailable'
           return stop_requested_text_delivery!(
             requested_mode, item, attempt, rung, 'text3d_mesh_unavailable'
           )
         end
 
-        after = RepresentationFidelity.snapshot(entities)
-        created = RepresentationFidelity.created_between(before, after)
-        if created.empty?
+        staged = RepresentationFidelity.snapshot(owned_group.entities)[:entities]
+        if staged.empty?
+          cleanup_claimed_text_entities!(
+            entities, before, [owned_group], rung
+          )
+          owned_group = nil
+          rung[:reason] = 'text3d_mesh_empty'
           return stop_requested_text_delivery!(
             requested_mode, item, attempt, rung, 'text3d_mesh_empty'
           )
         end
+
+        created = Array(owned_group.explode).compact
+        owned_group = nil
+        if created.empty?
+          raise RepresentationFidelity::ContractError,
+                'text3d staging group did not return exploded entity references'
+        end
+        after = RepresentationFidelity.snapshot(entities)
+        owned = RepresentationFidelity.claimed_created_entities!(
+          before, after, created
+        )
+        all_created = RepresentationFidelity.created_between(before, after)
+        unless RepresentationFidelity.stable_ids(all_created) ==
+               RepresentationFidelity.stable_ids(owned)
+          cleanup_claimed_text_entities!(entities, before, owned, rung)
+          created = []
+          raise RepresentationFidelity::ContractError,
+                'text3d host creation was accompanied by an unclaimed peer artifact'
+        end
+        created = owned
         rung[:created_entity_ids] = RepresentationFidelity.stable_ids(created)
 
         begin
@@ -1167,21 +1225,21 @@ module BlueCollarSystems
         complete_text_rung!(attempt, rung, :text3d, entity_ids, evidence)
         true
       rescue RepresentationFidelity::ContractError => e
-        # Once creation occurred without a verifiable snapshot/ownership map,
-        # an item-level fallback cannot prove it owns the partial artifacts.
-        # Escalate so the enclosing SketchUp operation aborts atomically.
         if defined?(before) && before && defined?(rung) && rung
-          fail_created_since_snapshot!(
-            entities, before, rung, "text3d_contract_error: #{e.message}"
-          )
+          claims = []
+          claims.concat(Array(created)) if defined?(created) && created
+          claims << owned_group if defined?(owned_group) && owned_group
+          cleanup_claimed_text_entities!(entities, before, claims, rung)
         end
         raise e
       rescue StandardError => e
         Logger.warn('GeometryBuilder', "add_3d_text failed: #{e.message}")
         if defined?(before) && before && defined?(rung) && rung
-          fail_created_since_snapshot!(
-            entities, before, rung, 'text3d_exception'
-          )
+          claims = []
+          claims.concat(Array(created)) if defined?(created) && created
+          claims << owned_group if defined?(owned_group) && owned_group
+          cleanup_claimed_text_entities!(entities, before, claims, rung)
+          rung[:reason] = 'text3d_exception'
         elsif defined?(rung) && rung
           rung[:outcome] = :failed
           rung[:reason] = 'text3d_exception'
@@ -1289,14 +1347,57 @@ module BlueCollarSystems
 
       def try_annotation_add(entities, rung, description)
         before = RepresentationFidelity.snapshot(entities)
+        entity = nil
         entity = yield
-        cleanup_created_since_snapshot!(entities, before, rung) unless entity
+        after = RepresentationFidelity.snapshot(entities)
+        created = RepresentationFidelity.created_between(before, after)
+        unless entity
+          unless created.empty?
+            raise RepresentationFidelity::ContractError,
+                  "#{description} created an unreturned host artifact; " \
+                  'ownership is ambiguous and the operation must abort'
+          end
+          return nil
+        end
+
+        owned = RepresentationFidelity.claimed_created_entities!(
+          before, after, [entity]
+        )
+        created_ids = RepresentationFidelity.stable_ids(created)
+        owned_ids = RepresentationFidelity.stable_ids(owned)
+        unless created_ids == owned_ids
+          cleaned_ids = RepresentationFidelity.erase_owned!(entities, owned)
+          if rung
+            rung[:created_entity_ids] = owned_ids
+            rung[:cleaned_entity_ids] = cleaned_ids
+            rung[:cleanup_outcome] = :verified
+          end
+          entity = nil
+          raise RepresentationFidelity::ContractError,
+                "#{description} was accompanied by an unclaimed peer artifact"
+        end
         entity
       rescue RepresentationFidelity::ContractError
+        if entity
+          begin
+            entities.erase_entities(entity)
+          rescue StandardError
+            # The enclosing SketchUp operation must abort atomically when the
+            # exact returned reference cannot be cleaned or verified.
+          end
+        end
         raise
       rescue StandardError => e
         Logger.warn('GeometryBuilder', "#{description} failed: #{e.message}")
-        cleanup_created_since_snapshot!(entities, before, rung) if before
+        if before
+          after = RepresentationFidelity.snapshot(entities)
+          created = RepresentationFidelity.created_between(before, after)
+          unless created.empty?
+            raise RepresentationFidelity::ContractError,
+                  "#{description} raised after creating an unreturned host " \
+                  'artifact; ownership is ambiguous and the operation must abort'
+          end
+        end
         nil
       end
 
@@ -1440,12 +1541,19 @@ module BlueCollarSystems
         attempt ||= begin_text_attempt(item, requested_mode)
         return false unless attempt
         rung = append_text_rung(attempt, :labels)
+        source_geometry = verified_label_source_geometry(item)
+        unless source_geometry
+          return stop_requested_text_delivery!(
+            requested_mode, item, attempt, rung,
+            'label_source_dimensions_unavailable'
+          )
+        end
         label_x, label_y, label_angle = label_insertion_pdf(item)
         display_angle = display_text_angle(item, label_angle)
         pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
         rotated = display_angle.to_f.abs > 1.0e-12
         if rotated
-          proof = host_unsupported_label_rotation_proof(item, display_angle)
+          proof = host_unsupported_label_rotation_proof(item, display_angle, pt)
           rung[:transition_proof] = proof
           return stop_requested_text_delivery!(
             requested_mode, item, attempt, rung,
@@ -1471,11 +1579,8 @@ module BlueCollarSystems
               text, item.text, pt, display_angle, true
             )
             set_layer(text, layer)
-            bbox = item_source_bbox_pdf(item)
-            expected_width = bbox ? (bbox[2].to_f - bbox[0].to_f).abs *
-              @scale_factor.to_f / 72.0 : 0.0
-            expected_height = bbox ? (bbox[3].to_f - bbox[1].to_f).abs *
-              @scale_factor.to_f / 72.0 : 0.0
+            expected_width = source_geometry[:expected_width]
+            expected_height = source_geometry[:expected_height]
             evidence[:physical_geometry_verified] = true
             evidence[:physical_style_verified] = true
             evidence[:transform_verified] = true
@@ -1546,8 +1651,9 @@ module BlueCollarSystems
 
       def normalize_text_mode_symbol(mode)
         case mode.to_s.strip.downcase
+        when 'text', 'flat_text', 'editable_text' then :text
         when 'text3d', '3d_text', '3d text', 'add_3d_text' then :text3d
-        when 'labels', 'label', 'text', 'add_text' then :labels
+        when 'labels', 'label', 'add_text' then :labels
         when 'glyphs', 'glyph' then :glyphs
         when 'geometry', 'outlines', 'outline' then :geometry
         when 'raster', 'image' then :raster
@@ -1574,6 +1680,7 @@ module BlueCollarSystems
           span_id: span_id,
           source_text_sha256: Digest::SHA256.hexdigest(item.text.to_s),
           created_entity_type: entity_type,
+          requested_mode: @requested_text_mode,
           delivered_mode: normalize_text_mode_symbol(delivered_mode),
           resulting_entity_ids: ids
         }
@@ -1598,12 +1705,35 @@ module BlueCollarSystems
 
       def label_has_bbox?(item)
         return false unless item
-        vals = [item.bbox_x0, item.bbox_y0, item.bbox_x1, item.bbox_y1]
-        return false unless vals.all? { |v| !v.nil? }
-        (item.bbox_x1.to_f - item.bbox_x0.to_f).abs > 1.0e-6 &&
-          (item.bbox_y1.to_f - item.bbox_y0.to_f).abs > 1.0e-6
+        vals = [item.bbox_x0, item.bbox_y0, item.bbox_x1, item.bbox_y1].map do |value|
+          Float(value)
+        end
+        return false unless vals.all? { |value| value.finite? }
+        (vals[2] - vals[0]) > 1.0e-6 &&
+          (vals[3] - vals[1]) > 1.0e-6
       rescue StandardError
         false
+      end
+
+      def verified_label_source_geometry(item)
+        return nil unless label_has_bbox?(item)
+        bbox = [
+          Float(item.bbox_x0), Float(item.bbox_y0),
+          Float(item.bbox_x1), Float(item.bbox_y1)
+        ]
+        scale = Float(@scale)
+        width = (bbox[2] - bbox[0]) * scale / 72.0
+        height = (bbox[3] - bbox[1]) * scale / 72.0
+        return nil unless scale.finite? && scale > 0.0 &&
+                          width.finite? && width > 0.0 &&
+                          height.finite? && height > 0.0
+        {
+          :source_bbox_pdf => bbox,
+          :expected_width => width,
+          :expected_height => height
+        }
+      rescue StandardError
+        nil
       end
 
       def external_text_item?(item)
