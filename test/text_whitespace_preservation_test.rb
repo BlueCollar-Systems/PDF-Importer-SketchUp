@@ -24,6 +24,20 @@ class TextWhitespacePreservationTest < Minitest::Test
     TP.new([stream], {}, opts).parse
   end
 
+  def parse_exact_with_font_map(literal, map)
+    stream = "BT /F1 12 Tf 1 0 0 1 10 20 Tm (#{literal}) Tj ET"
+    maps = {
+      'F1' => {
+        :map => map,
+        :code_lengths => [1]
+      }
+    }
+    TP.new(
+      [stream], maps,
+      { :strict_text_fidelity => true, :merge_text_runs => false }
+    ).parse
+  end
+
   def normalize(text)
     item = TP::TextItem.new(
       text, 10.0, 20.0, 12.0, 0.0, 'F1', 12.0,
@@ -72,5 +86,19 @@ class TextWhitespacePreservationTest < Minitest::Test
 
     assert_equal 1, items.length
     assert_equal '   ', items.first.text
+  end
+
+  def test_complete_font_map_marks_exact_whitespace_operand_complete
+    item = parse_exact_with_font_map('   ', { ' ' => ' ' }).fetch(0)
+
+    assert_equal '   ', item.text
+    assert_equal true, item.source_decode_complete
+  end
+
+  def test_partially_decoded_painted_run_cannot_pose_as_whitespace_operand
+    item = parse_exact_with_font_map('\\200   ', { ' ' => ' ' }).fetch(0)
+
+    assert_equal '   ', item.text
+    assert_equal false, item.source_decode_complete
   end
 end

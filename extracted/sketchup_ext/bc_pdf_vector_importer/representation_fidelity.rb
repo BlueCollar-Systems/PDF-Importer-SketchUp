@@ -530,7 +530,7 @@ module BlueCollarSystems
         []
       end
 
-      def geometry_entity_payload(entity)
+      def geometry_entity_payload(entity, child_payloads = nil)
         type = entity_type(entity)
         payload = {
           :type => type,
@@ -549,9 +549,13 @@ module BlueCollarSystems
           payload[:width] = canonical_number(entity.width) if entity.respond_to?(:width)
           payload[:height] = canonical_number(entity.height) if entity.respond_to?(:height)
         end
-        children = entity_children(entity).map do |child|
-          geometry_entity_payload(child)
-        end
+        children = if child_payloads.nil?
+                     entity_children(entity).map do |child|
+                       geometry_entity_payload(child)
+                     end
+                   else
+                     Array(child_payloads)
+                   end
         payload[:children] = children.sort_by { |child| canonical_json(child) }
         payload
       end
@@ -602,7 +606,7 @@ module BlueCollarSystems
         nil
       end
 
-      def style_entity_payload(entity)
+      def style_entity_payload(entity, child_payloads = nil)
         layer = layer_payload(entity)
         payload = {
           :type => entity_type(entity),
@@ -618,7 +622,13 @@ module BlueCollarSystems
           :receives_shadows => entity.respond_to?(:receives_shadows?) ?
             entity.receives_shadows? : nil
         }
-        children = entity_children(entity).map { |child| style_entity_payload(child) }
+        children = if child_payloads.nil?
+                     entity_children(entity).map do |child|
+                       style_entity_payload(child)
+                     end
+                   else
+                     Array(child_payloads)
+                   end
         payload[:children] = children.sort_by { |child| canonical_json(child) }
         payload
       end
@@ -629,22 +639,58 @@ module BlueCollarSystems
         end
       end
 
-      def physical_evidence(entities)
-        values = Array(entities).compact
-        raise ContractError, 'physical evidence has no entities' if values.empty?
-        geometry = values.map { |entity| geometry_entity_payload(entity) }
+      # Capture geometry, style, and descendants in one host walk.  Callers
+      # that already walked the descendants (the guarded save/reopen manifest)
+      # can supply their child trees and avoid repeatedly enumerating the same
+      # potentially enormous SketchUp collections.
+      def physical_entity_tree(entity, child_trees = nil)
+        children = if child_trees.nil?
+                     entity_children(entity).map do |child|
+                       physical_entity_tree(child)
+                     end
+                   else
+                     Array(child_trees)
+                   end
+        geometry = geometry_entity_payload(
+          entity, children.map { |child| child[:geometry_payload] }
+        )
+        style = style_entity_payload(
+          entity, children.map { |child| child[:style_payload] }
+        )
+        {
+          :geometry_payload => geometry,
+          :style_payload => style,
+          :physical_entity_count => 1 + children.inject(0) do |total, child|
+            total + child[:physical_entity_count].to_i
+          end
+        }
+      end
+
+      def physical_evidence_from_trees(trees)
+        values = Array(trees).compact
+        raise ContractError, 'physical evidence has no entity trees' if
+          values.empty?
+        geometry = values.map { |tree| tree[:geometry_payload] }
         geometry = geometry.sort_by { |entry| canonical_json(entry) }
-        style = values.map { |entity| style_entity_payload(entity) }
+        style = values.map { |tree| tree[:style_payload] }
         style = style.sort_by { |entry| canonical_json(entry) }
         {
           :geometry_payload => geometry,
           :style_payload => style,
           :physical_geometry_sha256 => canonical_sha256(geometry),
           :physical_style_sha256 => canonical_sha256(style),
-          :physical_entity_count => values.inject(0) do |total, entity|
-            total + recursive_entity_count(entity)
+          :physical_entity_count => values.inject(0) do |total, tree|
+            total + tree[:physical_entity_count].to_i
           end
         }
+      end
+
+      def physical_evidence(entities)
+        values = Array(entities).compact
+        raise ContractError, 'physical evidence has no entities' if values.empty?
+        physical_evidence_from_trees(
+          values.map { |entity| physical_entity_tree(entity) }
+        )
       end
 
       def source_bbox_pdf(item)

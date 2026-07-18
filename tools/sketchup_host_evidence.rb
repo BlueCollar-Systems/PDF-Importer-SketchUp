@@ -88,7 +88,9 @@ module SketchupHostEvidence
     unless entities.respond_to?(:to_a)
       raise EvidenceError, 'host entity collection cannot be enumerated'
     end
-    Array(entities.to_a).map { |entity| snapshot_entity(entity, []) }
+    Array(entities.to_a).map do |entity|
+      snapshot_entity_with_physical_tree(entity, []).first
+    end
   rescue EvidenceError
     raise
   rescue StandardError => error
@@ -382,15 +384,27 @@ module SketchupHostEvidence
   private_class_method :normalized_path
 
   def self.snapshot_entity(entity, ancestors)
+    snapshot_entity_with_physical_tree(entity, ancestors).first
+  end
+  private_class_method :snapshot_entity
+
+  def self.snapshot_entity_with_physical_tree(entity, ancestors)
     raise EvidenceError, 'entity manifest contains nil' if entity.nil?
     identity = entity.object_id
     if ancestors.include?(identity)
       raise EvidenceError, 'recursive host entity cycle detected'
     end
     children = child_entities(entity)
+    child_results = children.map do |child|
+      snapshot_entity_with_physical_tree(child, ancestors + [identity])
+    end
+    child_rows = child_results.map { |result| result[0] }
+    child_trees = child_results.map { |result| result[1] }
     typename = host_typename(entity)
-    physical = physical_entity_evidence(entity)
-    {
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    physical_tree = fidelity.physical_entity_tree(entity, child_trees)
+    physical = physical_tree_evidence(physical_tree)
+    row = {
       'entity_id' => host_positive_id(entity, :entityID, 'entityID'),
       'persistent_id' => host_positive_id(
         entity, :persistent_id, 'persistent_id'
@@ -404,16 +418,15 @@ module SketchupHostEvidence
       'content_evidence' => host_content_evidence(entity, typename),
       'geometry_evidence' => physical['geometry_evidence'],
       'style_evidence' => physical['style_evidence'],
-      'children' => children.map do |child|
-        snapshot_entity(child, ancestors + [identity])
-      end
+      'children' => child_rows
     }
+    [row, physical_tree]
   end
-  private_class_method :snapshot_entity
+  private_class_method :snapshot_entity_with_physical_tree
 
-  def self.physical_entity_evidence(entity)
+  def self.physical_tree_evidence(tree)
     fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
-    evidence = fidelity.physical_evidence([entity])
+    evidence = fidelity.physical_evidence_from_trees([tree])
     style_root = Array(evidence[:style_payload]).first || {}
     {
       'geometry_evidence' => {
@@ -433,7 +446,7 @@ module SketchupHostEvidence
   rescue StandardError => error
     raise EvidenceError, "host physical evidence failed: #{error.message}"
   end
-  private_class_method :physical_entity_evidence
+  private_class_method :physical_tree_evidence
 
   def self.host_positive_id(entity, method_name, label)
     unless entity.respond_to?(method_name)

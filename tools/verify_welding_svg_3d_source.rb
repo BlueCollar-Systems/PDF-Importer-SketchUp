@@ -392,7 +392,11 @@ reports = paths.map do |pdf_path|
     { :strict_text_fidelity => true, :merge_text_runs => false }, ocg_map
   ).parse || []
   external = mod::ExternalTextExtractor.extract(pdf_path, 1) || []
-  items = external.empty? ? internal : external
+  items = if external.empty?
+            internal
+          else
+            mod.apply_internal_text_angle_hints(external, internal)
+          end
   mod::TextSourceIdentity.assign!(items, 1)
 
   paths_on_page = mod::ContentStreamParser.new(

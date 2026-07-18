@@ -41,8 +41,14 @@ module SketchupBatchImport
       raise "open gate refused: #{gate[:reason]}" if gate
 
       @model = Sketchup.active_model
+      SketchupBatchImport.write_progress!(
+        job, binding, 'baseline_evidence_snapshot_started'
+      )
       before_manifest = SketchupHostEvidence.snapshot_entities(
         @model.active_entities
+      )
+      SketchupBatchImport.write_progress!(
+        job, binding, 'baseline_evidence_snapshot_completed'
       )
       SketchupBatchImport.write_progress!(job, binding, 'import_started')
       stats = importer.run_pipeline(
@@ -52,8 +58,14 @@ module SketchupBatchImport
       source_lineage = verified_source_lineage!(stats, job)
       SketchupBatchImport.write_progress!(job, binding, 'import_completed')
 
+      SketchupBatchImport.write_progress!(
+        job, binding, 'post_import_evidence_snapshot_started'
+      )
       after_manifest = SketchupHostEvidence.snapshot_entities(
         @model.active_entities
+      )
+      SketchupBatchImport.write_progress!(
+        job, binding, 'post_import_evidence_snapshot_completed'
       )
       owned_manifest = SketchupHostEvidence.owned_manifest(
         before_manifest, after_manifest
@@ -111,8 +123,14 @@ module SketchupBatchImport
 
       SketchupBatchImport.write_progress!(job, binding, 'reopen_started')
       reopened_model = reopen_model!(job[:model_path])
+      SketchupBatchImport.write_progress!(
+        job, binding, 'reopen_evidence_snapshot_started'
+      )
       reopened_manifest = SketchupHostEvidence.snapshot_entities(
         reopened_model.active_entities
+      )
+      SketchupBatchImport.write_progress!(
+        job, binding, 'reopen_evidence_snapshot_completed'
       )
       SketchupHostEvidence.verify_reopen_continuity!(
         after_manifest, reopened_manifest

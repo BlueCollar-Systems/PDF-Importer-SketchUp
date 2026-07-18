@@ -181,6 +181,10 @@ class SketchupBatchHostContractTest < Minitest::Test
     assert_includes source, "'salvage_note' =>"
     assert_includes source,
                     'after_manifest, reopened_manifest'
+    assert_includes source, "'post_import_evidence_snapshot_started'"
+    assert_includes source, "'post_import_evidence_snapshot_completed'"
+    assert_includes source, "'reopen_evidence_snapshot_started'"
+    assert_includes source, "'reopen_evidence_snapshot_completed'"
   end
 
   def test_pipeline_binds_report_to_immutable_input_and_records_salvage_lineage

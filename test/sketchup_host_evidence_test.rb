@@ -65,6 +65,20 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  class CountingCollection
+    attr_reader :to_a_calls
+
+    def initialize(values)
+      @values = values
+      @to_a_calls = 0
+    end
+
+    def to_a
+      @to_a_calls += 1
+      @values.dup
+    end
+  end
+
   class FakeText < FakeEntity
     attr_reader :text, :point
 
@@ -185,6 +199,23 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_equal true, nested['deleted']
     assert_equal [10, 11, 12, 13],
                  SketchupHostEvidence.manifest_entity_ids(manifest).sort
+  end
+
+  def test_snapshot_enumerates_each_nested_collection_once
+    leaf = FakeEntity.new(31, 'Edge')
+    nested_entities = CountingCollection.new([leaf])
+    nested = FakeGroup.new(30, nested_entities)
+    root_entities = CountingCollection.new([nested])
+    root = FakeGroup.new(29, root_entities)
+
+    manifest = SketchupHostEvidence.snapshot_entities([root])
+
+    assert_equal [29, 30, 31],
+                 SketchupHostEvidence.manifest_entity_ids(manifest)
+    assert_equal 1, root_entities.to_a_calls,
+                 'root host children must be enumerated once per snapshot'
+    assert_equal 1, nested_entities.to_a_calls,
+                 'nested host children must be enumerated once per snapshot'
   end
 
   def test_snapshot_preserves_representation_identity_attributes

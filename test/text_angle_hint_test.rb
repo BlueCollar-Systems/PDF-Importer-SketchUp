@@ -94,6 +94,7 @@ semantic_internal = [
   ti.new('   ', 130.0, 200.0, 10.0, 0.0, 'F1', 10.0,
          nil, nil, nil, nil, nil)
 ]
+semantic_internal[1].source_decode_complete = true
 semantic_merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hints(
   semantic_external, semantic_internal
 )
@@ -114,11 +115,23 @@ shadow_internal = [
   ti.new('   ', 724.7812, 552.8345, 7.0, 0.0, '/T1_0', 1.0,
          nil, nil, nil, nil, nil)
 ]
+shadow_internal[0].source_decode_complete = false
 shadow_merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hints(
   shadow_external, shadow_internal
 )
 assert_true(shadow_merged.length == 1 && shadow_merged[0].text == "\u03A61",
-            'bbox-owned visible ink must suppress an incomplete whitespace-only decode')
+            'unresolved raw source codes must suppress an incomplete whitespace-only decode')
+
+overlap_internal = [
+  ti.new(' ', 724.7812, 552.8345, 7.0, 0.0, '/T1_0', 1.0,
+         nil, nil, nil, nil, nil)
+]
+overlap_internal[0].source_decode_complete = true
+overlap_merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hints(
+  shadow_external, overlap_internal
+)
+assert_true(overlap_merged.length == 2 && overlap_merged[1].text == ' ',
+            'a completely decoded whitespace operand must survive even when its anchor overlaps visible ink')
 
 puts
 if $failures.empty?

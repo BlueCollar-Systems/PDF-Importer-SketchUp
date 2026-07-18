@@ -28,6 +28,13 @@ module BlueCollarSystems
         # MUST stay the FINAL member so positional constructors stay valid.
         :source_span_id
       )
+      # Source decoding evidence is deliberately outside the positional Struct
+      # members so source_span_id remains the final constructor argument.  A
+      # true value means every raw character code in this PDF text-show operand
+      # was resolved by the selected source font map; nil/false fails closed.
+      TextItem.class_eval do
+        attr_accessor :source_decode_complete
+      end
 
       # Common structural drawing fraction denominators
       VALID_DENOMS = [2, 4, 8, 16, 32, 64].freeze
@@ -233,7 +240,9 @@ module BlueCollarSystems
               if in_text
                 raw = strs.last || hexs.last
                 text = decode_text_operand(raw, font_name)
-                emit_text(text, tm, font_size, font_name) if readable_text?(text)
+                emit_text(
+                  text, tm, font_size, font_name, @last_decode_complete
+                ) if readable_text?(text)
               end
 
             when 'TJ'
@@ -242,7 +251,9 @@ module BlueCollarSystems
                 arr_token = operand_stack.find { |t| t[:type] == :array }
                 if arr_token
                   text = extract_tj_text(arr_token[:value], font_name)
-                  emit_text(text, tm, font_size, font_name) if readable_text?(text)
+                  emit_text(
+                    text, tm, font_size, font_name, @last_decode_complete
+                  ) if readable_text?(text)
                 end
               end
 
@@ -253,7 +264,9 @@ module BlueCollarSystems
                 tm = tlm.dup
                 if !strs.empty?
                   text = decode_text_operand(strs.first, font_name)
-                  emit_text(text, tm, font_size, font_name) if readable_text?(text)
+                  emit_text(
+                    text, tm, font_size, font_name, @last_decode_complete
+                  ) if readable_text?(text)
                 end
               end
 
@@ -264,7 +277,9 @@ module BlueCollarSystems
                 tm = tlm.dup
                 if !strs.empty?
                   text = decode_text_operand(strs.first, font_name)
-                  emit_text(text, tm, font_size, font_name) if readable_text?(text)
+                  emit_text(
+                    text, tm, font_size, font_name, @last_decode_complete
+                  ) if readable_text?(text)
                 end
               end
 
@@ -296,7 +311,8 @@ module BlueCollarSystems
         end
       end
 
-      def emit_text(text, tm, font_size, font_name)
+      def emit_text(text, tm, font_size, font_name,
+                    source_decode_complete = false)
         text_matrix = multiply_matrix(tm, @ctm)
         # Extract position and rotation from text matrix
         x = text_matrix[4]
@@ -310,8 +326,12 @@ module BlueCollarSystems
         # Rotation angle
         angle = -Math.atan2(text_matrix[1], text_matrix[0]) * 180.0 / Math::PI
 
-        @text_items << TextItem.new(text, x, y, effective_size, angle, font_name, font_size,
-                                    nil, nil, nil, nil, @current_ocg_layer)
+        item = TextItem.new(
+          text, x, y, effective_size, angle, font_name, font_size,
+          nil, nil, nil, nil, @current_ocg_layer
+        )
+        item.source_decode_complete = source_decode_complete == true
+        @text_items << item
       end
 
       def decode_text_operand(raw, font_name = nil)
@@ -325,7 +345,9 @@ module BlueCollarSystems
                 end
 
         mapped = decode_bytes_with_font_map(bytes, font_name)
-        text = if mapped && !mapped.empty?
+        @last_decode_complete = !mapped.nil? &&
+          font_map_covers_all_bytes?(bytes, font_name)
+        text = if !mapped.nil?
                  mapped
                else
                  # Fallback for simple PDFs without ToUnicode.
@@ -386,6 +408,30 @@ module BlueCollarSystems
       rescue StandardError => e
         Logger.warn("TextParser", "decode_tounicode failed: #{e.message}")
         nil
+      end
+
+      def font_map_covers_all_bytes?(bytes, font_name)
+        return false unless font_name && bytes && !bytes.empty?
+        fmap = @font_maps[font_name.to_s] ||
+          @font_maps[font_name.to_s.sub(/\A\//, '')]
+        return false unless fmap.is_a?(Hash) && fmap[:map].is_a?(Hash) &&
+          !fmap[:map].empty?
+        lengths = (fmap[:code_lengths] || [1]).map(&:to_i).select do |length|
+          length > 0
+        end.uniq.sort.reverse
+        lengths = [1] if lengths.empty?
+        index = 0
+        while index < bytes.bytesize
+          matched_length = lengths.find do |length|
+            index + length <= bytes.bytesize &&
+              fmap[:map].key?(bytes.byteslice(index, length))
+          end
+          return false unless matched_length
+          index += matched_length
+        end
+        true
+      rescue StandardError
+        false
       end
 
       def clean_text(text)
@@ -1145,9 +1191,13 @@ module BlueCollarSystems
         arr = array_str.to_s
         chunks = arr.scan(/\((?:\\.|[^\\)])*\)|<[^>]*>/)
         text = ""
+        complete = !chunks.empty?
         chunks.each do |chunk|
-          text << decode_text_operand(chunk, font_name)
+          decoded = decode_text_operand(chunk, font_name)
+          complete = false unless @last_decode_complete == true
+          text << decoded
         end
+        @last_decode_complete = complete
         @strict_text_fidelity ? text : clean_text(text)
       end
 
