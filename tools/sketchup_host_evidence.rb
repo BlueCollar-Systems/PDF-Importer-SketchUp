@@ -2126,11 +2126,20 @@ module SketchupHostEvidence
   private_class_method :verify_empty_source_proof!
 
   def self.source_sha256_value(stats, *keys)
+    values = []
     Array(keys).each do |key|
+      next unless hash_key?(stats, key)
       value = hash_value(stats, key).to_s.downcase
-      return value if value =~ /\A[0-9a-f]{64}\z/
+      next if value.empty?
+      unless value =~ /\A[0-9a-f]{64}\z/
+        raise EvidenceError, "source SHA256 alias #{key} is invalid"
+      end
+      values << value
     end
-    ''
+    if values.uniq.length > 1
+      raise EvidenceError, 'source SHA256 aliases conflict'
+    end
+    values.first.to_s
   end
   private_class_method :source_sha256_value
 

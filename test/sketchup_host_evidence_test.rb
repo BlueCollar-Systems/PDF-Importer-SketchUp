@@ -636,6 +636,16 @@ class SketchupHostEvidenceTest < Minitest::Test
       terminal_schema, label_manifest, :labels, [1]
     )
 
+    conflicting_schema = Marshal.load(Marshal.dump(stats))
+    conflicting_schema[:immutable_pdf_sha256] = 'c' * 64
+    conflicting_schema[:normalized_pdf_sha256] = 'd' * 64
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        conflicting_schema, label_manifest, :labels, [1]
+      )
+    end
+    assert_match(/source|sha|conflict/i, error.message)
+
     mutations = {
       :source_page_number => 2,
       :canonical_text_item_count => 1,
