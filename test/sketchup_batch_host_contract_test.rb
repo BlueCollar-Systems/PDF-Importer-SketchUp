@@ -119,6 +119,40 @@ class SketchupBatchHostContractTest < Minitest::Test
                     "'requested_text_mode' => job[:text_mode].to_s"
   end
 
+  def test_real_session_uses_public_import_config_mode_factory
+    load_runner_library
+    value = Struct.new(:raw) do
+      def to_opts
+        raw.dup
+      end
+    end.new({ :factory_sentinel => true })
+    config = Class.new
+    config.singleton_class.send(:attr_accessor, :requested_mode)
+    config.define_singleton_method(:from_mode) do |name|
+      self.requested_mode = name
+      value
+    end
+    importer = Module.new
+    importer.const_set(:ImportConfig, config)
+    job = {
+      :pages => [1], :import_mode => 'vector', :text_mode => :text3d,
+      :original_pdf_path => 'C:/source.pdf',
+      :original_pdf_sha256 => 'a' * 64,
+      :immutable_pdf_path => 'C:/snapshot.pdf',
+      :immutable_pdf_sha256 => 'b' * 64
+    }
+
+    opts = SketchupBatchImport::RealHostSession.new.send(
+      :import_options, importer, job
+    )
+
+    assert_equal 'Vector', config.requested_mode
+    assert_equal true, opts[:factory_sentinel]
+    assert_equal :text3d, opts[:text_mode]
+    assert_equal true, opts[:use_3d_text]
+    assert_equal false, opts[:force_raster]
+  end
+
   def test_runner_preserves_complete_evidence_and_source_provenance
     assert_includes source,
                     'SketchupHostEvidence.verify_delivery_evidence!'

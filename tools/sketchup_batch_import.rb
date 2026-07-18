@@ -281,7 +281,8 @@ module SketchupBatchImport
     end
 
     def import_options(importer, job)
-      opts = importer::ImportConfig.auto.to_opts
+      mode_name = job[:import_mode].to_s.capitalize
+      opts = importer::ImportConfig.from_mode(mode_name).to_opts
       opts[:pages] = job[:pages]
       opts[:import_mode] = job[:import_mode]
       opts[:text_mode] = job[:text_mode]
