@@ -53,7 +53,7 @@ class SvgTextCollapseTest < Minitest::Test
       matrix: [1.0, 0.0, 0.0, 1.0, 5.0, 20.0]
     }
     nearby = {
-      glyph_id: 'g', x: 5.0001, y: 0.0,
+      glyph_id: 'g', x: 5.0000000004, y: 0.0,
       matrix: [1.0, 0.0, 0.0, 1.0, 5.0, 20.0]
     }
 
@@ -140,6 +140,83 @@ class SvgTextCollapseTest < Minitest::Test
   def test_temp_svg_path_is_extensionless_for_pdftocairo_multi_page_svg
     path = R.temp_svg_path
     refute_match(/\.svg\z/i, path)
+  end
+
+  def test_svg_path_distance_thresholds_are_numeric_not_host_fuzzy_lengths
+    path = 'M 0 0 L 1 0 L 0.0001 0 Z'
+    float_factory = lambda { |x, y, z| DummyPoint.new(x, y, z) }
+    fuzzy_factory = lambda { |x, y, z| FuzzyPoint.new(x, y, z) }
+
+    expected = R.svg_path_to_points(path, 1.0, 1.0, float_factory)
+    actual = R.svg_path_to_points(path, 1.0, 1.0, fuzzy_factory)
+
+    assert_equal expected.map(&:length), actual.map(&:length)
+    assert_equal expected.flatten.map { |point| [point.x, point.y] },
+                 actual.flatten.map { |point| [point.x, point.y] }
+  end
+
+  def test_svg_path_preserves_every_nonzero_source_segment_for_scaled_construction
+    path = 'M 0 0 L 0.000217 0 L 1 0 L 1 1 Z'
+    factory = lambda { |x, y, z| DummyPoint.new(x, y, z) }
+
+    points = R.svg_path_to_points(path, 1.0, 1.0, factory).flatten
+
+    assert points.any? { |point| (point.x.to_f - 0.000217).abs < 1.0e-12 },
+           'nonzero source edge must reach tolerance-safe 3D construction'
+  end
+
+  def test_svg_path_moveto_additional_pairs_are_line_segments
+    factory = lambda { |x, y, z| DummyPoint.new(x, y, z) }
+
+    absolute = R.svg_path_to_points(
+      'M 0 0 10 0 10 10 Z', 1.0, 1.0, factory
+    )
+    relative = R.svg_path_to_points(
+      'm 1 1 2 0 0 2 z', 1.0, 1.0, factory
+    )
+
+    assert_equal [[0.0, -0.0], [10.0, -0.0], [10.0, -10.0], [0.0, -0.0]],
+                 absolute[0].map { |point| [point.x, point.y] }
+    assert_equal [[1.0, -1.0], [3.0, -1.0], [3.0, -3.0], [1.0, -1.0]],
+                 relative[0].map { |point| [point.x, point.y] }
+  end
+
+  def test_svg_path_smooth_cubic_and_quadratic_commands_keep_curvature
+    factory = lambda { |x, y, z| DummyPoint.new(x, y, z) }
+    cubic = R.svg_path_to_points(
+      'M 0 0 C 0 10 10 10 10 0 S 20 -10 20 0',
+      1.0, 1.0, factory
+    )[0]
+    quadratic = R.svg_path_to_points(
+      'M 0 0 Q 5 10 10 0 T 20 0', 1.0, 1.0, factory
+    )[0]
+
+    assert_equal 9, cubic.length
+    assert_equal 9, quadratic.length
+    refute_in_delta 0.0, cubic[-2].y, 1.0e-9
+    refute_in_delta 0.0, quadratic[-2].y, 1.0e-9
+    assert_in_delta 20.0, cubic[-1].x, 1.0e-9
+    assert_in_delta 20.0, quadratic[-1].x, 1.0e-9
+  end
+
+  def test_svg_path_absolute_and_relative_arcs_preserve_curved_geometry
+    factory = lambda { |x, y, z| DummyPoint.new(x, y, z) }
+    absolute = R.svg_path_to_points(
+      'M 10 0 A 10 10 0 0 1 0 10', 1.0, 1.0, factory
+    )[0]
+    relative = R.svg_path_to_points(
+      'm 10 0 a 10 10 0 0 1 -10 10', 1.0, 1.0, factory
+    )[0]
+
+    assert_operator absolute.length, :>, 2
+    assert_equal absolute.map { |point| [point.x, point.y] },
+                 relative.map { |point| [point.x, point.y] }
+    middle = absolute[absolute.length / 2]
+    assert_in_delta 10.0,
+                    Math.sqrt((middle.x * middle.x) + (middle.y * middle.y)),
+                    1.0e-8
+    assert_in_delta 0.0, absolute[-1].x, 1.0e-9
+    assert_in_delta(-10.0, absolute[-1].y, 1.0e-9)
   end
 
   def test_glyph_component_flattening_defaults_on_with_escape_hatch
@@ -239,6 +316,23 @@ class SvgTextCollapseTest < Minitest::Test
       dy = y.to_f - other.y.to_f
       dz = z.to_f - other.z.to_f
       Math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+    end
+  end
+
+  class FuzzyLength
+    include Comparable
+    def initialize(value); @value = value.to_f; end
+    def to_f; @value; end
+    def <=>(other)
+      difference = @value - other.to_f
+      return 0 if difference.abs < 0.001
+      difference < 0.0 ? -1 : 1
+    end
+  end
+
+  class FuzzyPoint < DummyPoint
+    def distance(other)
+      FuzzyLength.new(super)
     end
   end
 

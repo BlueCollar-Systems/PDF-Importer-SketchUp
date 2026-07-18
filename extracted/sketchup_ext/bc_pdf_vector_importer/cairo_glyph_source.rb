@@ -682,31 +682,30 @@ module BlueCollarSystems
           boxes.map { |box| box[2] }.max,
           boxes.map { |box| box[3] }.max
         ]
-        width = row[:box_x1] - row[:box_x0]
-        height = row[:box_y1] - row[:box_y0]
-        axes = Array(candidates).map do |candidate|
-          assignment = candidate[:assignment]
-          placement = assignment.is_a?(Hash) ? assignment[:placement] : nil
-          placement.is_a?(Hash) ? placement[:source_primary_axis] : nil
-        end.compact.uniq
-        horizontal = if axes.length == 1
-                       axes.first.to_s == 'x'
-                     else
-                       width >= height
-                     end
-        source_min = horizontal ? row[:box_x0] : row[:box_y0]
-        source_max = horizontal ? row[:box_x1] : row[:box_y1]
-        ink_min = horizontal ? ink[0] : ink[1]
-        ink_max = horizontal ? ink[2] : ink[3]
-        cross_span = horizontal ? height : width
-        edge_tolerance = [tolerance.to_f, cross_span.abs].max
+        axis = source_run_axis(row, candidates)
+        perpendicular = [-axis[1], axis[0]]
+        source_points = bbox_corners([
+          row[:box_x0], row[:box_y0], row[:box_x1], row[:box_y1]
+        ])
+        ink_points = source_ink_projection_points(candidates)
+        source_min, source_max = projected_extent(source_points, axis)
+        ink_min, ink_max = projected_extent(ink_points, axis)
+        cross_min, cross_max = projected_extent(source_points, perpendicular)
+        cross_span = cross_max - cross_min
+        edge_tolerance = source_edge_tolerance(
+          row[:item], tolerance, cross_span, axis
+        )
         start_gap = [ink_min - source_min, 0.0].max
         end_gap = [source_max - ink_max, 0.0].max
         minimum_shaped_count = minimum_shaped_glyph_count(row[:item])
         count_plausible = observed >= minimum_shaped_count
+        # Unicode scalar/grapheme count is not an authoritative lower bound on
+        # a font shaper's physical glyph count (contextual forms and arbitrary
+        # font ligatures may contract multiple clusters into one outline).
+        # Keep the estimate as telemetry only. Independent raw-SVG binding and
+        # physical ink coverage are the acceptance authorities.
         verified = (ink_max - ink_min) > 1.0e-9 &&
-          start_gap <= edge_tolerance && end_gap <= edge_tolerance &&
-          count_plausible
+          start_gap <= edge_tolerance && end_gap <= edge_tolerance
         {
           :reason => verified ? :source_ink_coverage_verified :
             :source_ink_coverage_incomplete,
@@ -718,12 +717,14 @@ module BlueCollarSystems
           :source_bbox_pdf => [row[:box_x0], row[:box_y0],
                                row[:box_x1], row[:box_y1]],
           :source_ink_bbox_pdf => ink,
-          :primary_axis => horizontal ? :x : :y,
+          :primary_axis => axis[0].abs >= axis[1].abs ? :x : :y,
+          :baseline_axis_pdf => axis,
           :start_edge_gap_pt => start_gap,
           :end_edge_gap_pt => end_gap,
           :edge_tolerance_pt => edge_tolerance,
           :character_count_parity => observed == expected,
           :shaped_glyph_count_verified => count_plausible,
+          :shaped_glyph_count_telemetry_only => true,
           :source_ink_coverage_verified => verified
         }
       rescue StandardError => e
@@ -736,6 +737,122 @@ module BlueCollarSystems
           :source_ink_coverage_verified => false,
           :detail => e.message.to_s
         }
+      end
+
+      def self.source_run_axis(row, candidates)
+        pens = Array(candidates).map do |candidate|
+          assignment = candidate[:assignment]
+          placement = assignment.is_a?(Hash) ? assignment[:placement] : nil
+          next unless placement.is_a?(Hash)
+          x = placement[:x].to_f
+          y = placement[:y].to_f
+          next unless x.finite? && y.finite?
+          [x, y]
+        end.compact.uniq
+        if pens.length >= 2
+          mean_x = pens.inject(0.0) { |sum, point| sum + point[0] } / pens.length
+          mean_y = pens.inject(0.0) { |sum, point| sum + point[1] } / pens.length
+          xx = 0.0
+          yy = 0.0
+          xy = 0.0
+          pens.each do |point|
+            dx = point[0] - mean_x
+            dy = point[1] - mean_y
+            xx += dx * dx
+            yy += dy * dy
+            xy += dx * dy
+          end
+          if (xx + yy) > 1.0e-12
+            angle = 0.5 * Math.atan2(2.0 * xy, xx - yy)
+            return [Math.cos(angle), Math.sin(angle)]
+          end
+        end
+
+        angle = source_item_angle_degrees(row[:item])
+        if angle
+          radians = angle * Math::PI / 180.0
+          return [Math.cos(radians), Math.sin(radians)]
+        end
+        axes = Array(candidates).map do |candidate|
+          assignment = candidate[:assignment]
+          placement = assignment.is_a?(Hash) ? assignment[:placement] : nil
+          placement.is_a?(Hash) ? placement[:source_primary_axis] : nil
+        end.compact.uniq
+        return [0.0, 1.0] if axes.length == 1 && axes.first.to_s == 'y'
+        width = row[:box_x1] - row[:box_x0]
+        height = row[:box_y1] - row[:box_y0]
+        width >= height ? [1.0, 0.0] : [0.0, 1.0]
+      end
+
+      def self.source_item_angle_degrees(item)
+        value = if item.respond_to?(:angle)
+                  item.angle
+                elsif item.is_a?(Hash)
+                  item[:angle] || item['angle']
+                end
+        return nil if value.nil?
+        number = value.to_f
+        number.finite? ? number : nil
+      rescue StandardError
+        nil
+      end
+
+      def self.source_ink_projection_points(candidates)
+        points = []
+        Array(candidates).each do |candidate|
+          assignment = candidate[:assignment]
+          placement = assignment.is_a?(Hash) ? assignment[:placement] : nil
+          raw = placement.is_a?(Hash) ? placement[:ink_points_pdf] : nil
+          valid = Array(raw).map do |point|
+            values = Array(point).first(2).map { |value| value.to_f }
+            values if values.length == 2 && values.all?(&:finite?)
+          end.compact
+          if valid.empty?
+            valid = bbox_corners(candidate[:ink_bbox])
+          end
+          points.concat(valid)
+        end
+        raise 'source ink has no finite projection points' if points.empty?
+        points
+      end
+
+      def self.bbox_corners(box)
+        values = Array(box).first(4).map { |value| value.to_f }
+        return [] unless values.length == 4 && values.all?(&:finite?)
+        x0, x1 = [values[0], values[2]].minmax
+        y0, y1 = [values[1], values[3]].minmax
+        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+      end
+
+      def self.projected_extent(points, axis)
+        values = Array(points).map do |point|
+          (point[0].to_f * axis[0]) + (point[1].to_f * axis[1])
+        end
+        raise 'projection extent is unavailable' if values.empty?
+        [values.min, values.max]
+      end
+
+      def self.source_edge_tolerance(item, tolerance, cross_span, axis = nil)
+        font_size = if item.respond_to?(:font_size)
+                      item.font_size.to_f
+                    elsif item.is_a?(Hash)
+                      (item[:font_size] || item['font_size']).to_f
+                    else
+                      0.0
+                    end
+        typographic = if font_size.finite? && font_size > 0.0
+                        font_size * 2.0
+                      else
+                        components = Array(axis).first(2).map do |value|
+                          value.to_f.abs
+                        end
+                        cardinal = components.length == 2 &&
+                          components.min <= 1.0e-6 &&
+                          (components.max - 1.0).abs <= 1.0e-6
+                        cardinal ? cross_span.to_f.abs :
+                          [cross_span.to_f.abs, 12.0].min
+                      end
+        [tolerance.to_f, typographic].max
       end
 
       # Conservative lower bound for Unicode shaping. ASCII text may contract
@@ -1043,11 +1160,12 @@ module BlueCollarSystems
         point_factory = lambda do |x, y, z|
           NumericPoint.new(x, y, z)
         end
+        canonical_unit = PDF_PT_TO_INCH
         glyph_paths = {}
         defs.each do |glyph_id, path_d|
           next if path_d.to_s.strip.empty?
           paths = SvgTextRenderer.svg_path_to_points(
-            path_d, 1.0, 1.0, point_factory
+            path_d, canonical_unit, canonical_unit, point_factory
           )
           glyph_paths[glyph_id] = paths unless paths.empty?
         end
@@ -1077,22 +1195,30 @@ module BlueCollarSystems
           end
           tx = (e - vb_min_x) + pen_dx
           ty = (vb_h + vb_min_y - f) + pen_dy
-          xs = []
-          ys = []
-          local.each do |points|
-            points.each do |point|
-              lx = point.x.to_f
-              ly = point.y.to_f
-              xs << (tx + (a * lx) - (c * ly))
-              ys << (ty - (b * lx) + (d * ly))
+          ink_loops = local.map do |points|
+            points.map do |point|
+              # Curves are flattened once at the canonical 1x physical unit.
+              # Convert those canonical inch coordinates back to SVG units
+              # before applying the raw-SVG affine matrix.
+              lx = point.x.to_f / canonical_unit
+              ly = point.y.to_f / canonical_unit
+              [
+                tx + (a * lx) - (c * ly),
+                ty - (b * lx) + (d * ly)
+              ]
             end
           end
+          ink_points = ink_loops.flatten(1)
+          xs = ink_points.map { |point| point[0] }
+          ys = ink_points.map { |point| point[1] }
           pens << {
             x: tx,
             y: ty,
             placement_index: placement_index,
             glyph_id: p[:glyph_id],
             source_primary_axis: source_primary_axis_for_matrix(m),
+            ink_points_pdf: ink_points,
+            ink_loops_pdf: ink_loops,
             ink_bbox_pdf: [xs.min, ys.min, xs.max, ys.max]
           }
         end
@@ -1103,7 +1229,8 @@ module BlueCollarSystems
       # placement contributes no additional visible ink. Keep one physical
       # outline so duplicate PDF content streams cannot create coincident 3D
       # solids or masquerade as surplus glyph coverage. Nearby placements are
-      # distinct; rounding is only below the renderer's numeric precision.
+      # distinct. Float hash/equality preserves the parsed numeric value; do
+      # not round a nearby physical placement into an apparent duplicate.
       def self.exact_source_placement_key(placement)
         p = placement.is_a?(Hash) ? placement : {}
         matrix = p[:matrix]
@@ -1114,8 +1241,7 @@ module BlueCollarSystems
           values[4] + p[:x].to_f,
           values[5] + p[:y].to_f
         ]
-        [p[:glyph_id].to_s,
-         effective.map { |value| value.round(9) }]
+        [p[:glyph_id].to_s, effective]
       rescue StandardError
         [placement.object_id]
       end
@@ -1163,7 +1289,13 @@ module BlueCollarSystems
         glyph_paths = {}
         SvgTextRenderer.parse_glyph_defs(svg).each do |glyph_id, path_d|
           next if path_d.strip.empty?
-          subpaths = SvgTextRenderer.svg_path_to_points(path_d, unit, unit)
+          # Keep the physical source contour inventory independent of import
+          # scale. Scale the already-flattened canonical points below; never
+          # let curve subdivision change merely because the user chose a
+          # different output size.
+          subpaths = SvgTextRenderer.svg_path_to_points(
+            path_d, PDF_PT_TO_INCH, PDF_PT_TO_INCH
+          )
           glyph_paths[glyph_id] = subpaths unless subpaths.empty?
         end
 
@@ -1203,8 +1335,8 @@ module BlueCollarSystems
               # Local glyph points are already inch-scaled and Y-flipped
               # (svg_path_to_points). Apply the same axes SvgTextRenderer
               # uses for placement: x' = a*x - c*y, y' = -b*x + d*y.
-              lx = pt.x.to_f
-              ly = pt.y.to_f
+              lx = pt.x.to_f * scale
+              ly = pt.y.to_f * scale
               wx = tx + (a * lx) - (c * ly)
               wy = ty - (b * lx) + (d * ly)
               loop_pts << Geom::Point3d.new(wx, wy, 0.0)
@@ -1218,6 +1350,14 @@ module BlueCollarSystems
           ink_y = ink_points.map do |point|
             (point.y.to_f - y_offset) / unit
           end
+          ink_loops_pdf = loops.map do |loop_points|
+            loop_points.map do |point|
+              [
+                point.x.to_f / unit,
+                (point.y.to_f - y_offset) / unit
+              ]
+            end
+          end
 
           pen_x_pdf = (e - vb_min_x) + (svg_min_x - media_min_x)
           pen_y_pdf = (vb_h + vb_min_y - f) + (svg_min_y - media_min_y)
@@ -1228,11 +1368,182 @@ module BlueCollarSystems
               [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             source_primary_axis: source_primary_axis_for_matrix(m),
             pen_pdf: [pen_x_pdf, pen_y_pdf],
+            ink_points_pdf: ink_loops_pdf.flatten(1),
+            ink_loops_pdf: ink_loops_pdf,
             ink_bbox_pdf: [ink_x.min, ink_y.min, ink_x.max, ink_y.max],
             loops: loops
           }
         end
         out
+      end
+
+      # Bind model-space physical loops back to an independent raw-SVG parse.
+      # A sidecar pen/bbox cannot certify geometry: each placement index, glyph,
+      # pen, and ink extent must agree with both the raw SVG and the actual loops.
+      def self.verify_model_loop_bindings(svg, media_box, placed, opts = {})
+        raw = pen_placements_pdf(svg, media_box, opts)
+        failures = []
+        raw_by_index = unique_placement_index_map(raw, :raw_svg, failures)
+        model_by_index = unique_placement_index_map(
+          Array(placed), :model_loops, failures
+        )
+        raw_indices = raw_by_index.keys.sort
+        model_indices = model_by_index.keys.sort
+        unless raw_indices == model_indices
+          failures << {
+            :reason => :placement_index_inventory_mismatch,
+            :raw_indices => raw_indices,
+            :model_indices => model_indices
+          }
+        end
+
+        scale = (opts[:scale] || 1.0).to_f
+        unit = PDF_PT_TO_INCH * scale
+        y_offset = (opts[:y_offset] || 0.0).to_f
+        unless unit.finite? && unit != 0.0 && y_offset.finite?
+          failures << { :reason => :invalid_model_loop_coordinate_scale }
+        end
+
+        (raw_indices & model_indices).each do |placement_index|
+          source = raw_by_index[placement_index]
+          model = model_by_index[placement_index]
+          if source[:glyph_id].to_s != model[:glyph_id].to_s
+            failures << {
+              :reason => :glyph_identity_mismatch,
+              :placement_index => placement_index,
+              :raw_glyph_id => source[:glyph_id].to_s,
+              :model_glyph_id => model[:glyph_id].to_s
+            }
+            next
+          end
+          actual_bbox = model_loop_bbox_pdf(model, unit, y_offset)
+          compare_loop_binding_values(
+            failures, placement_index, :pen,
+            [source[:x], source[:y]], model[:pen_pdf]
+          )
+          compare_loop_binding_values(
+            failures, placement_index, :raw_svg_ink_bbox,
+            source[:ink_bbox_pdf], actual_bbox
+          )
+          compare_loop_binding_values(
+            failures, placement_index, :reported_model_ink_bbox,
+            model[:ink_bbox_pdf], actual_bbox
+          )
+          compare_loop_binding_contours(
+            failures, placement_index, source[:ink_loops_pdf],
+            model_loop_points_pdf(model, unit, y_offset)
+          )
+        end if unit.finite? && unit != 0.0
+
+        {
+          :ok => failures.empty?,
+          :raw_placement_count => raw.length,
+          :model_placement_count => Array(placed).length,
+          :failures => failures
+        }
+      rescue StandardError => e
+        {
+          :ok => false,
+          :raw_placement_count => 0,
+          :model_placement_count => Array(placed).length,
+          :failures => [{
+            :reason => :source_loop_binding_exception,
+            :error_class => e.class.to_s,
+            :detail => e.message.to_s
+          }]
+        }
+      end
+
+      def self.unique_placement_index_map(entries, source, failures)
+        mapped = {}
+        Array(entries).each do |entry|
+          index = entry[:placement_index].to_i
+          if mapped.key?(index)
+            failures << {
+              :reason => :duplicate_placement_index,
+              :source => source, :placement_index => index
+            }
+          else
+            mapped[index] = entry
+          end
+        end
+        mapped
+      end
+
+      def self.model_loop_bbox_pdf(entry, unit, y_offset)
+        points = Array(entry[:loops]).flatten
+        raise 'model placement has no physical loop points' if points.empty?
+        xs = points.map { |point| point.x.to_f / unit }
+        ys = points.map { |point| (point.y.to_f - y_offset) / unit }
+        values = [xs.min, ys.min, xs.max, ys.max]
+        raise 'model loop bbox is nonfinite' unless values.all?(&:finite?)
+        values
+      end
+
+      def self.model_loop_points_pdf(entry, unit, y_offset)
+        Array(entry[:loops]).map do |loop_points|
+          Array(loop_points).map do |point|
+            [
+              point.x.to_f / unit,
+              (point.y.to_f - y_offset) / unit
+            ]
+          end
+        end
+      end
+
+      def self.compare_loop_binding_contours(failures, placement_index,
+                                             expected, actual)
+        expected_loops = Array(expected)
+        actual_loops = Array(actual)
+        valid = !expected_loops.empty? &&
+          expected_loops.length == actual_loops.length
+        if valid
+          valid = expected_loops.each_with_index.all? do |loop_points, loop_index|
+            expected_points = Array(loop_points)
+            actual_points = Array(actual_loops[loop_index])
+            expected_points.length == actual_points.length &&
+              !expected_points.empty? &&
+              expected_points.each_with_index.all? do |point, point_index|
+                expected_pair = Array(point).first(2).map { |value| value.to_f }
+                actual_pair = Array(actual_points[point_index]).first(2).map do |value|
+                  value.to_f
+                end
+                expected_pair.length == 2 && actual_pair.length == 2 &&
+                  expected_pair.all?(&:finite?) && actual_pair.all?(&:finite?) &&
+                  expected_pair.each_with_index.all? do |value, coordinate|
+                    (value - actual_pair[coordinate]).abs <= 1.0e-7
+                  end
+              end
+          end
+        end
+        return if valid
+        failures << {
+          :reason => :physical_loop_contour_mismatch,
+          :placement_index => placement_index,
+          :field => :source_contours,
+          :expected_loop_lengths => expected_loops.map { |loop_points| Array(loop_points).length },
+          :actual_loop_lengths => actual_loops.map { |loop_points| Array(loop_points).length }
+        }
+      end
+
+      def self.compare_loop_binding_values(failures, placement_index, field,
+                                           expected, actual)
+        expected_values = Array(expected).map { |value| value.to_f }
+        actual_values = Array(actual).map { |value| value.to_f }
+        valid = expected_values.length == actual_values.length &&
+          !expected_values.empty? &&
+          expected_values.all?(&:finite?) && actual_values.all?(&:finite?) &&
+          expected_values.each_with_index.all? do |value, index|
+            (value - actual_values[index]).abs <= 1.0e-7
+          end
+        return if valid
+        failures << {
+          :reason => :physical_loop_value_mismatch,
+          :placement_index => placement_index,
+          :field => field,
+          :expected => expected_values,
+          :actual => actual_values
+        }
       end
 
       # Combined extent of loops from model_space_loops, in model inches:

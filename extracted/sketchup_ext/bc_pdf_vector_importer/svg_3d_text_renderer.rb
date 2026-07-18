@@ -10,6 +10,8 @@ module BlueCollarSystems
     module Svg3DTextRenderer
       DEFAULT_DEPTH_INCHES = 1.0 / 64.0
       SIZE_TOLERANCE_INCHES = 1.0e-6
+      HOST_POINT_TOLERANCE_INCHES = 0.001
+      MAX_CONSTRUCTION_SCALE = 1_000_000.0
 
       def self.render_svg(entities, svg, media_box, text_items, opts = {})
         result = base_result
@@ -25,6 +27,18 @@ module BlueCollarSystems
 
         placed = CairoGlyphSource.model_space_loops(svg, media_box, opts)
         result[:source_placements] = placed.length
+        loop_binding = CairoGlyphSource.verify_model_loop_bindings(
+          svg, media_box, placed, opts
+        )
+        result[:source_loop_binding] = loop_binding
+        unless loop_binding[:ok] == true
+          detail = Array(loop_binding[:failures]).first
+          detail = detail ? detail.inspect : 'independent SVG loop binding failed'
+          result[:failures] << hard_failure(
+            nil, :source_loop_binding_mismatch, detail
+          )
+          return result
+        end
         pens = placed.map do |entry|
           {
             :x => entry[:pen_pdf][0],
@@ -32,6 +46,7 @@ module BlueCollarSystems
             :placement_index => entry[:placement_index],
             :glyph_id => entry[:glyph_id],
             :ink_bbox_pdf => entry[:ink_bbox_pdf],
+            :ink_points_pdf => entry[:ink_points_pdf],
             :source_primary_axis => entry[:source_primary_axis]
           }
         end
@@ -121,6 +136,10 @@ module BlueCollarSystems
             span_result[:source_ink_coverage] = ink_evidence if ink_evidence
             result[:span_results] << span_result
           rescue StandardError => e
+            Logger.warn(
+              'Svg3DTextRenderer',
+              "#{source_id}: #{e.class}: #{e.message}"
+            )
             cleanup = cleanup_owned_group(entities, group)
             owned_groups.delete(group)
             result[:failures] << hard_failure(
@@ -245,8 +264,30 @@ module BlueCollarSystems
         child = group.respond_to?(:entities) ? group.entities : nil
         raise 'owned source-span group has no entities collection' unless child
         faces = []
+        construction_origin = construction_origin_for(entries)
+        construction_scale = safe_construction_scale(entries, construction_origin)
+        construction_group = nil
+        geometry_entities = child
+        if construction_scale > 1.0
+          raise 'host cannot create a tolerance-safe nested group' unless
+            child.respond_to?(:add_group)
+          construction_group = child.add_group
+          geometry_entities = construction_group.respond_to?(:entities) ?
+            construction_group.entities : nil
+          raise 'tolerance-safe nested group has no entities collection' unless
+            geometry_entities
+        end
+        source_vertex_count = Array(entries).inject(0) do |entry_total, entry|
+          entry_total + Array(entry[:loops]).inject(0) do |loop_total, points|
+            contour = normalized_contour(points)
+            loop_total + (contour ? contour.length : 0)
+          end
+        end
         Array(entries).each do |entry|
-          glyph_faces = build_filled_glyph(child, entry[:loops])
+          glyph_faces = build_filled_glyph(
+            geometry_entities, entry[:loops], entry, construction_scale,
+            construction_origin
+          )
           raise 'source glyph produced no filled face' if glyph_faces.empty?
           faces.concat(glyph_faces)
         end
@@ -264,8 +305,21 @@ module BlueCollarSystems
           rescue StandardError
             # pushpull and the final positive-Z bounds check remain authoritative.
           end
-          face.pushpull(depth)
+          face.pushpull(depth * construction_scale)
           extruded += 1
+        end
+
+        if construction_scale > 1.0
+          unless construction_group.respond_to?(:transform!) &&
+                 defined?(Geom::Transformation) &&
+                 Geom::Transformation.respond_to?(:scaling)
+            raise 'host cannot retain exact inverse construction scale'
+          end
+          inverse = Geom::Transformation.scaling(
+            construction_origin, 1.0 / construction_scale
+          )
+          transformed = construction_group.transform!(inverse)
+          raise 'host rejected inverse construction scale' unless transformed
         end
 
         expected = CairoGlyphSource.loops_extent(entries)
@@ -314,6 +368,17 @@ module BlueCollarSystems
             matrices.all? { |matrix| matrix.length >= 6 },
           :size_verified => width_ok && height_ok,
           :depth_verified => depth_ok,
+          :host_tolerance_adapted => construction_scale > 1.0,
+          :construction_scale => construction_scale,
+          :construction_origin => [
+            construction_origin.x.to_f,
+            construction_origin.y.to_f,
+            construction_origin.z.to_f
+          ],
+          :construction_group_entity_id => construction_group &&
+            RepresentationFidelity.stable_entity_id(construction_group),
+          :collapsed_host_equal_vertices => 0,
+          :source_outline_vertex_count => source_vertex_count,
           :width => actual_width,
           :height => actual_height,
           :depth => actual_depth,
@@ -322,25 +387,48 @@ module BlueCollarSystems
         }
       end
 
-      # Build SVG's non-zero-fill contours in descending area order. An odd
-      # containment depth is a hole: creating then erasing that inner face is
-      # SketchUp's supported way to retain its loop as a hole in the outer face.
-      def self.build_filled_glyph(entities, loops)
-        contours = Array(loops).map { |points| normalized_contour(points) }.compact
+      # Build SVG non-zero-fill contours in descending area order. A contour is
+      # a boundary only when crossing it changes cumulative winding between
+      # zero (unfilled) and nonzero (filled). Creating then erasing a boundary
+      # whose inside winding is zero retains SketchUp's supported hole loop.
+      def self.build_filled_glyph(entities, loops, source = {}, scale = 1.0,
+                                  origin = nil)
+        contours = Array(loops).map do |points|
+          normalized = normalized_contour(points)
+          normalized && scaled_contour(normalized, scale, origin)
+        end.compact
         raise 'source glyph has no closed contour' if contours.empty?
         records = contours.map do |points|
-          { :points => points, :area => signed_area(points).abs }
+          area = signed_area(points)
+          {
+            :points => points, :area => area.abs,
+            :winding => area > 0.0 ? 1 : -1
+          }
         end
         records.sort_by! { |record| -record[:area] }
         filled = []
         records.each_with_index do |record, index|
           probe = record[:points][0]
-          nesting = records[0...index].count do |outer|
+          containing = records[0...index].select do |outer|
             point_in_polygon?(probe, outer[:points])
           end
-          face = entities.add_face(record[:points])
+          outside_winding = containing.inject(0) do |total, outer|
+            total + outer[:winding]
+          end
+          inside_winding = outside_winding + record[:winding]
+          next if outside_winding.zero? == inside_winding.zero?
+          begin
+            face = entities.add_face(record[:points])
+          rescue StandardError => e
+            glyph_id = source[:glyph_id].to_s
+            placement = source[:placement_index]
+            detail = "add_face failed for glyph #{glyph_id} placement " \
+              "#{placement} contour #{index}: #{e.message}; " \
+              "host_equal_pairs=#{host_equal_pair_summary(record[:points])}"
+            raise e.class, detail, e.backtrace
+          end
           raise 'host add_face returned no face for a source glyph contour' unless face
-          if nesting.odd?
+          if inside_winding.zero?
             erase_face!(entities, face)
           else
             filled << face
@@ -357,13 +445,104 @@ module BlueCollarSystems
         end
         clean.pop if clean.length > 1 && same_point?(clean[0], clean[-1])
         return nil if clean.length < 3
-        return nil if signed_area(clean).abs <= SIZE_TOLERANCE_INCHES**2
+        area = signed_area(clean)
+        raise 'source contour area is nonfinite' unless area.finite?
+        return nil if area == 0.0
         clean
       end
 
+      def self.construction_origin_for(entries)
+        extent = CairoGlyphSource.loops_extent(entries)
+        raise 'source outline extent is unavailable for safe construction' unless extent
+        Geom::Point3d.new(
+          (extent[0].to_f + extent[2].to_f) * 0.5,
+          (extent[1].to_f + extent[3].to_f) * 0.5,
+          0.0
+        )
+      end
+
+      def self.safe_construction_scale(entries, origin = nil)
+        origin ||= construction_origin_for(entries)
+        contours = Array(entries).flat_map do |entry|
+          Array(entry[:loops]).map { |points| normalized_contour(points) }.compact
+        end
+        return 1.0 unless contours.any? { |points| host_duplicate_points?(points) }
+
+        scale = 10.0
+        while scale <= MAX_CONSTRUCTION_SCALE
+          safe = contours.all? do |points|
+            !host_duplicate_points?(scaled_contour(points, scale, origin))
+          end
+          return [scale * 10.0, MAX_CONSTRUCTION_SCALE].min if safe
+          scale *= 10.0
+        end
+        raise 'source contour has coincident vertices that scaling cannot separate'
+      end
+
+      def self.host_duplicate_points?(points)
+        list = Array(points)
+        list.each_with_index do |left, left_index|
+          ((left_index + 1)...list.length).each do |right_index|
+            right = list[right_index]
+            dx = left.x.to_f - right.x.to_f
+            dy = left.y.to_f - right.y.to_f
+            left_z = left.respond_to?(:z) ? left.z.to_f : 0.0
+            right_z = right.respond_to?(:z) ? right.z.to_f : 0.0
+            dz = left_z - right_z
+            distance = Math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+            return true if distance < HOST_POINT_TOLERANCE_INCHES
+            return true if left == right
+          end
+        end
+        false
+      end
+
+      def self.scaled_contour(points, scale, origin = nil)
+        factor = scale.to_f
+        return Array(points) if factor == 1.0
+        ox = origin ? origin.x.to_f : 0.0
+        oy = origin ? origin.y.to_f : 0.0
+        oz = origin && origin.respond_to?(:z) ? origin.z.to_f : 0.0
+        Array(points).map do |point|
+          Geom::Point3d.new(
+            ox + ((point.x.to_f - ox) * factor),
+            oy + ((point.y.to_f - oy) * factor),
+            oz + (((point.respond_to?(:z) ? point.z.to_f : 0.0) - oz) * factor)
+          )
+        end
+      end
+
       def self.same_point?(left, right)
-        (left.x.to_f - right.x.to_f).abs <= SIZE_TOLERANCE_INCHES &&
-          (left.y.to_f - right.y.to_f).abs <= SIZE_TOLERANCE_INCHES
+        left_x = left.x.to_f
+        left_y = left.y.to_f
+        right_x = right.x.to_f
+        right_y = right.y.to_f
+        left_z = left.respond_to?(:z) ? left.z.to_f : 0.0
+        right_z = right.respond_to?(:z) ? right.z.to_f : 0.0
+        left_x == right_x && left_y == right_y && left_z == right_z
+      end
+
+      def self.host_equal_pair_summary(points)
+        matches = []
+        list = Array(points)
+        list.each_with_index do |left, left_index|
+          ((left_index + 1)...list.length).each do |right_index|
+            right = list[right_index]
+            next unless left == right
+            distance = if left.respond_to?(:distance)
+                         left.distance(right).to_f
+                       else
+                         dx = left.x.to_f - right.x.to_f
+                         dy = left.y.to_f - right.y.to_f
+                         Math.sqrt((dx * dx) + (dy * dy))
+                       end
+            matches << "#{left_index},#{right_index}@#{format('%.12g', distance)}"
+            return matches.join('|') if matches.length >= 8
+          end
+        end
+        matches.empty? ? 'none' : matches.join('|')
+      rescue StandardError => e
+        "unavailable(#{e.class})"
       end
 
       def self.signed_area(points)

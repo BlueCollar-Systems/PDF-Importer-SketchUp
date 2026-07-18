@@ -491,6 +491,27 @@ class CairoGlyphSourceTest < Minitest::Test
     assert evidence[:shaped_glyph_count_verified]
   end
 
+  def test_contextual_non_ascii_shaping_is_not_blocked_by_unicode_count
+    span = SpanItem.new(
+      "\u0644\u0627", 'pdftotext', 'text_span:1:arabic',
+      0.0, 0.0, 40.0, 12.0
+    )
+    pens = [{
+      :x => 20.0, :y => 6.0, :placement_index => 0,
+      :ink_bbox_pdf => [0.0, 1.0, 40.0, 11.0]
+    }]
+
+    match = CGS.match_spans(pens, [span], FIXTURE_MEDIA_BOX)
+
+    assert_equal 1, match[:runs_matched]
+    assert_equal 0, match[:runs_unmatched]
+    evidence = match[:source_ink_matches].first
+    assert_equal 2, evidence[:minimum_shaped_glyph_count]
+    assert_equal false, evidence[:character_count_parity]
+    assert_equal false, evidence[:shaped_glyph_count_verified]
+    assert evidence[:source_ink_coverage_verified]
+  end
+
   def test_finite_ascii_shaping_bound_does_not_excuse_unrelated_missing_glyphs
     assert_equal 10, CGS.minimum_shaped_glyph_count(
       SpanItem.new('TENLETTERS')
@@ -574,13 +595,42 @@ class CairoGlyphSourceTest < Minitest::Test
     assert_equal [3], indices
   end
 
+  def test_rotated_span_requires_ink_coverage_along_semantic_text_angle
+    rotated_span_class = Struct.new(
+      :text, :font_name, :source_span_id,
+      :bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1, :angle
+    )
+    source = rotated_span_class.new(
+      'AB', 'pdftotext', 'text_span:1:vertical',
+      0.0, 0.0, 10.0, 100.0, -90.0
+    )
+    pens = [
+      {
+        :x => 5.0, :y => 45.0, :placement_index => 0,
+        :ink_bbox_pdf => [0.0, 40.0, 10.0, 50.0],
+        :source_primary_axis => :x
+      },
+      {
+        :x => 5.0, :y => 55.0, :placement_index => 1,
+        :ink_bbox_pdf => [0.0, 50.0, 10.0, 60.0],
+        :source_primary_axis => :x
+      }
+    ]
+
+    match = CGS.match_spans(pens, [source], [0.0, 0.0, 200.0, 200.0])
+
+    assert_equal 0, match[:runs_matched]
+    assert_equal 1, match[:runs_unmatched]
+    refute match[:coverage_failures][0][:source_ink_coverage_verified]
+  end
+
   def test_model_space_loops_deduplicates_only_exact_physical_svg_uses
     svg = <<-SVG
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
   <defs><g id="glyph-0-0"><path d="M 0 0 L 10 0 L 10 -10 L 0 -10 Z"/></g></defs>
   <use xlink:href="#glyph-0-0" x="10" y="20"/>
   <use xlink:href="#glyph-0-0" x="10" y="20"/>
-  <use xlink:href="#glyph-0-0" x="10.0001" y="20"/>
+  <use xlink:href="#glyph-0-0" x="10.0000000004" y="20"/>
 </svg>
     SVG
 
@@ -592,6 +642,49 @@ class CairoGlyphSourceTest < Minitest::Test
     placed.each do |entry|
       assert_equal 4, entry[:ink_bbox_pdf].length
     end
+  end
+
+  def test_loop_binding_rejects_same_bbox_contour_mutation
+    svg = <<-SVG
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
+  <defs><g id="glyph-0-0"><path d="M 0 0 L 10 0 L 10 -10 L 5 -8 L 0 -10 Z"/></g></defs>
+  <use xlink:href="#glyph-0-0" x="10" y="20"/>
+</svg>
+    SVG
+    placed = CGS.model_space_loops(svg, [0, 0, 100, 100])
+    original = placed[0][:loops][0][3]
+    placed[0][:loops][0][3] = Geom::Point3d.new(
+      original.x.to_f + 0.01, original.y.to_f + 0.01, 0.0
+    )
+
+    binding = CGS.verify_model_loop_bindings(
+      svg, [0, 0, 100, 100], placed
+    )
+
+    refute binding[:ok],
+           'a matching bbox cannot certify a physically different contour'
+    assert binding[:failures].any? { |failure| failure[:field] == :source_contours }
+  end
+
+  def test_curved_contour_inventory_is_scale_invariant_and_source_bound
+    svg = <<-SVG
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
+  <defs><g id="glyph-0-0"><path d="M 0 0 C 0.5 0 1 -1 2 -2 L 0 -2 Z"/></g></defs>
+  <use xlink:href="#glyph-0-0" x="10" y="20"/>
+</svg>
+    SVG
+
+    full = CGS.model_space_loops(svg, [0, 0, 100, 100], :scale => 1.0)
+    tiny = CGS.model_space_loops(svg, [0, 0, 100, 100], :scale => 0.1)
+
+    assert_equal full[0][:loops][0].length, tiny[0][:loops][0].length,
+                 'import scale must not change a source glyph contour inventory'
+    assert CGS.verify_model_loop_bindings(
+      svg, [0, 0, 100, 100], full, :scale => 1.0
+    )[:ok]
+    assert CGS.verify_model_loop_bindings(
+      svg, [0, 0, 100, 100], tiny, :scale => 0.1
+    )[:ok]
   end
 
   def test_model_space_loops_keep_deterministic_svg_placement_indices

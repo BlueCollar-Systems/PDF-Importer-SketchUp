@@ -884,8 +884,7 @@ module BlueCollarSystems
           values[4] + p[:x].to_f,
           values[5] + p[:y].to_f
         ]
-        [p[:glyph_id].to_s,
-         effective.map { |value| value.round(9) }]
+        [p[:glyph_id].to_s, effective]
       rescue StandardError
         [placement.object_id]
       end
@@ -1100,13 +1099,13 @@ module BlueCollarSystems
         [0.0, 0.0, 0.0, 0.0]
       end
 
-      # Convert SVG path to arrays of SketchUp Point3d.
-      # Glyph coords are in SVG viewBox units, Y-down.
-      # Convert to model inches with potentially non-uniform scaling.
+      # Convert one complete SVG path grammar to point arrays. Glyph coords are
+      # SVG viewBox units (Y-down); output uses the requested physical X/Y
+      # scales and a Y flip. All standard path commands are consumed rather
+      # than silently converting an unsupported curve into a straight edge.
       def self.svg_path_to_points(d, scale_or_x_unit_to_in, y_unit_to_in = nil,
                                   point_factory = nil)
         if y_unit_to_in.nil?
-          # Backward compatibility: 2-arg call treated as isotropic scale factor.
           x_unit_to_in = PDF_PT_TO_INCH * scale_or_x_unit_to_in.to_f
           y_unit_to_in = x_unit_to_in
         else
@@ -1114,12 +1113,16 @@ module BlueCollarSystems
           y_unit_to_in = y_unit_to_in.to_f
         end
 
-        tokens = d.scan(/[MLHVCSZmlhvcsz]|[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/)
-        subpaths = []
-        current = []
-        start_pt = nil
-        cx = 0.0; cy = 0.0
-        cmd = nil; nums = []
+        source = d.to_s
+        number_source = '[-+]?(?:\\d*\\.\\d+|\\d+\\.?)(?:[eE][-+]?\\d+)?'
+        token_pattern = Regexp.new(
+          '[AaCcHhLlMmQqSsTtVvZz]|' + number_source
+        )
+        tokens = source.scan(token_pattern)
+        residue = source.gsub(token_pattern, '').gsub(/[\s,]/, '')
+        unless residue.empty?
+          raise ArgumentError, "unsupported SVG path token #{residue.inspect}"
+        end
 
         factory = point_factory
         factory = lambda do |x, y, z|
@@ -1128,140 +1131,268 @@ module BlueCollarSystems
         mk = lambda do |gx, gy|
           factory.call(gx * x_unit_to_in, -gy * y_unit_to_in, 0.0)
         end
-
-        run = lambda {
-          case cmd
-          when 'M'
-            while nums.length >= 2
-              subpaths << current if current.length >= 2
-              cx, cy = nums.shift(2)
-              start_pt = mk.call(cx, cy)
-              current = [start_pt]
-            end
-          when 'L'
-            while nums.length >= 2
-              cx, cy = nums.shift(2)
-              current << mk.call(cx, cy)
-            end
-          when 'H'
-            while nums.length >= 1
-              cx = nums.shift
-              current << mk.call(cx, cy)
-            end
-          when 'V'
-            while nums.length >= 1
-              cy = nums.shift
-              current << mk.call(cx, cy)
-            end
-          when 'C'
-            while nums.length >= 6
-              x1, y1, x2, y2, x, y = nums.shift(6)
-              p0 = current.last || mk.call(cx, cy)
-              p1 = mk.call(x1, y1); p2 = mk.call(x2, y2); p3 = mk.call(x, y)
-              ch = p0.distance(p3)
-              n = ch < 0.02 ? 2 : (ch < 0.08 ? 3 : 4)
-              (1..n).each do |i|
-                t = i.to_f / n; mt = 1.0 - t
-                bx = mt**3*p0.x + 3*mt**2*t*p1.x + 3*mt*t**2*p2.x + t**3*p3.x
-                by = mt**3*p0.y + 3*mt**2*t*p1.y + 3*mt*t**2*p2.y + t**3*p3.y
-                current << factory.call(bx, by, 0.0)
-              end
-              cx, cy = x, y
-            end
-          when 'S'
-            while nums.length >= 4
-              _, _, x, y = nums.shift(4)
-              cx, cy = x, y
-              current << mk.call(cx, cy)
-            end
-          when '_RM'  # relative moveto
-            while nums.length >= 2
-              subpaths << current if current.length >= 2
-              cx += nums.shift; cy += nums.shift
-              start_pt = mk.call(cx, cy)
-              current = [start_pt]
-            end
-          when '_RL'  # relative lineto
-            while nums.length >= 2
-              cx += nums.shift; cy += nums.shift
-              current << mk.call(cx, cy)
-            end
-          when '_RH'  # relative horizontal lineto
-            while nums.length >= 1
-              cx += nums.shift
-              current << mk.call(cx, cy)
-            end
-          when '_RV'  # relative vertical lineto
-            while nums.length >= 1
-              cy += nums.shift
-              current << mk.call(cx, cy)
-            end
-          when '_RC'  # relative curveto
-            while nums.length >= 6
-              dx1, dy1, dx2, dy2, dx, dy = nums.shift(6)
-              x1 = cx + dx1; y1 = cy + dy1
-              x2 = cx + dx2; y2 = cy + dy2
-              x = cx + dx;   y = cy + dy
-              p0 = current.last || mk.call(cx, cy)
-              p1 = mk.call(x1, y1); p2 = mk.call(x2, y2); p3 = mk.call(x, y)
-              ch = p0.distance(p3)
-              n = ch < 0.02 ? 2 : (ch < 0.08 ? 3 : 4)
-              (1..n).each do |i|
-                t = i.to_f / n; mt = 1.0 - t
-                bx = mt**3*p0.x + 3*mt**2*t*p1.x + 3*mt*t**2*p2.x + t**3*p3.x
-                by = mt**3*p0.y + 3*mt**2*t*p1.y + 3*mt*t**2*p2.y + t**3*p3.y
-                current << factory.call(bx, by, 0.0)
-              end
-              cx, cy = x, y
-            end
-          when '_RS'  # relative smooth curveto
-            while nums.length >= 4
-              _, _, dx, dy = nums.shift(4)
-              cx += dx; cy += dy
-              current << mk.call(cx, cy)
-            end
-          when 'Z'
-            if current.last && start_pt && current.last.distance(start_pt) >= 0.0003
-              current << start_pt
-            end
-            subpaths << current if current.length >= 2
-            current = start_pt ? [start_pt] : []
-          end
-        }
-
-        tokens.each do |tok|
-          if tok =~ /\A[A-Za-z]\z/
-            run.call if cmd
-            is_relative = (tok =~ /[a-z]/) ? true : false
-            cmd = tok.upcase
-            # For relative commands, convert coordinates to absolute before processing
-            if is_relative && cmd == 'M'
-              cmd = '_RM'  # relative move marker
-            elsif is_relative && cmd == 'L'
-              cmd = '_RL'
-            elsif is_relative && cmd == 'H'
-              cmd = '_RH'
-            elsif is_relative && cmd == 'V'
-              cmd = '_RV'
-            elsif is_relative && cmd == 'C'
-              cmd = '_RC'
-            elsif is_relative && cmd == 'S'
-              cmd = '_RS'
-            end
-            # Z/z behave identically
-            nums = []
-          else
-            nums << tok.to_f
+        append_point = lambda do |points, point|
+          if points.empty? || points.last.distance(point).to_f > 0.0
+            points << point
           end
         end
-        run.call if cmd
+        cubic_to = lambda do |points, from_x, from_y, control1_x, control1_y,
+                             control2_x, control2_y, end_x, end_y|
+          p0 = points.last || mk.call(from_x, from_y)
+          p1 = mk.call(control1_x, control1_y)
+          p2 = mk.call(control2_x, control2_y)
+          p3 = mk.call(end_x, end_y)
+          chord = p0.distance(p3).to_f
+          segments = chord < 0.02 ? 2 : (chord < 0.08 ? 3 : 4)
+          (1..segments).each do |segment|
+            t = segment.to_f / segments
+            mt = 1.0 - t
+            bx = (mt**3 * p0.x.to_f) +
+              (3.0 * mt**2 * t * p1.x.to_f) +
+              (3.0 * mt * t**2 * p2.x.to_f) +
+              (t**3 * p3.x.to_f)
+            by = (mt**3 * p0.y.to_f) +
+              (3.0 * mt**2 * t * p1.y.to_f) +
+              (3.0 * mt * t**2 * p2.y.to_f) +
+              (t**3 * p3.y.to_f)
+            append_point.call(points, factory.call(bx, by, 0.0))
+          end
+        end
+        vector_angle = lambda do |ux, uy, vx, vy|
+          Math.atan2((ux * vy) - (uy * vx), (ux * vx) + (uy * vy))
+        end
+        arc_to = lambda do |points, from_x, from_y, radius_x, radius_y,
+                           rotation, large_arc, sweep, end_x, end_y|
+          rx = radius_x.to_f.abs
+          ry = radius_y.to_f.abs
+          if (from_x == end_x && from_y == end_y)
+            next
+          end
+          if rx == 0.0 || ry == 0.0
+            append_point.call(points, mk.call(end_x, end_y))
+            next
+          end
+          phi = rotation.to_f * Math::PI / 180.0
+          cos_phi = Math.cos(phi)
+          sin_phi = Math.sin(phi)
+          half_dx = (from_x - end_x) * 0.5
+          half_dy = (from_y - end_y) * 0.5
+          x1p = (cos_phi * half_dx) + (sin_phi * half_dy)
+          y1p = (-sin_phi * half_dx) + (cos_phi * half_dy)
+          radii_ratio = (x1p * x1p) / (rx * rx) +
+            (y1p * y1p) / (ry * ry)
+          if radii_ratio > 1.0
+            adjustment = Math.sqrt(radii_ratio)
+            rx *= adjustment
+            ry *= adjustment
+          end
+          numerator = (rx * rx * ry * ry) -
+            (rx * rx * y1p * y1p) - (ry * ry * x1p * x1p)
+          denominator = (rx * rx * y1p * y1p) +
+            (ry * ry * x1p * x1p)
+          coefficient = 0.0
+          if denominator > 0.0
+            sign = (large_arc == sweep) ? -1.0 : 1.0
+            coefficient = sign * Math.sqrt([numerator / denominator, 0.0].max)
+          end
+          center_xp = coefficient * (rx * y1p / ry)
+          center_yp = coefficient * (-ry * x1p / rx)
+          center_x = (cos_phi * center_xp) - (sin_phi * center_yp) +
+            ((from_x + end_x) * 0.5)
+          center_y = (sin_phi * center_xp) + (cos_phi * center_yp) +
+            ((from_y + end_y) * 0.5)
+          start_ux = (x1p - center_xp) / rx
+          start_uy = (y1p - center_yp) / ry
+          end_ux = (-x1p - center_xp) / rx
+          end_uy = (-y1p - center_yp) / ry
+          start_angle = vector_angle.call(1.0, 0.0, start_ux, start_uy)
+          delta = vector_angle.call(start_ux, start_uy, end_ux, end_uy)
+          delta -= 2.0 * Math::PI if !sweep && delta > 0.0
+          delta += 2.0 * Math::PI if sweep && delta < 0.0
+          segments = [(delta.abs / (Math::PI / 4.0)).ceil, 1].max
+          (1..segments).each do |segment|
+            if segment == segments
+              append_point.call(points, mk.call(end_x, end_y))
+              next
+            end
+            angle = start_angle + (delta * segment.to_f / segments)
+            unit_x = rx * Math.cos(angle)
+            unit_y = ry * Math.sin(angle)
+            point_x = center_x + (cos_phi * unit_x) - (sin_phi * unit_y)
+            point_y = center_y + (sin_phi * unit_x) + (cos_phi * unit_y)
+            append_point.call(points, mk.call(point_x, point_y))
+          end
+        end
+
+        arities = {
+          'M' => 2, 'L' => 2, 'H' => 1, 'V' => 1,
+          'C' => 6, 'S' => 4, 'Q' => 4, 'T' => 2, 'A' => 7
+        }
+        subpaths = []
+        current = []
+        start_point = nil
+        start_x = 0.0
+        start_y = 0.0
+        cx = 0.0
+        cy = 0.0
+        previous = nil
+        last_cubic_x = nil
+        last_cubic_y = nil
+        last_quadratic_x = nil
+        last_quadratic_y = nil
+        command = nil
+        index = 0
+        while index < tokens.length
+          token = tokens[index]
+          if token =~ /\A[A-Za-z]\z/
+            command = token
+            index += 1
+            if command.upcase == 'Z'
+              if current.last && start_point &&
+                 current.last.distance(start_point).to_f > 0.0
+                current << start_point
+              end
+              subpaths << current if current.length >= 2
+              current = []
+              cx = start_x
+              cy = start_y
+              previous = 'Z'
+              last_cubic_x = last_cubic_y = nil
+              last_quadratic_x = last_quadratic_y = nil
+              command = nil
+              next
+            end
+          elsif command.nil?
+            raise ArgumentError, 'SVG path numbers have no command'
+          end
+
+          type = command.upcase
+          arity = arities[type]
+          raise ArgumentError, "unsupported SVG path command #{command}" unless arity
+          values = tokens[index, arity]
+          if !values || values.length != arity ||
+             values.any? { |value| value =~ /\A[A-Za-z]\z/ }
+            raise ArgumentError, "incomplete SVG path command #{command}"
+          end
+          values = values.map { |value| value.to_f }
+          index += arity
+          relative = command == command.downcase
+
+          if type == 'M'
+            x = relative ? cx + values[0] : values[0]
+            y = relative ? cy + values[1] : values[1]
+            subpaths << current if current.length >= 2
+            cx = x
+            cy = y
+            start_x = x
+            start_y = y
+            start_point = mk.call(x, y)
+            current = [start_point]
+            previous = 'M'
+            last_cubic_x = last_cubic_y = nil
+            last_quadratic_x = last_quadratic_y = nil
+            command = relative ? 'l' : 'L'
+            next
+          end
+
+          if current.empty?
+            start_x = cx
+            start_y = cy
+            start_point = mk.call(cx, cy)
+            current << start_point
+          end
+
+          case type
+          when 'L'
+            cx = relative ? cx + values[0] : values[0]
+            cy = relative ? cy + values[1] : values[1]
+            append_point.call(current, mk.call(cx, cy))
+          when 'H'
+            cx = relative ? cx + values[0] : values[0]
+            append_point.call(current, mk.call(cx, cy))
+          when 'V'
+            cy = relative ? cy + values[0] : values[0]
+            append_point.call(current, mk.call(cx, cy))
+          when 'C'
+            x1 = relative ? cx + values[0] : values[0]
+            y1 = relative ? cy + values[1] : values[1]
+            x2 = relative ? cx + values[2] : values[2]
+            y2 = relative ? cy + values[3] : values[3]
+            x = relative ? cx + values[4] : values[4]
+            y = relative ? cy + values[5] : values[5]
+            cubic_to.call(current, cx, cy, x1, y1, x2, y2, x, y)
+            last_cubic_x = x2
+            last_cubic_y = y2
+            cx = x
+            cy = y
+          when 'S'
+            x1 = ['C', 'S'].include?(previous) && last_cubic_x ?
+              (2.0 * cx) - last_cubic_x : cx
+            y1 = ['C', 'S'].include?(previous) && last_cubic_y ?
+              (2.0 * cy) - last_cubic_y : cy
+            x2 = relative ? cx + values[0] : values[0]
+            y2 = relative ? cy + values[1] : values[1]
+            x = relative ? cx + values[2] : values[2]
+            y = relative ? cy + values[3] : values[3]
+            cubic_to.call(current, cx, cy, x1, y1, x2, y2, x, y)
+            last_cubic_x = x2
+            last_cubic_y = y2
+            cx = x
+            cy = y
+          when 'Q', 'T'
+            if type == 'Q'
+              quadratic_x = relative ? cx + values[0] : values[0]
+              quadratic_y = relative ? cy + values[1] : values[1]
+              x = relative ? cx + values[2] : values[2]
+              y = relative ? cy + values[3] : values[3]
+            else
+              quadratic_x = ['Q', 'T'].include?(previous) && last_quadratic_x ?
+                (2.0 * cx) - last_quadratic_x : cx
+              quadratic_y = ['Q', 'T'].include?(previous) && last_quadratic_y ?
+                (2.0 * cy) - last_quadratic_y : cy
+              x = relative ? cx + values[0] : values[0]
+              y = relative ? cy + values[1] : values[1]
+            end
+            control1_x = cx + ((quadratic_x - cx) * 2.0 / 3.0)
+            control1_y = cy + ((quadratic_y - cy) * 2.0 / 3.0)
+            control2_x = x + ((quadratic_x - x) * 2.0 / 3.0)
+            control2_y = y + ((quadratic_y - y) * 2.0 / 3.0)
+            cubic_to.call(
+              current, cx, cy, control1_x, control1_y,
+              control2_x, control2_y, x, y
+            )
+            last_quadratic_x = quadratic_x
+            last_quadratic_y = quadratic_y
+            cx = x
+            cy = y
+          when 'A'
+            x = relative ? cx + values[5] : values[5]
+            y = relative ? cy + values[6] : values[6]
+            arc_to.call(
+              current, cx, cy, values[0], values[1], values[2],
+              values[3] != 0.0, values[4] != 0.0, x, y
+            )
+            cx = x
+            cy = y
+          end
+
+          unless ['C', 'S'].include?(type)
+            last_cubic_x = last_cubic_y = nil
+          end
+          unless ['Q', 'T'].include?(type)
+            last_quadratic_x = last_quadratic_y = nil
+          end
+          previous = type
+        end
         subpaths << current if current.length >= 2
 
-        subpaths.map { |pts|
-          cl = [pts.first]
-          pts[1..-1].each { |p| cl << p if p.distance(cl.last) >= 0.0003 }
-          cl.length >= 2 ? cl : nil
-        }.compact
+        subpaths.map do |points|
+          clean = [points.first]
+          points[1..-1].each do |point|
+            clean << point if point.distance(clean.last).to_f > 0.0
+          end
+          clean.length >= 2 ? clean : nil
+        end.compact
       end
 
     end

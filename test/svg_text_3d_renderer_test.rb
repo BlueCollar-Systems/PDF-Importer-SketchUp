@@ -21,7 +21,25 @@ module Geom
       dz = z - other.z.to_f
       Math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
     end
+
+    # SketchUp 2017 treats points within its modeling tolerance as equal before
+    # Entities#add_face validates a polygon.
+    def ==(other)
+      other.respond_to?(:x) && distance(other) < 0.001
+    end
   end unless const_defined?(:Point3d)
+
+  class Transformation
+    attr_reader :scale, :origin
+    def initialize(scale, origin = nil)
+      @scale = scale.to_f
+      @origin = origin
+    end
+    def self.scaling(*args)
+      return new(args[0]) if args.length == 1
+      new(args[1], args[0])
+    end
+  end unless const_defined?(:Transformation)
 end
 
 require 'bc_pdf_vector_importer/svg_3d_text_renderer'
@@ -43,7 +61,7 @@ class Svg3DNormal
 end
 
 class Svg3DFace
-  attr_reader :persistent_id, :pushpull_calls
+  attr_reader :persistent_id, :pushpull_calls, :points
 
   def initialize(owner, id, points)
     @owner = owner
@@ -72,16 +90,29 @@ class Svg3DFace
     @owner.erase_entities(self)
     true
   end
+
+  def scale_by!(factor, origin = nil)
+    ox = origin ? origin.x.to_f : 0.0
+    oy = origin ? origin.y.to_f : 0.0
+    oz = origin ? origin.z.to_f : 0.0
+    @points.each do |point|
+      point.x = ox + ((point.x - ox) * factor.to_f)
+      point.y = oy + ((point.y - oy) * factor.to_f)
+      point.z = oz + ((point.z - oz) * factor.to_f)
+    end
+    @depth = oz + ((@depth - oz) * factor.to_f)
+  end
 end
 
 class Svg3DEntities
-  attr_reader :erased, :groups
+  attr_reader :erased, :groups, :transform_entity_calls
 
   def initialize(options = {})
     @options = options
     @items = []
     @erased = []
     @groups = []
+    @transform_entity_calls = []
     @next_id = options[:first_id] || 100
   end
 
@@ -100,6 +131,14 @@ class Svg3DEntities
 
   def add_face(points)
     raise 'synthetic face creation failure' if @options[:fail_add_face]
+    if @options[:reject_host_equal_points]
+      Array(points).each_with_index do |left, index|
+        duplicate = Array(points)[(index + 1)..-1].to_a.any? do |right|
+          left == right
+        end
+        raise ArgumentError, 'Duplicate points in array' if duplicate
+      end
+    end
     if @options[:translate_created_faces]
       dx, dy = @options[:translate_created_faces]
       points = Array(points).map do |point|
@@ -118,17 +157,35 @@ class Svg3DEntities
       @erased << entity
     end
   end
+
+
+  def scale_by!(factor)
+    @items.each do |entity|
+      entity.scale_by!(factor) if entity.respond_to?(:scale_by!)
+    end
+  end
+
+  def transform_entities(transformation, entities)
+    @transform_entity_calls << [transformation, Array(entities).dup]
+    Array(entities).each do |entity|
+      entity.scale_by!(transformation.scale, transformation.origin) if
+        entity.respond_to?(:scale_by!)
+    end
+    true
+  end
 end
 
 class Svg3DGroup
   attr_accessor :name, :layer
-  attr_reader :persistent_id, :entities, :attributes
+  attr_reader :persistent_id, :entities, :attributes, :transform_calls
 
   def initialize(owner, id, options)
     @owner = owner
     @persistent_id = id
     @entities = Svg3DEntities.new(options.merge(first_id: id * 100))
     @attributes = {}
+    @transform_calls = []
+    @transformation = nil
   end
 
   def typename; 'Group'; end
@@ -145,12 +202,33 @@ class Svg3DGroup
       points << box.min << box.max
     end
     raise 'empty group bounds' if points.empty?
+    if @transformation
+      scale = @transformation.scale
+      origin = @transformation.origin
+      ox = origin ? origin.x.to_f : 0.0
+      oy = origin ? origin.y.to_f : 0.0
+      oz = origin ? origin.z.to_f : 0.0
+      points = points.map do |point|
+        Geom::Point3d.new(
+          ox + ((point.x.to_f - ox) * scale),
+          oy + ((point.y.to_f - oy) * scale),
+          oz + ((point.z.to_f - oz) * scale)
+        )
+      end
+    end
     Svg3DBounds.new(points)
   end
 
   def erase!
     @owner.erase_entities(self)
     true
+  end
+
+
+  def transform!(transformation)
+    @transform_calls << transformation
+    @transformation = transformation
+    self
   end
 end
 
@@ -188,8 +266,32 @@ class SvgText3DRendererTest < Minitest::Test
       '<use href="#glyph-0-0" x="70" y="20"/></g></svg>'
   end
 
+  def square_svg_with_host_tolerance_edge
+    '<svg xmlns="http://www.w3.org/2000/svg" width="100pt" height="100pt" ' \
+      'viewBox="0 0 100 100"><defs><g id="glyph-0-0"><path ' \
+      'd="M 0.04 0 L 0 0 L 10 0 L 10 -10 L 0.04 -10 Z"/>' \
+      '</g></defs><g><use href="#glyph-0-0" x="10" y="80"/></g></svg>'
+  end
+
   def span(id = 'text_span:1:0', box = [8.0, 18.0, 25.0, 35.0])
     Svg3DSpan.new('A', 'pdftotext', id, *box)
+  end
+
+  def contour_points(coordinates)
+    coordinates.map { |x, y| Geom::Point3d.new(x, y, 0.0) }
+  end
+
+  def source_loop_entry(index, glyph, loop_box, reported_box, pen)
+    x0, y0, x1, y1 = loop_box
+    points = [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]].map do |x, y|
+      Geom::Point3d.new(x.to_f / 72.0, y.to_f / 72.0, 0.0)
+    end
+    {
+      :glyph_id => glyph, :placement_index => index,
+      :svg_matrix => [1.0, 0.0, 0.0, 1.0, pen[0], 100.0 - pen[1]],
+      :source_primary_axis => :x, :pen_pdf => pen,
+      :ink_bbox_pdf => reported_box, :loops => [points]
+    }
   end
 
   def test_exact_svg_outline_becomes_owned_filled_positive_depth_3d_text
@@ -216,6 +318,140 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal 'text_span:1:0',
       delivered[:group].attributes[['BC_PDF_Importer', 'source_span_id']]
     assert_empty result[:transition_proofs]
+  end
+
+  def test_host_equal_vertices_are_preserved_by_baked_scaled_construction
+    entities = Svg3DEntities.new(:reject_host_equal_points => true)
+    result = RENDERER.render_svg(
+      entities, square_svg_with_host_tolerance_edge, MEDIA_BOX, [span],
+      :depth => 0.05
+    )
+
+    assert result[:ok], result[:failures].inspect
+    delivered = result[:span_results][0]
+    assert_equal :svg_source_3d_text, delivered[:renderer]
+    assert_in_delta 10.0 / 72.0, delivered[:width], 1.0e-7
+    assert_in_delta 10.0 / 72.0, delivered[:height], 1.0e-7
+    assert delivered[:host_tolerance_adapted]
+    assert_operator delivered[:construction_scale], :>, 1.0
+    assert_equal 0, delivered[:collapsed_host_equal_vertices]
+    assert_empty delivered[:group].transform_calls,
+                 'outer semantic group must remain free of construction scale'
+    assert_empty delivered[:group].entities.transform_entity_calls
+    construction_group = delivered[:group].entities.groups.first
+    refute_nil construction_group
+    assert_equal 1, construction_group.transform_calls.length
+    inverse = construction_group.transform_calls[0]
+    refute_nil inverse.origin
+    refute_in_delta 0.0, inverse.origin.x, 1.0e-12
+    refute_in_delta 0.0, inverse.origin.y, 1.0e-12
+    face = construction_group.entities.to_a.find do |entity|
+      entity.respond_to?(:typename) && entity.typename == 'Face'
+    end
+    assert_equal 5, delivered[:source_outline_vertex_count]
+    assert_equal delivered[:source_outline_vertex_count], face.points.length
+  end
+
+  def test_nonzero_submicron_source_edge_is_not_silently_normalized_away
+    points = [
+      Geom::Point3d.new(0.0, 0.0, 0.0),
+      Geom::Point3d.new(0.0000005, 0.0000005, 0.0),
+      Geom::Point3d.new(1.0, 0.0, 0.0),
+      Geom::Point3d.new(1.0, 1.0, 0.0),
+      Geom::Point3d.new(0.0, 1.0, 0.0)
+    ]
+    normalized = RENDERER.normalized_contour(points)
+    assert_equal 5, normalized.length
+
+    parent = Svg3DEntities.new(:reject_host_equal_points => true)
+    group = parent.add_group
+    entry = {
+      :glyph_id => 'tiny-edge', :placement_index => 7,
+      :svg_matrix => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+      :loops => [points]
+    }
+    delivered = RENDERER.build_span_group(
+      group, [entry], 'text_span:1:tiny', 0.05
+    )
+
+    assert_equal 5, delivered[:source_outline_vertex_count]
+    assert_operator delivered[:construction_scale], :>, 1.0
+    construction_group = group.entities.groups.first
+    face = construction_group.entities.to_a.find do |entity|
+      entity.typename == 'Face'
+    end
+    assert_equal 5, face.points.length
+  end
+
+  def test_nonzero_fill_keeps_same_winding_nested_region_filled
+    outer = contour_points([[0, 0], [10, 0], [10, 10], [0, 10]])
+    inner = contour_points([[2, 2], [8, 2], [8, 8], [2, 8]])
+    entities = Svg3DEntities.new
+
+    faces = RENDERER.build_filled_glyph(entities, [outer, inner])
+
+    assert_equal 1, faces.length,
+                 'same-winding inner path must not create overlapping solids'
+    assert_empty entities.erased,
+                 'same-winding nested contours are filled under nonzero rule'
+  end
+
+  def test_nonzero_fill_erases_opposite_winding_nested_region_as_hole
+    outer = contour_points([[0, 0], [10, 0], [10, 10], [0, 10]])
+    inner = contour_points([[2, 2], [8, 2], [8, 8], [2, 8]]).reverse
+    entities = Svg3DEntities.new
+
+    faces = RENDERER.build_filled_glyph(entities, [outer, inner])
+
+    assert_equal 1, faces.length
+    assert_equal 1, entities.erased.length
+  end
+
+  def test_reported_ink_bbox_cannot_bind_far_away_physical_loops
+    source = Svg3DSpan.new(
+      'A', 'pdftotext', 'text_span:1:0', 8.0, 8.0, 22.0, 22.0
+    )
+    forged = source_loop_entry(
+      0, 'glyph-0-0', [70.0, 70.0, 80.0, 80.0],
+      [10.0, 10.0, 20.0, 20.0], [10.0, 10.0]
+    )
+
+    result = BlueCollarSystems::PDFVectorImporter::CairoGlyphSource.stub(
+      :model_space_loops, [forged]
+    ) do
+      RENDERER.render_svg(
+        Svg3DEntities.new, '<svg/>', MEDIA_BOX, [source], :depth => 0.05
+      )
+    end
+
+    refute result[:ok]
+    assert_equal :source_loop_binding_mismatch, result[:failures][0][:reason_code]
+  end
+
+  def test_reported_placements_cannot_certify_physically_swapped_loops
+    first = Svg3DSpan.new(
+      'A', 'pdftotext', 'text_span:1:0', 8.0, 8.0, 22.0, 22.0
+    )
+    second = Svg3DSpan.new(
+      'B', 'pdftotext', 'text_span:1:1', 68.0, 68.0, 82.0, 82.0
+    )
+    entries = [
+      source_loop_entry(0, 'glyph-0-0', [70.0, 70.0, 80.0, 80.0],
+                        [10.0, 10.0, 20.0, 20.0], [10.0, 10.0]),
+      source_loop_entry(1, 'glyph-0-1', [10.0, 10.0, 20.0, 20.0],
+                        [70.0, 70.0, 80.0, 80.0], [70.0, 70.0])
+    ]
+
+    result = BlueCollarSystems::PDFVectorImporter::CairoGlyphSource.stub(
+      :model_space_loops, entries
+    ) do
+      RENDERER.render_svg(
+        Svg3DEntities.new, '<svg/>', MEDIA_BOX, [first, second], :depth => 0.05
+      )
+    end
+
+    refute result[:ok]
+    assert_equal :source_loop_binding_mismatch, result[:failures][0][:reason_code]
   end
 
   def test_unmatched_source_span_never_claims_that_source_outlines_are_absent
@@ -245,7 +481,7 @@ class SvgText3DRendererTest < Minitest::Test
   end
 
 
-  def test_incomplete_glyph_coverage_is_not_delivered_as_exact_3d_text
+  def test_full_source_outline_is_not_rejected_by_unicode_count_guess
     long_span = Svg3DSpan.new(
       'TENLETTERS', 'pdftotext', 'text_span:1:0', 8.0, 18.0, 25.0, 35.0
     )
@@ -254,15 +490,17 @@ class SvgText3DRendererTest < Minitest::Test
       source_context: complete_source_context
     )
 
-    refute result[:ok]
-    assert_empty result[:span_results]
-    assert_empty result[:unmatched_source_results],
-                 'partial ink must not survive as a second anonymous 3D object'
-    assert_equal :source_item_identity_unavailable,
-                 result[:transition_proofs][0][:reason_code]
-    coverage = result[:match][:coverage_failures][0]
+    assert result[:ok]
+    assert_equal 1, result[:span_results].length
+    assert_empty result[:unmatched_source_results]
+    assert_empty result[:transition_proofs]
+    assert_empty result[:match][:coverage_failures]
+    coverage = result[:match][:source_ink_matches][0]
     assert_equal 10, coverage[:expected_glyph_count]
     assert_equal 1, coverage[:observed_glyph_count]
+    assert_equal false, coverage[:character_count_parity]
+    assert coverage[:source_ink_coverage_verified]
+    assert coverage[:shaped_glyph_count_telemetry_only]
   end
 
   def test_each_transition_proof_contains_only_its_item_coverage_evidence
@@ -357,6 +595,9 @@ class SvgText3DRendererTest < Minitest::Test
     refute result[:ok]
     assert_empty result[:transition_proofs]
     assert_equal :host_face_creation_exception, result[:failures][0][:reason_code]
+    assert_match(/add_face failed for glyph glyph-0-0 placement 0/i,
+                 result[:failures][0][:detail])
+    assert_match(/host_equal_pairs=none/i, result[:failures][0][:detail])
     assert result[:failures][0][:generic_failure]
     assert_empty entities.groups, 'partially created owned group must be erased'
   end
