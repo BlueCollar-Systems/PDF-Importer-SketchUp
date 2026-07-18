@@ -210,7 +210,7 @@ internal_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
 ix, iy, _ = builder.send(:label_insertion_pdf, internal_item)
 assert_true(ix == 120.0 && iy == 400.0, 'internal parser baseline anchor should remain unchanged')
 
-horiz_vec = builder.send(:label_direction_vector, 0.0)
+horiz_vec = builder.send(:zero_label_leader_vector)
 assert_true(horiz_vec.x.abs < 0.01 && horiz_vec.y.abs < 0.01,
             'horizontal labels should use zero direction vector for SU 2017')
 
@@ -316,8 +316,8 @@ if File.exist?(PDF_TIER1_USER)
     assert_near(dx, 1435.63, PDF_TOL, "1 1/2 X should center in narrow vertical bbox (got #{dx})")
     assert_near(dy, 689.32, PDF_TOL, "1 1/2 Y baseline for stacked fraction (got #{dy})")
     assert_true(dang.abs < 0.01, "1 1/2 angle must be horizontal, not stacked-fraction false tilt (got #{dang})")
-    assert_true(builder.send(:label_direction_vector, dang).y.abs < 0.01,
-                '1 1/2 must use zero direction vector')
+    assert_true(builder.send(:zero_label_leader_vector).y.abs < 0.01,
+                '1 1/2 must use the active zero leader vector')
   end
 
   dim_916 = items.find { |it| it.text.to_s.strip == '1 9/16' && (it.bbox_x0.to_f - 1949.40).abs < 1.0 }
@@ -418,8 +418,8 @@ if File.exist?(PDF_TIER1_USER)
     assert_near(wx, 420.37, PDF_TOL, "SECTION C-C 3/16\" weld X should anchor at bbox x0 (got #{wx})")
     assert_near(wy, 1542.16, PDF_TOL, "SECTION C-C 3/16\" weld Y baseline (got #{wy})")
     assert_true(wang.abs < 0.01, "SECTION C-C 3/16\" weld angle should be horizontal (got #{wang})")
-    assert_true(builder.send(:label_direction_vector, wang).y.abs < 0.01,
-                'SECTION C-C 3/16" weld must use zero direction vector')
+    assert_true(builder.send(:zero_label_leader_vector).y.abs < 0.01,
+                'SECTION C-C 3/16" weld must use the active zero leader vector')
   end
 
   cc_typ = find_cc_label(items, 'TYP.', 465.84)

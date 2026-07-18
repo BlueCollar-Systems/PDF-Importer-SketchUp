@@ -7,6 +7,7 @@
 
 require File.join(File.dirname(__FILE__), 'page_transform')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
+require 'digest'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -715,6 +716,7 @@ module BlueCollarSystems
         source_id = RepresentationFidelity.source_span_id(item)
         attempt = {
           source_span_id: source_id,
+          source_text_sha256: Digest::SHA256.hexdigest(item.text.to_s),
           requested_mode: normalize_text_mode_symbol(requested_mode),
           delivered_mode: nil,
           resulting_entity_ids: [],
@@ -1429,6 +1431,7 @@ module BlueCollarSystems
           page: @page_number,
           source_kind: 'text_span',
           span_id: span_id,
+          source_text_sha256: Digest::SHA256.hexdigest(item.text.to_s),
           created_entity_type: entity_type,
           delivered_mode: normalize_text_mode_symbol(delivered_mode),
           resulting_entity_ids: ids
@@ -2063,13 +2066,13 @@ module BlueCollarSystems
       def rotated_bbox_text_origin?(item, bbox_w_pts, bbox_h_pts, angle_deg)
         return false if annotation_like_label?(item.text, bbox_w_pts, bbox_h_pts)
         if bom_table_quantity_label?(item.text, bbox_w_pts, bbox_h_pts, angle_deg, item)
-          return angle_needs_geometry_text?(angle_deg, 3.0)
+          return angle_requires_rotated_origin?(angle_deg)
         end
         if tall_single_text_bbox?(item, bbox_w_pts, bbox_h_pts)
-          return angle_needs_geometry_text?(angle_deg, 3.0)
+          return angle_requires_rotated_origin?(angle_deg)
         end
         return false unless part_mark_label?(item.text) || dimension_like_label?(item.text)
-        angle_needs_geometry_text?(angle_deg, 3.0)
+        angle_requires_rotated_origin?(angle_deg)
       rescue StandardError
         false
       end
@@ -2152,27 +2155,10 @@ module BlueCollarSystems
         [item.x.to_f, item.y.to_f, label_angle_pdf(item)]
       end
 
-      # SketchUp 2017 label text expects a zero direction vector for horizontal
-      # annotation text. Non-zero unit vectors are reserved for rotated labels.
-      def label_direction_vector(angle_deg, item = nil)
-        return Geom::Vector3d.new(0, 0, 0) if angle_deg.to_f.abs <= 1.0e-12
-        label_text_vector(angle_deg)
-      rescue StandardError
-        Geom::Vector3d.new(0, 0, 0)
-      end
-
-      def label_text_vector(angle_deg)
-        rad = angle_deg.to_f * Math::PI / 180.0
-        Geom::Vector3d.new(Math.cos(rad), Math.sin(rad), 0.0)
-      rescue StandardError
-        Geom::Vector3d.new(0, 0, 0)
-      end
-
-      # Non-horizontal Labels still use native add_text; this only decides whether
-      # to pass a non-zero direction vector when |angle| exceeds the threshold.
-      # Name is historical — it does NOT switch Labels → mesh/geometry.
-      # Tunable via BC_SU_ROTATED_LABEL_DEG for troubleshooting.
-      def angle_needs_geometry_text?(angle_deg, tol_deg = 12.0)
+      # This helper only selects the rotated-bbox insertion calculation used by
+      # representations that can preserve rotation. SketchUp::Text#vector is a
+      # leader vector and is never used as a glyph-orientation axis.
+      def angle_requires_rotated_origin?(angle_deg)
         a = angle_deg.to_f % 180.0
         a += 180.0 if a < 0.0
         a = 180.0 - a if a > 90.0

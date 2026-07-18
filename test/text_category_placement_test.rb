@@ -104,8 +104,8 @@ weld = make_item('3/16', 420.0, 1540.0, 435.0, 1552.0, angle: -6.0, font_size: 8
 wx2, wy2, w_ang = builder.send(:label_insertion_pdf, weld)
 assert_near(wx2, 420.0, 0.05, 'weld fraction anchors at bbox x0')
 assert_true(w_ang.abs < 0.01, 'weld fraction forced horizontal')
-assert_true(builder.send(:label_direction_vector, w_ang, weld).y.abs < 0.01,
-            'weld fraction uses zero direction vector')
+assert_true(builder.send(:zero_label_leader_vector).y.abs < 0.01,
+            'weld fraction uses the active zero leader vector')
 
 typ = make_item('TYP.', 465.0, 1550.0, 480.0, 1562.0, angle: 0.0, font_size: 8.0)
 _, _, tang = builder.send(:label_insertion_pdf, typ)
@@ -134,9 +134,10 @@ bom = make_item('MARK', 90.0, 200.0, 140.0, 210.0, angle: 0.0, font_size: 8.0)
 bx, = builder.send(:label_insertion_pdf, bom)
 assert_true(bx > 90.0 && bx < 115.0, 'BOM header X shifts toward bbox center')
 
-# --- Rotated labels: >8° uses a non-zero add_text direction vector (still Labels mode) ---
-assert_true(builder.send(:angle_needs_geometry_text?, 45.0, 8.0),
-            '45° label should use a non-zero native add_text direction vector (not mesh)')
+# --- Rotated bbox origins: geometry-capable representations preserve the angle;
+# native Labels reject it before add_text because Text#vector is only a leader. ---
+assert_true(builder.send(:angle_requires_rotated_origin?, 45.0),
+            '45° source text should use the rotated-origin calculation')
 
 # --- Centered mesh anchor: bbox centering happens once, shared by Labels/3D Text ---
 bom_mesh_x, _, _ = builder.send(:mesh_label_anchor_pdf, bom)

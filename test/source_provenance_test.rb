@@ -98,6 +98,7 @@ class SourceProvenanceTest < Minitest::Test
     def item.bbox_x1; 30.0; end
     def item.bbox_y1; 40.0; end
     def item.source_span_id; 'text_span:2:7'; end
+    def item.text; 'A'; end
 
     builder.send(
       :record_text_span_provenance, item, 'native_label',
@@ -106,6 +107,7 @@ class SourceProvenanceTest < Minitest::Test
     assert_equal 1, bucket.length
     entry = bucket[0]
     assert_equal 'text_span:2:7', entry[:span_id]
+    assert_equal Digest::SHA256.hexdigest('A'), entry[:source_text_sha256]
     assert_equal 'text_delivery:2:0', entry[:object_id],
                  'object_id stays a separate created-entity label'
     assert_equal [10.0, 20.0, 30.0, 40.0], entry[:source_bbox_pdf]

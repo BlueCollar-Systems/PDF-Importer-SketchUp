@@ -256,6 +256,9 @@ module SketchupHostEvidence
     end
 
     if strict
+      verify_attempt_claim_ownership!(
+        hash_value(stats, :text_attempts), claim_rows
+      )
       verify_source_sets!(stats, requested_mode, selected_pages)
       verify_fallback_contracts!(stats, requested_mode, selected_pages)
       verify_raster_deliveries!(
@@ -264,6 +267,29 @@ module SketchupHostEvidence
     end
     true
   end
+
+  def self.verify_attempt_claim_ownership!(attempts, rows_by_claim)
+    owners = {}
+    Array(attempts).each_with_index do |attempt, index|
+      claims = hash_value(attempt, :resulting_entity_ids)
+      Array(claims).each do |claim|
+        normalized = normalized_delivery_claim(claim)
+        next unless normalized
+        claim_key = "#{normalized[0]}:#{normalized[1]}"
+        row = rows_by_claim[claim_key]
+        entity_id = hash_value(row, :entity_id)
+        key = "entity_id:#{entity_id}"
+        if owners.key?(key)
+          raise EvidenceError,
+                "text_attempts[#{index}] aliases the same host entity as " \
+                "text_attempts[#{owners[key]}]: #{key}"
+        end
+        owners[key] = index
+      end
+    end
+    true
+  end
+  private_class_method :verify_attempt_claim_ownership!
 
   def self.copy_verified_report!(source_path, destination_path, expectations)
     source = File.expand_path(source_path.to_s)
@@ -438,6 +464,7 @@ module SketchupHostEvidence
     {
       'text_like' => true,
       'text' => text,
+      'text_sha256' => text.nil? ? nil : Digest::SHA256.hexdigest(text),
       'anchor' => point,
       'leader_visible' => leader
     }
@@ -692,7 +719,7 @@ module SketchupHostEvidence
 
     case mode
     when :labels
-      verify_native_labels!(rows, label)
+      verify_native_labels!(rows, record, label)
     when :text3d
       verify_text3d_rows!(rows, record, label)
     when :glyphs
@@ -746,12 +773,19 @@ module SketchupHostEvidence
   end
   private_class_method :verify_representation_identity!
 
-  def self.verify_native_labels!(rows, label)
+  def self.verify_native_labels!(rows, record, label)
+    expected_digest = hash_value(record, :source_text_sha256).to_s.downcase
+    unless expected_digest =~ /\A[0-9a-f]{64}\z/
+      raise EvidenceError, "#{label} source text digest is missing"
+    end
     valid = rows.all? do |row|
       content = hash_value(row, :content_evidence)
+      actual_text = hash_value(content, :text).to_s
       hash_value(row, :typename).to_s == 'Text' &&
         content.is_a?(Hash) && hash_value(content, :text_like) == true &&
-        !hash_value(content, :text).to_s.strip.empty? &&
+        !actual_text.strip.empty? &&
+        Digest::SHA256.hexdigest(actual_text) == expected_digest &&
+        hash_value(content, :text_sha256).to_s.downcase == expected_digest &&
         numeric_point_payload?(hash_value(content, :anchor)) &&
         hash_value(content, :leader_visible) == false &&
         Array(hash_value(row, :children)).empty?

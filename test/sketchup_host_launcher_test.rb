@@ -416,6 +416,7 @@ class SketchupHostLauncherTest < Minitest::Test
           'object_count' => 1,
           'objects' => [{
             'span_id' => 'text_span:1:0',
+            'source_text_sha256' => Digest::SHA256.hexdigest('A'),
             'resulting_entity_ids' => ['entity_id:13']
           }]
         },
@@ -435,6 +436,7 @@ class SketchupHostLauncherTest < Minitest::Test
         'typename' => 'Text', 'valid' => true, 'deleted' => false,
         'content_evidence' => {
           'text_like' => true, 'text' => 'A',
+          'text_sha256' => Digest::SHA256.hexdigest('A'),
           'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
         },
         'children' => []
@@ -444,6 +446,7 @@ class SketchupHostLauncherTest < Minitest::Test
         'typename' => 'Text', 'valid' => true, 'deleted' => false,
         'content_evidence' => {
           'text_like' => true, 'text' => 'A',
+          'text_sha256' => Digest::SHA256.hexdigest('A'),
           'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
         },
         'children' => []
@@ -453,6 +456,7 @@ class SketchupHostLauncherTest < Minitest::Test
         'typename' => 'Text', 'valid' => true, 'deleted' => false,
         'content_evidence' => {
           'text_like' => true, 'text' => 'A',
+          'text_sha256' => Digest::SHA256.hexdigest('A'),
           'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
         },
         'children' => []
@@ -494,6 +498,7 @@ class SketchupHostLauncherTest < Minitest::Test
       'text_source_span_ids' => ['text_span:1:0'],
       'text_attempts' => [{
         'source_span_id' => 'text_span:1:0',
+        'source_text_sha256' => Digest::SHA256.hexdigest('A'),
         'requested_mode' => 'labels', 'delivered_mode' => 'labels',
         'resulting_entity_ids' => ['entity_id:13'],
         'visual_fidelity_verified' => true,
@@ -511,6 +516,7 @@ class SketchupHostLauncherTest < Minitest::Test
         'import_session_id' => 'session-1',
         'objects' => [{
           'span_id' => 'text_span:1:0',
+          'source_text_sha256' => Digest::SHA256.hexdigest('A'),
           'resulting_entity_ids' => ['entity_id:13']
         }]
       },

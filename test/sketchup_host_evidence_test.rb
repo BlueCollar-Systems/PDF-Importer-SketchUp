@@ -267,6 +267,7 @@ class SketchupHostEvidenceTest < Minitest::Test
     valid = ready_stats(:terminal_text_delivery_records => [{
         :resulting_entity_ids => ['persistent_id:7013'],
         :source_span_ids => ['text_span:1:0'],
+        :source_text_sha256 => Digest::SHA256.hexdigest('A'),
         :requested_mode => :labels, :delivered_mode => :labels
       }])
     valid[:text_attempts][0][:resulting_entity_ids] = ['persistent_id:7013']
@@ -285,6 +286,7 @@ class SketchupHostEvidenceTest < Minitest::Test
         ready_stats(:terminal_text_delivery_records => [{
           :resulting_entity_ids => ['persistent_id:13'],
           :source_span_ids => ['text_span:1:0'],
+          :source_text_sha256 => Digest::SHA256.hexdigest('A'),
           :requested_mode => :labels, :delivered_mode => :labels
         }]),
         rows,
@@ -557,6 +559,21 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  def test_label_delivery_is_bound_to_the_saved_text_content
+    stats = ready_stats
+    stats[:text_attempts][0][:source_text_sha256] =
+      Digest::SHA256.hexdigest('A')
+    wrong = Marshal.load(Marshal.dump(label_manifest))
+    wrong[0]['content_evidence']['text'] = 'B'
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, wrong, :labels, [1]
+      )
+    end
+    assert_match(/content|digest|text/i, error.message)
+  end
+
   def test_duplicate_source_identity_inside_one_delivery_record_fails
     stats = strict_page_mode_stats(:geometry, :geometry, 1)
     stats[:text_attempts][0][:source_span_ids] = [
@@ -569,6 +586,56 @@ class SketchupHostEvidenceTest < Minitest::Test
       )
     end
     assert_match(/duplicate|source span/i, error.message)
+  end
+
+  def test_two_item_sources_cannot_claim_the_same_host_entity
+    first = 'text_span:1:0'
+    second = 'text_span:1:1'
+    entity_id = 'entity_id:13'
+    completed = lambda do |source_id|
+      {
+        :source_span_id => source_id, :page => 1,
+        :source_text_sha256 => Digest::SHA256.hexdigest('A'),
+        :requested_mode => :labels, :delivered_mode => :labels,
+        :resulting_entity_ids => [entity_id],
+        :visual_fidelity_verified => true,
+        :attempt_history => [{
+          :mode => :labels, :outcome => :complete,
+          :resulting_entity_ids => [entity_id],
+          :visual_fidelity_verified => true,
+          :cleanup_outcome => :not_required
+        }]
+      }
+    end
+    stats = ready_stats(
+      :text_source_span_ids => [first, second],
+      :text_attempts => [completed.call(first), completed.call(second)],
+      :source_provenance_objects => [
+        { :span_id => first, :page => 1,
+          :resulting_entity_ids => [entity_id] },
+        { :span_id => second, :page => 1,
+          :resulting_entity_ids => [entity_id] }
+      ]
+    )
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, label_manifest, :labels, [1]
+      )
+    end
+    assert_match(/alias|duplicate|ownership|same host entity/i, error.message)
+
+    stats[:text_attempts][1][:resulting_entity_ids] = ['persistent_id:1013']
+    stats[:text_attempts][1][:attempt_history][0][:resulting_entity_ids] =
+      ['persistent_id:1013']
+    stats[:source_provenance_objects][1][:resulting_entity_ids] =
+      ['persistent_id:1013']
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        stats, label_manifest, :labels, [1]
+      )
+    end
+    assert_match(/alias|duplicate|ownership|same host entity/i, error.message)
   end
 
   def test_delivery_rejects_deleted_or_invalid_nested_physical_entities
@@ -838,6 +905,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       'typename' => 'Text', 'valid' => true, 'deleted' => false,
       'content_evidence' => {
         'text_like' => true, 'text' => 'A',
+        'text_sha256' => Digest::SHA256.hexdigest('A'),
         'anchor' => [1.0, 2.0, 0.0], 'leader_visible' => false
       },
       'children' => []
@@ -913,6 +981,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       :text_source_span_ids => ['text_span:1:0'],
       :text_attempts => [{
         :source_span_id => 'text_span:1:0',
+        :source_text_sha256 => Digest::SHA256.hexdigest('A'),
         :requested_mode => :labels, :delivered_mode => :labels,
         :resulting_entity_ids => [13],
         :visual_fidelity_verified => true,
@@ -948,6 +1017,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       :text_source_span_ids => [source_id],
       :text_attempts => [{
         :page => page_number, :source_span_ids => [source_id],
+        :source_text_sha256 => Digest::SHA256.hexdigest('A'),
         :requested_mode => record_mode, :delivered_mode => record_mode,
         :resulting_entity_ids => [entity_id],
         :visual_fidelity_verified => true,
@@ -961,6 +1031,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       :source_provenance_objects => [],
       :page_text_delivery_records => [{
         :page => page_number, :source_span_ids => [source_id],
+        :source_text_sha256 => Digest::SHA256.hexdigest('A'),
         :requested_mode => record_mode, :delivered_mode => record_mode,
         :resulting_entity_ids => [entity_id],
          :created_entity_type => case record_mode
