@@ -43,6 +43,45 @@ class SvgTextCollapseTest < Minitest::Test
     assert_equal R.placement_signature(base), R.placement_signature(moved)
   end
 
+  def test_exact_physical_deduplication_keeps_one_visible_outline
+    base = {
+      glyph_id: 'g', x: 0.0, y: 0.0,
+      matrix: [1.0, 0.0, 0.0, 1.0, 10.0, 20.0]
+    }
+    same_effective = {
+      glyph_id: 'g', x: 5.0, y: 0.0,
+      matrix: [1.0, 0.0, 0.0, 1.0, 5.0, 20.0]
+    }
+    nearby = {
+      glyph_id: 'g', x: 5.0001, y: 0.0,
+      matrix: [1.0, 0.0, 0.0, 1.0, 5.0, 20.0]
+    }
+
+    unique, duplicates = R.deduplicate_exact_physical_placements(
+      [base, same_effective, nearby]
+    )
+
+    assert_equal 2, unique.length
+    assert_equal [0, 2], unique.map { |item| item[:source_placement_index] }
+    assert_equal 1, duplicates.length
+    assert_equal 0, duplicates[0][:retained_placement_index]
+    assert_equal 1, duplicates[0][:duplicate_placement_index]
+  end
+
+  def test_transformed_source_ink_bbox_is_pdf_relative_and_finite
+    points = [[
+      DummyPoint.new(0.0, 0.0), DummyPoint.new(1.0, 0.0),
+      DummyPoint.new(1.0, -2.0), DummyPoint.new(0.0, -2.0)
+    ]]
+
+    bbox = R.transformed_source_ink_bbox_pdf(
+      points, 1.0, 0.0, 0.0, 1.0,
+      12.0, 24.0, 1.0, 1.0, 3.0, 2.0, 4.0
+    )
+
+    assert_equal [10.0, 15.0, 11.0, 17.0], bbox
+  end
+
   def test_detects_bulk_collapse_only
     placements = collapsed(296) + normal(20)
     keys = R.collapsed_signature_keys(placements)

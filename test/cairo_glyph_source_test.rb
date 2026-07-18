@@ -467,6 +467,133 @@ class CairoGlyphSourceTest < Minitest::Test
     assert_empty match[:coverage_failures]
   end
 
+  def test_shaped_source_ink_can_certify_a_ligature_without_character_count_parity
+    span = SpanItem.new(
+      'office', 'pdftotext', 'text_span:1:0',
+      0.0, 0.0, 60.0, 10.0
+    )
+    pens = 5.times.map do |index|
+      {
+        x: (index * 12.0) + 1.0, y: 5.0, placement_index: index,
+        ink_bbox_pdf: [index * 12.0, 1.0, (index + 1) * 12.0, 9.0]
+      }
+    end
+
+    match = CGS.match_spans(pens, [span], FIXTURE_MEDIA_BOX)
+
+    assert_equal 1, match[:runs_matched]
+    assert_equal 0, match[:runs_unmatched]
+    assert_equal [0, 1, 2, 3, 4],
+                 match[:placement_matches].map { |entry| entry[:placement_index] }
+    assert_empty match[:coverage_failures]
+    evidence = match[:source_ink_matches].first
+    assert_equal 4, evidence[:minimum_shaped_glyph_count]
+    assert evidence[:shaped_glyph_count_verified]
+  end
+
+  def test_finite_ascii_shaping_bound_does_not_excuse_unrelated_missing_glyphs
+    assert_equal 10, CGS.minimum_shaped_glyph_count(
+      SpanItem.new('TENLETTERS')
+    )
+    assert_equal 11, CGS.minimum_shaped_glyph_count(
+      SpanItem.new('Significance')
+    )
+    assert_equal 4, CGS.minimum_shaped_glyph_count(
+      SpanItem.new('office')
+    )
+  end
+
+  def test_source_ink_coverage_does_not_certify_a_partial_long_span
+    span = SpanItem.new(
+      'ABCDEFGHIJ', 'pdftotext', 'text_span:1:0',
+      0.0, 0.0, 100.0, 10.0
+    )
+    pens = [{
+      x: 1.0, y: 5.0, placement_index: 7,
+      ink_bbox_pdf: [0.0, 1.0, 10.0, 9.0]
+    }]
+
+    match = CGS.match_spans(pens, [span], FIXTURE_MEDIA_BOX)
+
+    assert_equal 0, match[:runs_matched]
+    assert_equal 1, match[:runs_unmatched]
+    failure = match[:coverage_failures].first
+    assert_equal :source_ink_coverage_incomplete, failure[:reason]
+    assert_equal false, failure[:source_ink_coverage_verified]
+  end
+
+  def test_source_ink_overlap_owns_shared_baseline_pens_by_physical_row
+    spans = [
+      SpanItem.new('AB', 'pdftotext', 'text_span:1:0', 0.0, 10.0, 20.0, 20.0),
+      SpanItem.new('CD', 'pdftotext', 'text_span:1:1', 0.0, 0.0, 20.0, 10.0)
+    ]
+    pens = [
+      { x: 1.0, y: 10.0, placement_index: 0,
+        ink_bbox_pdf: [0.0, 12.0, 10.0, 18.0] },
+      { x: 11.0, y: 10.0, placement_index: 1,
+        ink_bbox_pdf: [10.0, 12.0, 20.0, 18.0] },
+      { x: 1.0, y: 10.0, placement_index: 2,
+        ink_bbox_pdf: [0.0, 2.0, 10.0, 8.0] },
+      { x: 11.0, y: 10.0, placement_index: 3,
+        ink_bbox_pdf: [10.0, 2.0, 20.0, 8.0] }
+    ]
+
+    match = CGS.match_spans(pens, spans, FIXTURE_MEDIA_BOX)
+    by_span = match[:placement_matches].group_by do |entry|
+      entry[:source_span_id]
+    end
+
+    assert_equal 2, match[:runs_matched]
+    top_indices = by_span['text_span:1:0'].map do |entry|
+      entry[:placement_index]
+    end
+    bottom_indices = by_span['text_span:1:1'].map do |entry|
+      entry[:placement_index]
+    end
+    assert_equal [0, 1], top_indices
+    assert_equal [2, 3], bottom_indices
+  end
+
+  def test_source_ink_ownership_does_not_require_pen_inside_span
+    span = SpanItem.new(
+      'A', 'pdftotext', 'text_span:1:0',
+      10.0, 0.0, 20.0, 10.0
+    )
+    pens = [{
+      x: 0.0, y: 5.0, placement_index: 3,
+      ink_bbox_pdf: [10.0, 1.0, 20.0, 9.0]
+    }]
+
+    match = CGS.match_spans(pens, [span], FIXTURE_MEDIA_BOX)
+
+    assert_equal 1, match[:runs_matched]
+    assert_equal 0, match[:runs_unmatched]
+    indices = match[:placement_matches].map do |entry|
+      entry[:placement_index]
+    end
+    assert_equal [3], indices
+  end
+
+  def test_model_space_loops_deduplicates_only_exact_physical_svg_uses
+    svg = <<-SVG
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
+  <defs><g id="glyph-0-0"><path d="M 0 0 L 10 0 L 10 -10 L 0 -10 Z"/></g></defs>
+  <use xlink:href="#glyph-0-0" x="10" y="20"/>
+  <use xlink:href="#glyph-0-0" x="10" y="20"/>
+  <use xlink:href="#glyph-0-0" x="10.0001" y="20"/>
+</svg>
+    SVG
+
+    placed = CGS.model_space_loops(svg, [0, 0, 100, 100])
+
+    assert_equal 2, placed.length,
+                 'exact duplicate ink is one physical outline; nearby ink is distinct'
+    assert_equal [0, 2], placed.map { |entry| entry[:placement_index] }
+    placed.each do |entry|
+      assert_equal 4, entry[:ink_bbox_pdf].length
+    end
+  end
+
   def test_model_space_loops_keep_deterministic_svg_placement_indices
     placed = CGS.model_space_loops(fixture_svg, FIXTURE_MEDIA_BOX)
     indices = placed.map { |entry| entry[:placement_index] }

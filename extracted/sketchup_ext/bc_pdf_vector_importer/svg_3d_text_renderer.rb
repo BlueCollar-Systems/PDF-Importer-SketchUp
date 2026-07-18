@@ -29,7 +29,10 @@ module BlueCollarSystems
           {
             :x => entry[:pen_pdf][0],
             :y => entry[:pen_pdf][1],
-            :placement_index => entry[:placement_index]
+            :placement_index => entry[:placement_index],
+            :glyph_id => entry[:glyph_id],
+            :ink_bbox_pdf => entry[:ink_bbox_pdf],
+            :source_primary_axis => entry[:source_primary_axis]
           }
         end
         match = CairoGlyphSource.match_spans(pens, text_items, media_box)
@@ -47,6 +50,11 @@ module BlueCollarSystems
           matched_by_span[id] = [] unless matched_by_span.key?(id)
           matched_by_span[id] << record[:placement_index].to_i
         end
+        source_ink_by_span = {}
+        Array(match[:source_ink_matches]).each do |evidence|
+          next unless evidence.is_a?(Hash)
+          source_ink_by_span[evidence[:source_span_id].to_s] = evidence
+        end
 
         owned_groups = []
         Array(text_items).each do |item|
@@ -61,6 +69,21 @@ module BlueCollarSystems
           indices = Array(matched_by_span[source_id]).uniq.sort
           entries = placed.select do |entry|
             indices.include?(entry[:placement_index].to_i)
+          end
+
+          ink_evidence = source_ink_by_span[source_id]
+          if ink_evidence &&
+             ink_evidence[:character_count_parity] == false
+            page_failure = source_page_failure(
+              source_id, opts[:source_context]
+            )
+            if page_failure
+              page_failure[:detail] =
+                'shaped source-glyph coverage requires a complete page ' \
+                'renderer/font inventory: ' + page_failure[:detail].to_s
+              result[:failures] << page_failure
+              next
+            end
           end
 
           if entries.empty?
@@ -95,6 +118,7 @@ module BlueCollarSystems
             span_result = build_span_group(
               group, entries, source_id, depth, :text_span
             )
+            span_result[:source_ink_coverage] = ink_evidence if ink_evidence
             result[:span_results] << span_result
           rescue StandardError => e
             cleanup = cleanup_owned_group(entities, group)

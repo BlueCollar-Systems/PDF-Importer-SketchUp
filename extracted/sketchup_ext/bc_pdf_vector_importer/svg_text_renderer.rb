@@ -206,6 +206,18 @@ module BlueCollarSystems
             "Page #{page_num}: source_uses=#{source_use_count}, glyph_uses=#{placements.length} (rendering glyph geometry)")
         end
 
+        semantic_svg_placements = placements
+        placements, duplicate_physical_placements =
+          deduplicate_exact_physical_placements(placements)
+        if !duplicate_physical_placements.empty?
+          Logger.info(
+            'SvgTextRenderer',
+            "Page #{page_num}: retained #{placements.length} unique physical " \
+              "glyph placements; removed #{duplicate_physical_placements.length} " \
+              'exact coincident source duplicate(s)'
+          )
+        end
+
         vb_min_x, vb_min_y, vb_w, vb_h = parse_viewbox(svg)
         vb_w = page_w if vb_w <= 0.0
         vb_h = page_h if vb_h <= 0.0
@@ -354,8 +366,6 @@ module BlueCollarSystems
 
               tx = (e - vb_min_x) * x_unit_to_in + box_offset_x_in
               ty = (vb_h + vb_min_y - f) * y_unit_to_in + y_offset.to_f + box_offset_y_in
-              placements_pdf << { x: (e - vb_min_x) + pen_dx, y: (vb_h + vb_min_y - f) + pen_dy }
-
               # Local glyph coordinates are scaled to inches and Y-flipped.
               ratio_xy = y_unit_to_in.zero? ? 1.0 : (x_unit_to_in / y_unit_to_in)
               ratio_yx = x_unit_to_in.zero? ? 1.0 : (y_unit_to_in / x_unit_to_in)
@@ -364,12 +374,30 @@ module BlueCollarSystems
               zaxis = Geom::Vector3d.new(0.0, 0.0, 1.0)
               tr = Geom::Transformation.axes(Geom::Point3d.new(tx, ty, 0.0), xaxis, yaxis, zaxis)
             else
+              a = 1.0
+              b = 0.0
+              c = 0.0
+              d = 1.0
+              e = p[:x].to_f
+              f = p[:y].to_f
               tx = (p[:x].to_f - vb_min_x) * x_unit_to_in + box_offset_x_in
               ty = (vb_h + vb_min_y - p[:y].to_f) * y_unit_to_in + y_offset.to_f + box_offset_y_in
-              placements_pdf << { x: (p[:x].to_f - vb_min_x) + pen_dx,
-                                  y: (vb_h + vb_min_y - p[:y].to_f) + pen_dy }
               tr = Geom::Transformation.new(Geom::Point3d.new(tx, ty, 0.0))
             end
+
+            ink_bbox = transformed_source_ink_bbox_pdf(
+              glyph_paths[p[:glyph_id]], a, b, c, d, tx, ty,
+              x_unit_to_in, y_unit_to_in, y_offset.to_f,
+              box_offset_x_in, box_offset_y_in
+            )
+            placements_pdf << {
+              :x => (e - vb_min_x) + pen_dx,
+              :y => (vb_h + vb_min_y - f) + pen_dy,
+              :placement_index => p[:source_placement_index] || idx,
+              :glyph_id => p[:glyph_id],
+              :ink_bbox_pdf => ink_bbox,
+              :source_primary_axis => a.to_f.abs >= b.to_f.abs ? :x : :y
+            }
 
             if raw_edge_glyphs
               added = add_transformed_glyph_edges(text_entities, glyph_data, tr, text_layer)
@@ -447,11 +475,13 @@ module BlueCollarSystems
           skipped_placement_evidence: skipped_placement_evidence,
           placement_failure_evidence: placement_failure_evidence,
           unoutlined_placement_evidence: unoutlined_placement_evidence,
+          duplicate_physical_placement_evidence:
+            duplicate_physical_placements,
           created_definitions: created_definitions,
           missing_language_packs: missing_language_packs(render_stderr),
           placements_pdf: placements_pdf,
           semantic_svg_glyphs: glyphs,
-          semantic_svg_placements: placements,
+          semantic_svg_placements: semantic_svg_placements,
           poppler_transport_validation: poppler_transport_validation }
       rescue StandardError => e
         begin
@@ -844,6 +874,80 @@ module BlueCollarSystems
       # ------------------------------------------------------------------
       MIN_COLLAPSE_REPEAT = 12
 
+      def self.exact_physical_placement_signature(placement)
+        p = placement.is_a?(Hash) ? placement : {}
+        matrix = p[:matrix]
+        matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] unless
+          matrix.is_a?(Array) && matrix.length >= 6
+        values = matrix.first(6).map { |value| value.to_f }
+        effective = values.first(4) + [
+          values[4] + p[:x].to_f,
+          values[5] + p[:y].to_f
+        ]
+        [p[:glyph_id].to_s,
+         effective.map { |value| value.round(9) }]
+      rescue StandardError
+        [placement.object_id]
+      end
+
+      def self.deduplicate_exact_physical_placements(placements)
+        unique = []
+        duplicates = []
+        retained = {}
+        Array(placements).each_with_index do |placement, source_index|
+          key = exact_physical_placement_signature(placement)
+          if retained.key?(key)
+            duplicates << {
+              :duplicate_placement_index => source_index,
+              :retained_placement_index => retained[key],
+              :glyph_id => placement[:glyph_id].to_s,
+              :reason => :exact_coincident_source_outline
+            }
+            next
+          end
+          retained[key] = source_index
+          copy = placement.dup
+          copy[:source_placement_index] = source_index
+          unique << copy
+        end
+        [unique, duplicates]
+      rescue StandardError
+        [Array(placements), []]
+      end
+
+      # Convert the same flattened source points used to create the host
+      # glyph into PDF-relative physical ink bounds. These bounds are
+      # independent of Unicode character count and let the ownership layer
+      # prove shaped runs without inspecting the newly created entities.
+      def self.transformed_source_ink_bbox_pdf(subpaths, a, b, c, d, tx, ty,
+                                               x_unit_to_in, y_unit_to_in,
+                                               y_offset, box_offset_x_in,
+                                               box_offset_y_in)
+        return nil if x_unit_to_in.to_f.abs <= 1.0e-12 ||
+          y_unit_to_in.to_f.abs <= 1.0e-12
+        ratio_xy = x_unit_to_in.to_f / y_unit_to_in.to_f
+        ratio_yx = y_unit_to_in.to_f / x_unit_to_in.to_f
+        xs = []
+        ys = []
+        Array(subpaths).each do |points|
+          Array(points).each do |point|
+            lx = point.x.to_f
+            ly = point.y.to_f
+            wx = tx.to_f + (a.to_f * lx) -
+              (c.to_f * ratio_xy * ly)
+            wy = ty.to_f - (b.to_f * ratio_yx * lx) +
+              (d.to_f * ly)
+            xs << ((wx - box_offset_x_in.to_f) / x_unit_to_in.to_f)
+            ys << ((wy - y_offset.to_f - box_offset_y_in.to_f) /
+                   y_unit_to_in.to_f)
+          end
+        end
+        return nil if xs.empty? || ys.empty?
+        [xs.min, ys.min, xs.max, ys.max]
+      rescue StandardError
+        nil
+      end
+
       def self.placement_signature(p)
         m = p[:matrix]
         if m.is_a?(Array) && m.length >= 6
@@ -999,7 +1103,8 @@ module BlueCollarSystems
       # Convert SVG path to arrays of SketchUp Point3d.
       # Glyph coords are in SVG viewBox units, Y-down.
       # Convert to model inches with potentially non-uniform scaling.
-      def self.svg_path_to_points(d, scale_or_x_unit_to_in, y_unit_to_in = nil)
+      def self.svg_path_to_points(d, scale_or_x_unit_to_in, y_unit_to_in = nil,
+                                  point_factory = nil)
         if y_unit_to_in.nil?
           # Backward compatibility: 2-arg call treated as isotropic scale factor.
           x_unit_to_in = PDF_PT_TO_INCH * scale_or_x_unit_to_in.to_f
@@ -1016,9 +1121,13 @@ module BlueCollarSystems
         cx = 0.0; cy = 0.0
         cmd = nil; nums = []
 
-        mk = lambda { |gx, gy|
-          Geom::Point3d.new(gx * x_unit_to_in, -gy * y_unit_to_in, 0.0)
-        }
+        factory = point_factory
+        factory = lambda do |x, y, z|
+          Geom::Point3d.new(x, y, z)
+        end unless factory.respond_to?(:call)
+        mk = lambda do |gx, gy|
+          factory.call(gx * x_unit_to_in, -gy * y_unit_to_in, 0.0)
+        end
 
         run = lambda {
           case cmd
@@ -1055,7 +1164,7 @@ module BlueCollarSystems
                 t = i.to_f / n; mt = 1.0 - t
                 bx = mt**3*p0.x + 3*mt**2*t*p1.x + 3*mt*t**2*p2.x + t**3*p3.x
                 by = mt**3*p0.y + 3*mt**2*t*p1.y + 3*mt*t**2*p2.y + t**3*p3.y
-                current << Geom::Point3d.new(bx, by, 0.0)
+                current << factory.call(bx, by, 0.0)
               end
               cx, cy = x, y
             end
@@ -1101,7 +1210,7 @@ module BlueCollarSystems
                 t = i.to_f / n; mt = 1.0 - t
                 bx = mt**3*p0.x + 3*mt**2*t*p1.x + 3*mt*t**2*p2.x + t**3*p3.x
                 by = mt**3*p0.y + 3*mt**2*t*p1.y + 3*mt*t**2*p2.y + t**3*p3.y
-                current << Geom::Point3d.new(bx, by, 0.0)
+                current << factory.call(bx, by, 0.0)
               end
               cx, cy = x, y
             end

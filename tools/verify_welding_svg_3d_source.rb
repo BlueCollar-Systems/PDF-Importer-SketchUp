@@ -424,7 +424,10 @@ reports = paths.map do |pdf_path|
   pens = placed.map do |entry|
     {
       :x => entry[:pen_pdf][0], :y => entry[:pen_pdf][1],
-      :placement_index => entry[:placement_index]
+      :placement_index => entry[:placement_index],
+      :glyph_id => entry[:glyph_id],
+      :ink_bbox_pdf => entry[:ink_bbox_pdf],
+      :source_primary_axis => entry[:source_primary_axis]
     }
   end
   match = mod::CairoGlyphSource.match_spans(pens, items, media_box)

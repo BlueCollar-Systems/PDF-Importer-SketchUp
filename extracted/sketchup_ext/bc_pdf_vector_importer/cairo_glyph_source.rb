@@ -46,6 +46,15 @@ module BlueCollarSystems
 
       PDF_PT_TO_INCH = 1.0 / 72.0
 
+      NumericPoint = Struct.new(:x, :y, :z) do
+        def distance(other)
+          dx = x.to_f - other.x.to_f
+          dy = y.to_f - other.y.to_f
+          dz = z.to_f - other.z.to_f
+          Math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+        end
+      end
+
       SOURCE_CAIRO = 'cairo_svg'.freeze
       SOURCE_MUPDF = 'mupdf_svg'.freeze
       SOURCE_UNAVAILABLE = 'unavailable'.freeze
@@ -325,7 +334,8 @@ module BlueCollarSystems
         result = {
           matched_items: [], placement_matches: [],
           unmatched_source_runs: [], unmatched_placements: [],
-          coverage_failures: [], runs_matched: 0, runs_unmatched: 0,
+          coverage_failures: [], source_ink_matches: [],
+          runs_matched: 0, runs_unmatched: 0,
           placements_unmatched: 0
         }
         pens = Array(placements_pdf)
@@ -348,6 +358,7 @@ module BlueCollarSystems
           y0, y1 = [box[1].to_f, box[3].to_f].minmax
           rows << {
             item: item, index: index,
+            box_x0: x0, box_y0: y0, box_x1: x1, box_y1: y1,
             x0: x0 - tol, y0: y0 - tol,
             x1: x1 + tol, y1: y1 + tol,
             expected_count: visible_source_glyph_count(item),
@@ -365,14 +376,22 @@ module BlueCollarSystems
                               end
             px = pen[:x].to_f
             py = pen[:y].to_f
+            ink_bbox = source_ink_bbox(pen)
             pen_records << {
               :pen_index => enumerated_index,
               :placement_index => placement_index,
-              :placement => pen
+              :placement => pen, :ink_bbox => ink_bbox
             }
             rows.each do |row|
-              next unless px >= row[:x0] && px <= row[:x1] &&
-                          py >= row[:y0] && py <= row[:y1]
+              pen_inside = px >= row[:x0] && px <= row[:x1] &&
+                py >= row[:y0] && py <= row[:y1]
+              ink_inside = ink_bbox.is_a?(Array) &&
+                source_ink_overlap_ratio(ink_bbox, row) > 0.0
+              # Overhanging and negatively offset glyphs can put their pen
+              # outside the extractor span while their physical ink is fully
+              # inside it. Ink-aware matching must not inherit the legacy pen
+              # gate; pen-only callers retain the original behavior.
+              next unless pen_inside || ink_inside
               width = [row[:x1] - row[:x0], 1.0].max
               height = [row[:y1] - row[:y0], 1.0].max
               dx = (px - ((row[:x0] + row[:x1]) * 0.5)) / width
@@ -380,6 +399,7 @@ module BlueCollarSystems
               row[:candidates] << {
                 :pen_index => enumerated_index,
                 :placement_index => placement_index,
+                :ink_bbox => ink_bbox,
                 :score => (dx * dx) + (dy * dy),
                 :assignment => {
                   :placement_index => placement_index,
@@ -403,13 +423,25 @@ module BlueCollarSystems
           end
         end
 
+        rows_by_index = {}
+        rows.each { |row| rows_by_index[row[:index]] = row }
+        accepted = {}
+        pen_slot = {}
+        slot_pen = {}
+        source_ink_mode = pen_records.any? do |record|
+          record[:ink_bbox].is_a?(Array)
+        end
+
+        if source_ink_mode
+          allocate_source_ink_rows!(
+            rows, pen_records, accepted, pen_slot, slot_pen, tol
+          )
+        else
         # Treat every visible source character as a capacity slot. An
         # augmenting-path allocation can move a shared pen from a broad bbox to
         # the narrow span that needs it. The old nearest-center greedy pass
         # could falsely prove both spans impossible even when a complete,
         # one-to-one page assignment existed.
-        rows_by_index = {}
-        rows.each { |row| rows_by_index[row[:index]] = row }
         ordered_rows = rows.select do |row|
           row[:expected_count].to_i > 0 &&
             row[:candidates].length >= row[:expected_count].to_i
@@ -419,9 +451,6 @@ module BlueCollarSystems
             row[:candidates].length, row[:index]
           ]
         end
-        accepted = {}
-        pen_slot = {}
-        slot_pen = {}
         ordered_rows.each do |row|
           if activate_complete_span_row!(
             row, rows_by_index, pen_slot, slot_pen
@@ -452,6 +481,7 @@ module BlueCollarSystems
             end
           end
         end
+        end
 
         rows.each do |row|
           expected_count = row[:expected_count].to_i
@@ -468,6 +498,9 @@ module BlueCollarSystems
             result[:runs_matched] += 1
             result[:matched_items] << row[:item]
             result[:placement_matches].concat(assignments)
+            if row[:source_ink_evidence]
+              result[:source_ink_matches] << row[:source_ink_evidence]
+            end
           else
             result[:runs_unmatched] += 1
             result[:unmatched_source_runs] << row[:item]
@@ -475,9 +508,11 @@ module BlueCollarSystems
               candidate[:pen_index]
             end.uniq
             unless candidate_pen_indices.empty?
-              reason = candidate_pen_indices.length == expected_count ?
-                :source_ownership_conflict : :glyph_coverage_mismatch
-              evidence = {
+              evidence = row[:coverage_evidence]
+              unless evidence
+                reason = candidate_pen_indices.length == expected_count ?
+                  :source_ownership_conflict : :glyph_coverage_mismatch
+                evidence = {
                 :reason => reason,
                 :source_span_id => source_span_id_for(row[:item]),
                 :expected_glyph_count => expected_count,
@@ -485,7 +520,8 @@ module BlueCollarSystems
                 :placement_indices => row[:candidates].map do |candidate|
                   candidate[:placement_index]
                 end.uniq.sort
-              }
+                }
+              end
               result[:coverage_failures] << evidence
               row[:coverage_evidence] = evidence
             end
@@ -526,6 +562,235 @@ module BlueCollarSystems
         result
       end
 
+      # Allocate real SVG ink by its physical overlap with extractor rows.
+      # This is deliberately separate from the legacy character-capacity
+      # matcher: Unicode scalar count is not a glyph count after shaping
+      # (ligatures, combining marks, and contextual forms). Every physical
+      # placement still has one owner, and the union of its independently
+      # derived outline bounds must cover the declared source span.
+      def self.allocate_source_ink_rows!(rows, pen_records, accepted,
+                                         pen_slot, slot_pen, tolerance)
+        owned = Hash.new { |hash, key| hash[key] = [] }
+        pen_records.each do |record|
+          ink_bbox = record[:ink_bbox]
+          next unless ink_bbox.is_a?(Array)
+          contenders = []
+          rows.each do |row|
+            candidate = row[:candidates].find do |entry|
+              entry[:pen_index] == record[:pen_index]
+            end
+            next unless candidate
+            overlap = source_ink_overlap_ratio(ink_bbox, row)
+            next unless overlap > 0.0
+            center_distance = source_ink_center_distance(ink_bbox, row)
+            contenders << [row, candidate, overlap, center_distance]
+          end
+          next if contenders.empty?
+          winner = contenders.sort_by do |entry|
+            row = entry[0]
+            [-entry[2], entry[3], row[:candidates].length, row[:index]]
+          end.first
+          owned[winner[0][:index]] << winner[1]
+        end
+
+        rows.each do |row|
+          candidates = owned[row[:index]].sort_by do |candidate|
+            [candidate[:placement_index], candidate[:pen_index]]
+          end
+          evidence = source_ink_coverage_evidence(
+            row, candidates, tolerance
+          )
+          row[:coverage_evidence] = evidence
+          next unless evidence[:source_ink_coverage_verified] == true
+
+          accepted[row[:index]] = true
+          row[:source_ink_evidence] = evidence
+          candidates.each_with_index do |candidate, sequence|
+            slot = [row[:index], sequence]
+            pen_index = candidate[:pen_index]
+            pen_slot[pen_index] = slot
+            slot_pen[slot] = pen_index
+          end
+        end
+      end
+
+      def self.source_ink_bbox(pen)
+        return nil unless pen.is_a?(Hash)
+        raw = pen[:ink_bbox_pdf]
+        raw = pen['ink_bbox_pdf'] unless raw.is_a?(Array)
+        return nil unless raw.is_a?(Array) && raw.length >= 4
+        values = raw.first(4).map { |value| value.to_f }
+        return nil unless values.all? { |value| value.finite? }
+        x0, x1 = [values[0], values[2]].minmax
+        y0, y1 = [values[1], values[3]].minmax
+        return nil if (x1 - x0) <= 1.0e-9 || (y1 - y0) <= 1.0e-9
+        [x0, y0, x1, y1]
+      rescue StandardError
+        nil
+      end
+
+      def self.source_ink_overlap_ratio(ink_bbox, row)
+        ix0 = [ink_bbox[0], row[:box_x0]].max
+        iy0 = [ink_bbox[1], row[:box_y0]].max
+        ix1 = [ink_bbox[2], row[:box_x1]].min
+        iy1 = [ink_bbox[3], row[:box_y1]].min
+        overlap_w = [ix1 - ix0, 0.0].max
+        overlap_h = [iy1 - iy0, 0.0].max
+        area = (ink_bbox[2] - ink_bbox[0]) *
+          (ink_bbox[3] - ink_bbox[1])
+        return 0.0 unless area > 0.0
+        (overlap_w * overlap_h) / area
+      rescue StandardError
+        0.0
+      end
+
+      def self.source_ink_center_distance(ink_bbox, row)
+        ink_x = (ink_bbox[0] + ink_bbox[2]) * 0.5
+        ink_y = (ink_bbox[1] + ink_bbox[3]) * 0.5
+        row_x = (row[:box_x0] + row[:box_x1]) * 0.5
+        row_y = (row[:box_y0] + row[:box_y1]) * 0.5
+        width = [row[:box_x1] - row[:box_x0], 1.0].max
+        height = [row[:box_y1] - row[:box_y0], 1.0].max
+        dx = (ink_x - row_x) / width
+        dy = (ink_y - row_y) / height
+        (dx * dx) + (dy * dy)
+      rescue StandardError
+        Float::INFINITY
+      end
+
+      def self.source_ink_coverage_evidence(row, candidates, tolerance)
+        boxes = Array(candidates).map { |entry| entry[:ink_bbox] }.compact
+        observed = boxes.length
+        expected = row[:expected_count].to_i
+        indices = Array(candidates).map do |entry|
+          entry[:placement_index]
+        end.uniq.sort
+        if boxes.empty?
+          return {
+            :reason => :source_ownership_conflict,
+            :source_span_id => source_span_id_for(row[:item]),
+            :expected_glyph_count => expected,
+            :observed_glyph_count => 0,
+            :placement_indices => [],
+            :source_ink_coverage_verified => false
+          }
+        end
+
+        ink = [
+          boxes.map { |box| box[0] }.min,
+          boxes.map { |box| box[1] }.min,
+          boxes.map { |box| box[2] }.max,
+          boxes.map { |box| box[3] }.max
+        ]
+        width = row[:box_x1] - row[:box_x0]
+        height = row[:box_y1] - row[:box_y0]
+        axes = Array(candidates).map do |candidate|
+          assignment = candidate[:assignment]
+          placement = assignment.is_a?(Hash) ? assignment[:placement] : nil
+          placement.is_a?(Hash) ? placement[:source_primary_axis] : nil
+        end.compact.uniq
+        horizontal = if axes.length == 1
+                       axes.first.to_s == 'x'
+                     else
+                       width >= height
+                     end
+        source_min = horizontal ? row[:box_x0] : row[:box_y0]
+        source_max = horizontal ? row[:box_x1] : row[:box_y1]
+        ink_min = horizontal ? ink[0] : ink[1]
+        ink_max = horizontal ? ink[2] : ink[3]
+        cross_span = horizontal ? height : width
+        edge_tolerance = [tolerance.to_f, cross_span.abs].max
+        start_gap = [ink_min - source_min, 0.0].max
+        end_gap = [source_max - ink_max, 0.0].max
+        minimum_shaped_count = minimum_shaped_glyph_count(row[:item])
+        count_plausible = observed >= minimum_shaped_count
+        verified = (ink_max - ink_min) > 1.0e-9 &&
+          start_gap <= edge_tolerance && end_gap <= edge_tolerance &&
+          count_plausible
+        {
+          :reason => verified ? :source_ink_coverage_verified :
+            :source_ink_coverage_incomplete,
+          :source_span_id => source_span_id_for(row[:item]),
+          :expected_glyph_count => expected,
+          :minimum_shaped_glyph_count => minimum_shaped_count,
+          :observed_glyph_count => observed,
+          :placement_indices => indices,
+          :source_bbox_pdf => [row[:box_x0], row[:box_y0],
+                               row[:box_x1], row[:box_y1]],
+          :source_ink_bbox_pdf => ink,
+          :primary_axis => horizontal ? :x : :y,
+          :start_edge_gap_pt => start_gap,
+          :end_edge_gap_pt => end_gap,
+          :edge_tolerance_pt => edge_tolerance,
+          :character_count_parity => observed == expected,
+          :shaped_glyph_count_verified => count_plausible,
+          :source_ink_coverage_verified => verified
+        }
+      rescue StandardError => e
+        {
+          :reason => :source_ink_coverage_incomplete,
+          :source_span_id => source_span_id_for(row[:item]),
+          :expected_glyph_count => row[:expected_count].to_i,
+          :observed_glyph_count => 0,
+          :placement_indices => [],
+          :source_ink_coverage_verified => false,
+          :detail => e.message.to_s
+        }
+      end
+
+      # Conservative lower bound for Unicode shaping. ASCII text may contract
+      # only through an explicit finite set of common typographic ligatures;
+      # a long unrelated string can never be certified by one partial glyph.
+      # Non-ASCII text uses extended grapheme clusters when the host regex
+      # engine supports them, preserving combining/ZWJ sequences without
+      # equating raw Unicode scalar count to physical glyph count.
+      def self.minimum_shaped_glyph_count(item)
+        text = item_text(item)
+        return 0 if text.empty?
+        if text.respond_to?(:ascii_only?) && text.ascii_only?
+          return text.split(/\s+/).inject(0) do |sum, token|
+            sum + minimum_ascii_ligature_glyphs(token)
+          end
+        end
+        clusters = begin
+          # Compile at runtime so an older host regex engine that does not
+          # implement extended grapheme clusters can take the conservative
+          # each_char path instead of failing while this file is loaded.
+          text.scan(Regexp.new('\\X'))
+        rescue StandardError
+          chars = []
+          text.each_char { |character| chars << character }
+          chars
+        end
+        clusters.count { |cluster| cluster !~ /\A\s+\z/u }
+      rescue StandardError
+        visible_source_glyph_count(item)
+      end
+
+      def self.minimum_ascii_ligature_glyphs(token)
+        chars = token.to_s.downcase.each_char.to_a
+        return 0 if chars.empty?
+        ligatures = ['ffi', 'ffl', 'ff', 'fi', 'fl', 'st', 'ct']
+        best = Array.new(chars.length + 1, chars.length + 1)
+        best[0] = 0
+        (0...chars.length).each do |index|
+          next if best[index] > chars.length
+          best[index + 1] = [best[index + 1], best[index] + 1].min
+          ligatures.each do |sequence|
+            length = sequence.length
+            next if index + length > chars.length
+            slice = chars[index, length].join
+            next unless slice == sequence
+            best[index + length] = [
+              best[index + length], best[index] + 1
+            ].min
+          end
+        end
+        best[chars.length]
+      rescue StandardError
+        token.to_s.length
+      end
+
       def self.activate_complete_span_row!(row, rows_by_index, pen_slot,
                                            slot_pen)
         owner_snapshot = pen_slot.dup
@@ -563,12 +828,10 @@ module BlueCollarSystems
         false
       end
 
-      # A bbox overlap proves only location. It does not prove that the
-      # renderer supplied every glyph belonging to the source item. Require a
-      # one-to-one physical placement for every visible source character; a
-      # short or overfull match remains explicit unmatched evidence. This is
-      # intentionally conservative for ligatures/combining sequences because
-      # an inferred equivalence would be a false success.
+      # Legacy lower bound for callers that provide only pen positions. Real
+      # SVG delivery also supplies independently derived outline ink bounds,
+      # where match_spans uses physical coverage plus a finite shaping bound
+      # instead of incorrectly equating Unicode characters with glyphs.
       def self.visible_source_glyph_count(item)
         count = 0
         item_text(item).each_char do |character|
@@ -777,20 +1040,92 @@ module BlueCollarSystems
         pen_dy = svg_min_y - media_min_y
 
         defs = SvgTextRenderer.parse_glyph_defs(svg)
+        point_factory = lambda do |x, y, z|
+          NumericPoint.new(x, y, z)
+        end
+        glyph_paths = {}
+        defs.each do |glyph_id, path_d|
+          next if path_d.to_s.strip.empty?
+          paths = SvgTextRenderer.svg_path_to_points(
+            path_d, 1.0, 1.0, point_factory
+          )
+          glyph_paths[glyph_id] = paths unless paths.empty?
+        end
         pens = []
+        seen_physical = {}
         SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
-          next unless defs[p[:glyph_id]]
+          local = glyph_paths[p[:glyph_id]]
+          next unless local
+          physical_key = exact_source_placement_key(p)
+          next if seen_physical.key?(physical_key)
+          seen_physical[physical_key] = placement_index
           m = p[:matrix]
           if m.is_a?(Array) && m.length >= 6
+            a = m[0].to_f
+            b = m[1].to_f
+            c = m[2].to_f
+            d = m[3].to_f
             e = m[4].to_f + p[:x].to_f
             f = m[5].to_f + p[:y].to_f
           else
+            a = 1.0
+            b = 0.0
+            c = 0.0
+            d = 1.0
             e = p[:x].to_f
             f = p[:y].to_f
           end
-          pens << { x: (e - vb_min_x) + pen_dx, y: (vb_h + vb_min_y - f) + pen_dy }
+          tx = (e - vb_min_x) + pen_dx
+          ty = (vb_h + vb_min_y - f) + pen_dy
+          xs = []
+          ys = []
+          local.each do |points|
+            points.each do |point|
+              lx = point.x.to_f
+              ly = point.y.to_f
+              xs << (tx + (a * lx) - (c * ly))
+              ys << (ty - (b * lx) + (d * ly))
+            end
+          end
+          pens << {
+            x: tx,
+            y: ty,
+            placement_index: placement_index,
+            glyph_id: p[:glyph_id],
+            source_primary_axis: source_primary_axis_for_matrix(m),
+            ink_bbox_pdf: [xs.min, ys.min, xs.max, ys.max]
+          }
         end
         pens
+      end
+
+      # A second identical use of the same source outline at the same affine
+      # placement contributes no additional visible ink. Keep one physical
+      # outline so duplicate PDF content streams cannot create coincident 3D
+      # solids or masquerade as surplus glyph coverage. Nearby placements are
+      # distinct; rounding is only below the renderer's numeric precision.
+      def self.exact_source_placement_key(placement)
+        p = placement.is_a?(Hash) ? placement : {}
+        matrix = p[:matrix]
+        matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] unless
+          matrix.is_a?(Array) && matrix.length >= 6
+        values = matrix.first(6).map { |value| value.to_f }
+        effective = values.first(4) + [
+          values[4] + p[:x].to_f,
+          values[5] + p[:y].to_f
+        ]
+        [p[:glyph_id].to_s,
+         effective.map { |value| value.round(9) }]
+      rescue StandardError
+        [placement.object_id]
+      end
+
+      def self.source_primary_axis_for_matrix(matrix)
+        values = matrix.is_a?(Array) && matrix.length >= 4 ? matrix :
+          [1.0, 0.0, 0.0, 1.0]
+        values[0].to_f.abs >= values[1].to_f.abs ? :x : :y
+      rescue StandardError
+        :x
       end
 
       # ------------------------------------------------------------------
@@ -833,9 +1168,13 @@ module BlueCollarSystems
         end
 
         out = []
+        seen_physical = {}
         SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
           local = glyph_paths[p[:glyph_id]]
           next unless local
+          physical_key = exact_source_placement_key(p)
+          next if seen_physical.key?(physical_key)
+          seen_physical[physical_key] = placement_index
 
           m = p[:matrix]
           if m.is_a?(Array) && m.length >= 6
@@ -874,6 +1213,12 @@ module BlueCollarSystems
           end
           next if loops.empty?
 
+          ink_points = loops.flatten
+          ink_x = ink_points.map { |point| point.x.to_f / unit }
+          ink_y = ink_points.map do |point|
+            (point.y.to_f - y_offset) / unit
+          end
+
           pen_x_pdf = (e - vb_min_x) + (svg_min_x - media_min_x)
           pen_y_pdf = (vb_h + vb_min_y - f) + (svg_min_y - media_min_y)
           out << {
@@ -881,7 +1226,9 @@ module BlueCollarSystems
             placement_index: placement_index,
             svg_matrix: m.is_a?(Array) ? m.map { |value| value.to_f } :
               [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            source_primary_axis: source_primary_axis_for_matrix(m),
             pen_pdf: [pen_x_pdf, pen_y_pdf],
+            ink_bbox_pdf: [ink_x.min, ink_y.min, ink_x.max, ink_y.max],
             loops: loops
           }
         end
