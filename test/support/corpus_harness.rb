@@ -17,6 +17,7 @@ require 'bc_pdf_vector_importer/pdf_parser'
 require 'bc_pdf_vector_importer/content_stream_parser'
 require 'bc_pdf_vector_importer/text_parser'
 require 'bc_pdf_vector_importer/external_text_extractor'
+require 'bc_pdf_vector_importer/text_source_identity'
 
 BlueCollarSystems::PDFVectorImporter::Logger.debug = false
 
@@ -288,13 +289,22 @@ module CorpusHarness
 
     if pdftotext_available?
       items = ext.extract(pdf_path, page_num)
-      return [items, :external] if items && !items.empty?
+      if items && !items.empty?
+        # Mirror the import pipeline (main.rb RB-01 corrective): every text
+        # item must carry a deterministic source-span identity before it can
+        # reach GeometryBuilder, whose delivery contract fails closed on a
+        # missing/malformed source_span_id.
+        BlueCollarSystems::PDFVectorImporter::TextSourceIdentity.assign!(items, page_num)
+        return [items, :external]
+      end
     end
 
     items = BlueCollarSystems::PDFVectorImporter::TextParser.new(
       streams, font_maps, parser_opts, ocg_map
     ).parse
-    [items || [], :internal]
+    items ||= []
+    BlueCollarSystems::PDFVectorImporter::TextSourceIdentity.assign!(items, page_num) unless items.empty?
+    [items, :internal]
   end
 
   def self.page_height_for(parser)
