@@ -91,6 +91,31 @@ assert_true(builder.send(:should_center_dimension_label?, feet_inch.text, 40.0, 
 assert_true(!builder.send(:should_center_dimension_label?, '7 1/8', 24.0, 8.0, 6.0, 0.0),
             'wide horizontal fraction dim stays left-aligned')
 
+# --- Single-digit spans never infer 90° from bbox aspect (LOOP-1 placement
+# gate 9/17 residual, R-A adjacent). A lone digit's natural bbox is often
+# taller than 1.6x its width, while a truly 90°-rotated single glyph yields
+# the OPPOSITE aspect — so the vertical-dimension inference can never be
+# right for one-character text. Refusing these as unsupported rotations
+# dropped stacked-fraction halves and whole numbers. ---
+frac_numerator = make_item('1', 100.0, 278.55, 103.89, 285.03, angle: 0.0, font_size: 6.0)
+assert_true(!builder.send(:vertical_dimension_bbox?, frac_numerator, 3.89, 6.48),
+            'single-digit stacked-fraction numerator is not a vertical dimension run')
+assert_true(builder.send(:label_angle_pdf, frac_numerator).abs < 0.01,
+            'stacked-fraction numerator digit stays horizontal')
+
+frac_denominator = make_item('4', 100.0, 268.55, 103.89, 275.03, angle: 0.0, font_size: 6.0)
+assert_true(builder.send(:label_angle_pdf, frac_denominator).abs < 0.01,
+            'stacked-fraction denominator digit stays horizontal')
+
+whole_beside_fraction = make_item('2', 80.0, 273.52, 86.67, 284.62, angle: 0.0, font_size: 11.0)
+assert_true(builder.send(:label_angle_pdf, whole_beside_fraction).abs < 0.01,
+            'whole-number digit beside a stacked fraction stays horizontal')
+
+# Multi-character narrow-tall numeric runs keep the vertical inference.
+tall_run = make_item('12', 100.0, 500.0, 104.0, 520.0, angle: 0.0, font_size: 8.0)
+assert_true(builder.send(:vertical_dimension_bbox?, tall_run, 4.0, 20.0),
+            'multi-digit narrow-tall run still infers a vertical dimension')
+
 # --- Weld callouts: any N/N fraction + TYP; baseline anchor, angle 0 ---
 assert_true(builder.send(:weld_fraction_label?, '3/16', 20.0, 8.0),
             'horizontal weld fraction in wide short bbox')

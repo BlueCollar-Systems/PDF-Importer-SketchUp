@@ -2327,6 +2327,13 @@ module BlueCollarSystems
         return false if annotation_like_label?(item.text, bbox_w_pts, bbox_h_pts)
         return false if stacked_vertical_dimension_labels?(item)
         return false unless dimension_like_label?(item.text)
+        # A single glyph's natural bbox is routinely taller than 1.6x its
+        # width (stacked-fraction halves, whole digits), while a truly
+        # 90°-rotated single glyph presents the OPPOSITE aspect — so a tall
+        # bbox can never evidence rotation for one-character text (LOOP-1
+        # placement 9/17 residual; R-A additive-only: each physical span
+        # stays at its own upright position).
+        return false if item.text.to_s.strip.length == 1
         bw = bbox_w_pts.to_f
         bh = bbox_h_pts.to_f
         bw > 0.5 && bh > bw * 1.6
