@@ -478,30 +478,62 @@ module BlueCollarSystems
       # after a C-side check + a raised exception we rescue and log, hundreds
       # of times on dense fabrication fills. Screening here is accuracy-neutral
       # (these never produced a face) and removes the exception + log cost.
-      def face_buildable?(points)
+      #
+      # Returns the cleaned, co-planar, closed loop of points to pass to
+      # entities.add_face, or nil if the loop cannot become a face. The
+      # caller must use the returned loop; passing the original points would
+      # re-introduce the duplicate/degenerate points we just removed.
+      def build_face_loop(points)
+        return nil if points.nil? || points.length < 3
+        # 1. Remove consecutive near-duplicate points.
         uniq = []
         points.each do |p|
-          uniq << p if uniq.empty? || p.distance(uniq.last) >= @merge_tol
+          if uniq.empty? || p.distance(uniq.last) >= @merge_tol
+            uniq << p
+          end
         end
-        uniq.pop if uniq.length > 1 && uniq.first.distance(uniq.last) < @merge_tol
-        return false if uniq.length < 3
-        # Shoelace area in the XY plane (imported points are flattened to z=0).
+        # 2. Remove a closing point that duplicates the start.
+        if uniq.length > 1 && uniq.first.distance(uniq.last) < @merge_tol
+          uniq.pop
+        end
+        return nil if uniq.length < 3
+        # 3. Ensure all points are co-planar in the XY plane. Imported geometry
+        # is supposed to be z=0, but tolerate tiny numerical drift.
+        z_vals = uniq.map { |p| p.z.to_f }
+        z_min = z_vals.min
+        z_max = z_vals.max
+        return nil if (z_max - z_min) > 1.0e-5
+        # 4. Build a fresh flat loop for add_face so the C-side planar test
+        # sees clean, consistent coordinates. In standalone test environments
+        # Geom::Point3d is not loaded, so keep the cleaned test points.
+        flat = if defined?(Geom) && defined?(Geom::Point3d)
+                uniq.map { |p| Geom::Point3d.new(p.x.to_f, p.y.to_f, 0.0) }
+              else
+                uniq
+              end
+        # 5. Shoelace area in the XY plane.
         area2 = 0.0
-        n = uniq.length
+        n = flat.length
         n.times do |i|
-          a = uniq[i]; b = uniq[(i + 1) % n]
+          a = flat[i]; b = flat[(i + 1) % n]
           area2 += (a.x.to_f * b.y.to_f) - (b.x.to_f * a.y.to_f)
         end
-        (area2.abs * 0.5) > 1.0e-6
+        return nil if (area2.abs * 0.5) <= 1.0e-6
+        flat
       rescue StandardError
-        true
+        nil
+      end
+
+      def face_buildable?(points)
+        !build_face_loop(points).nil?
       end
 
       def draw_face(entities, points, layer, fill_rgb = nil)
         return if points.length < 3
+        clean = build_face_loop(points)
+        return unless clean
         begin
-          return unless face_buildable?(points)
-          face = entities.add_face(points)
+          face = entities.add_face(clean)
           if face
             # Keep imported sheet faces consistently front-facing in top view.
             face.reverse! if face.normal.z < 0
