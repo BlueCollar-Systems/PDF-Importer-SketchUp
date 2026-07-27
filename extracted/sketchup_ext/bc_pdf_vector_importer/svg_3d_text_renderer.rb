@@ -12,6 +12,10 @@ module BlueCollarSystems
       SIZE_TOLERANCE_INCHES = 1.0e-6
       HOST_POINT_TOLERANCE_INCHES = 0.001
       MAX_CONSTRUCTION_SCALE = 1_000_000.0
+      # Shared with GeometryBuilder#get_or_create_material's cache key for
+      # [0,0,0] so a model reuses one black text-ink material.
+      TEXT_INK_MATERIAL_NAME = 'PDF_0_0_0'.freeze
+      TEXT_INK_RGB = [0, 0, 0].freeze
 
       def self.render_svg(entities, svg, media_box, text_items, opts = {})
         result = base_result
@@ -344,6 +348,8 @@ module BlueCollarSystems
           width_ok && height_ok && position_ok
         raise 'extruded source glyph has no verified positive Z depth' unless depth_ok
 
+        ink_applied = apply_source_text_ink!(group)
+
         matrices = entries.map { |entry| Array(entry[:svg_matrix]).map { |v| v.to_f } }
         ids = entries.map { |entry| entry[:glyph_id].to_s }
         placement_indices = entries.map { |entry| entry[:placement_index].to_i }
@@ -361,6 +367,7 @@ module BlueCollarSystems
           :source_placement_count => placement_indices.length,
           :face_count => faces.length,
           :extruded_face_count => extruded,
+          :ink_applied => ink_applied,
           :identity_verified => !ids.empty? && ids.none? { |id| id.empty? },
           :placement_verified => !placement_indices.empty? &&
             placement_indices.uniq.length == placement_indices.length,
@@ -385,6 +392,42 @@ module BlueCollarSystems
           :bounds => actual,
           :expected_outline_extent => expected
         }
+      end
+
+      # Render-weight contract (R-D ghosting): extruded source glyphs whose
+      # faces keep nil materials render as white-filled outlines — only their
+      # edges draw, so text ghosts at any size. Painting the owned span group
+      # lets every nil-material glyph face (caps and extrusion walls, nested
+      # construction group included) inherit visible black text ink, matching
+      # the native_3d_text path's TEXT_FACE_RGB behavior. Returns true only
+      # when the host accepted the paint; callers record the outcome (R20-2 —
+      # a headless host without materials reports ink_applied false, never a
+      # silent claim).
+      def self.apply_source_text_ink!(group)
+        return false unless group.respond_to?(:material=) &&
+                            group.respond_to?(:model)
+        model = group.model
+        materials = model && model.respond_to?(:materials) ? model.materials : nil
+        return false unless materials
+        mat = materials[TEXT_INK_MATERIAL_NAME]
+        unless mat
+          mat = materials.add(TEXT_INK_MATERIAL_NAME)
+          if mat && mat.respond_to?(:color=) &&
+             defined?(Sketchup) && Sketchup.const_defined?(:Color)
+            mat.color = Sketchup::Color.new(
+              TEXT_INK_RGB[0], TEXT_INK_RGB[1], TEXT_INK_RGB[2]
+            )
+          end
+        end
+        return false unless mat
+        group.material = mat
+        true
+      rescue StandardError => e
+        Logger.warn(
+          'Svg3DTextRenderer',
+          "source text ink paint failed: #{e.message}"
+        )
+        false
       end
 
       # Build SVG non-zero-fill contours in descending area order. A contour is

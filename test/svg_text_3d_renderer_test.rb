@@ -176,12 +176,13 @@ class Svg3DEntities
 end
 
 class Svg3DGroup
-  attr_accessor :name, :layer
+  attr_accessor :name, :layer, :material
   attr_reader :persistent_id, :entities, :attributes, :transform_calls
 
   def initialize(owner, id, options)
     @owner = owner
     @persistent_id = id
+    @options = options
     @entities = Svg3DEntities.new(options.merge(first_id: id * 100))
     @attributes = {}
     @transform_calls = []
@@ -189,6 +190,8 @@ class Svg3DGroup
   end
 
   def typename; 'Group'; end
+
+  def model; @options[:model]; end
 
   def set_attribute(dictionary, key, value)
     @attributes[[dictionary, key]] = value
@@ -230,6 +233,51 @@ class Svg3DGroup
     @transformation = transformation
     self
   end
+end
+
+# Minimal host material fakes: a group painted with a named colored material
+# is the render-weight evidence for delivered 3D text ink (ghosting RED).
+class Svg3DMaterial
+  attr_reader :name
+  attr_accessor :color
+
+  def initialize(name)
+    @name = name
+  end
+end
+
+class Svg3DMaterials
+  def initialize
+    @by_name = {}
+  end
+
+  def [](name)
+    @by_name[name]
+  end
+
+  def add(name)
+    @by_name[name] ||= Svg3DMaterial.new(name)
+  end
+end
+
+class Svg3DModel
+  attr_reader :materials
+
+  def initialize
+    @materials = Svg3DMaterials.new
+  end
+end
+
+module Sketchup
+  class Color
+    attr_reader :red, :green, :blue
+
+    def initialize(red, green, blue)
+      @red = red
+      @green = green
+      @blue = blue
+    end
+  end unless const_defined?(:Color)
 end
 
 Svg3DSpan = Struct.new(:text, :font_name, :source_span_id,
@@ -318,6 +366,46 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal 'text_span:1:0',
       delivered[:group].attributes[['BC_PDF_Importer', 'source_span_id']]
     assert_empty result[:transition_proofs]
+  end
+
+  # Ghosting behavior contract (R-D, LOOP-1 Welding-Symbol-Chart su overlap
+  # 0.2957): extruded source glyphs delivered with nil materials render as
+  # white-filled outlines — edges only, no face ink. Delivered 3D Text must
+  # carry the shared black text-ink material on its owned span group so the
+  # glyph caps and walls render with visible weight.
+  def test_delivered_3d_text_carries_visible_source_ink
+    model = Svg3DModel.new
+    entities = Svg3DEntities.new(:model => model)
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, [span], :depth => 0.05
+    )
+
+    assert result[:ok], result[:failures].inspect
+    delivered = result[:span_results][0]
+    assert_equal true, delivered[:ink_applied],
+                 'delivered 3D Text must record applied face ink'
+    group = delivered[:group]
+    refute_nil group.material,
+               'owned span group must be painted with the text ink material'
+    assert_equal 'PDF_0_0_0', group.material.name
+    color = group.material.color
+    refute_nil color, 'text ink material must carry an explicit color'
+    assert_equal [0, 0, 0], [color.red, color.green, color.blue]
+  end
+
+  # R20-2: a host (or fake) without material support must not silently claim
+  # painted ink — the row records ink_applied false while the geometry
+  # delivery itself remains valid.
+  def test_host_without_material_support_reports_unpainted_ink_truthfully
+    entities = Svg3DEntities.new
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, [span], :depth => 0.05
+    )
+
+    assert result[:ok], result[:failures].inspect
+    delivered = result[:span_results][0]
+    assert_equal false, delivered[:ink_applied],
+                 'host without materials must report unpainted ink truthfully'
   end
 
   def test_host_equal_vertices_are_preserved_by_baked_scaled_construction
