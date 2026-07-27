@@ -17,6 +17,7 @@ require 'bc_pdf_vector_importer/pdf_parser'
 require 'bc_pdf_vector_importer/content_stream_parser'
 require 'bc_pdf_vector_importer/text_parser'
 require 'bc_pdf_vector_importer/external_text_extractor'
+require 'bc_pdf_vector_importer/text_source_identity'
 
 BlueCollarSystems::PDFVectorImporter::Logger.debug = false
 
@@ -42,19 +43,52 @@ unless defined?(Geom::Point3d)
   end
 end
 
+# Minimal host-Text fake satisfying the RepresentationFidelity delivery
+# contract (stable persistent_id, observable typename/text/point, leader
+# visibility) — mirrors PlacementLabelEntity in the placement contract tests.
 class CorpusDummyTextEntity
-  attr_accessor :layer
+  attr_accessor :layer, :vector, :display_leader
+  attr_reader :text, :point, :persistent_id
+
+  @@next_persistent_id = 0
+
+  def initialize(text, point, vector)
+    @text = text
+    @point = point
+    @vector = vector
+    @display_leader = true
+    @@next_persistent_id += 1
+    @persistent_id = @@next_persistent_id
+  end
+
+  def typename
+    'Text'
+  end
 end
 
 class CorpusDummyEntities
   attr_reader :texts
+
   def initialize
+    @entities = []
     @texts = []
   end
+
+  def to_a
+    @entities.dup
+  end
+
   def add_text(text, point, vector = nil)
-    ent = CorpusDummyTextEntity.new
+    ent = CorpusDummyTextEntity.new(text, point, vector)
+    @entities << ent
     @texts << [text, point, vector, ent]
     ent
+  end
+
+  def erase_entities(*args)
+    doomed = args.flatten
+    @entities.reject! { |entity| doomed.include?(entity) }
+    @texts.reject! { |tuple| doomed.include?(tuple[3]) }
   end
 end
 
@@ -288,13 +322,22 @@ module CorpusHarness
 
     if pdftotext_available?
       items = ext.extract(pdf_path, page_num)
-      return [items, :external] if items && !items.empty?
+      if items && !items.empty?
+        # Mirror the import pipeline (main.rb RB-01 corrective): every text
+        # item must carry a deterministic source-span identity before it can
+        # reach GeometryBuilder, whose delivery contract fails closed on a
+        # missing/malformed source_span_id.
+        BlueCollarSystems::PDFVectorImporter::TextSourceIdentity.assign!(items, page_num)
+        return [items, :external]
+      end
     end
 
     items = BlueCollarSystems::PDFVectorImporter::TextParser.new(
       streams, font_maps, parser_opts, ocg_map
     ).parse
-    [items || [], :internal]
+    items ||= []
+    BlueCollarSystems::PDFVectorImporter::TextSourceIdentity.assign!(items, page_num) unless items.empty?
+    [items, :internal]
   end
 
   def self.page_height_for(parser)
