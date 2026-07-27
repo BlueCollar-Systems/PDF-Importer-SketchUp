@@ -43,19 +43,52 @@ unless defined?(Geom::Point3d)
   end
 end
 
+# Minimal host-Text fake satisfying the RepresentationFidelity delivery
+# contract (stable persistent_id, observable typename/text/point, leader
+# visibility) — mirrors PlacementLabelEntity in the placement contract tests.
 class CorpusDummyTextEntity
-  attr_accessor :layer
+  attr_accessor :layer, :vector, :display_leader
+  attr_reader :text, :point, :persistent_id
+
+  @@next_persistent_id = 0
+
+  def initialize(text, point, vector)
+    @text = text
+    @point = point
+    @vector = vector
+    @display_leader = true
+    @@next_persistent_id += 1
+    @persistent_id = @@next_persistent_id
+  end
+
+  def typename
+    'Text'
+  end
 end
 
 class CorpusDummyEntities
   attr_reader :texts
+
   def initialize
+    @entities = []
     @texts = []
   end
+
+  def to_a
+    @entities.dup
+  end
+
   def add_text(text, point, vector = nil)
-    ent = CorpusDummyTextEntity.new
+    ent = CorpusDummyTextEntity.new(text, point, vector)
+    @entities << ent
     @texts << [text, point, vector, ent]
     ent
+  end
+
+  def erase_entities(*args)
+    doomed = args.flatten
+    @entities.reject! { |entity| doomed.include?(entity) }
+    @texts.reject! { |tuple| doomed.include?(tuple[3]) }
   end
 end
 
