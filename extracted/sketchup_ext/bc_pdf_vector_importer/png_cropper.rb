@@ -320,6 +320,62 @@ module BlueCollarSystems
       end
       private_class_method :delete_file
 
+      def raw_to_png!(raw_path, width, height, channels, output_path)
+        raw = File.expand_path(raw_path.to_s)
+        raise_contract('PNG raw source is missing') unless File.file?(raw)
+        raise_contract('PNG raw dimensions are invalid') unless width > 0 && height > 0
+        raise_contract('PNG raw channel count is invalid') unless [1, 2, 3, 4].include?(channels)
+        row_bytes = width * channels
+        expected = row_bytes * height
+        actual = File.size(raw)
+        raise_contract(
+          "PNG raw size mismatch for #{width}x#{height}x#{channels}: " \
+          "expected #{expected}, got #{actual}"
+        ) unless actual == expected
+
+        color_type = { 1 => 0, 2 => 4, 3 => 2, 4 => 6 }[channels]
+        compressed = binary_string
+        deflater = Zlib::Deflate.new(Zlib::DEFAULT_COMPRESSION)
+        File.open(raw, 'rb') do |input|
+          height.times do
+            row = input.read(row_bytes)
+            raise_contract('PNG raw row truncated') unless
+              row && row.bytesize == row_bytes
+            compressed << deflater.deflate("\x00".b + row)
+          end
+        end
+        compressed << deflater.finish
+
+        destination = File.expand_path(output_path.to_s)
+        File.open(destination, 'wb') do |file|
+          file.write(SIGNATURE)
+          write_chunk(file, 'IHDR', [
+            width, height, 8, color_type, 0, 0, 0
+          ].pack('N2C5'))
+          write_chunk(file, 'IDAT', compressed)
+          write_chunk(file, 'IEND', binary_string)
+        end
+        {
+          :png_path => destination,
+          :pixel_width => width,
+          :pixel_height => height,
+          :content_sha256 => Digest::SHA256.file(destination).hexdigest,
+          :content_byte_size => File.size(destination).to_i
+        }
+      rescue RepresentationFidelity::ContractError
+        delete_file(output_path)
+        raise
+      rescue StandardError => error
+        delete_file(output_path)
+        raise_contract("PNG raw-to-png failed: #{error.message}")
+      ensure
+        begin
+          deflater.close if deflater
+        rescue StandardError
+          nil
+        end
+      end
+
       def raise_contract(message)
         raise RepresentationFidelity::ContractError, message.to_s
       end

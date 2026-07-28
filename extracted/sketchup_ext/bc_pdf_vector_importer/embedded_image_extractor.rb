@@ -10,6 +10,7 @@
 require 'fileutils'
 require 'json'
 require 'zlib'
+require_relative 'png_cropper'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -246,6 +247,26 @@ module BlueCollarSystems
         ]
         image_path = File.join(output_dir, base + extension)
         File.open(image_path, 'wb') { |f| f.write(data) }
+
+        if extension == '.raw' && asset.width > 0 && asset.height > 0
+          pixels = asset.width.to_i * asset.height.to_i
+          if pixels > 0 && data.bytesize % pixels == 0
+            channels = data.bytesize / pixels
+            if [1, 2, 3, 4].include?(channels)
+              png_path = File.join(output_dir, base + '.png')
+              begin
+                PngCropper.raw_to_png!(image_path, asset.width, asset.height, channels, png_path)
+                image_path = png_path
+              rescue StandardError => e
+                Logger.warn(
+                  'EmbeddedImages',
+                  "raw-to-png conversion for #{asset.name} failed: #{e.message}"
+                )
+              end
+            end
+          end
+        end
+
         asset.file_path = image_path
 
         meta_path = File.join(output_dir, base + '.json')
