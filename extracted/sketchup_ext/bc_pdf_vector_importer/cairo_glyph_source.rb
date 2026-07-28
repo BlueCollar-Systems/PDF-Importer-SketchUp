@@ -1,3 +1,5 @@
+require 'digest/md5'
+
 # bc_pdf_vector_importer/cairo_glyph_source.rb
 # Round 23 (F-1): glyph SOURCE selection + telemetry for the requested
 # Glyphs/Outlines text mode.
@@ -1296,9 +1298,17 @@ module BlueCollarSystems
       # (SvgTextRenderer): SVG user unit == PDF point; single page-height
       # Y flip; glyph-local outlines baseline-relative with Y negated.
       def self.model_space_loops(svg, media_box, opts = {})
+        svg_page_box = opts[:svg_page_box] || media_box
         scale = (opts[:scale] || 1.0).to_f
         y_offset = (opts[:y_offset] || 0.0).to_f
-        svg_page_box = opts[:svg_page_box] || media_box
+        cache_key = [
+          svg.respond_to?(:length) ? Digest::MD5.hexdigest(svg) : svg.object_id,
+          scale, y_offset, svg_page_box, media_box
+        ]
+        @model_space_loops_cache ||= {}
+        cached = @model_space_loops_cache[cache_key]
+        return cached if cached
+
         media_min_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
         media_min_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
         svg_min_x = svg_page_box.is_a?(Array) ? svg_page_box[0].to_f : 0.0
@@ -1403,6 +1413,7 @@ module BlueCollarSystems
             loops: loops
           }
         end
+        @model_space_loops_cache[cache_key] = out
         out
       end
 
