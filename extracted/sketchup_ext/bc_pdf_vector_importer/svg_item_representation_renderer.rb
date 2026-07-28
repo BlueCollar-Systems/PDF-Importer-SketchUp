@@ -19,7 +19,14 @@ module BlueCollarSystems
         end
         source_id = RepresentationFidelity.source_span_id(item)
         verify_source_context!(source_id, opts[:source_context])
-        verify_source_bbox!(item, media_box)
+        base_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
+        base_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
+        unless CairoGlyphSource.item_bbox_media_relative(item, base_x, base_y)
+          return impossible_result(
+            source_id, item, mode, [], nil, opts[:source_context], {},
+            :source_item_bbox_unavailable
+          )
+        end
 
         group = nil
         before = RepresentationFidelity.snapshot(entities)
@@ -218,7 +225,8 @@ module BlueCollarSystems
       end
 
       def self.impossible_result(source_id, item, mode, placed, match,
-                                 source_context, selection = {})
+                                 source_context, selection = {},
+                                 reason = nil)
         binding = RepresentationFidelity.proof_binding(source_id)
         to_mode = mode == :glyphs ? :geometry : :raster
         renderer = mode == :glyphs ? 'svg_item_glyph_group_renderer' :
@@ -226,8 +234,10 @@ module BlueCollarSystems
         contract = mode == :glyphs ?
           'one owned physical glyph group per exact source placement' :
           'one owned flat raw-edge set for the exact source item'
-        reason = Array(placed).empty? ? :source_vector_geometry_absent :
-          :source_item_identity_unavailable
+        if reason.nil?
+          reason = Array(placed).empty? ? :source_vector_geometry_absent :
+            :source_item_identity_unavailable
+        end
         proof = {
           :source_span_id => source_id,
           :importer_id => binding[:importer_id],
