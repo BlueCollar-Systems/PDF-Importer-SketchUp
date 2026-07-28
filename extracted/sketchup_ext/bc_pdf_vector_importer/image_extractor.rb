@@ -407,7 +407,8 @@ module BlueCollarSystems
       end
 
       def self.write_png_chunk(io, type, data)
-        data = data.to_s.b
+        data = data.to_s.dup
+        data.force_encoding(Encoding::BINARY) if data.respond_to?(:force_encoding)
         io.write([data.bytesize].pack('N'))
         io.write(type)
         io.write(data)

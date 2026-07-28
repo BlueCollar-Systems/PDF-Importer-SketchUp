@@ -38,6 +38,10 @@ INCOMPATIBLE_PATTERNS = [
         "File.empty?/Dir.empty? require Ruby 2.4+",
     ),
     (re.compile(r"<<~"), "squiggly heredoc requires Ruby 2.3+"),
+    (
+        re.compile(r"(?<![\w$])\.b\b"),
+        "String#b requires Ruby 2.3+; use force_encoding(Encoding::BINARY)",
+    ),
     (re.compile(r"\[[^\]\n]*\.\.\s*\]"), "endless range requires Ruby 2.6+"),
     (re.compile(r"\[\s*\.\.[^\]\n]*\]"), "beginless range requires Ruby 2.7+"),
     (re.compile(r"\bdef\b[^\n]*\.\.\."), "argument forwarding requires Ruby 2.7+"),

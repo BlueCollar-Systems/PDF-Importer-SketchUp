@@ -140,7 +140,7 @@ module BlueCollarSystems
               alpha_index += 4
             end
             visual_digest.update(canonical_visual_row(row))
-            compressed << deflater.deflate("\x00".b + row)
+            compressed << deflater.deflate(png_filter_none_row(row))
           end
         end
         compressed << deflater.finish
@@ -236,14 +236,29 @@ module BlueCollarSystems
 
       def rgb_to_rgba(row)
         rgba = binary_string
+        opaque = binary_byte(0xff)
         index = 0
         while index < row.bytesize
-          rgba << row.byteslice(index, 3) << "\xff".b
+          rgba << row.byteslice(index, 3) << opaque
           index += 3
         end
         rgba
       end
       private_class_method :rgb_to_rgba
+
+      def png_filter_none_row(row)
+        filtered = binary_byte(0x00)
+        filtered << row
+        filtered
+      end
+      private_class_method :png_filter_none_row
+
+      def binary_byte(value)
+        byte = value.chr
+        byte.force_encoding(Encoding::BINARY) if byte.respond_to?(:force_encoding)
+        byte
+      end
+      private_class_method :binary_byte
 
       def canonical_visual_row(row)
         canonical = binary_string
@@ -328,10 +343,12 @@ module BlueCollarSystems
         row_bytes = width * channels
         expected = row_bytes * height
         actual = File.size(raw)
-        raise_contract(
-          "PNG raw size mismatch for #{width}x#{height}x#{channels}: " \
-          "expected #{expected}, got #{actual}"
-        ) unless actual == expected
+        unless actual == expected
+          raise_contract(
+            "PNG raw size mismatch for #{width}x#{height}x#{channels}: " \
+            "expected #{expected}, got #{actual}"
+          )
+        end
 
         color_type = { 1 => 0, 2 => 4, 3 => 2, 4 => 6 }[channels]
         compressed = binary_string
@@ -341,7 +358,7 @@ module BlueCollarSystems
             row = input.read(row_bytes)
             raise_contract('PNG raw row truncated') unless
               row && row.bytesize == row_bytes
-            compressed << deflater.deflate("\x00".b + row)
+            compressed << deflater.deflate(png_filter_none_row(row))
           end
         end
         compressed << deflater.finish

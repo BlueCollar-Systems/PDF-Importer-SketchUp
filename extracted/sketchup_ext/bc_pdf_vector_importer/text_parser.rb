@@ -1126,14 +1126,14 @@ module BlueCollarSystems
       # PDF string decoding
       # ---------------------------------------------------------------
       def decode_pdf_string_bytes(str)
-        return "".b unless str
+        return binary_pdf_bytes('') unless str
         s = str.to_s
         # Remove parentheses wrapper
         if s.start_with?('(') && s.end_with?(')')
           s = s[1..-2]
         end
 
-        out = "".b
+        out = binary_pdf_bytes('')
         i = 0
         while i < s.length
           ch = s[i]
@@ -1143,14 +1143,14 @@ module BlueCollarSystems
             esc = s[i]
 
             case esc
-            when 'n' then out << "\n".b
-            when 'r' then out << "\r".b
-            when 't' then out << "\t".b
-            when 'b' then out << "\b".b
-            when 'f' then out << "\f".b
-            when '\\' then out << "\\".b
-            when '(' then out << "(".b
-            when ')' then out << ")".b
+            when 'n' then out << binary_pdf_bytes("\n")
+            when 'r' then out << binary_pdf_bytes("\r")
+            when 't' then out << binary_pdf_bytes("\t")
+            when 'b' then out << binary_pdf_bytes("\b")
+            when 'f' then out << binary_pdf_bytes("\f")
+            when '\\' then out << binary_pdf_bytes('\\')
+            when '(' then out << binary_pdf_bytes('(')
+            when ')' then out << binary_pdf_bytes(')')
             when "\n"
               # Line continuation: swallow escaped newline
             when "\r"
@@ -1166,16 +1166,25 @@ module BlueCollarSystems
               end
               out << oct.to_i(8).chr(Encoding::BINARY)
             else
-              out << esc.b
+              out << binary_pdf_bytes(esc)
             end
           else
-            out << ch.b
+            out << binary_pdf_bytes(ch)
           end
           i += 1
         end
 
         out
       end
+
+      def binary_pdf_bytes(value)
+        bytes = value.to_s.dup
+        if bytes.respond_to?(:force_encoding)
+          bytes.force_encoding(Encoding::BINARY)
+        end
+        bytes
+      end
+      private :binary_pdf_bytes
 
       def decode_pdf_hex_bytes(str)
         s = str.to_s
