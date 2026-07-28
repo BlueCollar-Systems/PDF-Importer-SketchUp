@@ -176,21 +176,38 @@ module BlueCollarSystems
         count = 0
         edges = entities.grep(Sketchup::Edge).select(&:valid?)
 
-        # Hash edges by sorted endpoint coordinates (rounded)
+        # Hash edges by sorted endpoint coordinates (rounded).
+        #
+        # The snapshot above goes stale as we erase: erasing one edge can also
+        # delete others (SketchUp removes geometry that the erase orphans), so a
+        # later element of `edges` may already be gone by the time we reach it.
+        # Dereferencing it then raises TypeError: reference to deleted Edge,
+        # which — unlike every other phase in this file — used to escape
+        # uncaught and abort the whole page import via the pipeline's re-raise.
+        # Re-check validity each iteration and contain per-edge failures.
         edge_hash = {}
         edges.each do |edge|
-          p1 = edge.start.position
-          p2 = edge.end.position
-          key = edge_key(p1, p2)
+          begin
+            next unless edge.valid?
 
-          if edge_hash[key]
-            # Duplicate found — keep the first, remove this one
-            if edge.faces.empty?
-              edge.erase!
-              count += 1
+            p1 = edge.start.position
+            p2 = edge.end.position
+            key = edge_key(p1, p2)
+
+            kept = edge_hash[key]
+            if kept && kept.valid?
+              # Duplicate found — keep the first, remove this one
+              if edge.faces.empty?
+                edge.erase!
+                count += 1
+              end
+            else
+              # No survivor for this key yet (or the previous keeper was itself
+              # erased as a side effect), so this edge becomes the keeper.
+              edge_hash[key] = edge
             end
-          else
-            edge_hash[key] = edge
+          rescue StandardError => e
+            Logger.warn("GeometryCleanup", "remove_duplicate_edges failed: #{e.message}")
           end
         end
 
