@@ -19,6 +19,7 @@ module BlueCollarSystems
     require File.join(dir, 'page_transform')
     require File.join(dir, 'primitives')
     require File.join(dir, 'logger')
+    require File.join(dir, 'import_operation')
     require File.join(dir, 'command_runner')
     require File.join(dir, 'png_cropper')
     require File.join(dir, 'dependency_resolver')
@@ -181,7 +182,6 @@ module BlueCollarSystems
           'Compatibility Report to verify detection.'
         )
       end
-      safe_abort_operation(model, 'Pipeline')
       raise RepresentationFidelity::ContractError,
             "requested #{requested_label} renderer is unavailable; no " \
             'representation fallback is authorized'
@@ -772,12 +772,66 @@ module BlueCollarSystems
         item = items_by_id[source_id]
         raise RepresentationFidelity::ContractError,
               "fallback proof has no source item #{source_id}" unless item
+
+        # The source-outline renderer is the exact first choice. If that exact
+        # construction is affirmatively unavailable for this item, exhaust a
+        # finite, truthful native add_3d_text family list on the same Text3D
+        # rung before the representation ladder is allowed to advance.
+        native_builder = GeometryBuilder.new(
+          model, [], [item], media_box,
+          :scale_factor => opts[:scale], :group_per_page => false,
+          :import_text => true, :use_3d_text => true,
+          :requested_text_mode => :text3d,
+          :target_entities => target_entities, :page_number => page_num,
+          :y_offset => y_offset, :page_rotation => page_rotation,
+          :provenance_bucket => stats[:source_provenance_objects],
+          :import_session_id => stats[:import_session_id],
+          :native_font_identity_resolver =>
+            opts[:native_font_identity_resolver],
+          :native_3d_text_font_candidates =>
+            opts[:native_3d_text_font_candidates]
+        )
+        native_delivered = native_builder.send(
+          :place_mesh_text, target_entities, item, 0.0, 0.0, nil, :text3d
+        )
+        native_attempt = Array(native_builder.text_attempts).last
+        if native_delivered == true && native_attempt.is_a?(Hash) &&
+           native_attempt[:delivered_mode] == :text3d
+          merge_text_attempts!(stats, [native_attempt])
+          native_ids = Array(native_attempt[:resulting_entity_ids])
+          stats[:text] = stats[:text].to_i + 1
+          stats[:faces] = stats[:faces].to_i +
+            native_builder.instance_variable_get(:@face_count).to_i
+          record_text_renderer(
+            stats, page_num,
+            :renderer => :add_3d_text, :mode => :text3d,
+            :requested_mode => :text3d, :delivered_mode => :text3d,
+            :degraded => false, :count => 1,
+            :resulting_entity_ids => native_ids,
+            :native_font_family_argument =>
+              native_attempt[:native_font_family_argument],
+            :font_candidate_source => native_attempt[:font_candidate_source],
+            :source_font_equivalence =>
+              native_attempt[:source_font_equivalence],
+            :font_substitution_applied =>
+              native_attempt[:font_substitution_applied],
+            :font_identity_verified => native_attempt[:font_identity_verified]
+          )
+          next
+        end
+
+        proof = initial_proof.dup
+        proof[:attempted_renderer] =
+          'svg_source_3d_text_then_sketchup_native_3d_text'
+        proof[:evidence] = Hash(initial_proof[:evidence]).merge(
+          :same_rung_native_attempt => native_attempt
+        )
         controller = RepresentationFidelity::FallbackController.new(
           :text3d, source_id
         )
-        controller.advance!(initial_proof)
+        controller.advance!(proof)
         history = []
-        append_failed_item_rung!(history, initial_proof)
+        append_failed_item_rung!(history, proof)
         complete_item_representation_ladder!(
           stats, model, target_entities, pdf_path, page_num, item, :text3d,
           controller, history, media_box, render_box, page_rotation, opts,
@@ -2606,20 +2660,74 @@ module BlueCollarSystems
       lineage
     end
 
+    def self.diagnostic_session_token(value)
+      token = value.to_s.gsub(/[^A-Za-z0-9_.-]+/, '_')
+      token.empty? ? 'session' : token
+    end
+
+    def self.reserve_diagnostic_artifact!(stats, path)
+      expanded = File.expand_path(path.to_s)
+      if path.to_s.strip.empty? || File.exist?(expanded)
+        raise RepresentationFidelity::ContractError,
+              'diagnostic artifact path is empty or already owned'
+      end
+      stats[:diagnostic_artifacts_owned] ||= []
+      stats[:diagnostic_artifacts_owned] << expanded unless
+        stats[:diagnostic_artifacts_owned].include?(expanded)
+      expanded
+    end
+
+    def self.cleanup_owned_diagnostic_artifacts!(stats)
+      errors = []
+      remaining = []
+      Array(stats[:diagnostic_artifacts_owned]).reverse_each do |path|
+        begin
+          File.delete(path) if File.file?(path)
+        rescue StandardError => e
+          errors << "#{path}: #{e.class}: #{e.message}"
+          remaining << path
+        end
+      end
+      stats[:diagnostic_artifacts_owned] = remaining.reverse
+      unless errors.empty?
+        raise RepresentationFidelity::ContractError,
+              "diagnostic cleanup failed: #{errors.join('; ')}"
+      end
+      true
+    end
+
     def self.finalize_import_diagnostics!(path, opts, stats)
+      stats[:diagnostic_artifacts_owned] = []
+      sidecar_path = write_source_provenance_sidecar(path, opts, stats)
+      unless Array(stats[:source_provenance_objects]).empty?
+        unless sidecar_path && File.file?(sidecar_path)
+          raise RepresentationFidelity::ContractError,
+                'source provenance sidecar was not persisted'
+        end
+        stats[:source_provenance_sidecar_path] = sidecar_path
+      end
       report = QAReport.build_from_stats(path, opts, stats)
       parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
       if parts_payload && parts_payload[:row_count].to_i > 0
-        report_target = QAReport.default_output_path(path)
+        report_target = import_report_output_path(
+          path, opts, stats[:import_session_id]
+        )
+        session = diagnostic_session_token(stats[:import_session_id])
         sidecar_base = File.join(
           File.dirname(report_target),
-          File.basename(path.to_s, File.extname(path.to_s))
+          "#{File.basename(path.to_s, File.extname(path.to_s))}_#{session}"
         )
+        expected_parts_path = "#{sidecar_base}_parts_bootstrap.json"
+        reserve_diagnostic_artifact!(stats, expected_parts_path)
         parts_path = PartsBootstrap.write_sidecar(parts_payload, sidecar_base)
-        if parts_path
+        if parts_path && File.expand_path(parts_path) ==
+           File.expand_path(expected_parts_path) && File.file?(parts_path)
           parts_payload[:sidecar_path] = parts_path
           report[:extra][:parts_bootstrap] = parts_payload
           stats[:parts_bootstrap_sidecar_path] = parts_path
+        else
+          raise RepresentationFidelity::ContractError,
+                'parts bootstrap sidecar was not persisted at its owned path'
         end
       end
       extra = report[:extra] || {}
@@ -2632,20 +2740,115 @@ module BlueCollarSystems
         extra['representation_fidelity'] || { :ready => false }
       stats[:import_contract_ready] = extra[:import_contract_ready] ||
         extra['import_contract_ready'] || { :ready => false }
-      report_path = QAReport.write_json(report, QAReport.default_output_path(path))
-      stats[:import_report_path] = report_path if report_path
-      sidecar_path = write_source_provenance_sidecar(path, opts, stats)
-      stats[:source_provenance_sidecar_path] = sidecar_path if sidecar_path
+      unless import_contract_ready?(stats)
+        raise RepresentationFidelity::ContractError,
+              'import diagnostics contract is not ready'
+      end
+      report_target = import_report_output_path(
+        path, opts, stats[:import_session_id]
+      )
+      reserve_diagnostic_artifact!(stats, report_target)
+      report_path = QAReport.write_json(report, report_target)
+      unless report_path && File.expand_path(report_path) ==
+             File.expand_path(report_target)
+        raise RepresentationFidelity::ContractError,
+              'import report writer returned a different output path'
+      end
+      verify_import_report_file!(report_path)
+      stats[:import_report_path] = report_path
       ImportHealth.record!(stats, path)
       stats[:import_contract_ready]
-    rescue StandardError => e
+    rescue RepresentationFidelity::ContractError => e
+      cleanup_owned_diagnostic_artifacts!(stats)
       stats[:import_contract_ready] = {
         :ready => false,
         :checks => { :diagnostics_generated => false },
         :errors => ["diagnostics_error:#{e.class}:#{e.message}"]
       }
       Logger.error('Pipeline', "import diagnostics failed: #{e.message}", e)
-      stats[:import_contract_ready]
+      raise e
+    rescue StandardError => e
+      cleanup_owned_diagnostic_artifacts!(stats)
+      stats[:import_contract_ready] = {
+        :ready => false,
+        :checks => { :diagnostics_generated => false },
+        :errors => ["diagnostics_error:#{e.class}:#{e.message}"]
+      }
+      Logger.error('Pipeline', "import diagnostics failed: #{e.message}", e)
+      raise RepresentationFidelity::ContractError,
+            "import diagnostics failed: #{e.class}: #{e.message}"
+    end
+
+    def self.import_report_output_path(pdf_path, opts = {}, session_id = nil)
+      configured = opts.is_a?(Hash) ?
+        (opts[:qa_output_dir] || opts['qa_output_dir']) : nil
+      default = QAReport.default_output_path(pdf_path)
+      directory = configured.to_s.strip.empty? ?
+        File.dirname(default) : File.expand_path(configured.to_s)
+      name = File.basename(default, File.extname(default))
+      unless session_id.to_s.strip.empty?
+        name = "#{name}_#{diagnostic_session_token(session_id)}"
+      end
+      File.join(directory, "#{name}.json")
+    end
+
+    def self.source_provenance_output_path(pdf_path, opts = {}, session_id = nil)
+      report_path = import_report_output_path(pdf_path, opts, session_id)
+      base = File.basename(pdf_path.to_s, File.extname(pdf_path.to_s))
+      base = 'pdf_import' if base.to_s.strip.empty?
+      token = session_id.to_s.gsub(/[^A-Za-z0-9_.-]+/, '_')
+      token = 'session' if token.empty?
+      File.join(
+        File.dirname(report_path),
+        "#{base}_#{token}_source_provenance.json"
+      )
+    end
+
+    def self.verify_import_report_file!(path)
+      unless path && File.file?(path) && File.size(path).to_i > 0
+        raise RepresentationFidelity::ContractError,
+              'import report was not persisted to a readable file'
+      end
+      parsed = JSON.parse(File.read(path, :encoding => 'UTF-8'))
+      extra = parsed['extra']
+      contract = extra.is_a?(Hash) ? extra['import_contract_ready'] : nil
+      unless contract.is_a?(Hash) && contract['ready'] == true
+        raise RepresentationFidelity::ContractError,
+              'persisted import report did not round-trip as ready'
+      end
+      path
+    rescue RepresentationFidelity::ContractError
+      raise
+    rescue StandardError => e
+      raise RepresentationFidelity::ContractError,
+            "persisted import report is invalid: #{e.class}: #{e.message}"
+    end
+
+    def self.verify_staged_import_persistence!(model, baseline, stats)
+      current = model.active_entities.to_a
+      imported = current.reject { |entity| Array(baseline).include?(entity) }
+      if stats[:pages].to_i > 0 && imported.empty?
+        raise RepresentationFidelity::ContractError,
+              'staged import has no persistent host entities'
+      end
+      ids = RepresentationFidelity.stable_ids(imported)
+      stats[:host_result_persistence] = {
+        :schema => 'bcs.host_result_persistence/1.0',
+        :host_app => 'sketchup',
+        :method => 'sketchup_open_operation_entity_inventory',
+        :commit_complete => false,
+        :persistence_verified => true,
+        :import_session_id => stats[:import_session_id].to_s,
+        :source_pdf_sha256 => stats[:source_input_sha256].to_s,
+        :imported_entity_ids_sha256 => Digest::SHA256.hexdigest(ids.sort.join("\n")),
+        :imported_entity_count => ids.length
+      }
+      true
+    rescue RepresentationFidelity::ContractError
+      raise
+    rescue StandardError => e
+      raise RepresentationFidelity::ContractError,
+            "staged host persistence check failed: #{e.class}: #{e.message}"
     end
 
     def self.run_forced_raster_pipeline(model, path, opts)
@@ -2670,7 +2873,7 @@ module BlueCollarSystems
       arrangement = normalize_page_arrangement(opts[:page_arrangement])
       gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
       running_y_offset = 0.0
-      operation_open = false
+      operation = nil
       stats = {
         :pages => 0, :primitives => 0, :edges => 0, :faces => 0,
         :arcs => 0, :text => 0, :components => 0, :layers => [],
@@ -2697,8 +2900,8 @@ module BlueCollarSystems
       }
       record_source_lineage!(stats, path, path, nil, opts)
 
-      model.start_operation('Import PDF Raster', true)
-      operation_open = true
+      operation = ImportOperation.new(model, 'Import PDF Raster')
+      operation.start!
       pages.each_with_index do |page_num, index|
         raw = parser.page_data(page_num)
         unless raw.is_a?(Hash)
@@ -2773,14 +2976,24 @@ module BlueCollarSystems
       # cleanup would report a failure after commit, when rollback is too late.
       cleanup_item_raster_page_cache!(opts)
       verify_cached_source_pdf_bindings!(opts)
-      model.commit_operation
-      operation_open = false
       stats[:elapsed_seconds] = (Time.now - import_start).round(1)
       stats[:log_path] = Logger.log_path
       imported_entities = model.active_entities.to_a - pre_import_entities
       apply_top_view_fit(model, page_fit_bounds, imported_entities)
+      persistence_ready = verify_staged_import_persistence!(
+        model, pre_import_entities, stats
+      )
       finalize_import_diagnostics!(path, opts, stats)
       ready = import_contract_ready?(stats)
+      unless ready && persistence_ready
+        raise RepresentationFidelity::ContractError,
+              'Raster import did not pass diagnostics and persistence readiness.'
+      end
+      operation.mark_ready!(:diagnostics => true, :persistence => true)
+      operation.commit!
+      stats[:import_operation_committed] = operation.committed?
+      stats[:import_operation_ready] = ready
+      stats[:diagnostic_artifacts_owned] = []
       Sketchup.status_text = if ready
         "PDF Raster Import complete — #{stats[:pages]} page(s) — " \
           "#{stats[:elapsed_seconds]}s"
@@ -2790,7 +3003,10 @@ module BlueCollarSystems
       end
       stats
     rescue StandardError => e
-      safe_abort_operation(model, 'Raster Pipeline') if operation_open
+      operation.abort! if operation
+      cleanup_owned_diagnostic_artifacts!(stats) if
+        defined?(stats) && stats.is_a?(Hash) &&
+        (!operation || !operation.committed?)
       raise e
     ensure
       begin
@@ -2868,7 +3084,8 @@ module BlueCollarSystems
       # Track new entities in the currently active editing context.
       # Using model.entities misses imports done while editing groups/components.
       pre_import_entities = model.active_entities.to_a
-      model.start_operation("Import PDF Vectors", true)
+      operation = ImportOperation.new(model, 'Import PDF Vectors')
+      operation.start!
 
       # Reset ID counter once at the start of a multi-page import
       IDGen.reset
@@ -3776,11 +3993,9 @@ module BlueCollarSystems
           'Pipeline',
           "Page #{page_num} ownership/identity proof failed: #{e.message}", e
         )
-        safe_abort_operation(model, 'Pipeline')
         raise e
       rescue StandardError => e
         Logger.error("Pipeline", "Page #{page_num} failed: #{e.message}", e)
-        safe_abort_operation(model, 'Pipeline')
         raise e
       end
       end
@@ -3791,7 +4006,6 @@ module BlueCollarSystems
 
       cleanup_item_raster_page_cache!(opts)
       verify_cached_source_pdf_bindings!(opts)
-      model.commit_operation
 
       layer_mgr.register_imported_names!
       stats[:layers] = layer_mgr.imported_names
@@ -3817,8 +4031,21 @@ module BlueCollarSystems
       apply_top_view_fit(model, page_fit_bounds, imported_entities)
 
       stats[:log_path] = Logger.log_path
+      persistence_ready = verify_staged_import_persistence!(
+        model, pre_import_entities, stats
+      )
       finalize_import_diagnostics!(source_input_path, opts, stats)
-      Sketchup.status_text = if import_contract_ready?(stats)
+      ready = import_contract_ready?(stats)
+      unless ready && persistence_ready
+        raise RepresentationFidelity::ContractError,
+              'Vector import did not pass diagnostics and persistence readiness.'
+      end
+      operation.mark_ready!(:diagnostics => true, :persistence => true)
+      operation.commit!
+      stats[:import_operation_committed] = operation.committed?
+      stats[:import_operation_ready] = ready
+      stats[:diagnostic_artifacts_owned] = []
+      Sketchup.status_text = if ready
         "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text " \
           "items — #{elapsed}s"
       else
@@ -3826,6 +4053,12 @@ module BlueCollarSystems
           "#{stats[:edges]} edges, #{stats[:text]} text items"
       end
       stats
+    rescue StandardError => e
+      operation.abort! if defined?(operation) && operation
+      cleanup_owned_diagnostic_artifacts!(stats) if
+        defined?(stats) && stats.is_a?(Hash) &&
+        (!defined?(operation) || !operation || !operation.committed?)
+      raise e
     ensure
       cleanup_item_raster_page_cache!(opts) if
         defined?(opts) && opts.is_a?(Hash)
@@ -4905,8 +5138,9 @@ module BlueCollarSystems
       return nil if objects.empty?
 
       session_id = (stats[:import_session_id] || SourceProvenance.new_import_session_id).to_s
-      sidecar_path = SourceProvenance.default_sidecar_path(pdf_path)
-      SourceProvenance.write_sidecar(
+      sidecar_path = source_provenance_output_path(pdf_path, opts, session_id)
+      reserve_diagnostic_artifact!(stats, sidecar_path)
+      written = SourceProvenance.write_sidecar(
         output_path: sidecar_path,
         import_session_id: session_id,
         pdf_path: pdf_path,
@@ -4914,9 +5148,22 @@ module BlueCollarSystems
         version: BlueCollarSystems::PDFVectorImporter::VERSION,
         page_count: stats[:pages]
       )
+      unless written && File.file?(written) && File.size(written).to_i > 0
+        raise RepresentationFidelity::ContractError,
+              'source provenance writer did not persist a readable file'
+      end
+      manifest = JSON.parse(File.read(written, :encoding => 'UTF-8'))
+      unless manifest['schema'].to_s == SourceProvenance::SCHEMA &&
+             manifest['import_session_id'].to_s == session_id
+        raise RepresentationFidelity::ContractError,
+              'source provenance sidecar did not round-trip its session binding'
+      end
+      written
+    rescue RepresentationFidelity::ContractError
+      raise
     rescue StandardError => e
-      Logger.warn('Pipeline', "source_provenance sidecar failed: #{e.message}")
-      nil
+      raise RepresentationFidelity::ContractError,
+            "source provenance sidecar failed: #{e.class}: #{e.message}"
     end
 
     def self.record_open_failure_report(path, opts, reason, message)
@@ -4948,7 +5195,6 @@ module BlueCollarSystems
           UI.messagebox("No vector content found in PDF.")
         end
       rescue StandardError => e
-        safe_abort_operation(model, "Import")
         Logger.error("Import", "Import failed", e)
         log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
         UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
@@ -4974,7 +5220,6 @@ module BlueCollarSystems
           UI.messagebox("No vector content found in PDF.")
         end
       rescue StandardError => e
-        safe_abort_operation(model, "ImportSafe")
         Logger.error("ImportSafe", "Safe mode import failed", e)
         log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
         UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
@@ -5098,9 +5343,12 @@ module BlueCollarSystems
         model = Sketchup.active_model
         return Sketchup::Importer::ImportFail unless model
         stats = BlueCollarSystems::PDFVectorImporter.run_pipeline(model, file_path, opts)
-        stats ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
+        ready = stats.is_a?(Hash) &&
+          stats[:import_operation_committed] == true &&
+          stats[:import_operation_ready] == true &&
+          BlueCollarSystems::PDFVectorImporter.import_contract_ready?(stats)
+        ready ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
       rescue StandardError => e
-        BlueCollarSystems::PDFVectorImporter.safe_abort_operation(model, "PDFFileImporter")
         Logger.error("PDFFileImporter", "load_file failed", e)
         Sketchup::Importer::ImportFail
       end

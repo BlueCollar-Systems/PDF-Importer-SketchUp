@@ -70,9 +70,14 @@ class TextModeRoutingTest < Minitest::Test
   end
 
   def test_labels_and_exact_source_3d_text_renderers_are_reported
-    assert_match(/builder_use_3d_text\s*=\s*false/, @main,
-                 'unproven native font identity must not be the default 3D path')
     assert_match(/:renderer\s*=>\s*:svg_source_3d_text/, @main)
+    assert_match(/native_builder\.send\(\s*:place_mesh_text/m, @main,
+                 'failed exact SVG 3D Text must try native 3D Text on the same rung')
+    assert_operator(
+      @main.index('Svg3DTextRenderer.render_svg'), :<,
+      @main.index('native_builder.send('),
+      'exact source SVG must be attempted before native substitution'
+    )
     assert_match(/record_text_renderer\(\s*stats,\s*page_num,/, @main,
                   'renderer outcomes must be recorded in the report stats')
   end

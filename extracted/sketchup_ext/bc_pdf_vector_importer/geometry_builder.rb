@@ -49,6 +49,8 @@ module BlueCollarSystems
         # Native add_3d_text is opt-in only. The resolver must independently
         # prove that the installed family is the exact PDF source family.
         @native_font_identity_resolver = opts[:native_font_identity_resolver]
+        @native_3d_text_font_candidates =
+          sanitize_native_font_families(opts[:native_3d_text_font_candidates])
         @target_entities = opts[:target_entities] || nil
         @y_offset        = opts[:y_offset] || 0.0
         @page_rotation   = PageTransform.normalize_rotation(opts[:page_rotation])
@@ -639,6 +641,86 @@ module BlueCollarSystems
         nil
       end
 
+      def pdf_font_resource_key?(value)
+        text = value.to_s.strip
+        return true if text.downcase == 'pdftotext'
+        text =~ /\A\/?F\d+\z/i ? true : false
+      end
+
+      def valid_native_font_family?(value)
+        text = value.to_s.strip
+        !text.empty? && text.length <= 128 &&
+          text !~ /[\x00-\x1f\x7f]/ && !pdf_font_resource_key?(text)
+      end
+
+      def sanitize_native_font_families(values)
+        candidates = ['Arial'] + Array(values)
+        seen = {}
+        candidates.each_with_object([]) do |value, result|
+          break result if result.length >= 8
+          family = value.to_s.strip
+          next unless valid_native_font_family?(family)
+          key = family.downcase
+          next if seen[key]
+          seen[key] = true
+          result << family
+        end
+      rescue StandardError
+        ['Arial']
+      end
+
+      def native_text_font_candidates(item)
+        values = []
+        identity = verified_native_font_identity(item)
+        if identity && valid_native_font_family?(identity[:installed_family])
+          values << {
+            :native_font_family_argument => identity[:installed_family],
+            :font_candidate_source => :verified_exact_font_identity,
+            :source_font_equivalence => true,
+            :font_substitution_applied => false,
+            :font_identity_verified => true,
+            :pdf_font_identity => identity[:pdf_font_identity],
+            :installed_family => identity[:installed_family]
+          }
+        end
+        Array(@native_3d_text_font_candidates).each do |family|
+          next if values.any? do |candidate|
+            candidate[:native_font_family_argument].to_s.downcase ==
+              family.to_s.downcase
+          end
+          values << {
+            :native_font_family_argument => family,
+            :font_candidate_source => :configured_free_substitute,
+            :source_font_equivalence => false,
+            :font_substitution_applied => true,
+            :font_identity_verified => false
+          }
+        end
+        values.first(8)
+      end
+
+      def valid_native_font_evidence?(evidence)
+        return false unless evidence.is_a?(Hash)
+        family = evidence[:native_font_family_argument]
+        return false unless valid_native_font_family?(family)
+        source = evidence[:font_candidate_source]
+        if source == :verified_exact_font_identity
+          evidence[:source_font_equivalence] == true &&
+            evidence[:font_substitution_applied] == false &&
+            evidence[:font_identity_verified] == true &&
+            !evidence[:pdf_font_identity].to_s.strip.empty? &&
+            evidence[:installed_family].to_s == family.to_s
+        elsif source == :configured_free_substitute
+          evidence[:source_font_equivalence] == false &&
+            evidence[:font_substitution_applied] == true &&
+            evidence[:font_identity_verified] == false &&
+            !evidence.key?(:pdf_font_identity) &&
+            !evidence.key?(:installed_family)
+        else
+          false
+        end
+      end
+
       def native_text_extrusion_depth(height)
         value = [height.to_f * 0.08, 1.0e-4].max
         return nil unless value.finite? && value > 0.0
@@ -823,7 +905,7 @@ module BlueCollarSystems
           valid = valid && evidence[:width_verified] == true &&
             evidence[:height_verified] == true &&
             evidence[:depth_verified] == true &&
-            evidence[:font_identity_verified] == true
+            valid_native_font_evidence?(evidence)
         elsif normalized_mode == :labels
           valid = valid && evidence[:content_verified] == true &&
             evidence[:leader_verified] == true
@@ -842,6 +924,16 @@ module BlueCollarSystems
         rung[:height_verified] = evidence[:height_verified] == true
         rung[:depth_verified] = evidence[:depth_verified] == true
         rung[:font_identity_verified] = evidence[:font_identity_verified] == true
+        rung[:native_font_family_argument] =
+          evidence[:native_font_family_argument]
+        rung[:font_candidate_source] = evidence[:font_candidate_source]
+        rung[:source_font_equivalence] = evidence[:source_font_equivalence]
+        rung[:font_substitution_applied] =
+          evidence[:font_substitution_applied]
+        rung[:pdf_font_identity] = evidence[:pdf_font_identity] if
+          evidence.key?(:pdf_font_identity)
+        rung[:installed_family] = evidence[:installed_family] if
+          evidence.key?(:installed_family)
         rung[:content_verified] = evidence[:content_verified] == true
         rung[:leader_verified] = evidence[:leader_verified] == true
         rung[:entity_type_verified] = true
@@ -858,6 +950,17 @@ module BlueCollarSystems
         attempt[:height_verified] = evidence[:height_verified] == true
         attempt[:depth_verified] = evidence[:depth_verified] == true
         attempt[:font_identity_verified] = evidence[:font_identity_verified] == true
+        attempt[:native_font_family_argument] =
+          evidence[:native_font_family_argument]
+        attempt[:font_candidate_source] = evidence[:font_candidate_source]
+        attempt[:source_font_equivalence] =
+          evidence[:source_font_equivalence]
+        attempt[:font_substitution_applied] =
+          evidence[:font_substitution_applied]
+        attempt[:pdf_font_identity] = evidence[:pdf_font_identity] if
+          evidence.key?(:pdf_font_identity)
+        attempt[:installed_family] = evidence[:installed_family] if
+          evidence.key?(:installed_family)
         attempt[:content_verified] = evidence[:content_verified] == true
         attempt[:leader_verified] = evidence[:leader_verified] == true
         attempt[:entity_type_verified] = evidence[:entity_type_verified] == true
@@ -1092,11 +1195,11 @@ module BlueCollarSystems
           )
         end
 
-        font_identity = verified_native_font_identity(item)
-        unless font_identity
+        font_candidates = native_text_font_candidates(item)
+        if font_candidates.empty?
           return stop_requested_text_delivery!(
             requested_mode, item, attempt, rung,
-            'text3d_native_font_identity_unverified'
+            'text3d_native_font_candidate_unavailable'
           )
         end
         extrusion_depth = native_text_extrusion_depth(height)
@@ -1107,123 +1210,181 @@ module BlueCollarSystems
           )
         end
 
-        before = RepresentationFidelity.snapshot(entities)
-        owned_group = entities.add_group
-        unless owned_group && owned_group.respond_to?(:entities)
-          raise RepresentationFidelity::ContractError,
-                'text3d host did not return an owned staging group'
-        end
-        success = owned_group.entities.add_3d_text(
-          item.text, TextAlignLeft, font_identity[:installed_family], false, false,
-          height, 0.0, 0.0, true, extrusion_depth
-        )
-        unless success
-          cleanup_claimed_text_entities!(
-            entities, before, [owned_group], rung
-          )
+        rung[:font_candidate_attempts] = []
+        font_candidates.each do |font_candidate|
+          before = RepresentationFidelity.snapshot(entities)
+          owned_group = entities.add_group
+          unless owned_group && owned_group.respond_to?(:entities)
+            raise RepresentationFidelity::ContractError,
+                  'text3d host did not return an owned staging group'
+          end
+          candidate_record = {
+            :native_font_family_argument =>
+              font_candidate[:native_font_family_argument],
+            :font_candidate_source => font_candidate[:font_candidate_source],
+            :source_font_equivalence =>
+              font_candidate[:source_font_equivalence],
+            :font_substitution_applied =>
+              font_candidate[:font_substitution_applied],
+            :font_identity_verified =>
+              font_candidate[:font_identity_verified],
+            :created_entity_ids => [], :cleaned_entity_ids => [],
+            :cleanup_outcome => :not_required, :outcome => :attempting
+          }
+          begin
+            success = owned_group.entities.add_3d_text(
+              item.text, TextAlignLeft,
+              font_candidate[:native_font_family_argument], false, false,
+              height, 0.0, 0.0, true, extrusion_depth
+            )
+          rescue StandardError => e
+            cleanup_claimed_text_entities!(
+              entities, before, [owned_group], candidate_record
+            )
+            owned_group = nil
+            candidate_record[:outcome] = :failed
+            candidate_record[:reason] = "text3d_candidate_exception: #{e.message}"
+            rung[:font_candidate_attempts] << candidate_record
+            next
+          end
+          unless success == true
+            cleanup_claimed_text_entities!(
+              entities, before, [owned_group], candidate_record
+            )
+            owned_group = nil
+            candidate_record[:outcome] = :failed
+            candidate_record[:reason] = 'text3d_mesh_unavailable'
+            rung[:font_candidate_attempts] << candidate_record
+            next
+          end
+
+          staged = RepresentationFidelity.snapshot(owned_group.entities)[:entities]
+          if staged.empty?
+            cleanup_claimed_text_entities!(
+              entities, before, [owned_group], candidate_record
+            )
+            owned_group = nil
+            candidate_record[:outcome] = :failed
+            candidate_record[:reason] = 'text3d_mesh_empty'
+            rung[:font_candidate_attempts] << candidate_record
+            next
+          end
+
+          created = Array(owned_group.explode).compact
           owned_group = nil
-          rung[:reason] = 'text3d_mesh_unavailable'
-          return stop_requested_text_delivery!(
-            requested_mode, item, attempt, rung, 'text3d_mesh_unavailable'
+          if created.empty?
+            raise RepresentationFidelity::ContractError,
+                  'text3d staging group did not return exploded entity references'
+          end
+          after = RepresentationFidelity.snapshot(entities)
+          owned = RepresentationFidelity.claimed_created_entities!(
+            before, after, created
           )
-        end
+          all_created = RepresentationFidelity.created_between(before, after)
+          unless RepresentationFidelity.stable_ids(all_created) ==
+                 RepresentationFidelity.stable_ids(owned)
+            cleanup_claimed_text_entities!(
+              entities, before, owned, candidate_record
+            )
+            created = []
+            raise RepresentationFidelity::ContractError,
+                  'text3d host creation was accompanied by an unclaimed peer artifact'
+          end
+          created = owned
 
-        staged = RepresentationFidelity.snapshot(owned_group.entities)[:entities]
-        if staged.empty?
-          cleanup_claimed_text_entities!(
-            entities, before, [owned_group], rung
+          begin
+            evidence = fit_created_text_entities!(
+              entities, created, item, display_angle, anchor
+            )
+          rescue RepresentationFidelity::ContractError => e
+            cleanup_claimed_text_entities!(
+              entities, before, created, candidate_record
+            )
+            created = []
+            candidate_record[:outcome] = :failed
+            candidate_record[:reason] =
+              "text3d_visual_fidelity_unverified: #{e.message}"
+            rung[:font_candidate_attempts] << candidate_record
+            next
+          end
+          font_candidate.each { |key, value| evidence[key] = value }
+
+          text_faces = created.select do |entity|
+            entity.respond_to?(:typename) && entity.typename == 'Face'
+          end
+          apply_text_face_material(text_faces)
+          @face_count += text_faces.length
+          created.each { |entity| set_layer(entity, layer) }
+          evidence[:content_verified] = true
+          evidence[:physical_geometry_verified] = true
+          evidence[:physical_style_verified] = true
+          evidence[:transform_verified] = true
+          source_planar_bounds = RepresentationFidelity.expected_rotated_bounds(
+            anchor, evidence[:target_width_in], evidence[:target_height_in],
+            display_angle
           )
-          owned_group = nil
-          rung[:reason] = 'text3d_mesh_empty'
-          return stop_requested_text_delivery!(
-            requested_mode, item, attempt, rung, 'text3d_mesh_empty'
-          )
-        end
-
-        created = Array(owned_group.explode).compact
-        owned_group = nil
-        if created.empty?
-          raise RepresentationFidelity::ContractError,
-                'text3d staging group did not return exploded entity references'
-        end
-        after = RepresentationFidelity.snapshot(entities)
-        owned = RepresentationFidelity.claimed_created_entities!(
-          before, after, created
-        )
-        all_created = RepresentationFidelity.created_between(before, after)
-        unless RepresentationFidelity.stable_ids(all_created) ==
-               RepresentationFidelity.stable_ids(owned)
-          cleanup_claimed_text_entities!(entities, before, owned, rung)
-          created = []
-          raise RepresentationFidelity::ContractError,
-                'text3d host creation was accompanied by an unclaimed peer artifact'
-        end
-        created = owned
-        rung[:created_entity_ids] = RepresentationFidelity.stable_ids(created)
-
-        begin
-          evidence = fit_created_text_entities!(entities, created, item,
-                                                 display_angle, anchor)
-          evidence[:font_identity_verified] = true
-          evidence[:pdf_font_identity] = font_identity[:pdf_font_identity]
-          evidence[:installed_family] = font_identity[:installed_family]
-        rescue RepresentationFidelity::ContractError => e
-          reason = "text3d_visual_fidelity_unverified: #{e.message}"
-          fail_created_text_rung!(entities, created, rung, reason)
-          return stop_requested_text_delivery!(
-            requested_mode, item, attempt, rung, reason
-          )
-        end
-
-        text_faces = created.select do |entity|
-          entity.respond_to?(:typename) && entity.typename == 'Face'
-        end
-        apply_text_face_material(text_faces)
-        @face_count += text_faces.length
-        created.each { |entity| set_layer(entity, layer) }
-        evidence[:content_verified] = true
-        evidence[:physical_geometry_verified] = true
-        evidence[:physical_style_verified] = true
-        evidence[:transform_verified] = true
-        source_planar_bounds = RepresentationFidelity.expected_rotated_bounds(
-          anchor, evidence[:target_width_in], evidence[:target_height_in],
-          display_angle
-        )
-        source_anchor = RepresentationFidelity.numeric_point(anchor)
-        source_bounds = {
-          :min => [
-            source_planar_bounds[:min_x], source_planar_bounds[:min_y],
-            source_anchor[2]
-          ],
-          :max => [
-            source_planar_bounds[:max_x], source_planar_bounds[:max_y],
-            source_anchor[2] + extrusion_depth
-          ]
-        }
-        evidence[:expected_evidence] = source_expected_for_created!(
-          item, :text3d, created, anchor, display_angle,
-          {
-            :expected_width => evidence[:target_width_in],
-            :expected_height => evidence[:target_height_in],
-            :expected_depth => extrusion_depth,
-            :expected_bounds => source_bounds,
-            :expected_transformation => {
-              :kind => 'baked_geometry',
-              :entity_count => created.length
+          source_anchor = RepresentationFidelity.numeric_point(anchor)
+          source_bounds = {
+            :min => [
+              source_planar_bounds[:min_x], source_planar_bounds[:min_y],
+              source_anchor[2]
+            ],
+            :max => [
+              source_planar_bounds[:max_x], source_planar_bounds[:max_y],
+              source_anchor[2] + extrusion_depth
+            ]
+          }
+          font_evidence = {
+            :source_pdf_font_resource => item.font_name.to_s,
+            :native_font_family_argument =>
+              font_candidate[:native_font_family_argument],
+            :font_candidate_source => font_candidate[:font_candidate_source],
+            :source_font_equivalence =>
+              font_candidate[:source_font_equivalence],
+            :font_substitution_applied =>
+              font_candidate[:font_substitution_applied],
+            :font_identity_verified =>
+              font_candidate[:font_identity_verified]
+          }
+          font_evidence[:pdf_font_identity] =
+            font_candidate[:pdf_font_identity] if
+              font_candidate.key?(:pdf_font_identity)
+          font_evidence[:installed_family] =
+            font_candidate[:installed_family] if
+              font_candidate.key?(:installed_family)
+          evidence[:expected_evidence] = source_expected_for_created!(
+            item, :text3d, created, anchor, display_angle,
+            {
+              :expected_width => evidence[:target_width_in],
+              :expected_height => evidence[:target_height_in],
+              :expected_depth => extrusion_depth,
+              :expected_bounds => source_bounds,
+              :expected_transformation => {
+                :kind => 'baked_geometry',
+                :entity_count => created.length
+              },
+              :source_font_identity => font_evidence
             },
-            :source_font_identity => {
-              :pdf_font_identity => font_identity[:pdf_font_identity],
-              :installed_family => font_identity[:installed_family]
-            }
-          },
-          'sketchup_native_3d_text'
+            'sketchup_native_3d_text'
+          )
+          entity_ids = RepresentationFidelity.stable_ids(created)
+          candidate_record[:created_entity_ids] = entity_ids
+          candidate_record[:resulting_entity_ids] = entity_ids
+          candidate_record[:outcome] = :complete
+          rung[:font_candidate_attempts] << candidate_record
+          rung[:created_entity_ids] = entity_ids
+          @text_count += 1
+          record_mesh_text_height_sample(height)
+          record_text_span_provenance(
+            item, 'native_3d_text', entity_ids, :text3d
+          )
+          complete_text_rung!(attempt, rung, :text3d, entity_ids, evidence)
+          return true
+        end
+        stop_requested_text_delivery!(
+          requested_mode, item, attempt, rung,
+          'text3d_native_font_candidates_exhausted'
         )
-        entity_ids = RepresentationFidelity.stable_ids(created)
-        @text_count += 1
-        record_mesh_text_height_sample(height)
-        record_text_span_provenance(item, 'native_3d_text', entity_ids, :text3d)
-        complete_text_rung!(attempt, rung, :text3d, entity_ids, evidence)
-        true
       rescue RepresentationFidelity::ContractError => e
         if defined?(before) && before && defined?(rung) && rung
           claims = []

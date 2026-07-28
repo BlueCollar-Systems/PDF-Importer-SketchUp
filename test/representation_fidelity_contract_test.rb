@@ -722,19 +722,21 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal [8.0, 23.0, 0.5], bounds[:max]
   end
 
-  def test_native_3d_text_stops_before_creation_without_exact_font_identity_proof
-    source = item('NO SUBSTITUTE')
+  def test_native_3d_text_uses_truthful_substitute_without_exact_font_identity
+    source = item('SAME REPRESENTATION SUBSTITUTE')
     b = GB.new(nil, [], [], [0, 0, 612, 792],
                import_text: true, use_3d_text: true,
                requested_text_mode: :text3d, page_number: 1)
     entities = FidelityEntities.new
 
-    refute b.send(:place_mesh_text, entities, source, 0, 0, nil)
-    assert_empty entities.to_a
-    failure = b.text_delivery_failures.last
-    assert_match(/font_identity_unverified/, failure[:reason])
-    rung = b.text_attempts.last[:attempt_history].last
-    assert_equal :not_required, rung[:cleanup_outcome]
+    assert b.send(:place_mesh_text, entities, source, 0, 0, nil)
+    attempt = b.text_attempts.last
+    assert_equal :text3d, attempt[:delivered_mode]
+    assert_equal 'Arial', attempt[:native_font_family_argument]
+    assert_equal :configured_free_substitute, attempt[:font_candidate_source]
+    assert_equal false, attempt[:source_font_equivalence]
+    assert_equal true, attempt[:font_substitution_applied]
+    assert_equal false, attempt[:font_identity_verified]
   end
 
   def test_text3d_has_no_arbitrary_height_or_width_factor_roadblocks
@@ -786,10 +788,11 @@ class RepresentationFidelityContractTest < Minitest::Test
     attempt = b.text_attempts.last
     assert_equal 1, attempt[:attempt_history].length
     mesh_rung = attempt[:attempt_history].first
+    candidate = mesh_rung[:font_candidate_attempts].first
     assert_equal :failed, mesh_rung[:outcome]
-    assert_equal :verified, mesh_rung[:cleanup_outcome]
+    assert_equal :verified, candidate[:cleanup_outcome]
     assert_empty mesh_rung[:resulting_entity_ids]
-    refute_empty mesh_rung[:cleaned_entity_ids]
+    refute_empty candidate[:cleaned_entity_ids]
     assert_nil attempt[:delivered_mode]
     assert_empty attempt[:resulting_entity_ids]
     assert_empty entities.to_a
@@ -820,10 +823,11 @@ class RepresentationFidelityContractTest < Minitest::Test
 
     refute b.send(:place_mesh_text, entities, source, 0, 0, nil)
     failed = b.text_attempts.first[:attempt_history].first
+    candidate = failed[:font_candidate_attempts].first
     assert_equal :text3d, failed[:mode]
     assert_equal :failed, failed[:outcome]
-    assert_equal ['persistent_id:101'], failed[:created_entity_ids]
-    assert_equal failed[:created_entity_ids], failed[:cleaned_entity_ids]
+    assert_equal ['persistent_id:101'], candidate[:created_entity_ids]
+    assert_equal candidate[:created_entity_ids], candidate[:cleaned_entity_ids]
     assert_equal [101], entities.erased.map(&:persistent_id)
     assert_empty b.text_attempts.first[:resulting_entity_ids]
     assert_empty entities.to_a
@@ -1437,7 +1441,7 @@ class RepresentationFidelityContractTest < Minitest::Test
                  main)
     refute_match(/next\s+unless\s+raw/, main)
     refute_match(/Continue to next page instead of aborting/, main)
-    assert_match(/rescue\s+StandardError\s*=>\s*e.*?safe_abort_operation\(model,\s*'Pipeline'\).*?raise\s+e/m,
+    assert_match(/rescue\s+StandardError\s*=>\s*e.*?operation\.abort!.*?raise\s+e/m,
                  main)
   end
 
@@ -1903,7 +1907,8 @@ class RepresentationFidelityContractTest < Minitest::Test
     guarded_commits = main.scan(
       /cleanup_item_raster_page_cache!\(opts\)\s+
        verify_cached_source_pdf_bindings!\(opts\)\s+
-       model\.commit_operation/x
+       .*?finalize_import_diagnostics!.*?
+       operation\.commit!/mx
     )
 
     assert_equal 2, guarded_commits.length,
@@ -2093,7 +2098,7 @@ class RepresentationFidelityContractTest < Minitest::Test
   end
 
   def test_terminal_item_raster_must_be_new_owned_and_source_bound
-    entities = FidelityEntities.new
+    entities = FidelityEntities.new(:mesh => :false)
     model = Struct.new(:active_entities).new(entities)
     item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
       'AB', 10, 20, 12, 0, 'F1', 12,
@@ -2133,7 +2138,7 @@ class RepresentationFidelityContractTest < Minitest::Test
   end
 
   def test_failed_terminal_raster_probe_does_not_claim_an_unreturned_peer
-    entities = FidelityEntities.new
+    entities = FidelityEntities.new(:mesh => :false)
     model = Struct.new(:active_entities).new(entities)
     renderer = lambda do |*_args|
       entities.add_test_entity(2.0, 3.0, 'Edge')
@@ -2153,7 +2158,7 @@ class RepresentationFidelityContractTest < Minitest::Test
   end
 
   def test_terminal_page_raster_rejects_peer_but_cleans_only_returned_image
-    entities = FidelityEntities.new
+    entities = FidelityEntities.new(:mesh => :false)
     model = Struct.new(:active_entities).new(entities)
     renderer = lambda do |*_args|
       entities.add_test_entity(0.5, 0.5, 'Edge')
