@@ -17,6 +17,7 @@ module BlueCollarSystems
     class EmbeddedImageExtractor
       MAX_TOKENS_PER_STREAM = 500_000
       MAX_FORM_DEPTH = 12
+      MAX_IMAGE_PIXELS = 25_000_000
 
       ImageAsset = Struct.new(
         :page_number,
@@ -35,7 +36,10 @@ module BlueCollarSystems
         :file_path,
         :metadata_path,
         :bytes_written,
-        :encoded
+        :encoded,
+        :soft_mask_obj_num,
+        :fully_transparent,
+        :placement_error
       )
 
       attr_reader :assets
@@ -45,11 +49,14 @@ module BlueCollarSystems
         @output_dir = output_dir
         @assets = []
         @sequence = 0
+        @soft_mask_cache = {}
+        @color_space_cache = {}
       end
 
       def extract_page(page_num, output_dir = @output_dir, write_files = true)
         @assets = []
         @sequence = 0
+        @soft_mask_cache.clear
 
         raw = @pdf.page_data(page_num)
         return [] unless raw
@@ -72,6 +79,13 @@ module BlueCollarSystems
       def self.supported_sketchup_image?(path)
         ext = File.extname(path.to_s).downcase
         ['.jpg', '.jpeg', '.png'].include?(ext)
+      end
+
+      def self.placeable_sketchup_image?(asset)
+        asset &&
+          !asset.fully_transparent &&
+          !asset.placement_error &&
+          supported_sketchup_image?(asset.file_path)
       end
 
       private
@@ -225,7 +239,10 @@ module BlueCollarSystems
           nil,
           nil,
           data.bytesize,
-          data_info[:encoded]
+          data_info[:encoded],
+          ref_obj_num(dict['/SMask']),
+          false,
+          nil
         )
 
         if write_files && output_dir
@@ -248,22 +265,84 @@ module BlueCollarSystems
         image_path = File.join(output_dir, base + extension)
         File.open(image_path, 'wb') { |f| f.write(data) }
 
-        if extension == '.raw' && asset.width > 0 && asset.height > 0
+        if asset.soft_mask_obj_num && extension != '.raw'
+          mark_unplaceable(
+            asset,
+            "encoded #{extension} image soft mask cannot be safely composited"
+          )
+        elsif extension == '.raw' && asset.width > 0 && asset.height > 0
           pixels = asset.width.to_i * asset.height.to_i
-          if pixels > 0 && data.bytesize % pixels == 0
+          unless safe_conversion_size?(pixels)
+            mark_unplaceable(
+              asset,
+              "image conversion exceeds the #{MAX_IMAGE_PIXELS}-pixel safety limit"
+            )
+          end
+          if !asset.placement_error &&
+             asset.bits_per_component.to_i != 8
+            mark_unplaceable(
+              asset,
+              'decoded raw image conversion requires 8-bit samples'
+            )
+          end
+          if !asset.placement_error &&
+             pixels > 0 &&
+             data.bytesize % pixels == 0
             channels = data.bytesize / pixels
             if [1, 2, 3, 4].include?(channels)
               png_path = File.join(output_dir, base + '.png')
+              conversion_path = image_path
+              temporary_path = nil
               begin
-                PngCropper.raw_to_png!(image_path, asset.width, asset.height, channels, png_path)
+                mask = nil
+                if asset.soft_mask_obj_num
+                  mask = soft_mask_bytes(asset, pixels)
+                  unless mask
+                    raise ArgumentError,
+                          'declared PDF soft mask could not be decoded safely'
+                  end
+                  asset.fully_transparent = fully_transparent_mask?(mask)
+                end
+                converted, converted_channels = convert_raw_pixels(
+                  data,
+                  pixels,
+                  channels,
+                  mask,
+                  asset.color_space
+                )
+                if converted
+                  temporary_path = File.join(output_dir, base + '.converted')
+                  File.open(temporary_path, 'wb') { |f| f.write(converted) }
+                  conversion_path = temporary_path
+                  channels = converted_channels
+                end
+                PngCropper.raw_to_png!(
+                  conversion_path,
+                  asset.width,
+                  asset.height,
+                  channels,
+                  png_path
+                )
                 image_path = png_path
               rescue StandardError => e
-                Logger.warn(
-                  'EmbeddedImages',
-                  "raw-to-png conversion for #{asset.name} failed: #{e.message}"
+                mark_unplaceable(
+                  asset,
+                  "raw image conversion failed: #{e.message}"
                 )
+              ensure
+                delete_file(temporary_path)
               end
+            else
+              mark_unplaceable(
+                asset,
+                "decoded raw image has unsupported #{channels}-channel data"
+              )
             end
+          elsif !asset.placement_error
+            mark_unplaceable(
+              asset,
+              'decoded raw image byte length does not match its dimensions'
+            )
           end
         end
 
@@ -274,6 +353,62 @@ module BlueCollarSystems
           f.write(JSON.pretty_generate(metadata_for(asset)) + "\n")
         end
         asset.metadata_path = meta_path
+      end
+
+      def safe_conversion_size?(pixels)
+        pixels > 0 && pixels <= MAX_IMAGE_PIXELS
+      end
+
+      def mark_unplaceable(asset, reason)
+        asset.placement_error = reason.to_s
+        Logger.warn('EmbeddedImages', "#{asset.name}: #{asset.placement_error}")
+        nil
+      end
+
+      def convert_raw_pixels(data, pixels, channels, mask, color_space)
+        color_info = color_space_info(color_space)
+        validate_color_info!(color_info)
+        requires_color_conversion =
+          ['/DeviceCMYK', '/Indexed'].include?(color_info[:type])
+        return [nil, channels] unless mask || requires_color_conversion
+
+        output_channels = mask ? 4 : 3
+        output = binary_zero_string(pixels * output_channels)
+        pixel = 0
+        while pixel < pixels
+          source = pixel * channels
+          target = pixel * output_channels
+          red, green, blue = pixel_rgb(
+            data,
+            source,
+            channels,
+            color_info
+          )
+          output.setbyte(target, red)
+          output.setbyte(target + 1, green)
+          output.setbyte(target + 2, blue)
+          if mask
+            alpha = (
+              intrinsic_alpha(data, source, channels, color_info) *
+              mask.getbyte(pixel) + 127
+            ) / 255
+            output.setbyte(target + 3, alpha)
+          end
+          pixel += 1
+        end
+        [output, output_channels]
+      end
+
+      def binary_zero_string(length)
+        value = "\0" * length
+        value.force_encoding(Encoding::BINARY) if
+          value.respond_to?(:force_encoding) && defined?(Encoding::BINARY)
+        value
+      end
+
+      def validate_color_info!(color_info)
+        return unless color_info[:type] == '/Indexed'
+        raise ArgumentError, color_info[:error] if color_info[:error]
       end
 
       def metadata_for(asset)
@@ -294,8 +429,278 @@ module BlueCollarSystems
           bbox_pts: asset.bbox_pts,
           file: asset.file_path,
           bytes_written: asset.bytes_written,
-          encoded: asset.encoded
+          encoded: asset.encoded,
+          soft_mask_object: asset.soft_mask_obj_num,
+          fully_transparent: asset.fully_transparent,
+          placement_error: asset.placement_error
         }
+      end
+
+      def fully_transparent_mask?(mask)
+        mask.each_byte do |value|
+          return false unless value == 0
+        end
+        true
+      end
+
+      def soft_mask_bytes(asset, pixels)
+        obj_num = asset.soft_mask_obj_num
+        return nil unless obj_num && obj_num > 0
+
+        cache_key =
+          "#{obj_num}:#{asset.width.to_i}x#{asset.height.to_i}:#{pixels}"
+        return @soft_mask_cache[cache_key] if @soft_mask_cache.key?(cache_key)
+
+        mask_dict = to_dict(@pdf.resolve_object("#{obj_num} 0 R"))
+        return cache_soft_mask(cache_key, nil) unless mask_dict
+        return cache_soft_mask(cache_key, nil) unless
+          int_value(mask_dict['/Width']) == asset.width.to_i &&
+          int_value(mask_dict['/Height']) == asset.height.to_i
+        return cache_soft_mask(cache_key, nil) unless
+          int_value(mask_dict['/BitsPerComponent']) == 8
+        return cache_soft_mask(cache_key, nil) unless
+          color_space_info(mask_dict['/ColorSpace'])[:type] == '/DeviceGray'
+
+        data = begin
+          @pdf.get_stream_data(obj_num)
+        rescue StandardError
+          nil
+        end
+        return cache_soft_mask(cache_key, nil) unless data
+        return cache_soft_mask(cache_key, nil) unless data.bytesize == pixels
+
+        values = binary_zero_string(pixels)
+        index = 0
+        while index < pixels
+          values.setbyte(index, data.getbyte(index))
+          index += 1
+        end
+        apply_decode_string!(values, mask_dict['/Decode'])
+        cache_soft_mask(cache_key, values)
+      end
+
+      def cache_soft_mask(key, value)
+        @soft_mask_cache[key] = value
+        value
+      end
+
+      def apply_decode_string!(values, decode_value)
+        decode = parse_array_nums(decode_value)
+        return values unless decode.length >= 2
+
+        low = decode[0].to_f
+        high = decode[1].to_f
+        index = 0
+        while index < values.length
+          mapped = low + ((values[index].to_f / 255.0) * (high - low))
+          byte = (mapped * 255.0).round
+          byte = 0 if byte < 0
+          byte = 255 if byte > 255
+          values.setbyte(index, byte)
+          index += 1
+        end
+        values
+      end
+
+      def color_space_info(value)
+        key = normalize_pdf_value(value)
+        return @color_space_cache[key] if @color_space_cache.key?(key)
+
+        resolved = begin
+          @pdf.resolve_object(value)
+        rescue StandardError
+          value
+        end
+        info = if resolved.is_a?(Array) &&
+                  resolved[0].to_s == '/Indexed'
+                 indexed_color_space_info(resolved)
+               else
+                 { type: resolved.to_s }
+               end
+        @color_space_cache[key] = info
+        info
+      end
+
+      def indexed_color_space_info(resolved)
+        lookup_ref = resolved[3]
+        lookup_obj_num = ref_obj_num(lookup_ref)
+        lookup = if lookup_obj_num
+                   begin
+                     @pdf.get_stream_data(lookup_obj_num)
+                   rescue StandardError
+                     nil
+                   end
+                 else
+                   indexed_inline_lookup(lookup_ref)
+                 end
+        components = indexed_components(resolved[1].to_s)
+        required = (resolved[2].to_i + 1) * components
+        error = nil
+        if components <= 0
+          error = "indexed color-space base #{resolved[1]} is unsupported"
+        elsif !lookup || lookup.bytesize < required
+          error =
+            "indexed color-space lookup is missing or truncated " \
+            "(expected #{required} bytes)"
+        end
+        {
+          type: '/Indexed',
+          base: resolved[1].to_s,
+          high: resolved[2].to_i,
+          lookup: lookup,
+          error: error
+        }
+      end
+
+      def indexed_components(base)
+        return 4 if base == '/DeviceCMYK'
+        return 3 if base == '/DeviceRGB'
+        return 1 if base == '/DeviceGray'
+        0
+      end
+
+      def indexed_inline_lookup(value)
+        text = value.to_s.strip
+        return indexed_hex_lookup(text) if
+          text.start_with?('<') && text.end_with?('>')
+        return indexed_literal_lookup(text) if
+          text.start_with?('(') && text.end_with?(')')
+        nil
+      rescue StandardError
+        nil
+      end
+
+      def indexed_hex_lookup(text)
+        hex = text[1...-1].gsub(/\s+/, '')
+        hex += '0' if hex.length.odd?
+        [hex].pack('H*')
+      end
+
+      def indexed_literal_lookup(text)
+        source = text[1...-1]
+        output = ''.dup
+        output.force_encoding(Encoding::BINARY) if
+          output.respond_to?(:force_encoding) && defined?(Encoding::BINARY)
+        index = 0
+        while index < source.length
+          byte = source.getbyte(index)
+          unless byte == 92
+            output << byte
+            index += 1
+            next
+          end
+
+          index += 1
+          break if index >= source.length
+          escaped = source.getbyte(index)
+          mapped = {
+            110 => 10, 114 => 13, 116 => 9,
+            98 => 8, 102 => 12,
+            40 => 40, 41 => 41, 92 => 92
+          }[escaped]
+          if mapped
+            output << mapped
+            index += 1
+          elsif escaped == 13 || escaped == 10
+            index += 1
+            index += 1 if escaped == 13 &&
+                          source.getbyte(index) == 10
+          elsif escaped >= 48 && escaped <= 55
+            octal = ''.dup
+            count = 0
+            while count < 3 && index < source.length
+              digit = source.getbyte(index)
+              break unless digit >= 48 && digit <= 55
+              octal << digit
+              index += 1
+              count += 1
+            end
+            output << octal.to_i(8)
+          else
+            output << escaped
+            index += 1
+          end
+        end
+        output
+      end
+
+      def pixel_rgb(data, source, channels, color_info)
+        if color_info[:type] == '/Indexed'
+          return indexed_rgb(data.getbyte(source), color_info)
+        end
+        if color_info[:type] == '/DeviceCMYK' && channels >= 4
+          return cmyk_to_rgb(
+            data.getbyte(source),
+            data.getbyte(source + 1),
+            data.getbyte(source + 2),
+            data.getbyte(source + 3)
+          )
+        end
+        if color_info[:type] == '/DeviceGray' || channels <= 2
+          gray = data.getbyte(source)
+          return [gray, gray, gray]
+        end
+
+        [
+          data.getbyte(source),
+          data.getbyte(source + 1),
+          data.getbyte(source + 2)
+        ]
+      end
+
+      def indexed_rgb(index, color_info)
+        high = color_info[:high].to_i
+        index = high if index > high
+        base = color_info[:base]
+        components = indexed_components(base)
+        lookup = color_info[:lookup]
+        offset = index * components
+        unless components > 0 &&
+               lookup &&
+               lookup.bytesize >= offset + components
+          raise ArgumentError, 'indexed color-space lookup is unavailable'
+        end
+
+        if base == '/DeviceCMYK'
+          return cmyk_to_rgb(
+            lookup.getbyte(offset),
+            lookup.getbyte(offset + 1),
+            lookup.getbyte(offset + 2),
+            lookup.getbyte(offset + 3)
+          )
+        end
+        if base == '/DeviceRGB'
+          return [
+            lookup.getbyte(offset),
+            lookup.getbyte(offset + 1),
+            lookup.getbyte(offset + 2)
+          ]
+        end
+
+        gray = lookup.getbyte(offset)
+        [gray, gray, gray]
+      end
+
+      def cmyk_to_rgb(cyan, magenta, yellow, black)
+        [
+          255 - [255, cyan + black].min,
+          255 - [255, magenta + black].min,
+          255 - [255, yellow + black].min
+        ]
+      end
+
+      def intrinsic_alpha(data, source, channels, color_info)
+        return 255 if color_info[:type] == '/Indexed'
+        return 255 if color_info[:type] == '/DeviceCMYK'
+        return data.getbyte(source + 1) if channels == 2
+        return data.getbyte(source + 3) if channels == 4
+        255
+      end
+
+      def delete_file(path)
+        File.delete(path) if path && File.file?(path)
+      rescue StandardError
+        nil
       end
 
       def image_stream_data(obj_num, filters)

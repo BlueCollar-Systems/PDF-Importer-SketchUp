@@ -3907,11 +3907,24 @@ module BlueCollarSystems
       placed = 0
       assets.each do |asset|
         next unless asset && asset.file_path && File.file?(asset.file_path)
-        unless EmbeddedImageExtractor.supported_sketchup_image?(asset.file_path)
-          Logger.warn(
-            'EmbeddedImages',
-            "Skipping SketchUp placement for #{asset.name}: exported #{File.extname(asset.file_path)} is not a SketchUp image format."
-          )
+        unless EmbeddedImageExtractor.placeable_sketchup_image?(asset)
+          if asset.placement_error
+            Logger.warn(
+              'EmbeddedImages',
+              "Skipping unsafe PDF image #{asset.name}: " \
+              "#{asset.placement_error}."
+            )
+          elsif asset.fully_transparent
+            Logger.info(
+              'EmbeddedImages',
+              "Skipping fully transparent PDF image #{asset.name}."
+            )
+          else
+            Logger.warn(
+              'EmbeddedImages',
+              "Skipping SketchUp placement for #{asset.name}: exported #{File.extname(asset.file_path)} is not a SketchUp image format."
+            )
+          end
           next
         end
 
