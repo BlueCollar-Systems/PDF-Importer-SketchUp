@@ -981,14 +981,31 @@ module BlueCollarSystems
         ''
       end
 
+      # Some extractors expose the source span bbox as [x0, y0, x1, y1]
+      # through a single method, while others expose four separate accessors.
+      def self.bbox_values_from_item(item)
+        return nil unless item
+        names = [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1]
+        if names.all? { |name| item.respond_to?(name) }
+          return names.map { |name| item.send(name) }
+        end
+        if item.respond_to?(:bbox)
+          bbox = item.bbox
+          return bbox if bbox.is_a?(Array) && bbox.length == 4
+        end
+        nil
+      rescue StandardError
+        nil
+      end
+
       # Span bbox in the same space as SvgTextRenderer placements_pdf:
       # PDF points relative to the media-box origin, y-up. External
       # (pdftotext) items are already offset into that space; internal
       # content-stream items carry absolute user-space coordinates, so the
       # media origin is subtracted.
       def self.item_bbox_media_relative(item, base_x, base_y)
-        return nil unless item.respond_to?(:bbox_x0)
-        vals = [item.bbox_x0, item.bbox_y0, item.bbox_x1, item.bbox_y1]
+        vals = bbox_values_from_item(item)
+        return nil unless vals
         return nil if vals.any? { |v| v.nil? }
         x0 = vals[0].to_f
         y0 = vals[1].to_f
@@ -1044,8 +1061,8 @@ module BlueCollarSystems
       end
 
       def self.raw_item_bbox(item)
-        return nil unless item.respond_to?(:bbox_x0)
-        vals = [item.bbox_x0, item.bbox_y0, item.bbox_x1, item.bbox_y1]
+        vals = bbox_values_from_item(item)
+        return nil unless vals
         return nil if vals.any? { |v| v.nil? }
         vals.map { |v| v.to_f }
       rescue StandardError

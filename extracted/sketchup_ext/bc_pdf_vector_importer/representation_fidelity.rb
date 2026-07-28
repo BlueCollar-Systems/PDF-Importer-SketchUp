@@ -218,13 +218,30 @@ module BlueCollarSystems
         }
       end
 
-      def strict_source_bbox_pdf(item)
+      # Some extractors expose bbox as four separate accessors; others expose a
+      # single Array method returning [x0, y0, x1, y1]. Accept either form so a
+      # missing bbox_x0 accessor does not block downstream placement proofs.
+      def bbox_values_from_item(item)
+        return nil unless item
         names = [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1]
-        unless item && names.all? { |name| item.respond_to?(name) }
+        if names.all? { |name| item.respond_to?(name) }
+          return names.map { |name| item.send(name) }
+        end
+        if item.respond_to?(:bbox)
+          bbox = item.bbox
+          return bbox if bbox.is_a?(Array) && bbox.length == 4
+        end
+        nil
+      rescue StandardError
+        nil
+      end
+
+      def strict_source_bbox_pdf(item)
+        values = bbox_values_from_item(item)
+        unless values
           raise ContractError, 'source text bbox is unavailable'
         end
-        values = names.map do |name|
-          raw = item.send(name)
+        values = values.map do |raw|
           raise ContractError, 'source text bbox is incomplete' if raw.nil?
           value = Float(raw)
           raise ContractError, 'source text bbox is non-finite' unless value.finite?
@@ -961,9 +978,9 @@ module BlueCollarSystems
       end
 
       def source_bbox_pdf(item)
-        names = [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1]
-        return nil unless names.all? { |name| item.respond_to?(name) }
-        names.map { |name| canonical_number(item.send(name)) }
+        values = bbox_values_from_item(item)
+        return nil unless values
+        values.map { |raw| canonical_number(raw) }
       rescue StandardError
         nil
       end
