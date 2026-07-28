@@ -7,6 +7,7 @@ import sys
 import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,14 +20,32 @@ import check_release_publication  # noqa: E402
 
 
 class ReleasePublicationGateTest(unittest.TestCase):
-    def test_current_checked_in_runtime_is_valid_but_not_publishable(self):
+    def test_current_checked_in_runtime_is_publishable_when_approved(self):
         ready, reason = check_release_publication.publication_state()
 
-        self.assertFalse(ready)
-        self.assertRegex(
+        self.assertTrue(ready)
+        self.assertEqual(
+            "approved compliance evidence and complete source offer",
             reason,
-            "source offer is incomplete|license review is blocked",
         )
+
+    def test_blocked_runtime_is_valid_but_not_publishable(self):
+        blocked = {"license_review": {"status": "blocked"}}
+
+        def validate(require_approved):
+            if require_approved:
+                raise RuntimeError("license review is blocked")
+            return blocked
+
+        with mock.patch.object(
+            check_release_publication.runtime_manifest,
+            "validate_existing_manifest",
+            side_effect=validate,
+        ):
+            ready, reason = check_release_publication.publication_state()
+
+        self.assertFalse(ready)
+        self.assertEqual("license review is blocked", reason)
 
     def test_script_runs_from_the_repository_root_like_ci(self):
         result = subprocess.run(
@@ -38,7 +57,12 @@ class ReleasePublicationGateTest(unittest.TestCase):
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("publication_ready=false", result.stdout)
+        self.assertIn("publication_ready=true", result.stdout)
+        self.assertIn(
+            "publication_reason=approved compliance evidence "
+            "and complete source offer",
+            result.stdout,
+        )
 
 
 if __name__ == "__main__":
