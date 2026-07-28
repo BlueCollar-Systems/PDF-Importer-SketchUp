@@ -155,10 +155,17 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          rbzs = sorted(Path(".").glob("SketchUp-PDF-Importer_v*.rbz"))
-          if len(rbzs) != 1:
-              raise SystemExit(f"Expected one RBZ, found {len(rbzs)}: {rbzs}")
-          with zipfile.ZipFile(rbzs[0]) as zf:
+          version = Path("extracted/sketchup_ext/bc_pdf_vector_importer.rb").read_text(
+              encoding="utf-8"
+          )
+          import re
+          match = re.search(r"PLUGIN_VERSION\s*=\s*'(\d+\.\d+\.\d+)'", version)
+          if not match:
+              raise SystemExit("Could not read PLUGIN_VERSION for RBZ smoke")
+          expected = Path(f"SketchUp-PDF-Importer_v{match.group(1)}.rbz")
+          if not expected.is_file():
+              raise SystemExit(f"Expected RBZ missing: {expected}")
+          with zipfile.ZipFile(expected) as zf:
               names = set(zf.namelist())
           required = {
               "bc_pdf_vector_importer.rb",
@@ -191,7 +198,7 @@ jobs:
                   + ", ".join(missing_runtime)
               )
           print(
-              f"PASS: {rbzs[0].name} includes required extension files "
+              f"PASS: {expected.name} includes required extension files "
               "and zero-ceremony Poppler runtime"
           )
           PY
