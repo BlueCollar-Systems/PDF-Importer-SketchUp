@@ -308,13 +308,21 @@ module BlueCollarSystems
               tail = numeric_tail_candidate(items[candidate_idx].text.to_s.strip) ||
                      items[candidate_idx].text.to_s.strip
               merged = normalize_line_text(merge_head_tail(text, tail))
+              merged_bbox = merged_text_item_bbox(
+                [it, items[candidate_idx]]
+              )
               merged_item = TextParser::TextItem.new(
                 merged,
                 it.x.to_f,
                 it.y.to_f,
                 [it.font_size.to_f, items[candidate_idx].font_size.to_f].max,
                 merge_angle(it.angle, items[candidate_idx].angle),
-                it.font_name
+                it.font_name,
+                it.respond_to?(:raw_font_size) ? it.raw_font_size : nil,
+                merged_bbox[0],
+                merged_bbox[1],
+                merged_bbox[2],
+                merged_bbox[3]
               )
               # Merged fragments keep the head item's span identity (corrective §1).
               if it.respond_to?(:source_span_id)
@@ -524,13 +532,21 @@ module BlueCollarSystems
 
             if candidate_idx && candidate_frac
               rebuilt = replace_trailing_whole_with_fraction(text, candidate_frac)
+              merged_bbox = merged_text_item_bbox(
+                [it, items[candidate_idx]]
+              )
               rebuilt_item = TextParser::TextItem.new(
                 normalize_line_text(rebuilt),
                 it.x.to_f,
                 it.y.to_f,
                 [it.font_size.to_f, items[candidate_idx].font_size.to_f].max,
                 merge_angle(it.angle, items[candidate_idx].angle),
-                it.font_name
+                it.font_name,
+                it.respond_to?(:raw_font_size) ? it.raw_font_size : nil,
+                merged_bbox[0],
+                merged_bbox[1],
+                merged_bbox[2],
+                merged_bbox[3]
               )
               # Repaired pairs keep the head item's span identity (corrective §1).
               if it.respond_to?(:source_span_id)
@@ -549,6 +565,25 @@ module BlueCollarSystems
         rescue StandardError => e
           Logger.warn("ExternalTextExtractor", "repair_whole_fraction_pairs failed: #{e.message}")
           items
+        end
+
+        def merged_text_item_bbox(items)
+          boxes = Array(items).map do |item|
+            names = [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1]
+            next nil unless item && names.all? { |name| item.respond_to?(name) }
+            values = names.map { |name| item.send(name) }
+            next nil if values.any? { |value| value.nil? }
+            values.map { |value| value.to_f }
+          end
+          return [nil, nil, nil, nil] if boxes.any? { |box| box.nil? }
+          [
+            boxes.map { |box| [box[0], box[2]].min }.min,
+            boxes.map { |box| [box[1], box[3]].min }.min,
+            boxes.map { |box| [box[0], box[2]].max }.max,
+            boxes.map { |box| [box[1], box[3]].max }.max
+          ]
+        rescue StandardError
+          [nil, nil, nil, nil]
         end
 
         def merge_head_tail(head_text, tail_text)

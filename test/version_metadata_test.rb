@@ -2,7 +2,7 @@ require 'minitest/autorun'
 
 class VersionMetadataTest < Minitest::Test
   ROOT = File.expand_path('..', __dir__)
-  EXPECTED_VERSION = '3.7.102'.freeze
+  EXPECTED_VERSION = '3.7.103'.freeze
 
   def read(path)
     File.read(File.join(ROOT, path))

@@ -250,6 +250,21 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     assert_empty entities.to_a
   end
 
+  def test_missing_bbox_returns_item_specific_impossibility_for_each_rung
+    source = item('text_span:1:7', nil, nil, nil, nil)
+
+    [:glyphs, :geometry].each do |mode|
+      entities = ItemVectorEntities.new
+      result = render(entities, mode, square_svg, source)
+
+      refute result[:ok]
+      assert_equal :source_item_bbox_unavailable,
+                   result[:transition_proof][:reason_code]
+      assert_equal mode, result[:transition_proof][:from_mode]
+      assert_empty entities.to_a
+    end
+  end
+
   def test_geometry_can_deliver_an_unambiguous_ligature_that_glyphs_cannot_own
     source = ITEM.new('AB', 10.0, 20.0, 12.0, 0.0, 'F1', 12.0,
                       9.0, 19.0, 22.0, 32.0, nil, 'text_span:1:0')

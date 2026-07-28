@@ -23,7 +23,7 @@ module BlueCollarSystems
         base_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
         unless CairoGlyphSource.item_bbox_media_relative(item, base_x, base_y)
           return impossible_result(
-            source_id, item, mode, [], nil, opts[:source_context], {},
+            source_id, item, mode, [], {}, opts[:source_context], {},
             :source_item_bbox_unavailable
           )
         end
@@ -257,14 +257,15 @@ module BlueCollarSystems
             :source_observation =>
               'complete page inventory contained no exact item-bound outline set for this representation contract',
             :source_text => CairoGlyphSource.item_text(item),
-            :source_renderer => source_context[:renderer].to_s,
+            :source_renderer => (source_context || {})[:renderer].to_s,
             :source_placement_count => Array(placed).length,
             :matched_item_placement_count => 0,
             :bbox_geometry_candidate_count =>
-              Array(selection[:candidate_indices]).length,
+              Array(selection && selection[:candidate_indices]).length,
             :peer_ambiguous_placement_indices =>
-              Array(selection[:ambiguous_indices]),
-            :glyph_coverage_failures => Array(match[:coverage_failures]),
+              Array(selection && selection[:ambiguous_indices]),
+            :glyph_coverage_failures =>
+              Array(match && match[:coverage_failures]),
             :representation_contract_checked => contract,
             :verification =>
               'source bbox, complete page inventory, placement ownership, and representation-specific physical structure were checked'
