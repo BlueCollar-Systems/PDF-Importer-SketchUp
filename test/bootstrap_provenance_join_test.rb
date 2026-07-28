@@ -8,7 +8,8 @@
 # sidecars could NEVER join, and the mock-only unit tests concealed it.
 #
 # This test drives REAL TextParser::TextItem objects (not mocks) through the
-# exact pipeline seam order: TextSourceIdentity.assign! → PartsBootstrap AND
+# exact pipeline seam order: TextSourceIdentity.assign_and_validate →
+# PartsBootstrap AND
 # GeometryBuilder text placement, then asserts the emitted identifiers
 # actually join. It also locks the seam ORDER in main.rb/cli.rb source: the
 # identity assignment must sit after angle-hint replacement and before
@@ -65,6 +66,15 @@ TI = MOD::TextParser::TextItem
 # only the SketchUp API surface is faked.
 class FakeLabel
   attr_accessor :layer
+  attr_reader :persistent_id
+
+  @@next_persistent_id = 10_000
+
+  def initialize
+    @@next_persistent_id += 1
+    @persistent_id = @@next_persistent_id
+  end
+
   def display_leader=(_v); end
   def vector=(_v); end
 end
@@ -147,8 +157,10 @@ class BootstrapProvenanceJoinTest < Minitest::Test
 
     # The pipeline seam: identity assigned ONCE per page on the final array,
     # BEFORE both consumers see the SAME objects.
-    MOD::TextSourceIdentity.assign!(page1, 1)
-    MOD::TextSourceIdentity.assign!(page2, 2)
+    page1_identity = MOD::TextSourceIdentity.assign_and_validate(page1, 1)
+    page2_identity = MOD::TextSourceIdentity.assign_and_validate(page2, 2)
+    assert_empty page1_identity[:failures]
+    assert_empty page2_identity[:failures]
 
     # Both consumers must observe assigned IDs on every item.
     (page1 + page2).each do |item|
@@ -252,16 +264,113 @@ class BootstrapProvenanceJoinTest < Minitest::Test
                  'fix_merged_fractions must copy source_span_id'
   end
 
+  def test_identity_validation_counts_every_final_item_and_rejects_unassignable_ids
+    writable = TI.new('W12', 10.0, 20.0, 8.0, 0.0, 'F1', 8.0)
+    missing_setter = Object.new
+    sticky_id = Class.new do
+      def source_span_id=(_value)
+        # Simulate an extractor object that claims to be writable but silently
+        # retains an invalid/duplicate source identity.
+      end
+
+      def source_span_id
+        ''
+      end
+    end.new
+
+    result = MOD::TextSourceIdentity.assign_and_validate(
+      [writable, missing_setter, sticky_id], 4
+    )
+
+    assert_equal 3, result[:source_count],
+                 'every final extracted item must count even when identity assignment fails'
+    assert_equal ['text_span:4:0'], result[:source_span_ids]
+    assert_equal 2, result[:failures].length
+    assert_equal [1, 2], result[:failures].map { |failure| failure[:index] }
+
+    report = MOD::QAReport.build_from_stats(
+      'identity_failure.pdf', {},
+      {
+        pages: 1, primitives: 0, edges: 0, text: 0, layers: [],
+        text_mode: :text3d, source_text_count: result[:source_count],
+        source_text_identity_failure_count: result[:failures].length,
+        source_text_identity_failures: result[:failures],
+        import_report_publication_status: :published,
+        import_report_path: 'identity_failure_import_report.json'
+      }
+    )
+    contract = report[:extra][:import_contract_ready]
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:source_text_identity_integrity]
+  end
+
+  def test_identity_stats_retains_exact_multi_page_canonical_ledger
+    stats = {
+      source_text_count: 0,
+      source_text_span_ids: [],
+      source_text_identity_failure_count: 0,
+      source_text_identity_failures: []
+    }
+    page1 = [
+      TI.new('A', 1.0, 1.0, 8.0, 0.0, 'F1', 8.0),
+      TI.new('B', 2.0, 1.0, 8.0, 0.0, 'F1', 8.0)
+    ]
+    page3 = [TI.new('C', 3.0, 1.0, 8.0, 0.0, 'F1', 8.0)]
+
+    assert MOD::TextSourceIdentity.apply_result_to_stats!(
+      stats, MOD::TextSourceIdentity.assign_and_validate(page1, 1)
+    )
+    assert MOD::TextSourceIdentity.apply_result_to_stats!(
+      stats, MOD::TextSourceIdentity.assign_and_validate(page3, 3)
+    )
+    assert_equal 3, stats[:source_text_count]
+    assert_equal [
+      'text_span:1:0', 'text_span:1:1', 'text_span:3:0'
+    ], stats[:source_text_span_ids]
+  end
+
+  def test_identity_stats_rejects_same_count_wrong_canonical_id
+    stats = {
+      source_text_count: 0,
+      source_text_span_ids: [],
+      source_text_identity_failure_count: 0,
+      source_text_identity_failures: []
+    }
+    result = MOD::TextSourceIdentity.assign_and_validate(
+      [TI.new('A', 1.0, 1.0, 8.0, 0.0, 'F1', 8.0)], 1
+    )
+    result[:source_span_ids] = ['text_span:1:99']
+
+    refute MOD::TextSourceIdentity.apply_result_to_stats!(stats, result)
+    assert_equal 1, stats[:source_text_count]
+    assert_empty stats[:source_text_span_ids]
+    assert_includes stats[:source_text_identity_failures].map { |entry| entry[:reason] },
+                    'source_span_id_ledger_mismatch'
+  end
+
+  def test_identity_stats_rejects_malformed_result_payload
+    stats = {
+      source_text_count: 0,
+      source_text_span_ids: [],
+      source_text_identity_failure_count: 0,
+      source_text_identity_failures: []
+    }
+
+    refute MOD::TextSourceIdentity.apply_result_to_stats!(stats, {})
+    assert_operator stats[:source_text_identity_failure_count], :>, 0
+    refute_empty stats[:import_report_failures]
+  end
+
   # Seam-order lock: assignment sits after final extractor selection/merging/
   # angle hints and BEFORE page_text_map + GeometryBuilder in BOTH pipelines.
   def test_pipeline_seam_order_main_and_cli
     main_src = File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'))
     hints_call = main_src.index('text_items = apply_internal_text_angle_hints(text_items, angle_items)')
-    assign_call = main_src.index('TextSourceIdentity.assign!(text_items, page_num)')
+    assign_call = main_src.index('TextSourceIdentity.assign_and_validate(')
     map_write = main_src.index('stats[:page_text_map][page_num] = text_items')
     builder_call = main_src.index('GeometryBuilder.new(model, paths, builder_text_items')
     refute_nil hints_call, 'main.rb angle-hint call site missing'
-    refute_nil assign_call, 'main.rb must call TextSourceIdentity.assign!'
+    refute_nil assign_call, 'main.rb must assign and validate source identity'
     refute_nil map_write, 'main.rb page_text_map write missing'
     refute_nil builder_call, 'main.rb GeometryBuilder call site missing'
     assert_operator hints_call, :<, assign_call,
@@ -273,10 +382,10 @@ class BootstrapProvenanceJoinTest < Minitest::Test
 
     cli_src = File.read(File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'cli.rb'))
     cli_extract = cli_src.index('extract_text(parser, pdf_path, page_num, streams, ocg_map, opts)')
-    cli_assign = cli_src.index('TextSourceIdentity.assign!(text_items, page_num)')
+    cli_assign = cli_src.index('TextSourceIdentity.assign_and_validate(')
     cli_map = cli_src.index('stats[:page_text_map][page_num] = text_items')
     refute_nil cli_extract, 'cli.rb extract_text call site missing'
-    refute_nil cli_assign, 'cli.rb must call TextSourceIdentity.assign!'
+    refute_nil cli_assign, 'cli.rb must assign and validate source identity'
     refute_nil cli_map, 'cli.rb page_text_map write missing'
     assert_operator cli_extract, :<, cli_assign,
                     'CLI identity must be assigned AFTER final extraction'

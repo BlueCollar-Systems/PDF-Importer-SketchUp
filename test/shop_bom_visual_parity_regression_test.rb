@@ -112,7 +112,13 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
 
     class Entity
       attr_accessor :layer, :material, :back_material
+      attr_reader :persistent_id
+
+      @@next_persistent_id = 90_000
+
       def initialize(typename, width, height)
+        @@next_persistent_id += 1
+        @persistent_id = @@next_persistent_id
         @typename = typename
         @bounds = Bounds.new(width, height)
       end
@@ -130,7 +136,9 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
 
     def add_text(text, pt, dir = nil)
       @labels << { text: text, pt: pt, dir: dir }
-      Object.new.tap { |o| def o.valid?; true; end }
+      entity = Entity.new('Text', 0.1, 0.1)
+      @entities << entity
+      entity
     end
 
     def add_3d_text(text, _align, _font, _bold, _italic, height, _tol, _extrusion, _filled, _z)

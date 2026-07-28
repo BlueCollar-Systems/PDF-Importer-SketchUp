@@ -1,22 +1,39 @@
 #!/usr/bin/env ruby
 
 require 'minitest/autorun'
-require 'open3'
+require 'stringio'
 require 'tmpdir'
+require_relative '../tools/run_ruby_test_suite'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 RUNNER = File.join(REPO_ROOT, 'tools', 'run_ruby_test_suite.rb')
 
 class FullSuiteGateTest < Minitest::Test
-  def run_fixture(source, strict, env_strict = '0', extra_env = {})
+  GateStatus = Struct.new(:code) do
+    def success?
+      code.to_i == 0
+    end
+  end
+
+  def run_fixture(source, strict, env_strict = '0', extra_env = {},
+                  gate_runner = nil)
     Dir.mktmpdir('ruby_suite_gate_') do |dir|
       path = File.join(dir, 'fixture_test.rb')
       File.open(path, 'wb') { |io| io.write(source) }
-      args = [Gem.ruby, RUNNER, '--test-dir', dir]
-      args << '--strict-fixtures' if strict
-      env = { 'PRIVATE_VALIDATION_CI_STRICT' => env_strict }.merge(extra_env)
-      stdout, stderr, status = Open3.capture3(env, *args)
-      return [stdout, stderr, status]
+      out = StringIO.new
+      err = StringIO.new
+      gate_runner ||= lambda do |_gate_path, _extension_root, _ruby_exe|
+        ['UNIT EXACT RUBY 2.2.4 GATE: PASS\n', '', true]
+      end
+      code = RubyTestSuiteGate::Runner.new(
+        test_dir: dir,
+        strict_fixtures: (strict || env_strict == '1'),
+        child_env: extra_env,
+        gate_runner: gate_runner,
+        out: out,
+        err: err
+      ).run
+      return [out.string, err.string, GateStatus.new(code)]
     end
   end
 
@@ -101,5 +118,37 @@ exit(public_ok && private_ok ? 0 : 1)
     }
     stdout, stderr, status = run_fixture(source, true, '1', env)
     assert status.success?, "#{stdout}\n#{stderr}"
+  end
+
+  def test_strict_mode_invokes_the_configured_exact_ruby_224_gate
+    observed = []
+    gate_runner = lambda do |gate_path, extension_root, ruby_exe|
+      observed << [gate_path, extension_root, ruby_exe]
+      ['INJECTED EXACT RUBY 2.2.4 GATE: PASS\n', '', true]
+    end
+    stdout, stderr, status = run_fixture(
+      "exit 0\n", true, '1', {}, gate_runner
+    )
+
+    assert status.success?, "#{stdout}\n#{stderr}"
+    assert_match(/INJECTED EXACT RUBY 2\.2\.4 GATE: PASS/,
+                 stdout + stderr)
+    assert_equal 1, observed.length
+    assert_equal File.join(REPO_ROOT, 'tools', 'ruby22_real_parse_gate.rb'),
+                 observed[0][0]
+    assert_equal File.join(REPO_ROOT, 'extracted', 'sketchup_ext'),
+                 observed[0][1]
+  end
+
+  def test_strict_mode_fails_when_exact_ruby_224_gate_is_unavailable
+    gate_runner = lambda do |_gate_path, _extension_root, _ruby_exe|
+      ['', 'exact Ruby 2.2.4 runtime unavailable\n', false]
+    end
+    stdout, stderr, status = run_fixture(
+      "exit 0\n", true, '1', {}, gate_runner
+    )
+
+    refute status.success?, "#{stdout}\n#{stderr}"
+    assert_match(/EXACT RUBY 2\.2\.4 GATE: FAIL/i, stdout + stderr)
   end
 end

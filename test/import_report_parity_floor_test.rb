@@ -21,6 +21,17 @@ class ImportReportParityFloorTest < Minitest::Test
       elapsed_seconds: 1.0,
       text_renderers: [],
       text_mode: :labels,
+      source_text_count: 3,
+      source_text_span_ids: [
+        'text_span:1:0', 'text_span:1:1', 'text_span:1:2'
+      ],
+      source_provenance_objects: Array.new(3) do |index|
+        {
+          source_kind: 'text_span', span_id: "text_span:1:#{index}",
+          created_entity_type: 'native_label',
+          resulting_entity_ids: ["persistent_id:#{6_000 + index}"]
+        }
+      end,
       font_substitution_note: 'Non-embedded PDF fonts detected.',
       resolved_scale: {
         factor: 48.0,
@@ -37,13 +48,42 @@ class ImportReportParityFloorTest < Minitest::Test
     stats = {
       pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
       text_mode: :text3d,
+      source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
+      text_renderers: [
+        {
+          page: 1, renderer: :add_3d_text, requested_mode: :text3d,
+          delivered_mode: :text3d, count: 1, degraded: false
+        }
+      ],
+      source_provenance_objects: [
+        {
+          source_kind: 'text_span', span_id: 'text_span:1:0',
+          created_entity_type: 'native_3d_text',
+          resulting_entity_ids: ['persistent_id:6101']
+        }
+      ],
       mesh_text_telemetry: [
         {
-          page: 1, source_span_id: 'native-span', requested_mode: :text3d,
-          delivered_mode: :text3d, outcome: :complete,
+          page: 1, source_span_id: 'text_span:1:0', requested_mode: :text3d,
+           delivered_mode: :text3d, outcome: :complete,
+           visual_fidelity_verified: true,
+          source_height_verified: true,
+          fit_status: :fitted, fit_reason: 'bbox_overflow_shrink',
+          fit_measurement_verified: true,
+          cleanup_outcome: :not_required,
+          resulting_entity_ids: ['persistent_id:6101'],
+          delivered_font: 'Arial',
           pdf_em_height_in: 0.1, sketchup_letter_height_in: 0.07,
           letter_height_ratio: 0.7, matrix_x: 1.0,
-          residual_x: 1.0, total_x: 1.0
+          residual_x: 1.0, total_x: 1.0,
+          attempt_history: [
+            {
+              mode: :text3d, outcome: :complete,
+              cleanup_outcome: :not_required, delivered_mode: :text3d,
+              resulting_entity_ids: ['persistent_id:6101']
+            }
+          ]
         }
       ]
     }

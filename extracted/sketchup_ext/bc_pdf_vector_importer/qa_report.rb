@@ -22,6 +22,10 @@ module BlueCollarSystems
       SCALE_FACTOR_DISAGREE_RATIO = 0.15
       PERFORMANCE_HINT_ENTITY_THRESHOLD = 50_000
       PERFORMANCE_HINT_PEAK_MB = 1024.0
+      DELIVERED_TEXT_ENTITY_TYPES = %w[
+        native_label native_3d_text outline_curve_or_mesh raw_geometry_edges
+        dxf_text fallback_geometry
+      ].freeze
 
       module_function
 
@@ -273,6 +277,10 @@ module BlueCollarSystems
           edges: stats[:edges].to_i,
           arcs: stats[:arcs].to_i,
           text_mode: stats[:text_mode].to_s,
+          source_text_count: explicit_stat_value(stats, :source_text_count),
+          source_text_span_ids: normalize_json(
+            Array(stats[:source_text_span_ids] || stats['source_text_span_ids'])
+          ),
           svg_renderer_missing: !!stats[:svg_renderer_missing],
           font_substitution_note: stats[:font_substitution_note],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,
@@ -292,6 +300,7 @@ module BlueCollarSystems
       end
 
       def delivery_integrity_block(stats)
+        provenance = text_provenance_evidence(stats)
         failures = Array(
           stats[:import_report_failures] || stats['import_report_failures']
         ).dup
@@ -329,6 +338,24 @@ module BlueCollarSystems
               stats['text_font_substitution_merge_failure_count']
             ).to_i
           },
+          provenance_record_failure_count: (
+            stats[:provenance_record_failure_count] ||
+            stats['provenance_record_failure_count']
+          ).to_i,
+          text_provenance_invalid_entry_count:
+            provenance[:invalid_entry_count].to_i,
+          text_provenance_invalid_reasons:
+            normalize_json(provenance[:invalid_reasons]),
+          text_provenance_span_ids: provenance[:span_ids],
+          text_provenance_span_entity_types:
+            normalize_json(provenance[:span_entity_types]),
+          text_provenance_span_resulting_entity_ids:
+            normalize_json(provenance[:span_resulting_entity_ids]),
+          source_text_span_ids: normalize_json(
+            Array(
+              stats[:source_text_span_ids] || stats['source_text_span_ids']
+            )
+          ),
           terminal_cleanup_failures: normalize_json(
             Array(
               stats[:terminal_cleanup_failures] ||
@@ -339,6 +366,22 @@ module BlueCollarSystems
             Array(
               stats[:terminal_cleanup_events] ||
               stats['terminal_cleanup_events']
+            )
+          ),
+          terminal_text_delivery_records: normalize_json(
+            Array(
+              stats[:terminal_text_delivery_records] ||
+              stats['terminal_text_delivery_records']
+            )
+          ),
+          source_text_identity_failure_count: (
+            stats[:source_text_identity_failure_count] ||
+            stats['source_text_identity_failure_count']
+          ).to_i,
+          source_text_identity_failures: normalize_json(
+            Array(
+              stats[:source_text_identity_failures] ||
+              stats['source_text_identity_failures']
             )
           ),
           import_report_failures: normalize_json(failures),
@@ -354,8 +397,18 @@ module BlueCollarSystems
         {
           failed_pages: [],
           telemetry_failure_counts: { integrity_block: 1 },
+          provenance_record_failure_count: 1,
+          text_provenance_invalid_entry_count: 1,
+          text_provenance_invalid_reasons: ['integrity_block_exception'],
+          text_provenance_span_ids: [],
+          text_provenance_span_entity_types: {},
+          text_provenance_span_resulting_entity_ids: {},
+          source_text_span_ids: [],
           terminal_cleanup_failures: [],
           terminal_cleanup_events: [],
+          terminal_text_delivery_records: [],
+          source_text_identity_failure_count: 1,
+          source_text_identity_failures: [],
           import_report_failures: [
             { stage: 'generation', reason: e.message.to_s }
           ],
@@ -653,6 +706,7 @@ module BlueCollarSystems
         has_entity_types = extra.key?(:actual_text_entity_types) || extra.key?('actual_text_entity_types')
         text_ok = text_count <= 0 || has_entity_types
         integrity = extra[:delivery_integrity] || extra['delivery_integrity'] || {}
+        terminal_delivery_evidence = terminal_text_delivery_evidence(integrity)
         failed_pages = Array(
           integrity[:failed_pages] || integrity['failed_pages']
         )
@@ -676,16 +730,49 @@ module BlueCollarSystems
           crosscheck_invalid > 0
         )
         text_mode = (extra[:text_mode] || extra['text_mode']).to_s
+        source_count_present = extra.key?(:source_text_count) ||
+                               extra.key?('source_text_count')
+        source_count = strict_nonnegative_integer(
+          extra[:source_text_count] || extra['source_text_count']
+        )
+        active_text_mode = !normalize_report_text_mode(text_mode).nil?
+        source_count_valid = source_count_present && !source_count.nil?
+        source_count_valid = true unless active_text_mode || source_count_present
+        identity_failure_count = (
+          integrity[:source_text_identity_failure_count] ||
+          integrity['source_text_identity_failure_count']
+        ).to_i
+        identity_failures = Array(
+          integrity[:source_text_identity_failures] ||
+          integrity['source_text_identity_failures']
+        )
+        expected_source_span_ids = Array(
+          integrity[:source_text_span_ids] ||
+          integrity['source_text_span_ids']
+        ).map { |identity| identity.to_s.strip }
+        source_span_ledger_required = active_text_mode || source_count_present
+        source_span_ledger_valid = if source_span_ledger_required
+                                     canonical_source_span_id_ledger?(
+                                       expected_source_span_ids, source_count
+                                     )
+                                   else
+                                     true
+                                   end
+        source_text_identity_integrity = identity_failure_count.zero? &&
+                                         identity_failures.empty? &&
+                                         source_span_ledger_valid
         entity_types = extra[:actual_text_entity_types] ||
                        extra['actual_text_entity_types'] || {}
         native_entity_count = (
           entity_types[:native_3d_text] || entity_types['native_3d_text']
         ).to_i
-        native_required = normalize_report_text_mode(text_mode) == '3d_text' ||
-                          native_entity_count > 0 || attempts.any? do |sample|
+        native_attempt_present = native_entity_count > 0 || attempts.any? do |sample|
           telemetry_field(sample, :requested_mode).to_s == 'text3d' ||
             telemetry_field(sample, :delivered_mode).to_s == 'text3d'
         end
+        native_required = native_attempt_present ||
+                          (normalize_report_text_mode(text_mode) == '3d_text' &&
+                           source_count_valid && source_count.to_i > 0)
         valid_attempts = !attempts.empty? && crosscheck_invalid.zero? &&
                          attempts.all? { |sample| valid_mesh_attempt_evidence?(sample) }
         attempt_evidence = attempt_records_present ? valid_attempts : !native_required
@@ -696,12 +783,14 @@ module BlueCollarSystems
         terminal_delivery = attempts.all? do |sample|
           delivered = telemetry_field(sample, :delivered_mode).to_s
           !delivered.empty? && delivered != 'none'
-        end
+        end && terminal_delivery_evidence[:invalid_entry_count].to_i.zero?
         cleanup_failures = Array(
           integrity[:terminal_cleanup_failures] ||
           integrity['terminal_cleanup_failures']
         )
-        cleanup_verified = cleanup_failures.empty? && attempts.all? do |sample|
+        cleanup_verified = cleanup_failures.empty? &&
+                           terminal_delivery_evidence[:invalid_entry_count].to_i.zero? &&
+                           attempts.all? do |sample|
           cleanup = telemetry_field(sample, :cleanup_outcome).to_s
           terminal_cleanup = telemetry_field(
             sample, :terminal_cleanup_outcome
@@ -753,10 +842,93 @@ module BlueCollarSystems
                                       !publication_path.empty?
         telemetry_ok = telemetry_failures.zero? && crosscheck_invalid.zero? &&
                        policy != 'telemetry_summary_error'
+        provenance_failure_count = (
+          integrity[:provenance_record_failure_count] ||
+          integrity['provenance_record_failure_count']
+        ).to_i
+        provenance_invalid_count = (
+          integrity[:text_provenance_invalid_entry_count] ||
+          integrity['text_provenance_invalid_entry_count']
+        ).to_i
+        provenance_span_ids = Array(
+          integrity[:text_provenance_span_ids] ||
+          integrity['text_provenance_span_ids']
+        ).map(&:to_s).reject(&:empty?).uniq
+        provenance_span_types =
+          integrity[:text_provenance_span_entity_types] ||
+          integrity['text_provenance_span_entity_types'] || {}
+        provenance_span_resulting_ids =
+          integrity[:text_provenance_span_resulting_entity_ids] ||
+          integrity['text_provenance_span_resulting_entity_ids'] || {}
+        terminal_raster_span_ids = terminal_delivery_evidence[:span_ids]
+        delivered_span_ids = (provenance_span_ids + terminal_raster_span_ids).uniq
+        source_delivery_accounted = if !source_count_valid
+                                      false
+                                    elsif source_count.to_i == 0
+                                      text_count <= 0 && provenance_span_ids.empty? &&
+                                        terminal_raster_span_ids.empty? &&
+                                        attempts.empty? && source_span_ledger_valid
+                                    else
+                                      source_span_ledger_valid &&
+                                        (provenance_span_ids &
+                                         terminal_raster_span_ids).empty? &&
+                                        delivered_span_ids.sort ==
+                                          expected_source_span_ids.sort
+                                    end
+        attempt_provenance_consistent = attempts.all? do |sample|
+          delivered = telemetry_field(sample, :delivered_mode).to_s
+          span_id = telemetry_field(sample, :source_span_id).to_s
+          if delivered == 'raster'
+            record = terminal_delivery_evidence[:records].find do |entry|
+              telemetry_field(entry, :source_span_id).to_s == span_id
+            end
+            attempt_ids = stable_resulting_entity_ids(
+              telemetry_field(sample, :resulting_entity_ids)
+            )
+            record_ids = record && stable_resulting_entity_ids(
+              telemetry_field(record, :resulting_entity_ids)
+            )
+            next terminal_raster_span_ids.include?(span_id) && attempt_ids &&
+                 record_ids && attempt_ids.sort == record_ids.sort
+          end
+          types = provenance_span_types[span_id] || []
+          expected = case delivered
+                     when 'text3d' then 'native_3d_text'
+                     when 'labels' then 'native_label'
+                     else nil
+                     end
+          attempt_ids = stable_resulting_entity_ids(
+            telemetry_field(sample, :resulting_entity_ids)
+          )
+          provenance_ids = stable_resulting_entity_ids(
+            Array(provenance_span_resulting_ids[span_id])
+          )
+          !expected.nil? && Array(types).map(&:to_s).include?(expected) &&
+            attempt_ids && provenance_ids &&
+            attempt_ids.sort == provenance_ids.sort
+        end
+        provenance_ok = provenance_failure_count.zero? &&
+                         provenance_invalid_count.zero? &&
+                         attempt_provenance_consistent
+        renderer_provenance_consistency = renderer_provenance_consistent?(
+          extra, {
+            counts: (extra[:delivered_text_entity_counts] ||
+                     extra['delivered_text_entity_counts'] || {})
+          }, terminal_delivery_evidence, source_count
+        )
+        actual_type_evidence = text_count <= 0 || has_entity_types
         checks = {
           build_stamp: has_stamp,
           scale_crosscheck: has_crosscheck,
           actual_text_entity_types: text_ok,
+          actual_text_type_evidence: actual_type_evidence,
+          source_text_count_valid: source_count_valid,
+          source_text_identity_integrity: source_text_identity_integrity,
+          source_text_delivery_accounted: source_delivery_accounted,
+          provenance_integrity: provenance_ok,
+          renderer_provenance_consistency: renderer_provenance_consistency,
+          terminal_delivery_record_integrity:
+            terminal_delivery_evidence[:invalid_entry_count].to_i.zero?,
           no_open_failure: open_failure.nil?,
           no_failed_pages: failed_pages.empty?,
           telemetry_integrity: telemetry_ok,
@@ -810,11 +982,29 @@ module BlueCollarSystems
         end
         if delivered == 'labels'
           return false unless terminal_mode == 'labels'
+          ids = stable_resulting_entity_ids(
+            telemetry_field(sample, :resulting_entity_ids)
+          )
+          history_ids = stable_resulting_entity_ids(
+            telemetry_field(history.last, :resulting_entity_ids)
+          )
+          return false unless ids && history_ids && ids.sort == history_ids.sort
           return true
         end
         return false unless delivered == 'text3d'
+        ids = stable_resulting_entity_ids(
+          telemetry_field(sample, :resulting_entity_ids)
+        )
+        history_ids = stable_resulting_entity_ids(
+          telemetry_field(history.last, :resulting_entity_ids)
+        )
+        return false unless ids && history_ids && ids.sort == history_ids.sort
         return false unless %w[complete fallback_text3d].include?(outcome)
-        return false if telemetry_field(sample, :visual_fidelity_verified) == false
+        return false unless telemetry_field(sample, :visual_fidelity_verified) == true
+        return false unless telemetry_field(sample, :source_height_verified) == true
+        return false unless telemetry_field(sample, :height_fallback_reason).to_s.strip.empty?
+        return false unless telemetry_field(sample, :fit_status).to_s == 'fitted'
+        return false unless telemetry_field(sample, :fit_measurement_verified) == true
 
         numeric_fields = [
           :pdf_em_height_in, :sketchup_letter_height_in,
@@ -867,33 +1057,7 @@ module BlueCollarSystems
                            extra['delivered_text_entity_counts']
         delivered_info = build_actual_text_entity_types_from_delivered_counts(delivered_counts)
         return delivered_info if delivered_info
-
-        stats_mode = extra[:text_mode] || extra['text_mode']
-        mode = stats_mode.to_s.strip.downcase
-        return nil if mode.empty? || mode == 'none'
-
-        result = report[:result] || {}
-        total = result[:text_entities].to_i
-        return nil if total <= 0
-
-        rendered = %w[labels label 3d_text text3d].include?(mode)
-        info = {
-          entity_type: mode,
-          count: total,
-          font_rendered: rendered,
-          examples: []
-        }
-        case mode
-        when 'labels', 'label'
-          info[:native_label] = total
-        when '3d_text', 'text3d'
-          info[:native_3d_text] = total
-        when 'glyphs', 'geometry', 'outlines'
-          info[:outline_curve_or_mesh] = total
-        else
-          info[:fallback_geometry] = total
-        end
-        info
+        nil
       end
 
       # Native builders append one source-provenance object for every text
@@ -901,25 +1065,325 @@ module BlueCollarSystems
       # available: the requested text-mode string cannot describe a legitimate
       # TEXTMODE-1 fallback such as 3D Text -> Labels.
       def delivered_text_entity_counts(stats)
-        counts = {}
-        Array(stats[:source_provenance_objects] || stats['source_provenance_objects']).each do |entry|
-          next unless entry.respond_to?(:[])
-          kind = (entry[:created_entity_type] || entry['created_entity_type']).to_s.strip
-          next if kind.empty?
-          counts[kind] = counts.fetch(kind, 0).to_i + 1
-        end
-        counts
+        text_provenance_evidence(stats)[:counts]
       rescue StandardError
         {}
+      end
+
+      def explicit_stat_value(stats, key)
+        return nil unless stats.respond_to?(:key?)
+        return stats[key] if stats.key?(key)
+        string_key = key.to_s
+        return stats[string_key] if stats.key?(string_key)
+        nil
+      rescue StandardError
+        nil
+      end
+
+      def strict_nonnegative_integer(value)
+        return nil if value.nil? || value == true || value == false
+        if value.is_a?(Integer)
+          return value >= 0 ? value : nil
+        end
+        if value.is_a?(Numeric)
+          number = value.to_f
+          return nil unless number.finite? && number >= 0.0 && number == number.to_i.to_f
+          return number.to_i
+        end
+        text = value.to_s.strip
+        return nil unless text =~ /\A\d+\z/
+        text.to_i
+      rescue StandardError
+        nil
+      end
+
+      def stable_resulting_entity_ids(value)
+        return nil unless value.is_a?(Array)
+        ids = value.map { |identity| identity.to_s.strip }
+        return nil if ids.empty? || ids.uniq.length != ids.length
+        pattern = /\A(?:persistent_id|entity_id):.+\z/
+        return nil unless ids.all? { |identity| identity =~ pattern }
+        ids
+      rescue StandardError
+        nil
+      end
+
+      def canonical_source_span_id_ledger?(value, source_count)
+        return false unless value.is_a?(Array)
+        return false if source_count.nil? || source_count.to_i < 0
+        ids = value.map { |identity| identity.to_s.strip }
+        return false unless ids.length == source_count.to_i
+        return false unless ids.uniq.length == ids.length
+
+        page_indexes = {}
+        ids.each do |identity|
+          match = /\Atext_span:(\d+):(\d+)\z/.match(identity)
+          return false unless match && match[1].to_i > 0
+          page = match[1].to_i
+          page_indexes[page] ||= []
+          page_indexes[page] << match[2].to_i
+        end
+        page_indexes.each_value do |indexes|
+          sorted = indexes.sort
+          expected = (0...sorted.length).to_a
+          return false unless sorted == expected
+        end
+        true
+      rescue StandardError
+        false
+      end
+
+      def terminal_text_delivery_evidence(integrity)
+        records = Array(
+          integrity[:terminal_text_delivery_records] ||
+          integrity['terminal_text_delivery_records']
+        )
+        events = Array(
+          integrity[:terminal_cleanup_events] ||
+          integrity['terminal_cleanup_events']
+        )
+        seen_span_ids = {}
+        valid_records = []
+        invalid = 0
+
+        records.each do |record|
+          unless record.is_a?(Hash)
+            invalid += 1
+            next
+          end
+          page = telemetry_field(record, :page).to_i
+          span_id = telemetry_field(record, :source_span_id).to_s.strip
+          requested = normalize_report_text_mode(
+            telemetry_field(record, :requested_mode)
+          )
+          delivered = normalize_report_text_mode(
+            telemetry_field(record, :delivered_mode)
+          )
+          scope = telemetry_field(record, :delivery_scope).to_s
+          cleanup = telemetry_field(record, :cleanup_outcome).to_s
+          reason = telemetry_field(record, :reason).to_s.strip
+          entity_ids = Array(
+            telemetry_field(record, :resulting_entity_ids)
+          ).map { |value| value.to_s.strip }.reject(&:empty?)
+          identity_pattern = /\A(?:persistent_id|entity_id):.+\z/
+          fields_ok = page > 0 &&
+                      span_id =~ /\Atext_span:#{page}:\d+\z/ &&
+                      !requested.nil? && delivered == 'raster' &&
+                      scope == 'page_raster' && cleanup == 'verified' &&
+                      !reason.empty? && !entity_ids.empty? &&
+                      entity_ids.uniq.length == entity_ids.length &&
+                      entity_ids.all? { |identity| identity =~ identity_pattern }
+          event_ok = events.any? do |event|
+            next false unless event.is_a?(Hash)
+            event_page = telemetry_field(event, :page).to_i
+            event_cleanup = telemetry_field(event, :cleanup_outcome).to_s
+            event_mode = normalize_report_text_mode(
+              telemetry_field(event, :delivered_mode)
+            )
+            event_spans = Array(
+              telemetry_field(event, :source_span_ids)
+            ).map { |value| value.to_s.strip }.reject(&:empty?)
+            event_ids = Array(
+              telemetry_field(event, :resulting_entity_ids)
+            ).map { |value| value.to_s.strip }.reject(&:empty?)
+            event_page == page && event_cleanup == 'verified' &&
+              event_mode == 'raster' && event_spans.include?(span_id) &&
+              entity_ids.all? { |identity| event_ids.include?(identity) }
+          end
+          if !fields_ok || !event_ok || seen_span_ids.key?(span_id)
+            invalid += 1
+            next
+          end
+          seen_span_ids[span_id] = true
+          valid_records << record
+        end
+
+        {
+          records: valid_records,
+          span_ids: seen_span_ids.keys,
+          invalid_entry_count: invalid
+        }
+      rescue StandardError
+        { records: [], span_ids: [], invalid_entry_count: 1 }
+      end
+
+      def renderer_provenance_consistent?(extra, provenance,
+                                          terminal_delivery,
+                                          source_count)
+        renderers = Array(extra[:text_renderers] || extra['text_renderers'])
+        declared = {
+          'native_3d_text' => 0,
+          'native_label' => 0,
+          'raster' => 0
+        }
+        relevant = 0
+        renderers.each do |entry|
+          next unless entry.is_a?(Hash)
+          has_requested = entry.key?(:requested_mode) ||
+                          entry.key?('requested_mode')
+          has_delivered = entry.key?(:delivered_mode) ||
+                          entry.key?('delivered_mode')
+          has_count = entry.key?(:count) || entry.key?('count')
+          next unless has_requested || has_delivered || has_count
+          return false unless has_requested && has_delivered && has_count
+
+          count = strict_nonnegative_integer(telemetry_field(entry, :count))
+          requested = normalize_report_text_mode(
+            telemetry_field(entry, :requested_mode)
+          )
+          delivered = normalize_report_text_mode(
+            telemetry_field(entry, :delivered_mode)
+          )
+          return false if count.nil? || count <= 0 || requested.nil? ||
+                          delivered.nil?
+          case delivered
+          when '3d_text'
+            declared['native_3d_text'] += count
+          when 'labels'
+            declared['native_label'] += count
+          when 'raster'
+            declared['raster'] += count
+          else
+            # Geometry/Glyphs final-delivery evidence is intentionally not
+            # synthesized from requested mode or dormant renderer paths.
+            return false
+          end
+          relevant += 1
+        end
+
+        return false if source_count.to_i > 0 && relevant.zero?
+        counts = provenance[:counts] || {}
+        return false unless declared['native_3d_text'] ==
+                            counts.fetch('native_3d_text', 0).to_i
+        return false unless declared['native_label'] ==
+                            counts.fetch('native_label', 0).to_i
+        other_provenance = counts.inject(0) do |sum, pair|
+          kind, value = pair
+          if %w[native_3d_text native_label].include?(kind.to_s)
+            sum
+          else
+            sum + value.to_i
+          end
+        end
+        return false unless other_provenance.zero?
+        declared['raster'] == terminal_delivery[:records].length
+      rescue StandardError
+        false
+      end
+
+      def text_provenance_evidence(stats)
+        counts = {}
+        span_ids = []
+        span_entity_types = {}
+        span_resulting_entity_ids = {}
+        span_records = {}
+        seen_object_ids = {}
+        seen_resulting_entity_ids = {}
+        invalid_reasons = []
+        invalid = 0
+        objects = Array(
+          stats[:source_provenance_objects] || stats['source_provenance_objects']
+        )
+        objects.each do |entry|
+          unless entry.is_a?(Hash)
+            invalid += 1
+            invalid_reasons << 'entry_not_hash'
+            next
+          end
+          source_kind = (entry[:source_kind] || entry['source_kind']).to_s.strip
+          entity_type = (
+            entry[:created_entity_type] || entry['created_entity_type']
+          ).to_s.strip
+          relevant = source_kind == 'text_span' ||
+                     DELIVERED_TEXT_ENTITY_TYPES.include?(entity_type)
+          next unless relevant
+
+          span_id = (entry[:span_id] || entry['span_id']).to_s.strip
+          unless source_kind == 'text_span' && !span_id.empty? &&
+                 DELIVERED_TEXT_ENTITY_TYPES.include?(entity_type)
+            invalid += 1
+            invalid_reasons << 'invalid_text_provenance_fields'
+            next
+          end
+
+          resulting_entity_ids = stable_resulting_entity_ids(
+            entry[:resulting_entity_ids] || entry['resulting_entity_ids']
+          )
+          unless resulting_entity_ids
+            invalid += 1
+            invalid_reasons << "invalid_resulting_entity_ids:#{span_id}"
+            next
+          end
+          duplicate_identity = resulting_entity_ids.find do |identity|
+            seen_resulting_entity_ids.key?(identity)
+          end
+          if duplicate_identity
+            invalid += 1
+            invalid_reasons << "duplicate_resulting_entity_id:#{duplicate_identity}"
+            next
+          end
+
+          object_id = (entry[:object_id] || entry['object_id']).to_s.strip
+          existing = span_records[span_id] || []
+          if existing.any? { |record| record[:entity_type].to_s != entity_type }
+            invalid += 1
+            invalid_reasons << "conflicting_entity_type:#{span_id}"
+            next
+          end
+          if !object_id.empty? && seen_object_ids.key?(object_id)
+            invalid += 1
+            invalid_reasons << "duplicate_object_id:#{object_id}"
+            next
+          end
+          if !existing.empty? && (
+               object_id.empty? ||
+               existing.any? { |record| record[:object_id].to_s.empty? }
+             )
+            invalid += 1
+            invalid_reasons << "duplicate_span_without_fragment_identity:#{span_id}"
+            next
+          end
+
+          seen_object_ids[object_id] = true unless object_id.empty?
+          resulting_entity_ids.each do |identity|
+            seen_resulting_entity_ids[identity] = true
+          end
+          span_records[span_id] ||= []
+          span_records[span_id] << {
+            entity_type: entity_type,
+            object_id: object_id,
+            resulting_entity_ids: resulting_entity_ids
+          }
+          counts[entity_type] = counts.fetch(entity_type, 0).to_i + 1
+          span_ids << span_id unless span_ids.include?(span_id)
+          span_entity_types[span_id] ||= []
+          unless span_entity_types[span_id].include?(entity_type)
+            span_entity_types[span_id] << entity_type
+          end
+          span_resulting_entity_ids[span_id] ||= []
+          span_resulting_entity_ids[span_id].concat(resulting_entity_ids)
+        end
+        {
+          counts: counts,
+          span_ids: span_ids,
+          span_entity_types: span_entity_types,
+          span_resulting_entity_ids: span_resulting_entity_ids,
+          invalid_entry_count: invalid,
+          invalid_reasons: invalid_reasons
+        }
+      rescue StandardError
+        {
+          counts: {}, span_ids: [], span_entity_types: {},
+          span_resulting_entity_ids: {},
+          invalid_entry_count: 1,
+          invalid_reasons: ['provenance_evidence_exception']
+        }
       end
 
       def build_actual_text_entity_types_from_delivered_counts(raw_counts)
         return nil unless raw_counts.respond_to?(:each)
 
-        supported = %w[
-          native_label native_3d_text outline_curve_or_mesh raw_geometry_edges
-          dxf_text fallback_geometry
-        ]
+        supported = DELIVERED_TEXT_ENTITY_TYPES
         counts = {}
         raw_counts.each do |kind, value|
           key = kind.to_s.strip

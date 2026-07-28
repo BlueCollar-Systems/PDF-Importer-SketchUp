@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        ruby: ['2.2', '2.7', '3.2']
+        ruby: ['2.7', '3.2']
     steps:
       - uses: actions/checkout@v7
       - name: SketchUp 2017 Ruby compatibility guard
@@ -27,6 +27,17 @@ jobs:
           find extracted/sketchup_ext -name '*.rb' | while read f; do
             ruby -c "$f" || exit 1
           done
+
+  ruby-224-host-parse-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Exact SketchUp 2017 Ruby 2.2.4p230 parse gate
+        run: >-
+          docker run --rm --platform linux/amd64
+          -v "${PWD}:/work" -w /work
+          ruby:2.2.4@sha256:c8ed9ed708728b89e0744f70eed170c42ab2e52fa6443baf7488c381c65c6643
+          ruby --disable-gems tools/ruby22_real_parse_gate.rb
 
   version-check:
     runs-on: ubuntu-latest
@@ -51,24 +62,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ruby-version: ["2.2", "2.7", "3.0", "3.2"]
+        ruby-version: ["2.2.4", "2.7", "3.0", "3.2"]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Set up Ruby ${{ matrix.ruby-version }}
-        if: matrix.ruby-version != '2.2'
+        if: matrix.ruby-version != '2.2.4'
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby-version }}
           bundler-cache: false
 
       - name: Ruby 2.2 syntax + smoke (SketchUp Make 2017 compatibility)
-        if: matrix.ruby-version == '2.2'
+        if: matrix.ruby-version == '2.2.4'
         run: |
           set -e
-          docker run --rm -v "${PWD}:/work" -w /work ruby:2.2 bash -lc '
+          docker run --rm --platform linux/amd64 -v "${PWD}:/work" -w /work ruby:2.2.4@sha256:c8ed9ed708728b89e0744f70eed170c42ab2e52fa6443baf7488c381c65c6643 bash -lc '
             set -e
+            ruby --disable-gems tools/ruby22_real_parse_gate.rb
             find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
             ruby test/smoke_test.rb
             ruby test/ruby22_compat_test.rb
@@ -79,13 +91,13 @@ jobs:
           '
 
       - name: Ruby syntax check
-        if: matrix.ruby-version != '2.2'
+        if: matrix.ruby-version != '2.2.4'
         run: |
           set -e
           find extracted test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
 
       - name: Run smoke test
-        if: matrix.ruby-version != '2.2'
+        if: matrix.ruby-version != '2.2.4'
         run: |
           ruby test/smoke_test.rb
           ruby test/ruby22_compat_test.rb

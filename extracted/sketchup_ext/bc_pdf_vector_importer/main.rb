@@ -247,23 +247,34 @@ module BlueCollarSystems
     end
 
     def self.entity_list_difference(after_entities, before_entities)
-      Array(after_entities).select do |entity|
-        !Array(before_entities).any? { |existing| existing.equal?(entity) }
+      after_map = stable_entity_identity_map(after_entities)
+      before_map = stable_entity_identity_map(before_entities)
+      return nil unless after_map && before_map
+
+      before_ids = before_map[:ids]
+      after_map[:entities].select do |entity|
+        !before_ids.include?(stable_entity_identity(entity))
       end
     rescue StandardError
-      []
+      nil
     end
 
     def self.entity_list_union(*lists)
       result = []
+      seen = {}
       lists.each do |list|
-        Array(list).compact.each do |entity|
-          result << entity unless result.any? { |existing| existing.equal?(entity) }
+        map = stable_entity_identity_map(list)
+        return nil unless map
+        map[:entities].each do |entity|
+          identity = stable_entity_identity(entity)
+          next if seen.key?(identity)
+          seen[identity] = true
+          result << entity
         end
       end
       result
     rescue StandardError
-      []
+      nil
     end
 
     def self.stable_entity_identity(entity)
@@ -281,11 +292,52 @@ module BlueCollarSystems
     end
 
     def self.stable_entity_identities(entities)
-      Array(entities).map do |entity|
-        stable_entity_identity(entity)
-      end.compact.uniq
+      map = stable_entity_identity_map(entities)
+      map ? map[:ids] : nil
     rescue StandardError
-      []
+      nil
+    end
+
+    def self.stable_entity_identity_map(entities)
+      return nil unless entities.is_a?(Array)
+      ids = []
+      values = []
+      seen = {}
+      entities.each do |entity|
+        return nil if entity.nil?
+        identity = stable_entity_identity(entity)
+        return nil if identity.nil? || seen.key?(identity)
+        seen[identity] = true
+        ids << identity
+        values << entity
+      end
+      { ids: ids, entities: values }
+    rescue StandardError
+      nil
+    end
+
+    def self.stable_entities_present?(entities, snapshot)
+      candidates = stable_entity_identity_map(entities)
+      current = stable_entity_identity_map(snapshot)
+      return false unless candidates && current
+      candidates[:ids].all? { |identity| current[:ids].include?(identity) }
+    rescue StandardError
+      false
+    end
+
+    def self.stable_entities_absent?(entities, snapshot)
+      candidates = stable_entity_identity_map(entities)
+      current = stable_entity_identity_map(snapshot)
+      return false unless candidates && current
+      candidates[:ids].none? { |identity| current[:ids].include?(identity) }
+    rescue StandardError
+      false
+    end
+
+    def self.loose_page_entity_provenance_verified?(entities, snapshot)
+      stable_entities_present?(entities, snapshot)
+    rescue StandardError
+      false
     end
 
     def self.page_group_hidden_state(page_group)
@@ -311,10 +363,7 @@ module BlueCollarSystems
       return false unless entities && entities.respond_to?(:erase_entities)
       entities.erase_entities(*doomed)
       remaining = active_entity_snapshot(model)
-      return false if remaining.nil?
-      doomed.none? do |entity|
-        remaining.any? { |candidate| candidate.equal?(entity) }
-      end
+      stable_entities_absent?(doomed, remaining)
     rescue StandardError => e
       Logger.warn('Pipeline', "terminal raster rollback failed: #{e.message}")
       false
@@ -374,6 +423,12 @@ module BlueCollarSystems
                                                         page_vector_entities = nil)
       count = text_delivery_failure_count(failures)
       return false if count <= 0
+      source_span_ids = page_text_source_span_ids(stats, page_num)
+      if source_span_ids.nil? || source_span_ids.empty?
+        return record_terminal_cleanup_failure!(
+          stats, page_num, 'page_text_source_identity_unavailable'
+        )
+      end
 
       representation_blocked = Array(failures).any? do |failure|
         failure.respond_to?(:[]) &&
@@ -386,6 +441,11 @@ module BlueCollarSystems
         )
       end
 
+      if page_group.nil? && page_vector_entities.nil?
+        return record_terminal_cleanup_failure!(
+          stats, page_num, 'loose_vector_provenance_unavailable'
+        )
+      end
       vector_entities = Array(page_vector_entities).compact
       if page_group && !page_group.respond_to?(:hidden=)
         Logger.warn('Pipeline', "Page #{page_num}: page group cannot be hidden for terminal raster fallback.")
@@ -407,6 +467,12 @@ module BlueCollarSystems
       if before_raster.nil?
         return record_terminal_cleanup_failure!(
           stats, page_num, 'raster_entity_snapshot_unavailable'
+        )
+      end
+      if page_group.nil? &&
+         !loose_page_entity_provenance_verified?(vector_entities, before_raster)
+        return record_terminal_cleanup_failure!(
+          stats, page_num, 'loose_vector_identity_unverifiable'
         )
       end
       if page_group.nil? && !vector_entities.empty? &&
@@ -434,10 +500,28 @@ module BlueCollarSystems
         false
       end
       after_raster = active_entity_snapshot(model)
+      raster_delta = entity_list_difference(after_raster, before_raster)
+      if raster_delta.nil?
+        rollback_verified = !raster_collector.empty? &&
+          rollback_created_raster_entities(model, raster_collector)
+        record_terminal_cleanup_failure!(
+          stats, page_num, 'raster_entity_difference_unverifiable',
+          raster_rollback_verified: rollback_verified
+        )
+        raise TerminalRasterAtomicityError,
+              "Page #{page_num}: raster entity ownership could not be verified"
+      end
       raster_entities = entity_list_union(
         raster_collector,
-        entity_list_difference(after_raster, before_raster)
+        raster_delta
       )
+      if raster_entities.nil?
+        record_terminal_cleanup_failure!(
+          stats, page_num, 'raster_entity_identity_unverifiable'
+        )
+        raise TerminalRasterAtomicityError,
+              "Page #{page_num}: raster entity identities could not be verified"
+      end
       unless raster_ok
         if raster_entities.empty?
           details = {}
@@ -476,6 +560,21 @@ module BlueCollarSystems
         end
         return false
       end
+      if page_group.nil? &&
+         !loose_page_entity_provenance_verified?(vector_entities, after_raster)
+        raster_rolled_back = rollback_created_raster_entities(
+          model, raster_entities
+        )
+        record_terminal_cleanup_failure!(
+          stats, page_num, 'loose_vector_provenance_changed',
+          raster_rollback_verified: raster_rolled_back
+        )
+        unless raster_rolled_back
+          raise TerminalRasterAtomicityError,
+                "Page #{page_num}: loose vector provenance changed and raster rollback could not be verified"
+        end
+        return false
+      end
 
       cleanup_reason = nil
       begin
@@ -486,10 +585,8 @@ module BlueCollarSystems
         elsif !vector_entities.empty?
           model.active_entities.erase_entities(*vector_entities)
           remaining = active_entity_snapshot(model)
-          cleanup_reason = 'loose_vector_erase_unverified' if remaining.nil? ||
-            vector_entities.any? do |entity|
-              remaining.any? { |candidate| candidate.equal?(entity) }
-            end
+          cleanup_reason = 'loose_vector_erase_unverified' unless
+            stable_entities_absent?(vector_entities, remaining)
         end
       rescue StandardError => e
         Logger.warn('Pipeline', "Page #{page_num}: remove vector page before raster fallback failed: #{e.message}")
@@ -504,11 +601,9 @@ module BlueCollarSystems
                        false
                      end
                    else
-                     remaining = active_entity_snapshot(model)
-                     !remaining.nil? && vector_entities.all? do |entity|
-                       remaining.any? { |candidate| candidate.equal?(entity) }
-                     end
-                   end
+                      remaining = active_entity_snapshot(model)
+                      stable_entities_present?(vector_entities, remaining)
+                    end
         raster_rolled_back = rollback_created_raster_entities(
           model, raster_entities
         )
@@ -533,19 +628,41 @@ module BlueCollarSystems
         delivered_mode: :raster,
         degraded: true,
         reason: reason,
-        count: count,
+        count: (source_span_ids.empty? ? count : source_span_ids.length),
+        source_span_ids: source_span_ids,
         note: "Text-mode terminal raster fallback: #{reason}")
       entity_ids = stable_entity_identities(raster_entities)
+      if entity_ids.nil? || entity_ids.empty?
+        record_terminal_cleanup_failure!(
+          stats, page_num, 'raster_entity_identity_unverifiable'
+        )
+        raise TerminalRasterAtomicityError,
+              "Page #{page_num}: terminal raster has no verifiable stable identity"
+      end
       supersede_mesh_text_page_with_raster!(
-        stats, page_num, reason, entity_ids, :verified
+        stats, page_num, reason, entity_ids, :verified, source_span_ids
       )
       stats[:terminal_cleanup_events] ||= []
       stats[:terminal_cleanup_events] << {
         page: page_num,
         cleanup_outcome: :verified,
         delivered_mode: :raster,
+        source_span_ids: source_span_ids,
         resulting_entity_ids: entity_ids
       }
+      stats[:terminal_text_delivery_records] ||= []
+      source_span_ids.each do |source_span_id|
+        stats[:terminal_text_delivery_records] << {
+          page: page_num,
+          source_span_id: source_span_id,
+          requested_mode: requested_mode,
+          delivered_mode: :raster,
+          delivery_scope: :page_raster,
+          cleanup_outcome: :verified,
+          reason: reason,
+          resulting_entity_ids: entity_ids
+        }
+      end
       stats[:raster_fallback_used] = true
       Logger.warn(
         'Pipeline',
@@ -572,12 +689,36 @@ module BlueCollarSystems
     end
 
     def self.page_entities_created_since(model, before_entities)
-      return [] unless model && model.respond_to?(:active_entities)
-      entities = model.active_entities
-      return [] unless entities && entities.respond_to?(:to_a)
-      Array(entities.to_a) - Array(before_entities)
+      return nil unless before_entities.is_a?(Array)
+      after_entities = active_entity_snapshot(model)
+      return nil if after_entities.nil?
+      entity_list_difference(after_entities, before_entities)
     rescue StandardError
-      []
+      nil
+    end
+
+    def self.page_text_source_span_ids(stats, page_num)
+      ledger = stats[:source_text_span_ids] || stats['source_text_span_ids']
+      return nil unless ledger.is_a?(Array)
+      page = page_num.to_i
+      return nil if page <= 0
+
+      matches = []
+      ledger.each do |value|
+        identity = value.to_s.strip
+        match = /\Atext_span:(\d+):(\d+)\z/.match(identity)
+        return nil unless match && match[1].to_i > 0
+        matches << [match[2].to_i, identity] if match[1].to_i == page
+      end
+      matches.sort_by! { |pair| pair[0] }
+      matches.each_with_index do |pair, expected_index|
+        return nil unless pair[0] == expected_index
+      end
+      ids = matches.map { |pair| pair[1] }
+      return nil unless ids.uniq.length == ids.length
+      ids
+    rescue StandardError
+      nil
     end
 
     # Round 20: accumulate faithful mesh-text target heights (inches) for
@@ -659,6 +800,9 @@ module BlueCollarSystems
       stats[:mesh_text_telemetry_initialization_failure_count] =
         stats[:mesh_text_telemetry_initialization_failure_count].to_i +
         payload[:mesh_text_telemetry_initialization_failure_count].to_i
+      stats[:provenance_record_failure_count] =
+        stats[:provenance_record_failure_count].to_i +
+        payload[:provenance_record_failure_count].to_i
       stats
     rescue StandardError => e
       stats[:mesh_text_telemetry_outer_merge_failure_count] =
@@ -670,7 +814,8 @@ module BlueCollarSystems
     def self.supersede_mesh_text_page_with_raster!(stats, page_num,
                                                    terminal_reason = nil,
                                                    resulting_entity_ids = [],
-                                                   cleanup_outcome = :verified)
+                                                   cleanup_outcome = :verified,
+                                                   source_span_ids = [])
       Array(stats[:mesh_text_telemetry]).each do |sample|
         next unless sample.is_a?(Hash)
         page = sample[:page] || sample['page']
@@ -685,6 +830,7 @@ module BlueCollarSystems
           sample[:labels_failure_reason] ||= terminal_reason.to_s
         end
         sample[:terminal_cleanup_outcome] = cleanup_outcome
+        sample[:terminal_source_span_ids] = Array(source_span_ids)
         sample[:resulting_entity_ids] = Array(resulting_entity_ids)
         sample[:delivered_mode] = :raster
         sample[:final_delivered_font] = nil
@@ -695,6 +841,7 @@ module BlueCollarSystems
           reason: terminal_reason.to_s,
           cleanup_outcome: cleanup_outcome,
           delivered_mode: :raster,
+          source_span_ids: Array(source_span_ids),
           resulting_entity_ids: Array(resulting_entity_ids)
         }
       end
@@ -1423,6 +1570,12 @@ module BlueCollarSystems
                  recognition_skipped_pages: [],
                  import_session_id: new_import_session_id,
                  source_provenance_objects: [],
+                 source_text_count: 0,
+                 source_text_span_ids: [],
+                 source_text_identity_failure_count: 0,
+                 source_text_identity_failures: [],
+                 terminal_text_delivery_records: [],
+                 provenance_record_failure_count: 0,
                  mesh_text_telemetry: [],
                  mesh_text_telemetry_initialization_failure_count: 0,
                  mesh_text_telemetry_record_failure_count: 0,
@@ -1654,7 +1807,15 @@ module BlueCollarSystems
           # (PartsBootstrap input) and GeometryBuilder consume the SAME item
           # objects below. This is what makes parts_bootstrap row span_ids and
           # source_provenance span_id join.
-          TextSourceIdentity.assign!(text_items, page_num)
+          identity_result = TextSourceIdentity.assign_and_validate(
+            text_items, page_num
+          )
+          identity_ok = TextSourceIdentity.apply_result_to_stats!(
+            stats, identity_result
+          )
+          unless identity_ok
+            raise "Page #{page_num}: final text source identity validation failed"
+          end
           Logger.info("Pipeline", "Page #{page_num}: text extractor=#{text_source}, items=#{text_items ? text_items.length : 0}")
           stats[:page_text_sources][page_num] = text_source if text_source
           stats[:page_text_map][page_num] = text_items if text_items && !text_items.empty?
@@ -1803,12 +1964,7 @@ module BlueCollarSystems
           edges: stats[:edges], faces: stats[:faces], arcs: stats[:arcs], text: stats[:text]
         }
         page_provenance_before_builder = Array(stats[:source_provenance_objects]).length
-        page_entities_before_builder = begin
-          model && model.active_entities && model.active_entities.respond_to?(:to_a) ?
-            Array(model.active_entities.to_a) : []
-        rescue StandardError
-          []
-        end
+        page_entities_before_builder = active_entity_snapshot(model)
 
         builder = GeometryBuilder.new(model, paths, builder_text_items, media_box,
           scale_factor: opts[:scale], bezier_segments: opts[:bezier_segments],

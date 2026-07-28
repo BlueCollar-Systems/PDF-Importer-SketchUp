@@ -85,10 +85,26 @@ Z_AXIS = Geom::Vector3d.new(0, 0, 1)
 
 class DummyTextEntity
   attr_accessor :layer, :display_leader, :vector
+  attr_reader :persistent_id
+
+  @@next_persistent_id = 50_000
+
+  def initialize
+    @@next_persistent_id += 1
+    @persistent_id = @@next_persistent_id
+  end
 end
 
 class DummyMeshEntity
   attr_accessor :layer
+  attr_reader :persistent_id
+
+  @@next_persistent_id = 60_000
+
+  def initialize
+    @@next_persistent_id += 1
+    @persistent_id = @@next_persistent_id
+  end
 end
 
 class DummyEntities

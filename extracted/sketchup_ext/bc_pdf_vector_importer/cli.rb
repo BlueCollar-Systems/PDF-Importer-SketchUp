@@ -244,6 +244,10 @@ module BlueCollarSystems
           page_text_map: {},
           model_3d_texts: [],
           text_mode: opts[:text_mode],
+          source_text_count: 0,
+          source_text_span_ids: [],
+          source_text_identity_failure_count: 0,
+          source_text_identity_failures: [],
           elapsed_seconds: 0.0
         }
         payload = {
@@ -274,7 +278,10 @@ module BlueCollarSystems
           # Corrective 2026-07-12 §1 (RB-01): deterministic source-span identity
           # is assigned ONCE per page on the final extracted array, BEFORE
           # stats[:page_text_map] (PartsBootstrap input) is built below.
-          TextSourceIdentity.assign!(text_items, page_num)
+          identity_result = TextSourceIdentity.assign_and_validate(
+            text_items, page_num
+          )
+          TextSourceIdentity.apply_result_to_stats!(stats, identity_result)
           images = opts[:extract_embedded_images] == false ? [] : image_extractor.extract_page(page_num)
           page_data = PrimitiveExtractor.extract(
             paths,

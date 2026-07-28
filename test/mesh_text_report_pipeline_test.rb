@@ -37,6 +37,9 @@ class MeshTextReportPipelineTest < Minitest::Test
       installed_font_families: ['Arial'],
       page_number: 1
     )
+    builder.define_singleton_method(:mesh_text_residual_x_scale) do |*_args|
+      [1.0, :fitted, 'bbox_exact_match', true]
+    end
     builder.build
   end
 

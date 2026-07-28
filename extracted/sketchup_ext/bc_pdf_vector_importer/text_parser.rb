@@ -23,7 +23,7 @@ module BlueCollarSystems
         :bbox_y1,     # Optional PDF bbox max Y (top, media space)
         :layer_name,  # OCG layer name when marked content is active
         # Deterministic source-span identity "text_span:<page>:<index>",
-        # assigned ONCE per page by TextSourceIdentity.assign! after final
+      # assigned ONCE per page by TextSourceIdentity.assign_and_validate after final
         # extractor selection/merging/angle hints (corrective 2026-07-12 §1).
         # MUST stay at this legacy ordinal so positional constructors stay valid.
         :source_span_id,

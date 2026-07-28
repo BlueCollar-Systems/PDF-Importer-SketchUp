@@ -19,6 +19,37 @@ class AtomicRasterEntity
   end
 end
 
+class ExplodingPersistentIdEntity
+  def persistent_id
+    raise 'forced stable identity failure'
+  end
+end
+
+class RewrappedAtomicEntities
+  attr_reader :erased_ids
+
+  def initialize(ids)
+    @ids = ids.dup
+    @erased_ids = []
+  end
+
+  def to_a
+    @ids.map { |id| AtomicRasterEntity.new(id) }
+  end
+
+  def add(entity)
+    @ids << entity.persistent_id
+    entity
+  end
+
+  def erase_entities(*entities)
+    ids = entities.flatten.map(&:persistent_id)
+    @erased_ids.concat(ids)
+    @ids.delete_if { |id| ids.include?(id) }
+    true
+  end
+end
+
 class AtomicRasterEntities
   attr_reader :erased
 
@@ -99,8 +130,29 @@ class SnapshotOnlyAtomicEntities
   end
 end
 
+class FirstSnapshotFailureAtomicEntities < AtomicRasterEntities
+  def initialize(items = [])
+    super(items)
+    @snapshot_calls = 0
+  end
+
+  def to_a
+    @snapshot_calls += 1
+    raise 'forced initial active-entity snapshot failure' if @snapshot_calls == 1
+    super
+  end
+end
+
 class TextModeOneInvariantTest < Minitest::Test
   IMP = BlueCollarSystems::PDFVectorImporter
+
+  def terminal_stats(extra = {})
+    {
+      text_renderers: [],
+      mesh_text_telemetry: [],
+      source_text_span_ids: ['text_span:1:0']
+    }.merge(extra)
+  end
 
   def report_for(renderers)
     IMP::QAReport.build_from_stats('x.pdf', {}, {
@@ -166,6 +218,7 @@ class TextModeOneInvariantTest < Minitest::Test
 
     page_group = AtomicPageGroup.new
     stats = {
+      source_text_span_ids: ['text_span:1:0'],
       text_renderers: [
         {
           page: 1,
@@ -180,7 +233,7 @@ class TextModeOneInvariantTest < Minitest::Test
       ],
       mesh_text_telemetry: [
         {
-          page: 1, source_span_id: 'span-raster', requested_mode: :text3d,
+          page: 1, source_span_id: 'text_span:1:0', requested_mode: :text3d,
           delivered_mode: :none, outcome: :failed_cleanup,
           failure_phase: :cleanup, cleanup_outcome: :failed,
           failure_reason: 'text3d_mesh_unavailable',
@@ -249,7 +302,7 @@ class TextModeOneInvariantTest < Minitest::Test
 
   def test_terminal_raster_erases_page_vectors_when_grouping_is_disabled
     raster_calls = []
-    vector_entity = Object.new
+    vector_entity = AtomicRasterEntity.new(600)
     raster_entity = AtomicRasterEntity.new(601)
     entities = AtomicRasterEntities.new([vector_entity])
     model = Struct.new(:active_entities).new(entities)
@@ -259,7 +312,7 @@ class TextModeOneInvariantTest < Minitest::Test
       args[0].active_entities.add(raster_entity)
       true
     end
-    stats = { text_renderers: [] }
+    stats = terminal_stats
     failures = [{ requested: :labels, reason: 'text_native_api_unavailable', count: 1 }]
     begin
       promoted = IMP.promote_text_delivery_failures_to_raster!(
@@ -274,13 +327,152 @@ class TextModeOneInvariantTest < Minitest::Test
     end
   end
 
+  def test_terminal_raster_refuses_missing_canonical_source_id_ledger
+    entities = AtomicRasterEntities.new
+    model = Struct.new(:active_entities).new(entities)
+    stats = { text_renderers: [], mesh_text_telemetry: [] }
+    failures = [
+      { requested: :labels, reason: 'native_text_failed', count: 1 }
+    ]
+    original = IMP.method(:import_page_as_raster)
+    IMP.define_singleton_method(:import_page_as_raster) do |*_args|
+      raise 'raster must not run without canonical source IDs'
+    end
+
+    begin
+      promoted = IMP.promote_text_delivery_failures_to_raster!(
+        model, 'x.pdf', 1, [0, 0, 612, 792], {}, Time.now, 0.0,
+        [0, 0, 612, 792], AtomicPageGroup.new, :labels, stats, failures
+      )
+      assert_equal false, promoted
+      assert_equal 'page_text_source_identity_unavailable',
+                   stats[:terminal_cleanup_failures].first[:reason]
+    ensure
+      IMP.define_singleton_method(:import_page_as_raster, original)
+    end
+  end
+
+  def test_unknown_loose_page_snapshot_never_erases_preexisting_entities
+    preexisting = AtomicRasterEntity.new(590)
+    page_vector = AtomicRasterEntity.new(591)
+    raster_entity = AtomicRasterEntity.new(592)
+    entities = FirstSnapshotFailureAtomicEntities.new([preexisting])
+    model = Struct.new(:active_entities).new(entities)
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 0, source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
+      text_mode: :text3d, layers: [], text_renderers: [],
+      mesh_text_telemetry: [],
+      import_report_publication_status: :published,
+      import_report_path: 'snapshot_failure_import_report.json'
+    }
+    failures = [
+      {
+        requested: :text3d,
+        reason: 'text3d_visual_fidelity_unverified',
+        count: 1
+      }
+    ]
+    raster_calls = []
+    original = IMP.method(:import_page_as_raster)
+    IMP.define_singleton_method(:import_page_as_raster) do |*args|
+      raster_calls << args
+      args[0].active_entities.add(raster_entity)
+      true
+    end
+
+    begin
+      before = IMP.active_entity_snapshot(model)
+      assert_nil before, 'snapshot exceptions must retain an unknown sentinel'
+      entities.add(page_vector)
+      page_entities = IMP.page_entities_created_since(model, before)
+      assert_nil page_entities,
+                 'an unknown before-snapshot must never classify all active entities as page-owned'
+
+      promoted = IMP.promote_text_delivery_failures_to_raster!(
+        model, 'x.pdf', 1, [0, 0, 612, 792], {}, Time.now, 0.0,
+        [0, 0, 612, 792], nil, :text3d, stats, failures, page_entities
+      )
+
+      assert_equal false, promoted
+      assert_empty raster_calls, 'raster promotion must stop before mutating an unproven loose page'
+      assert_includes entities.to_a, preexisting
+      assert_includes entities.to_a, page_vector
+      assert_empty entities.erased
+      assert_equal 'loose_vector_provenance_unavailable',
+                   stats[:terminal_cleanup_failures].first[:reason]
+      assert_equal [1], stats[:failed_pages].map { |failure| failure[:page] }
+
+      report = IMP::QAReport.build_from_stats('x.pdf', {}, stats)
+      assert_equal false, report[:extra][:import_contract_ready][:ready]
+      assert_equal false,
+                   report[:extra][:import_contract_ready][:checks][:no_failed_pages]
+    ensure
+      IMP.define_singleton_method(:import_page_as_raster, original)
+    end
+  end
+
+  def test_page_entity_delta_uses_stable_ids_across_rewrapped_entities
+    before = [AtomicRasterEntity.new(1)]
+    after = [AtomicRasterEntity.new(1), AtomicRasterEntity.new(2)]
+
+    delta = IMP.entity_list_difference(after, before)
+
+    refute_nil delta
+    assert_equal [2], delta.map(&:persistent_id),
+                 'a rewrapped preexisting entity must never become page-owned'
+  end
+
+  def test_page_entity_delta_keeps_comparison_failure_unknown
+    delta = IMP.entity_list_difference(
+      [ExplodingPersistentIdEntity.new], [AtomicRasterEntity.new(1)]
+    )
+
+    assert_nil delta,
+               'stable identity failure must stay unknown instead of becoming known-empty'
+  end
+
+  def test_rewrapped_loose_page_cleanup_erases_only_the_new_stable_id
+    entities = RewrappedAtomicEntities.new([1])
+    model = Struct.new(:active_entities).new(entities)
+    before = IMP.active_entity_snapshot(model)
+    entities.add(AtomicRasterEntity.new(2))
+    page_entities = IMP.page_entities_created_since(model, before)
+    raster_entity = AtomicRasterEntity.new(3)
+    original = IMP.method(:import_page_as_raster)
+    IMP.define_singleton_method(:import_page_as_raster) do |*args|
+      args[0].active_entities.add(raster_entity)
+      true
+    end
+    item = Struct.new(:source_span_id).new('text_span:1:0')
+    stats = {
+      text_renderers: [], mesh_text_telemetry: [],
+      source_text_span_ids: ['text_span:1:0']
+    }
+    failures = [
+      { requested: :labels, reason: 'text_native_api_unavailable', count: 1 }
+    ]
+
+    begin
+      promoted = IMP.promote_text_delivery_failures_to_raster!(
+        model, 'x.pdf', 1, [0, 0, 612, 792], {}, Time.now, 0.0,
+        [0, 0, 612, 792], nil, :labels, stats, failures, page_entities
+      )
+      assert_equal true, promoted
+      assert_equal [2], entities.erased_ids
+      assert_equal [1, 3], entities.to_a.map(&:persistent_id).sort
+    ensure
+      IMP.define_singleton_method(:import_page_as_raster, original)
+    end
+  end
+
   def test_terminal_raster_rolls_back_when_page_group_hide_fails
     [:raise_after_set, :noop].each_with_index do |mode, index|
       raster_entity = AtomicRasterEntity.new(701 + index)
       entities = AtomicRasterEntities.new
       model = Struct.new(:active_entities).new(entities)
       page_group = AtomicPageGroup.new(mode)
-      stats = { text_renderers: [], mesh_text_telemetry: [] }
+      stats = terminal_stats
       failures = [
         { requested: :text3d,
           reason: 'text3d_mesh_unavailable_labels_unavailable', count: 1 }
@@ -311,11 +503,14 @@ class TextModeOneInvariantTest < Minitest::Test
 
   def test_terminal_raster_rolls_back_when_loose_vector_cleanup_is_not_verified
     [:raise, :noop, :partial].each_with_index do |mode, index|
-      vectors = [Object.new, Object.new]
+      vectors = [
+        AtomicRasterEntity.new(780 + index * 2),
+        AtomicRasterEntity.new(781 + index * 2)
+      ]
       raster_entity = AtomicRasterEntity.new(800 + index)
       entities = AtomicRasterEntities.new(vectors, mode)
       model = Struct.new(:active_entities).new(entities)
-      stats = { text_renderers: [], mesh_text_telemetry: [] }
+      stats = terminal_stats
       failures = [
         { requested: :labels,
           reason: 'add_text_unavailable_text3d_unavailable', count: 1 }
@@ -349,11 +544,11 @@ class TextModeOneInvariantTest < Minitest::Test
   end
 
   def test_terminal_raster_rolls_back_partial_image_when_raster_helper_returns_false
-    vector = Object.new
+    vector = AtomicRasterEntity.new(900)
     raster = AtomicRasterEntity.new(901)
     entities = AtomicRasterEntities.new([vector])
     model = Struct.new(:active_entities).new(entities)
-    stats = { text_renderers: [], mesh_text_telemetry: [] }
+    stats = terminal_stats
     failures = [
       { requested: :text3d,
         reason: 'text3d_mesh_unavailable_labels_unavailable', count: 1 }
@@ -385,7 +580,7 @@ class TextModeOneInvariantTest < Minitest::Test
   def test_unverified_native_geometry_cannot_be_promoted_to_another_representation
     entities = AtomicRasterEntities.new
     model = Struct.new(:active_entities).new(entities)
-    stats = { text_renderers: [], mesh_text_telemetry: [] }
+    stats = terminal_stats
     failures = [
       {
         requested: :text3d,
@@ -415,7 +610,7 @@ class TextModeOneInvariantTest < Minitest::Test
   def test_terminal_raster_records_failure_when_group_cannot_be_hidden
     entities = AtomicRasterEntities.new
     model = Struct.new(:active_entities).new(entities)
-    stats = { text_renderers: [], mesh_text_telemetry: [] }
+    stats = terminal_stats
     failures = [{ requested: :text3d, reason: 'native_text_failed', count: 1 }]
 
     promoted = IMP.promote_text_delivery_failures_to_raster!(
@@ -431,10 +626,10 @@ class TextModeOneInvariantTest < Minitest::Test
   end
 
   def test_terminal_raster_records_failure_when_loose_vectors_cannot_be_erased
-    vector = Object.new
+    vector = AtomicRasterEntity.new(950)
     entities = SnapshotOnlyAtomicEntities.new([vector])
     model = Struct.new(:active_entities).new(entities)
-    stats = { text_renderers: [], mesh_text_telemetry: [] }
+    stats = terminal_stats
     failures = [{ requested: :labels, reason: 'native_text_failed', count: 1 }]
 
     promoted = IMP.promote_text_delivery_failures_to_raster!(
@@ -452,7 +647,7 @@ class TextModeOneInvariantTest < Minitest::Test
     raster = AtomicRasterEntity.new(902)
     entities = AtomicRasterEntities.new([], nil, :noop)
     model = Struct.new(:active_entities).new(entities)
-    stats = { text_renderers: [], mesh_text_telemetry: [] }
+    stats = terminal_stats
     failures = [
       { requested: :text3d,
         reason: 'text3d_mesh_unavailable_labels_unavailable', count: 1 }
@@ -467,7 +662,7 @@ class TextModeOneInvariantTest < Minitest::Test
       error = assert_raises(IMP::TerminalRasterAtomicityError) do
         IMP.promote_text_delivery_failures_to_raster!(
           model, 'x.pdf', 1, [0, 0, 612, 792], {}, Time.now, 0.0,
-          [0, 0, 612, 792], nil, :text3d, stats, failures
+          [0, 0, 612, 792], nil, :text3d, stats, failures, []
         )
       end
       assert_match(/rollback could not be verified/, error.message)

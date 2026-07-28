@@ -99,8 +99,13 @@ end
 
 class DummyRenderedTextEntity
   attr_accessor :layer
+  attr_reader :persistent_id
+
+  @@next_persistent_id = 30_000
 
   def initialize(width, height, typename: 'Edge')
+    @@next_persistent_id += 1
+    @persistent_id = @@next_persistent_id
     @bounds = DummyBounds.new(width, height)
     @typename = typename
   end
@@ -110,6 +115,14 @@ end
 
 class DummyFaceEntity
   attr_accessor :layer, :material, :back_material
+  attr_reader :persistent_id
+
+  @@next_persistent_id = 40_000
+
+  def initialize
+    @@next_persistent_id += 1
+    @persistent_id = @@next_persistent_id
+  end
 
   def typename; 'Face'; end
   def bounds; DummyBounds.new(0.1, 0.1); end
@@ -421,6 +434,9 @@ class MeshTextScalingTest < Minitest::Test
     material = Object.new
     layer = Object.new
     b.define_singleton_method(:get_or_create_material) { |_rgb| material }
+    b.define_singleton_method(:mesh_text_residual_x_scale) do |*_args|
+      [1.0, :fitted, 'bbox_exact_match', true]
+    end
 
     delivered = b.send(:place_mesh_text, ents, item, 0.0, 0.0, layer)
     face = ents.entities.find { |entity| entity.respond_to?(:typename) && entity.typename == 'Face' }
@@ -504,6 +520,9 @@ class MeshTextScalingTest < Minitest::Test
     b = make_builder(ANSI_D)
     item = bbox_item('W12X30', 8.0, 10.0, bbox_w: 50.0)
     ents = DummyTransformEntities.new
+    b.define_singleton_method(:mesh_text_residual_x_scale) do |*_args|
+      [1.0, :fitted, 'bbox_exact_match', true]
+    end
     b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
 
     assert_equal 1, ents.height_args.length

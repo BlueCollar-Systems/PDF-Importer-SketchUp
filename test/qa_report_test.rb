@@ -255,7 +255,16 @@ class QAReportTest < Minitest::Test
       layers: [],
       elapsed_seconds: 0.8,
       text_renderers: [],
-      text_mode: :labels
+      text_mode: :labels,
+      source_text_count: 12,
+      source_text_span_ids: Array.new(12) { |index| "text_span:1:#{index}" },
+      source_provenance_objects: Array.new(12) do |index|
+        {
+          source_kind: 'text_span', span_id: "text_span:1:#{index}",
+          created_entity_type: 'native_label',
+          resulting_entity_ids: ["persistent_id:#{1_000 + index}"]
+        }
+      end
     }
 
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats('text.pdf', {}, stats)
@@ -279,9 +288,19 @@ class QAReportTest < Minitest::Test
       elapsed_seconds: 0.8,
       text_renderers: [],
       text_mode: :text3d,
+      source_text_count: 2,
+      source_text_span_ids: ['text_span:1:0', 'text_span:1:1'],
       source_provenance_objects: [
-        { created_entity_type: 'native_3d_text' },
-        { created_entity_type: 'native_label' }
+        {
+          source_kind: 'text_span', span_id: 'text_span:1:0',
+          created_entity_type: 'native_3d_text',
+          resulting_entity_ids: ['persistent_id:1101']
+        },
+        {
+          source_kind: 'text_span', span_id: 'text_span:1:1',
+          created_entity_type: 'native_label',
+          resulting_entity_ids: ['persistent_id:1102']
+        }
       ]
     }
 
@@ -328,7 +347,9 @@ class QAReportTest < Minitest::Test
           object_id: 'text_span:1:0',
           page: 1,
           source_kind: 'text_span',
-          created_entity_type: 'native_label'
+          span_id: 'text_span:1:0',
+          created_entity_type: 'native_label',
+          resulting_entity_ids: ['persistent_id:1201']
         }
       ]
     }
@@ -599,14 +620,19 @@ class QAReportTest < Minitest::Test
       matrix_x: 1.0,
       residual_x: 1.0,
       total_x: 1.0,
-      fit_status: :skipped,
-      fit_reason: 'no_overflow',
+      fit_status: :fitted,
+      fit_reason: 'bbox_overflow_shrink',
+      fit_measurement_verified: true,
+      source_height_verified: true,
+      visual_fidelity_verified: true,
       outcome: :complete,
       cleanup_outcome: :not_required,
+      resulting_entity_ids: ['persistent_id:1001', 'persistent_id:1002'],
       attempt_history: [
         {
           mode: :text3d, outcome: :complete, reason: nil,
-          cleanup_outcome: :not_required, delivered_mode: :text3d
+          cleanup_outcome: :not_required, delivered_mode: :text3d,
+          resulting_entity_ids: ['persistent_id:1001', 'persistent_id:1002']
         }
       ]
     }
@@ -616,11 +642,21 @@ class QAReportTest < Minitest::Test
     {
       pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
       text_mode: :text3d,
+      source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
       mesh_text_telemetry: [valid_native_mesh_attempt],
+      text_renderers: [
+        {
+          page: 1, renderer: :add_3d_text, requested_mode: :text3d,
+          delivered_mode: :text3d, degraded: false, count: 1
+        }
+      ],
       source_provenance_objects: [
         {
+          source_kind: 'text_span',
           span_id: 'text_span:1:0',
-          created_entity_type: 'native_3d_text'
+          created_entity_type: 'native_3d_text',
+          resulting_entity_ids: ['persistent_id:1001', 'persistent_id:1002']
         }
       ],
       import_report_publication_status: :published,
@@ -639,6 +675,8 @@ class QAReportTest < Minitest::Test
     contract = contract_for(
       pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
       text_mode: :labels,
+      source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
       text_renderers: [
         {
           page: 1, requested_mode: :labels, delivered_mode: :labels,
@@ -646,7 +684,11 @@ class QAReportTest < Minitest::Test
         }
       ],
       source_provenance_objects: [
-        { span_id: 'text_span:1:0', created_entity_type: 'native_label' }
+        {
+          source_kind: 'text_span', span_id: 'text_span:1:0',
+          created_entity_type: 'native_label',
+          resulting_entity_ids: ['persistent_id:2001']
+        }
       ],
       import_report_publication_status: :published,
       import_report_path: 'contract_import_report.json'
@@ -661,6 +703,94 @@ class QAReportTest < Minitest::Test
 
     assert_equal true, contract[:ready]
     assert contract[:checks].values.all?, contract.inspect
+  end
+
+  def test_import_contract_rejects_native_mesh_without_positive_visual_verification
+    [:missing, nil, false].each do |state|
+      stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+      attempt = stats[:mesh_text_telemetry][0]
+      if state == :missing
+        attempt.delete(:visual_fidelity_verified)
+      else
+        attempt[:visual_fidelity_verified] = state
+      end
+
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], state.inspect
+      assert_equal false, contract[:checks][:native_3d_attempt_evidence], state.inspect
+    end
+  end
+
+  def test_import_contract_rejects_native_mesh_without_verified_source_height
+    [:missing, nil, false].each do |state|
+      stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+      attempt = stats[:mesh_text_telemetry][0]
+      if state == :missing
+        attempt.delete(:source_height_verified)
+      else
+        attempt[:source_height_verified] = state
+      end
+      attempt[:height_fallback_reason] = 'forced minimum-height fallback'
+
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], state.inspect
+      assert_equal false,
+                   contract[:checks][:native_3d_attempt_evidence], state.inspect
+    end
+  end
+
+  def test_missing_provenance_never_infers_requested_native_type_or_readiness
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      text_mode: :text3d, source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
+      text_renderers: [
+        {
+          page: 1, requested_mode: :text3d, delivered_mode: :labels,
+          renderer: :labels, degraded: true,
+          reason: 'text3d_mesh_unavailable', count: 1
+        }
+      ],
+      provenance_record_failure_count: 1,
+      import_report_publication_status: :published,
+      import_report_path: 'missing_provenance_import_report.json'
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'contract.pdf', {}, stats
+    )
+    types = report[:extra][:actual_text_entity_types]
+    refute types && types[:native_3d_text].to_i > 0,
+           'requested text mode is not delivery evidence'
+    contract = report[:extra][:import_contract_ready]
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:provenance_integrity]
+  end
+
+  def test_zero_source_text_vector_import_does_not_require_native_attempts
+    contract = contract_for(
+      pages: 1, primitives: 2, edges: 2, text: 0, layers: [],
+      text_mode: :text3d, source_text_count: 0,
+      source_text_span_ids: [],
+      import_report_publication_status: :published,
+      import_report_path: 'vector_only_import_report.json'
+    )
+
+    assert_equal true, contract[:ready], contract.inspect
+    assert_equal true, contract[:checks][:native_3d_attempt_evidence]
+  end
+
+  def test_positive_source_text_count_without_delivery_evidence_fails_closed
+    contract = contract_for(
+      pages: 1, primitives: 1, edges: 1, text: 0, layers: [],
+      text_mode: :text3d, source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
+      import_report_publication_status: :published,
+      import_report_path: 'missing_delivery_import_report.json'
+    )
+
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:native_3d_attempt_evidence]
   end
 
   def test_import_contract_rejects_each_named_integrity_failure
@@ -850,5 +980,259 @@ class QAReportTest < Minitest::Test
 
     assert_equal false, contract[:ready]
     assert_equal false, contract[:checks][:height_fallback_reasons]
+  end
+
+  def test_renderer_claim_must_match_evidence_backed_final_entity_type
+    contract = contract_for(
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      text_mode: :labels, source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
+      text_renderers: [
+        {
+          page: 1, renderer: :labels, requested_mode: :labels,
+          delivered_mode: :labels, degraded: false, count: 1
+        }
+      ],
+      source_provenance_objects: [
+        {
+          source_kind: 'text_span', span_id: 'text_span:1:0',
+          created_entity_type: 'outline_curve_or_mesh',
+          resulting_entity_ids: ['persistent_id:3001']
+        }
+      ],
+      import_report_publication_status: :published,
+      import_report_path: 'renderer_mismatch_import_report.json'
+    )
+
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:renderer_provenance_consistency]
+  end
+
+  def test_duplicate_or_conflicting_final_provenance_per_span_fails_closed
+    ['native_3d_text', 'native_label'].each do |second_type|
+      stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+      stats[:source_provenance_objects] << {
+        source_kind: 'text_span', span_id: 'text_span:1:0',
+        created_entity_type: second_type,
+        resulting_entity_ids: ['persistent_id:3999']
+      }
+
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], second_type
+      assert_equal false, contract[:checks][:provenance_integrity], second_type
+    end
+  end
+
+  def test_verified_terminal_page_raster_accounts_for_every_source_span_on_page
+    attempt = valid_native_mesh_attempt
+    attempt[:source_span_id] = 'text_span:1:1'
+    attempt[:delivered_mode] = :raster
+    attempt[:outcome] = :failed_generation
+    attempt[:failure_phase] = :generation
+    attempt[:failure_reason] = 'text3d_mesh_unavailable_labels_unavailable'
+    attempt[:cleanup_outcome] = :not_required
+    attempt[:terminal_cleanup_outcome] = :verified
+    attempt[:superseded_by_raster] = true
+    attempt[:resulting_entity_ids] = ['persistent_id:901']
+    attempt[:attempt_history] = [
+      {
+        mode: :text3d, outcome: :failed_generation,
+        reason: 'text3d_mesh_unavailable',
+        cleanup_outcome: :not_required
+      },
+      {
+        mode: :raster, outcome: :complete,
+        reason: 'text3d_mesh_unavailable_labels_unavailable',
+        cleanup_outcome: :verified, delivered_mode: :raster,
+        resulting_entity_ids: ['persistent_id:901']
+      }
+    ]
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 0, layers: [],
+      text_mode: :text3d, source_text_count: 2,
+      source_text_span_ids: ['text_span:1:0', 'text_span:1:1'],
+      mesh_text_telemetry: [attempt],
+      text_renderers: [
+        {
+          page: 1, renderer: :raster, requested_mode: :text3d,
+          delivered_mode: :raster, degraded: true, count: 2
+        }
+      ],
+      terminal_cleanup_events: [
+        {
+          page: 1, cleanup_outcome: :verified, delivered_mode: :raster,
+          source_span_ids: ['text_span:1:0', 'text_span:1:1'],
+          resulting_entity_ids: ['persistent_id:901']
+        }
+      ],
+      terminal_text_delivery_records: [
+        {
+          page: 1, source_span_id: 'text_span:1:0',
+          requested_mode: :text3d, delivered_mode: :raster,
+          delivery_scope: :page_raster, cleanup_outcome: :verified,
+          reason: 'text3d_mesh_unavailable_labels_unavailable',
+          resulting_entity_ids: ['persistent_id:901']
+        },
+        {
+          page: 1, source_span_id: 'text_span:1:1',
+          requested_mode: :text3d, delivered_mode: :raster,
+          delivery_scope: :page_raster, cleanup_outcome: :verified,
+          reason: 'text3d_mesh_unavailable_labels_unavailable',
+          resulting_entity_ids: ['persistent_id:901']
+        }
+      ],
+      source_provenance_objects: [],
+      import_report_publication_status: :published,
+      import_report_path: 'mixed_terminal_raster_import_report.json'
+    }
+
+    contract = contract_for(stats)
+    assert_equal true, contract[:ready], contract.inspect
+    assert_equal true, contract[:checks][:source_text_delivery_accounted]
+    assert_equal true, contract[:checks][:renderer_provenance_consistency]
+  end
+
+  def test_same_type_split_entities_require_unique_object_identity_evidence
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 2, layers: [],
+      text_mode: :labels, source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
+      text_renderers: [
+        {
+          page: 1, renderer: :labels, requested_mode: :labels,
+          delivered_mode: :labels, degraded: false, count: 2
+        }
+      ],
+      source_provenance_objects: [
+        {
+          source_kind: 'text_span', span_id: 'text_span:1:0',
+          object_id: 'label_fragment_1', created_entity_type: 'native_label',
+          resulting_entity_ids: ['persistent_id:4001']
+        },
+        {
+          source_kind: 'text_span', span_id: 'text_span:1:0',
+          object_id: 'label_fragment_2', created_entity_type: 'native_label',
+          resulting_entity_ids: ['persistent_id:4002']
+        }
+      ],
+      import_report_publication_status: :published,
+      import_report_path: 'split_label_import_report.json'
+    }
+
+    contract = contract_for(stats)
+    assert_equal true, contract[:ready], contract.inspect
+    assert_equal true, contract[:checks][:provenance_integrity]
+    assert_equal true, contract[:checks][:renderer_provenance_consistency]
+  end
+
+  def test_native_attempt_requires_complete_stable_resulting_entity_ids
+    mutations = {
+      missing: lambda { |attempt| attempt.delete(:resulting_entity_ids) },
+      empty: lambda { |attempt| attempt[:resulting_entity_ids] = [] },
+      duplicate: lambda do |attempt|
+        attempt[:resulting_entity_ids] = [
+          'persistent_id:1001', 'persistent_id:1001'
+        ]
+      end,
+      unknown: lambda do |attempt|
+        attempt[:resulting_entity_ids] = ['synthetic_bucket:0']
+      end
+    }
+
+    mutations.each do |name, mutate|
+      stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+      mutate.call(stats[:mesh_text_telemetry][0])
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], name.inspect
+      assert_equal false,
+                   contract[:checks][:native_3d_attempt_evidence], name.inspect
+    end
+  end
+
+  def test_provenance_rejects_synthetic_only_or_invalid_resulting_ids
+    [
+      :missing,
+      [],
+      ['persistent_id:1001', 'persistent_id:1001'],
+      ['text_span:1:0']
+    ].each do |value|
+      stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+      entry = stats[:source_provenance_objects][0]
+      if value == :missing
+        entry.delete(:resulting_entity_ids)
+      else
+        entry[:resulting_entity_ids] = value
+      end
+      contract = contract_for(stats)
+      assert_equal false, contract[:ready], value.inspect
+      assert_equal false, contract[:checks][:provenance_integrity], value.inspect
+    end
+  end
+
+  def test_attempt_resulting_ids_must_exactly_cross_link_to_provenance
+    stats = Marshal.load(Marshal.dump(valid_native_mesh_stats))
+    attempt = stats[:mesh_text_telemetry][0]
+    attempt[:resulting_entity_ids] = ['persistent_id:9991']
+    attempt[:attempt_history][0][:resulting_entity_ids] = ['persistent_id:9991']
+
+    contract = contract_for(stats)
+    assert_equal false, contract[:ready]
+    assert_equal true, contract[:checks][:native_3d_attempt_evidence]
+    assert_equal false, contract[:checks][:provenance_integrity]
+  end
+
+  def test_label_provenance_requires_actual_stable_resulting_entity_ids
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      text_mode: :labels, source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
+      text_renderers: [
+        {
+          page: 1, renderer: :labels, requested_mode: :labels,
+          delivered_mode: :labels, degraded: false, count: 1
+        }
+      ],
+      source_provenance_objects: [
+        {
+          source_kind: 'text_span', span_id: 'text_span:1:0',
+          object_id: 'synthetic_label_bucket',
+          created_entity_type: 'native_label'
+        }
+      ],
+      import_report_publication_status: :published,
+      import_report_path: 'label_identity_import_report.json'
+    }
+
+    contract = contract_for(stats)
+    assert_equal false, contract[:ready]
+    assert_equal false, contract[:checks][:provenance_integrity]
+  end
+
+  def test_equal_cardinality_wrong_source_id_fails_exact_canonical_ledger
+    stats = {
+      pages: 1, primitives: 1, edges: 1, text: 1, layers: [],
+      text_mode: :labels, source_text_count: 1,
+      source_text_span_ids: ['text_span:1:0'],
+      text_renderers: [
+        {
+          page: 1, renderer: :labels, requested_mode: :labels,
+          delivered_mode: :labels, degraded: false, count: 1
+        }
+      ],
+      source_provenance_objects: [
+        {
+          source_kind: 'text_span', span_id: 'text_span:1:99',
+          created_entity_type: 'native_label',
+          resulting_entity_ids: ['persistent_id:5001']
+        }
+      ],
+      import_report_publication_status: :published,
+      import_report_path: 'wrong_source_id_import_report.json'
+    }
+
+    contract = contract_for(stats)
+    assert_equal false, contract[:ready]
+    assert_equal true, contract[:checks][:source_text_identity_integrity]
+    assert_equal false, contract[:checks][:source_text_delivery_accounted]
   end
 end

@@ -75,10 +75,15 @@ Dir.mktmpdir('su_cli_test_') do |tmp|
     meta = report['report_meta'] || {}
     check.call('report_meta.host is sketchup or sketchup-cli', %w[sketchup sketchup-cli].include?(meta['host']))
     check.call('report_meta.semver present', meta['semver'].to_s =~ /\A(\d+\.\d+\.\d+|unknown)\z/)
-    check.call('unified CLI emits actual_text_entity_types',
-               (report['extra'] || {})['actual_text_entity_types'].is_a?(Hash))
+    extra = report['extra'] || {}
+    check.call('headless CLI records extracted source_text_count',
+               extra['source_text_count'].to_i == summary['text_items'].to_i)
+    check.call('headless CLI never fabricates delivered SketchUp entity types',
+               !extra.key?('actual_text_entity_types'))
+    check.call('headless extraction alone is not delivery-contract ready',
+               (extra['import_contract_ready'] || {})['ready'] == false)
     check.call('model_3d intent present',
-               (report['extra'] || {})['model_3d_intent'].is_a?(Hash))
+               extra['model_3d_intent'].is_a?(Hash))
     check.call('model_3d block present', (report['extra'] || {})['model_3d'].is_a?(Hash))
     check.call('honesty: headless CLI does not claim solids enabled',
                ((report['extra'] || {})['model_3d'] || {})['enabled'] == false)

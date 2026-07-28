@@ -51,6 +51,12 @@ load File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb')
 GB = BlueCollarSystems::PDFVectorImporter::GeometryBuilder
 
 class SourceProvenanceTest < Minitest::Test
+  class ExplodingProvenanceBucket < Array
+    def <<(_entry)
+      raise 'forced provenance append failure'
+    end
+  end
+
   def test_write_sidecar_schema
     Dir.mktmpdir('su_prov_') do |dir|
       pdf = File.join(dir, 'sample.pdf')
@@ -99,7 +105,10 @@ class SourceProvenanceTest < Minitest::Test
     def item.bbox_y1; 40.0; end
     def item.source_span_id; 'text_span:2:7'; end
 
-    builder.send(:record_text_span_provenance, item)
+    builder.send(
+      :record_text_span_provenance, item, 'native_label',
+      ['persistent_id:2001']
+    )
     assert_equal 1, bucket.length
     entry = bucket[0]
     assert_equal 'text_span:2:7', entry[:span_id]
@@ -107,7 +116,10 @@ class SourceProvenanceTest < Minitest::Test
                  'object_id stays a separate created-entity label'
     assert_equal [10.0, 20.0, 30.0, 40.0], entry[:source_bbox_pdf]
 
-    builder.send(:record_text_span_provenance, item)
+    builder.send(
+      :record_text_span_provenance, item, 'native_label',
+      ['persistent_id:2002']
+    )
     assert_equal 'text_span:2:7', bucket[1][:span_id]
     assert_equal 'text_span:2:1', bucket[1][:object_id]
   end
@@ -128,10 +140,50 @@ class SourceProvenanceTest < Minitest::Test
     def item.bbox_x1; 30.0; end
     def item.bbox_y1; 40.0; end
 
-    builder.send(:record_text_span_provenance, item)
+    builder.send(
+      :record_text_span_provenance, item, 'native_label',
+      ['persistent_id:1001']
+    )
     assert_equal 1, bucket.length
     refute bucket[0].key?(:span_id),
            'no fabricated span_id for unassigned items (RB-01)'
     assert_equal 'text_span:1:0', bucket[0][:object_id]
+  end
+
+  def test_record_text_span_provenance_failure_is_counted
+    builder = GB.allocate
+    builder.instance_variable_set(:@provenance_bucket, ExplodingProvenanceBucket.new)
+    builder.instance_variable_set(:@page_number, 1)
+    builder.instance_variable_set(:@use_3d_text, true)
+    builder.instance_variable_set(:@provenance_record_failure_count, 0)
+
+    builder.send(
+      :record_text_span_provenance, Object.new, 'native_3d_text',
+      ['persistent_id:3001']
+    )
+
+    assert_equal 1, builder.provenance_record_failure_count
+  end
+
+  def test_record_text_span_provenance_rejects_unstable_resulting_ids
+    bucket = []
+    builder = GB.allocate
+    builder.instance_variable_set(:@provenance_bucket, bucket)
+    builder.instance_variable_set(:@page_number, 1)
+    builder.instance_variable_set(:@use_3d_text, true)
+    builder.instance_variable_set(:@provenance_record_failure_count, 0)
+
+    [
+      [],
+      ['persistent_id:1', 'persistent_id:1'],
+      ['synthetic_bucket:1']
+    ].each do |ids|
+      builder.send(
+        :record_text_span_provenance, Object.new, 'native_3d_text', ids
+      )
+    end
+
+    assert_empty bucket
+    assert_equal 3, builder.provenance_record_failure_count
   end
 end

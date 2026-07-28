@@ -17,7 +17,8 @@ module BlueCollarSystems
       attr_reader :page_group, :text_group, :text_fallbacks, :text_delivery_failures,
                   :text_font_substitutions, :mesh_text_telemetry,
                   :mesh_text_telemetry_record_failure_count,
-                  :mesh_text_telemetry_initialization_failure_count
+                  :mesh_text_telemetry_initialization_failure_count,
+                  :provenance_record_failure_count
 
       def initialize(model, paths, text_items, media_box, opts = {})
         @model = model
@@ -67,6 +68,7 @@ module BlueCollarSystems
         @mesh_text_telemetry = []
         @mesh_text_telemetry_record_failure_count = 0
         @mesh_text_telemetry_initialization_failure_count = 0
+        @provenance_record_failure_count = 0
       end
 
       def build
@@ -196,7 +198,9 @@ module BlueCollarSystems
           mesh_text_telemetry_record_failure_count:
             @mesh_text_telemetry_record_failure_count.to_i,
           mesh_text_telemetry_initialization_failure_count:
-            @mesh_text_telemetry_initialization_failure_count.to_i
+            @mesh_text_telemetry_initialization_failure_count.to_i,
+          provenance_record_failure_count:
+            @provenance_record_failure_count.to_i
         }
       end
 
@@ -651,8 +655,21 @@ module BlueCollarSystems
         # SketchUp Make 2017 runs Ruby 2.2, which has no Numeric#clamp (2.4+).
         # A clamp call here raised NoMethodError on the live host, the rescue
         # swallowed it, and EVERY item shipped at the 0.01" minimum (R20-2).
-        height = MESH_TEXT_HEIGHT_MIN_IN if height < MESH_TEXT_HEIGHT_MIN_IN
-        height = MESH_TEXT_HEIGHT_MAX_IN if height > MESH_TEXT_HEIGHT_MAX_IN
+        if height < MESH_TEXT_HEIGHT_MIN_IN
+          @text_height_fallback_count = @text_height_fallback_count.to_i + 1
+          if attempt
+            attempt[:height_fallback_reason] =
+              "source_height_below_minimum: #{height.inspect}"
+          end
+          height = MESH_TEXT_HEIGHT_MIN_IN
+        elsif height > MESH_TEXT_HEIGHT_MAX_IN
+          @text_height_fallback_count = @text_height_fallback_count.to_i + 1
+          if attempt
+            attempt[:height_fallback_reason] =
+              "source_height_above_maximum: #{height.inspect}"
+          end
+          height = MESH_TEXT_HEIGHT_MAX_IN
+        end
         height
       rescue StandardError => e
         # R20-2: this rescue silently hid a NoMethodError for 9 releases and
@@ -689,8 +706,21 @@ module BlueCollarSystems
           raise ArgumentError,
                 "invalid targeted visual text height: #{corrected.inspect}"
         end
-        corrected = MESH_TEXT_HEIGHT_MIN_IN if corrected < MESH_TEXT_HEIGHT_MIN_IN
-        corrected = MESH_TEXT_HEIGHT_MAX_IN if corrected > MESH_TEXT_HEIGHT_MAX_IN
+        if corrected < MESH_TEXT_HEIGHT_MIN_IN
+          @text_height_fallback_count = @text_height_fallback_count.to_i + 1
+          if attempt
+            attempt[:height_fallback_reason] =
+              "visual_height_below_minimum: #{corrected.inspect}"
+          end
+          corrected = MESH_TEXT_HEIGHT_MIN_IN
+        elsif corrected > MESH_TEXT_HEIGHT_MAX_IN
+          @text_height_fallback_count = @text_height_fallback_count.to_i + 1
+          if attempt
+            attempt[:height_fallback_reason] =
+              "visual_height_above_maximum: #{corrected.inspect}"
+          end
+          corrected = MESH_TEXT_HEIGHT_MAX_IN
+        end
         if attempt
           attempt[:visual_height_correction_reason] = 'targeted_bbox_short_side'
           attempt[:visual_height_source_points] = visual_points
@@ -764,6 +794,9 @@ module BlueCollarSystems
           upstream_fallback_reason: fallback_reason,
           superseded_by_raster: false,
           representation_fallback_allowed: true,
+          visual_fidelity_verified: false,
+          source_height_verified: false,
+          fit_measurement_verified: false,
           height_fallback_reason: nil,
           nominal_sketchup_letter_height_in: nil,
           visual_height_correction_reason: nil,
@@ -795,6 +828,9 @@ module BlueCollarSystems
           upstream_fallback_reason: fallback_reason,
           superseded_by_raster: false,
           representation_fallback_allowed: true,
+          visual_fidelity_verified: false,
+          source_height_verified: false,
+          fit_measurement_verified: false,
           height_fallback_reason: nil,
           attempt_history: []
         }
@@ -940,46 +976,54 @@ module BlueCollarSystems
         angle = PageTransform.normalize_angle(display_angle).abs
         unless angle <= MESH_TEXT_AXIS_ANGLE_TOL_DEG ||
                (angle - 90.0).abs <= MESH_TEXT_AXIS_ANGLE_TOL_DEG
-          return [1.0, :skipped, 'diagonal_angle']
+          return [1.0, :skipped, 'diagonal_angle', false]
         end
 
         generated = mesh_text_entities_width_inches(created)
         target = mesh_text_bbox_run_width_inches(item, display_angle)
-        return [1.0, :skipped, 'invalid_width'] unless generated && target
+        return [1.0, :skipped, 'invalid_width', false] unless generated && target
 
         width_after_matrix = generated * matrix_x.to_f
         unless width_after_matrix.finite? && width_after_matrix > 0.0
-          return [1.0, :skipped, 'invalid_width']
+          return [1.0, :skipped, 'invalid_width', false]
         end
 
         factor = target / width_after_matrix
-        return [1.0, :skipped, 'no_overflow'] if factor >= 1.0
+        return [1.0, :skipped, 'no_overflow', false] if factor >= 1.0
         if factor < MESH_TEXT_RESIDUAL_MIN
-          return [1.0, :rejected_outlier, 'residual_below_0_50']
+          return [factor, :rejected_outlier, 'residual_below_0_50', false]
         end
-        [factor, :fitted, 'bbox_overflow_shrink']
+        [factor, :fitted, 'bbox_overflow_shrink', true]
       rescue StandardError
-        [1.0, :skipped, 'fit_exception']
+        [1.0, :skipped, 'fit_exception', false]
       end
 
       def mesh_text_entity_snapshot(entities)
-        Array(entities.to_a).dup
+        snapshot = Array(entities.to_a).dup
+        mesh_text_entity_identity_map(snapshot)
+        snapshot
+      rescue StandardError => e
+        raise RuntimeError, "mesh entity snapshot unverifiable: #{e.message}"
       end
 
       def mesh_text_created_entities(before, after)
-        Array(after).select do |entity|
-          !Array(before).any? { |existing| existing.equal?(entity) }
+        before_map = mesh_text_entity_identity_map(before)
+        after_map = mesh_text_entity_identity_map(after)
+        after_map[:entities].select do |entity|
+          !before_map[:ids].include?(mesh_text_entity_identity(entity))
         end
       end
 
       def erase_partial_mesh_entities(entities, created)
         doomed = Array(created).compact
         return true if doomed.empty?
+        doomed_map = mesh_text_entity_identity_map(doomed)
 
         entities.erase_entities(*doomed)
         remaining = mesh_text_entity_snapshot(entities)
-        doomed.none? do |entity|
-          remaining.any? { |candidate| candidate.equal?(entity) }
+        remaining_map = mesh_text_entity_identity_map(remaining)
+        doomed_map[:ids].none? do |identity|
+          remaining_map[:ids].include?(identity)
         end
       rescue StandardError => e
         Logger.warn('GeometryBuilder', "partial 3D text cleanup failed: #{e.message}")
@@ -1103,6 +1147,16 @@ module BlueCollarSystems
             attempt[:sketchup_letter_height_in] = height
           end
 
+          attempt[:source_height_verified] =
+            attempt[:height_fallback_reason].to_s.strip.empty?
+          unless attempt[:source_height_verified] == true
+            reason = 'text3d_source_height_unverified'
+            return fail_mesh_without_representation_fallback(
+              entities, [], requested_mode, reason, attempt,
+              :failed_visual_verification, :visual_verification
+            )
+          end
+
           # add_3d_text tolerance is absolute inches; 0.0 = highest curve
           # quality. It creates native edges/faces at the origin.
           success = nil
@@ -1170,7 +1224,8 @@ module BlueCollarSystems
           end
 
           matrix_x = mesh_text_matrix_x_scale(item)
-          residual_x, fit_status, fit_reason = mesh_text_residual_x_scale(
+          residual_x, fit_status, fit_reason, fit_measurement =
+            mesh_text_residual_x_scale(
             item, created, display_angle, matrix_x
           )
           total_x = matrix_x * residual_x
@@ -1179,6 +1234,15 @@ module BlueCollarSystems
           attempt[:total_x] = total_x
           attempt[:fit_status] = fit_status
           attempt[:fit_reason] = fit_reason
+
+          fit_verified = fit_status == :fitted && fit_measurement == true
+          unless fit_verified
+            reason = "text3d_visual_fidelity_unverified_#{fit_reason}"
+            return fail_mesh_without_representation_fallback(
+              entities, created, requested_mode, reason, attempt,
+              :failed_visual_verification, :visual_verification
+            )
+          end
 
           begin
             scale = Geom::Transformation.scaling(ORIGIN, total_x, 1.0, 1.0)
@@ -1221,6 +1285,20 @@ module BlueCollarSystems
             end
           end
 
+          resulting_entity_ids = mesh_text_entity_identities(created)
+          if resulting_entity_ids.nil? ||
+             resulting_entity_ids.length != created.length ||
+             resulting_entity_ids.empty?
+            reason = 'text3d_resulting_entity_identity_unverified'
+            return fail_mesh_without_representation_fallback(
+              entities, created, requested_mode, reason, attempt,
+              :failed_visual_verification, :visual_verification
+            )
+          end
+
+          attempt[:fit_measurement_verified] = true
+          attempt[:visual_fidelity_verified] = true
+
           text_faces = mesh_text_face_entities(created)
           apply_text_face_material(text_faces)
           @face_count += text_faces.length
@@ -1238,7 +1316,9 @@ module BlueCollarSystems
           @text_count += 1
           record_mesh_text_height_sample(height)
           record_text_font_substitution(item, profile)
-          record_text_span_provenance(item, 'native_3d_text')
+          record_text_span_provenance(
+            item, 'native_3d_text', resulting_entity_ids
+          )
           if fallback_reason
             record_text_mode_fallback(
               requested_mode, :text3d, fallback_reason
@@ -1249,7 +1329,7 @@ module BlueCollarSystems
           attempt[:cleanup_outcome] = :not_required
           attempt[:delivered_mode] = :text3d
           attempt[:delivered_font] = profile[:family]
-          attempt[:resulting_entity_ids] = mesh_text_entity_identities(created)
+          attempt[:resulting_entity_ids] = resulting_entity_ids
           true
         ensure
           record_mesh_text_telemetry(attempt)
@@ -1277,13 +1357,23 @@ module BlueCollarSystems
           'GeometryBuilder',
           "3D text unavailable for #{item.text.inspect} — falling back to Labels (#{reason})"
         )
+        @last_label_resulting_entity_ids = []
         delivered = place_annotation_label(
           entities, item, origin_x, origin_y, layer, false, requested_mode
         )
         if delivered
+          resulting_entity_ids = Array(@last_label_resulting_entity_ids).dup
+          if attempt
+            attempt[:resulting_entity_ids] = resulting_entity_ids
+          end
           append_mesh_text_rung_history(
             attempt, :labels, :complete, nil, :labels
           ) if attempt
+          if attempt && attempt[:attempt_history].is_a?(Array) &&
+             attempt[:attempt_history].last.is_a?(Hash)
+            attempt[:attempt_history].last[:resulting_entity_ids] =
+              resulting_entity_ids
+          end
           record_text_mode_fallback(requested_mode, :labels, reason)
           return true
         end
@@ -1330,11 +1420,30 @@ module BlueCollarSystems
       end
 
       def mesh_text_entity_identities(entities)
-        Array(entities).map do |entity|
-          mesh_text_entity_identity(entity)
-        end.compact.uniq
+        mesh_text_entity_identity_map(Array(entities))[:ids]
       rescue StandardError
-        []
+        nil
+      end
+
+      def mesh_text_entity_identity_map(entities)
+        raise RuntimeError, 'entity list is not an Array' unless entities.is_a?(Array)
+        ids = []
+        values = []
+        seen = {}
+        entities.each do |entity|
+          raise RuntimeError, 'entity is nil' if entity.nil?
+          identity = mesh_text_entity_identity(entity)
+          if identity.nil? || identity.to_s.empty?
+            raise RuntimeError, 'entity stable identity is unreadable'
+          end
+          if seen.key?(identity)
+            raise RuntimeError, "duplicate entity stable identity: #{identity}"
+          end
+          seen[identity] = true
+          ids << identity
+          values << entity
+        end
+        { ids: ids, entities: values }
       end
 
       def apply_text_face_material(faces)
@@ -1475,17 +1584,31 @@ module BlueCollarSystems
       def place_annotation_label(entities, item, origin_x, origin_y, layer,
                                  allow_mesh_fallback = true, requested_mode = nil)
         requested_mode = @requested_text_mode if requested_mode.nil?
+        @last_label_resulting_entity_ids = []
         label_x, label_y, label_angle = label_insertion_pdf(item)
         display_angle = display_text_angle(item, label_angle)
         pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
         dir_vec = label_direction_vector(display_angle, item)
         text = try_add_annotation_text(entities, item.text, pt, dir_vec)
         if text
+          identity = mesh_text_entity_identity(text)
+          if identity.nil? || identity.to_s.strip.empty?
+            record_text_delivery_failure(
+              requested_mode, 'label_resulting_entity_identity_unverified', false
+            )
+            Logger.warn(
+              'GeometryBuilder',
+              "Label entity identity unavailable for #{item.text.inspect}; " \
+              'delivery cannot be certified.'
+            )
+            return false
+          end
           preserve_vector = angle_needs_geometry_text?(display_angle, part_mark_label?(item.text) ? 8.0 : 12.0)
           hide_annotation_leader(text, preserve_vector)
           set_layer(text, layer)
           @text_count += 1
-          record_text_span_provenance(item, 'native_label')
+          @last_label_resulting_entity_ids = [identity]
+          record_text_span_provenance(item, 'native_label', [identity])
           return true
         end
 
@@ -1551,17 +1674,25 @@ module BlueCollarSystems
         end
       end
 
-      def record_text_span_provenance(item, delivered_entity_type = nil)
+      def record_text_span_provenance(item, delivered_entity_type = nil,
+                                      resulting_entity_ids = [])
         return unless @provenance_bucket.is_a?(Array)
 
         entity_type = delivered_entity_type ||
                       (@use_3d_text ? 'native_3d_text' : 'native_label')
+        ids = Array(resulting_entity_ids).map { |value| value.to_s.strip }
+        identity_pattern = /\A(?:persistent_id|entity_id):.+\z/
+        unless !ids.empty? && ids.uniq.length == ids.length &&
+               ids.all? { |identity| identity =~ identity_pattern }
+          raise RuntimeError, 'resulting text entity identity evidence is invalid'
+        end
         idx = @provenance_bucket.length
         entry = {
           object_id: "text_span:#{@page_number}:#{idx}",
           page: @page_number,
           source_kind: 'text_span',
-          created_entity_type: entity_type
+          created_entity_type: entity_type,
+          resulting_entity_ids: ids
         }
         # Corrective 2026-07-12 §1 (RB-01): span_id is the SAME deterministic
         # source-span identity that PartsBootstrap emits in row span_ids
@@ -1578,6 +1709,8 @@ module BlueCollarSystems
         entry[:source_bbox_pdf] = bbox if bbox
         @provenance_bucket << entry
       rescue StandardError => e
+        @provenance_record_failure_count =
+          @provenance_record_failure_count.to_i + 1
         Logger.warn("GeometryBuilder", "provenance record failed: #{e.message}")
       end
 

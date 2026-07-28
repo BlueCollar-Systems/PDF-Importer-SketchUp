@@ -85,10 +85,34 @@ Z_AXIS = Geom::Vector3d.new(0, 0, 1)
 
 class DummyTextEntity
   attr_accessor :layer, :display_leader, :vector
+  attr_reader :persistent_id
+
+  @@next_persistent_id = 70_000
+
+  def initialize
+    @@next_persistent_id += 1
+    @persistent_id = @@next_persistent_id
+  end
 end
 
 class DummyMeshEntity
   attr_accessor :layer
+  attr_reader :persistent_id
+
+  @@next_persistent_id = 80_000
+
+  BoundsPoint = Struct.new(:x, :y, :z)
+  Bounds = Struct.new(:min, :max)
+
+  def initialize
+    @@next_persistent_id += 1
+    @persistent_id = @@next_persistent_id
+  end
+
+  def bounds
+    Bounds.new(BoundsPoint.new(0.0, 0.0, 0.0),
+               BoundsPoint.new(0.2, 0.1, 0.0))
+  end
 end
 
 class DummyEntities
@@ -143,7 +167,7 @@ end
 load File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb')
 
 def make_builder(use_3d_text:)
-  BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
+  builder = BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
     Sketchup::Model.new,
     [],
     [],
@@ -152,6 +176,12 @@ def make_builder(use_3d_text:)
     import_text: true,
     use_3d_text: use_3d_text
   )
+  if use_3d_text
+    builder.define_singleton_method(:mesh_text_residual_x_scale) do |*_args|
+      [1.0, :fitted, 'bbox_exact_match', true]
+    end
+  end
+  builder
 end
 
 label_builder = make_builder(use_3d_text: false)

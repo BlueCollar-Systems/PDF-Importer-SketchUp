@@ -68,6 +68,9 @@ class MeshTextVisualParityTest < Minitest::Test
                      group_per_page: false, target_entities: entities,
                      layer_manager: VisualFontLayerManager.new,
                      installed_font_families: fonts)
+    builder.define_singleton_method(:mesh_text_residual_x_scale) do |*_args|
+      [1.0, :fitted, 'bbox_exact_match', true]
+    end
     [builder.build, entities]
   end
 
@@ -222,7 +225,7 @@ class MeshTextVisualParityTest < Minitest::Test
     generated = [DummyRenderedTextEntity.new(1.0, 0.1)]
 
     item.bbox_x1 = 72.0
-    assert_equal [1.0, :skipped, 'no_overflow'],
+    assert_equal [1.0, :skipped, 'no_overflow', false],
                  builder.send(:mesh_text_residual_x_scale, item, generated, 0.0, 1.0)
 
     item.bbox_x1 = 36.0
@@ -233,8 +236,11 @@ class MeshTextVisualParityTest < Minitest::Test
     assert_equal [:fitted, 'bbox_overflow_shrink'], [status, reason]
 
     item.bbox_x1 = 35.999928
-    assert_equal [1.0, :rejected_outlier, 'residual_below_0_50'],
-                 builder.send(:mesh_text_residual_x_scale, item, generated, 0.0, 1.0)
+    residual, status, reason = builder.send(
+      :mesh_text_residual_x_scale, item, generated, 0.0, 1.0
+    )
+    assert_operator residual, :<, 0.50
+    assert_equal [:rejected_outlier, 'residual_below_0_50'], [status, reason]
   end
 
   def test_residual_axis_and_angle_tolerance_boundaries
@@ -260,7 +266,7 @@ class MeshTextVisualParityTest < Minitest::Test
       assert_equal :fitted, status
     end
 
-    assert_equal [1.0, :skipped, 'diagonal_angle'],
+    assert_equal [1.0, :skipped, 'diagonal_angle', false],
                  builder.send(:mesh_text_residual_x_scale, item, generated, 3.01, 1.0)
   end
 
@@ -379,12 +385,12 @@ class MeshTextVisualParityTest < Minitest::Test
     generated = [DummyRenderedTextEntity.new(1.0, 0.1)]
     [nil, Float::NAN, Float::INFINITY].each do |bad|
       item.bbox_x1 = bad
-      assert_equal [1.0, :skipped, 'invalid_width'],
+      assert_equal [1.0, :skipped, 'invalid_width', false],
                    builder.send(:mesh_text_residual_x_scale, item, generated, 0.0, 1.0)
     end
     item.bbox_x0 = 50.0
     item.bbox_x1 = 50.0
-    assert_equal [1.0, :skipped, 'invalid_width'],
+    assert_equal [1.0, :skipped, 'invalid_width', false],
                  builder.send(:mesh_text_residual_x_scale, item, generated, 0.0, 1.0)
   end
 
@@ -395,6 +401,9 @@ class MeshTextVisualParityTest < Minitest::Test
     item.trusted_text_matrix_x_scale = 1.436458
     sentinel = DummyRenderedTextEntity.new(9.0, 9.0)
     entities = DummyTransformEntities.new([sentinel])
+    builder.define_singleton_method(:mesh_text_residual_x_scale) do |*_args|
+      [1.0, :fitted, 'bbox_exact_match', true]
+    end
     label_x, label_y, = builder.send(:mesh_label_anchor_pdf, item)
     expected_anchor = builder.send(:text_point_to_su, item, label_x, label_y, 0.0, 0.0)
 

@@ -5,11 +5,15 @@
 # Usage: ruby test/ruby22_compat_test.rb
 
 require 'minitest/autorun'
+require 'open3'
+require 'rbconfig'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 EXT_DIR   = File.join(REPO_ROOT, 'extracted', 'sketchup_ext')
 TEST_DIR  = File.join(REPO_ROOT, 'test')
 LOADER    = File.join(EXT_DIR, 'bc_pdf_vector_importer.rb')
+
+require_relative 'ruby22_real_parse_gate_contract'
 
 MODERN_METHOD_PATTERN =
   /&\.|(?<!\.)\.(?:match\?|casecmp\?|positive\?|negative\?|append|dig|sum|then|yield_self|filter|filter_map|tally|transform_values|transform_keys|delete_prefix|delete_suffix|fetch_values|chunk_while|clamp|unpack1|digits|grep_v|bsearch_index)(?=[^A-Za-z0-9_]|$)/
@@ -80,10 +84,10 @@ class Ruby22CompatTest < Minitest::Test
     assert_empty hits, "SketchUp 2017 incompatible syntax in test suite:\n#{hits.join("\n")}"
   end
 
-  def test_loader_parses_on_ruby22
+  def test_loader_parses_on_current_runtime_as_a_supplemental_check
     skip 'loader missing' unless File.exist?(LOADER)
-    output = `ruby -c "#{LOADER}" 2>&1`
-    assert $?.success?, "Loader syntax error: #{output.strip}"
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, '-c', LOADER)
+    assert status.success?, "Loader syntax error: #{stdout}#{stderr}"
   end
 
   def test_task5_reporting_path_avoids_post_ruby22_collection_apis

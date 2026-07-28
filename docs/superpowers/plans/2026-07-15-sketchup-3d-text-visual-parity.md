@@ -1176,8 +1176,16 @@ git commit -m "fix: report native 3D text metric decisions"
 - Evidence outside git: `C:/TMP/su_text3d_live_20260715/`
 
 **Interfaces:**
-- Consumes: Tasks 1-5, the `1015 - Rev 0.pdf` fixture, built RBZ, installed plugin bytes, and proven live probe scripts.
+- Consumes: Tasks 1-5, the `1015 - Rev 0.pdf` fixture, build-only RBZ evidence, a freshly downloaded and byte-verified published RBZ for any host work, verified installed plugin bytes, and proven live probe scripts.
 - Produces: passing full suite, Ruby 2.2 proof, release artifact, installed-byte hashes, saved `.skp`, report JSON, probe JSON, registered screenshot, measured acceptance, version `3.7.95`, and pushed commits. Q&A authority remains gated on the follow-on five-mode host matrix.
+
+> **Safety override (2026-07-16):** The historical host-install steps below
+> are superseded. Never install or copy bytes from a working tree, build
+> directory, local candidate, or locally rebuilt RBZ into SketchUp's Plugins
+> directory. Host installation is allowed only from a release artifact freshly
+> downloaded from the authoritative release channel, after its SHA-256 matches
+> the published value, after every SketchUp process is confirmed closed, and
+> with explicit operator approval through the normal RBZ installer.
 
 - [ ] **Step 1: Run all focused tests as a fail-fast gate**
 
@@ -1233,38 +1241,22 @@ python tools/test_build_release.py
 
 Expected: builder, bundled-helper smoke, and release-builder tests exit 0.
 
-- [ ] **Step 4: Install exactly the candidate artifact with a reversible backup**
+- [ ] **Step 4: Freeze the candidate without touching the host**
 
-With SketchUp closed, expand the RBZ and swap the loader/folder while retaining backups:
+Do not install the local candidate. Record its SHA-256 for build evidence only.
+Any later host validation must consume a freshly downloaded, published release
+whose SHA-256 matches the authoritative published value. Confirm every
+SketchUp process is closed before an operator-approved RBZ installation through
+the normal installer. Direct loader/folder moves or copies are prohibited.
 
-```powershell
-$plugins = 'C:\Users\Rowdy Payton\AppData\Roaming\SketchUp\SketchUp 2017\SketchUp\Plugins'
-$stage = 'C:\TMP\su_text3d_release_candidate_20260715\expanded'
-$rbz = (Get-ChildItem -LiteralPath 'C:\TMP\su_text3d_release_candidate_20260715' -Filter '*.rbz' | Select-Object -First 1).FullName
-$zip = 'C:\TMP\su_text3d_release_candidate_20260715\candidate.zip'
-Copy-Item -LiteralPath $rbz -Destination $zip -Force
-Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
-$backup = 'pre_visual_parity_20260715'
-Move-Item -LiteralPath (Join-Path $plugins 'bc_pdf_vector_importer.rb') -Destination (Join-Path $plugins "bc_pdf_vector_importer.rb.$backup")
-Move-Item -LiteralPath (Join-Path $plugins 'bc_pdf_vector_importer') -Destination (Join-Path $plugins "bc_pdf_vector_importer.$backup")
-Copy-Item -LiteralPath (Join-Path $stage 'bc_pdf_vector_importer.rb') -Destination $plugins
-Copy-Item -LiteralPath (Join-Path $stage 'bc_pdf_vector_importer') -Destination $plugins -Recurse
-$mismatches = @()
-Get-ChildItem -LiteralPath $stage -Recurse -File | ForEach-Object {
-  $relative = $_.FullName.Substring($stage.Length).TrimStart('\')
-  $installed = Join-Path $plugins $relative
-  if (!(Test-Path -LiteralPath $installed) -or
-      (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash -ne
-      (Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash) {
-    $mismatches += $relative
-  }
-}
-if ($mismatches.Count -gt 0) { throw "Installed-byte mismatch: $($mismatches -join ', ')" }
-```
+Expected: candidate build evidence is retained, and the live host is unchanged.
 
-Expected: installed loader/folder originate only from the candidate RBZ and the previous installation remains recoverable by name.
+- [ ] **Step 5: Run live probes only after a separate safe release install**
 
-- [ ] **Step 5: Run the live import and width probes in SketchUp 2017**
+Precondition: the installed extension came from a freshly downloaded published
+RBZ, its SHA-256 matched the authoritative published value before installation,
+and the install occurred only after every SketchUp process was closed. A local
+candidate or working tree does not satisfy this precondition.
 
 Run each probe in a fresh host process:
 
@@ -1291,7 +1283,7 @@ GALVANIZED subtitle and title-block text do not overlap adjacent rules
 rotated and diagonal spans preserve source angle and baseline
 flat capitals, descenders, parentheses, fractions, and plus/minus-90-degree runs retain plausible baseline-relative bounds
 no microscopic text, erased faces, duplicate partial mesh, or raster substitution
-installed loader/plugin hashes match files expanded from the candidate RBZ
+installed loader/plugin hashes match the byte-verified downloaded release RBZ
 ```
 
 If any line fails, do not bump the version or edit Q&A authority. Add a failing regression test for the observed defect, return to the responsible task, and rerun Steps 1-6.
@@ -1313,33 +1305,12 @@ python build_release.py --require-poppler-smoke --out C:\TMP\su_text3d_release_f
 python tools/test_build_release.py
 ```
 
-Install the final RBZ with a second reversible swap, then rerun the live probe:
-
-```powershell
-$plugins = 'C:\Users\Rowdy Payton\AppData\Roaming\SketchUp\SketchUp 2017\SketchUp\Plugins'
-$finalRoot = 'C:\TMP\su_text3d_release_final_20260715'
-$finalStage = Join-Path $finalRoot 'expanded'
-$finalRbz = (Get-ChildItem -LiteralPath $finalRoot -Filter '*.rbz' | Select-Object -First 1).FullName
-$finalZip = Join-Path $finalRoot 'final.zip'
-Copy-Item -LiteralPath $finalRbz -Destination $finalZip -Force
-Expand-Archive -LiteralPath $finalZip -DestinationPath $finalStage -Force
-Move-Item -LiteralPath (Join-Path $plugins 'bc_pdf_vector_importer.rb') -Destination (Join-Path $plugins 'bc_pdf_vector_importer.rb.pre_3_7_95_20260715')
-Move-Item -LiteralPath (Join-Path $plugins 'bc_pdf_vector_importer') -Destination (Join-Path $plugins 'bc_pdf_vector_importer.pre_3_7_95_20260715')
-Copy-Item -LiteralPath (Join-Path $finalStage 'bc_pdf_vector_importer.rb') -Destination $plugins
-Copy-Item -LiteralPath (Join-Path $finalStage 'bc_pdf_vector_importer') -Destination $plugins -Recurse
-$finalMismatches = @()
-Get-ChildItem -LiteralPath $finalStage -Recurse -File | ForEach-Object {
-  $relative = $_.FullName.Substring($finalStage.Length).TrimStart('\')
-  $installed = Join-Path $plugins $relative
-  if (!(Test-Path -LiteralPath $installed) -or
-      (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash -ne
-      (Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash) {
-    $finalMismatches += $relative
-  }
-}
-if ($finalMismatches.Count -gt 0) { throw "Installed-byte mismatch: $($finalMismatches -join ', ')" }
-Start-Process -FilePath 'C:\Program Files\SketchUp\SketchUp 2017\SketchUp.exe' -ArgumentList @('-RubyStartup', 'C:\TMP\su_text3d_live_probe_20260715.rb') -Wait
-```
+Do not install the locally rebuilt final RBZ. Publish through the authorized
+release workflow first. For any later host probe, download that published RBZ
+freshly, verify its SHA-256 against the published release value, confirm all
+SketchUp processes are closed, obtain operator approval, and install with the
+normal RBZ workflow. Never copy or move working-tree or expanded-RBZ files into
+the Plugins directory.
 
 Expected: all Step 5-6 facts remain true and `plugin_version` is `3.7.95`.
 
