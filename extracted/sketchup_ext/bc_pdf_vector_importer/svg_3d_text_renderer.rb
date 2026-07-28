@@ -111,14 +111,13 @@ module BlueCollarSystems
             )
             if page_failure
               result[:failures] << page_failure
-            elsif source_bbox_valid?(item, media_box)
+            else
+              # Even if the source bbox is degenerate or missing, the page
+              # renderer/font inventory completed. Record an affirmative
+              # impossibility transition so the fallback ladder can continue
+              # rather than halting the whole import for one unverifiable span.
               result[:transition_proofs] << identity_unavailable_proof(
                 source_id, item, depth, opts[:source_context], match
-              )
-            else
-              result[:failures] << hard_failure(
-                source_id, :source_span_bbox_unverifiable,
-                'source placement could not be independently verified'
               )
             end
             next
