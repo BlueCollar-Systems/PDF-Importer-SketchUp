@@ -2,7 +2,9 @@
 
 Windows release RBZ files ship a free zero-ceremony Poppler runtime so clean
 machines can import without a separate helper download. Publication requires an
-approved integrity manifest for the exact staged bytes.
+approved integrity manifest for the exact staged bytes. The currently staged
+runtime is **blocked from stable publication** pending the independent review
+described in `POPLER_RUNTIME_PUBLICATION_BLOCKER.md`.
 
 ## Bundled components
 
@@ -32,6 +34,7 @@ source pins, and license-review state.
 
 ## Source availability
 
-The manifest pins unmodified upstream binary and data archives from the free
-`oschwartz10612/poppler-windows` release used by `tools/fetch_third_party_binaries.ps1`.
-MuPDF and Ghostscript are not bundled.
+`third_party/sources/SHA256SUMS.txt` pins the upstream Windows binary archive
+and the official Poppler data archive. These checksums prove source identity;
+they do not by themselves approve the dependency/license closure. MuPDF and
+Ghostscript are not bundled.

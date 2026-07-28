@@ -8,21 +8,25 @@
   "source": {
     "project": "oschwartz10612/poppler-windows",
     "tag": "v26.02.0-0",
-    "url": "https://github.com/oschwartz10612/poppler-windows/releases/tag/v26.02.0-0"
+    "url": "https://github.com/oschwartz10612/poppler-windows/releases/tag/v26.02.0-0",
+    "binary_asset": "Release-26.02.0-0.zip",
+    "binary_asset_sha256": "993e4a94376ed712fafc7058d724ea0b943d118bbd2305cd9ed55174eb85cda5",
+    "data_archive": "poppler-data-0.4.12.tar.gz",
+    "data_archive_sha256": "c835b640a40ce357e1b83666aabd95edffa24ddddd49b8daff63adb851cdab74"
   },
   "license_review": {
-    "status": "approved",
-    "missing": [],
-    "reviewer": "owner-doctrine-2026-07-28-zero-ceremony-helpers",
-    "evidence": "THIRD_PARTY_NOTICES.md + Library/THIRD_PARTY_NOTICES.txt + Library/licenses; free GPL/LGPL/BSD/Apache Poppler Windows runtime; owner doctrine requires zero-ceremony helpers inside the RBZ",
-    "reviewed_at": "2026-07-28T21:03:54Z"
+    "status": "blocked",
+    "missing": [
+      "binary dependency license closure"
+    ],
+    "reason": "Qualified review of the exact 22-binary dependency/license closure and source-availability obligations is pending"
   },
   "members": [
     {
-      "bytes": 810,
+      "bytes": 952,
       "category": "notice",
       "path": "Library/THIRD_PARTY_NOTICES.txt",
-      "sha256": "9d309bd4788fa8961431e3a225f945ad935f62fe6526fca057f270718ae816d4"
+      "sha256": "6fa4474f0cdb3400c9064292c81b1c702acd6a887c5930b9ec94c2554cea2ffb"
     },
     {
       "bytes": 540672,
@@ -1807,5 +1811,5 @@
       "sha256": "41d788d5b7c7e8cee377f633dffec6514afcb82e84a377a48154a908d6afaf49"
     }
   ],
-  "member_inventory_sha256": "8b383b2218ca2f8b0fb7aa6139a6cdc4dfa62afa3f60c9cb1d8e94b53c241c75"
+  "member_inventory_sha256": "8d22152e8d35ad677cb107f4a13566bfe51ded8f53a1459d2689ab74ba9f57f0"
 }

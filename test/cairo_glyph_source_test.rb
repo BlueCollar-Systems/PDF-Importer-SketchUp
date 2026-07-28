@@ -135,6 +135,23 @@ class CairoGlyphSourceTest < Minitest::Test
     assert_in_delta (e1[1] * 2.0) + 5.0, e2[1], 1.0e-6, 'y adds the page y_offset'
   end
 
+  def test_model_space_loop_cache_never_exposes_mutable_canonical_geometry
+    svg = fixture_svg + "\n<!-- mutable-cache-isolation-regression -->"
+    first = CGS.model_space_loops(svg, FIXTURE_MEDIA_BOX)
+    original_x = first[0][:loops][0][0].x.to_f
+    original_pen_x = first[0][:pen_pdf][0].to_f
+
+    first[0][:loops][0][0].x = original_x + 100.0
+    first[0][:pen_pdf][0] = original_pen_x + 100.0
+
+    second = CGS.model_space_loops(svg, FIXTURE_MEDIA_BOX)
+    assert_in_delta original_x, second[0][:loops][0][0].x, 1.0e-9,
+                    'a caller must not be able to corrupt cached source geometry'
+    assert_in_delta original_pen_x, second[0][:pen_pdf][0], 1.0e-9,
+                    'a caller must not be able to corrupt cached placement data'
+    refute_same first[0][:loops][0][0], second[0][:loops][0][0]
+  end
+
   def test_known_value_coordinate_mapping_simple_use
     # Hand-checkable synthetic SVG: one square glyph (baseline-relative,
     # y negative-up), one placement at pen (72, 96) on a 612x396 page.

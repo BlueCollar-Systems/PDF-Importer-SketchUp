@@ -1,0 +1,10 @@
+# Exact upstream archives used to stage the bundled Poppler runtime.
+# These pins are provenance/integrity evidence, not a license-review approval.
+#
+# Release-26.02.0-0.zip
+# https://github.com/oschwartz10612/poppler-windows/releases/download/v26.02.0-0/Release-26.02.0-0.zip
+993e4a94376ed712fafc7058d724ea0b943d118bbd2305cd9ed55174eb85cda5  Release-26.02.0-0.zip
+#
+# poppler-data-0.4.12.tar.gz
+# https://poppler.freedesktop.org/poppler-data-0.4.12.tar.gz
+c835b640a40ce357e1b83666aabd95edffa24ddddd49b8daff63adb851cdab74  poppler-data-0.4.12.tar.gz

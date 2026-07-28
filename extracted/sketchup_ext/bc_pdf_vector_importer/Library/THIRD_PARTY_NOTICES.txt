@@ -13,8 +13,11 @@ Canonical layout:
   share/poppler
 
 After fetch, tools/prune_poppler_bundle.py drops unused sibling DLLs.
-The libcurl â†’ libssh2 â†’ libcrypto chain is retained because poppler.dll
+The libcurl -> libssh2 -> libcrypto chain is retained because poppler.dll
 imports it (hard PE IAT dependency).
 
 MuPDF mutool is NOT bundled here (AGPL license review required).
 Ghostscript is NOT bundled here (optional font-repair helper).
+
+STABLE PUBLICATION IS BLOCKED until an independent qualified reviewer closes
+the exact binary dependency/license record. Integrity pins are not approval.

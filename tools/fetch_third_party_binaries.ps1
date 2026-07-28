@@ -12,6 +12,8 @@ $ErrorActionPreference = 'Stop'
 
 # Pin a known-good poppler-windows release tag (not releases/latest).
 $PopplerReleaseTag = 'v26.02.0-0'
+$PopplerAssetName = 'Release-26.02.0-0.zip'
+$PopplerAssetSha256 = '993e4a94376ed712fafc7058d724ea0b943d118bbd2305cd9ed55174eb85cda5'
 
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $SupportDir = Join-Path $RepoRoot 'extracted\sketchup_ext\bc_pdf_vector_importer'
@@ -25,23 +27,21 @@ if (Test-Path $LegacyBin) {
     throw "Legacy direct bin/ must be removed before staging Library/bin: $LegacyBin"
 }
 
-foreach ($dir in @($BinDir, $ShareDir, $LicenseDir)) {
-    if (Test-Path $dir) {
-        Remove-Item -Recurse -Force $dir
-    }
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-}
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
 Write-Host "Fetching Poppler Windows build (pinned $PopplerReleaseTag)..."
 $release = Invoke-RestMethod -Uri "https://api.github.com/repos/oschwartz10612/poppler-windows/releases/tags/$PopplerReleaseTag"
-$asset = $release.assets | Where-Object { $_.name -match '^Release-.*\.zip$' } | Select-Object -First 1
+$asset = $release.assets | Where-Object { $_.name -eq $PopplerAssetName } | Select-Object -First 1
 if (-not $asset) {
-    throw "Could not find Poppler Release zip on pinned tag $PopplerReleaseTag."
+    throw "Could not find exact Poppler asset $PopplerAssetName on pinned tag $PopplerReleaseTag."
 }
 
-$zipPath = Join-Path $TempDir $asset.name
+$zipPath = Join-Path $TempDir $PopplerAssetName
 Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+$actualSha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualSha256 -ne $PopplerAssetSha256) {
+    throw "Poppler archive SHA256 mismatch: expected $PopplerAssetSha256, got $actualSha256"
+}
 Expand-Archive -Path $zipPath -DestinationPath $TempDir -Force
 
 $popplerRoot = Get-ChildItem -Path $TempDir -Directory | Where-Object { $_.Name -match 'poppler' } | Select-Object -First 1
@@ -63,6 +63,13 @@ if (-not (Test-Path $sourceShare)) {
 }
 if (-not (Test-Path $sourceShare)) {
     throw "Could not locate share/poppler under $($popplerRoot.FullName)"
+}
+
+foreach ($dir in @($BinDir, $ShareDir, $LicenseDir)) {
+    if (Test-Path $dir) {
+        Remove-Item -Recurse -Force $dir
+    }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
 
 $required = @('pdftocairo.exe', 'pdftotext.exe', 'pdffonts.exe')
@@ -120,11 +127,14 @@ Canonical layout:
   share/poppler
 
 After fetch, tools/prune_poppler_bundle.py drops unused sibling DLLs.
-The libcurl → libssh2 → libcrypto chain is retained because poppler.dll
+The libcurl -> libssh2 -> libcrypto chain is retained because poppler.dll
 imports it (hard PE IAT dependency).
 
 MuPDF mutool is NOT bundled here (AGPL license review required).
 Ghostscript is NOT bundled here (optional font-repair helper).
+
+STABLE PUBLICATION IS BLOCKED until an independent qualified reviewer closes
+the exact binary dependency/license record. Integrity pins are not approval.
 "@ | Set-Content -Path (Join-Path $SupportDir 'Library\THIRD_PARTY_NOTICES.txt') -Encoding UTF8
 
 Write-Host ""

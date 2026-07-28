@@ -82,6 +82,8 @@ class BuildReleaseTest(unittest.TestCase):
                 br.SUPPORT_DIR = support
                 with mock.patch.object(br.subprocess, "run"), mock.patch.object(
                     br, "_run_poppler_smoke"
+                ), mock.patch.object(
+                    br.runtime_manifest, "validate_existing_manifest"
                 ):
                     archive = br.build(
                         root / "out",
@@ -110,6 +112,8 @@ class BuildReleaseTest(unittest.TestCase):
                 legacy.write_bytes(b"MZ bad")
                 with mock.patch.object(br.subprocess, "run"), mock.patch.object(
                     br, "_run_poppler_smoke"
+                ), mock.patch.object(
+                    br.runtime_manifest, "validate_existing_manifest"
                 ):
                     with self.assertRaises(RuntimeError):
                         br.build(

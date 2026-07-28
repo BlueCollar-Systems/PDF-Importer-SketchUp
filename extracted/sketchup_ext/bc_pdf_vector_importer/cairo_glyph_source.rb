@@ -1307,7 +1307,7 @@ module BlueCollarSystems
         ]
         @model_space_loops_cache ||= {}
         cached = @model_space_loops_cache[cache_key]
-        return cached if cached
+        return copy_model_space_loop_value(cached) if cached
 
         media_min_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
         media_min_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
@@ -1414,7 +1414,31 @@ module BlueCollarSystems
           }
         end
         @model_space_loops_cache[cache_key] = out
-        out
+        copy_model_space_loop_value(out)
+      end
+
+      # Cached outline entries are canonical source evidence. Renderers hand
+      # their points to host geometry APIs, which are allowed to retain or
+      # mutate those point objects. Never expose the cache's canonical object
+      # graph to a caller.
+      def self.copy_model_space_loop_value(value)
+        if defined?(Geom::Point3d) && value.is_a?(Geom::Point3d)
+          return Geom::Point3d.new(value.x.to_f, value.y.to_f, value.z.to_f)
+        end
+        case value
+        when Array
+          value.map { |item| copy_model_space_loop_value(item) }
+        when Hash
+          copy = {}
+          value.each do |key, item|
+            copy[key] = copy_model_space_loop_value(item)
+          end
+          copy
+        when String
+          value.dup
+        else
+          value
+        end
       end
 
       # Bind model-space physical loops back to an independent raw-SVG parse.

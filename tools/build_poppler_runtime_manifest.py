@@ -14,12 +14,31 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
+import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUPPORT = REPO_ROOT / "extracted" / "sketchup_ext" / "bc_pdf_vector_importer"
+PINNED_POPPLER_TAG = "v26.02.0-0"
+PINNED_BINARY_ASSET = "Release-26.02.0-0.zip"
+PINNED_BINARY_ASSET_SHA256 = (
+    "993e4a94376ed712fafc7058d724ea0b943d118bbd2305cd9ed55174eb85cda5"
+)
+PINNED_DATA_ARCHIVE = "poppler-data-0.4.12.tar.gz"
+PINNED_DATA_ARCHIVE_SHA256 = (
+    "c835b640a40ce357e1b83666aabd95edffa24ddddd49b8daff63adb851cdab74"
+)
+FORBIDDEN_REVIEWER_FRAGMENTS = (
+    "owner" + "-doctrine",
+    "codex",
+    "automation",
+    "unknown",
+)
+UTC_REVIEWED_AT = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z"
+)
 REQUIRED_EXES = ("pdftocairo.exe", "pdftotext.exe", "pdffonts.exe")
 REQUIRED_DATA = (
     "share/poppler/cidToUnicode/Adobe-GB1",
@@ -93,18 +112,151 @@ def validate_required(root: Path) -> None:
             raise SystemExit(f"Missing required Poppler data: {rel}")
 
 
+def require_checked_in_file(reference: str | None, label: str) -> str:
+    value = str(reference or "").strip()
+    if not value:
+        raise SystemExit(f"Approved review requires --{label}")
+    candidate = (REPO_ROOT / value).resolve()
+    try:
+        relative = candidate.relative_to(REPO_ROOT).as_posix()
+    except ValueError as exc:
+        raise SystemExit(f"{label} must stay inside the repository") from exc
+    if not candidate.is_file():
+        raise SystemExit(f"{label} is not a checked-in file: {relative}")
+    tracked = subprocess.run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={REPO_ROOT}",
+            "-C",
+            str(REPO_ROOT),
+            "ls-files",
+            "--error-unmatch",
+            relative,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if tracked.returncode != 0:
+        raise SystemExit(f"{label} is not tracked by git: {relative}")
+    return relative
+
+
+def build_license_review(
+    *,
+    status: str,
+    reviewer: str | None,
+    reviewed_at: str | None,
+    evidence: str | None,
+    sources_sha256: str | None,
+) -> dict:
+    if status == "blocked":
+        return {
+            "status": "blocked",
+            "missing": ["binary dependency license closure"],
+            "reason": (
+                "Qualified review of the exact 22-binary dependency/license "
+                "closure and source-availability obligations is pending"
+            ),
+        }
+    if status != "approved":
+        raise SystemExit(f"Unsupported license review status: {status}")
+
+    reviewer_value = str(reviewer or "").strip()
+    if not reviewer_value:
+        raise SystemExit("Approved review requires --reviewer")
+    lowered = reviewer_value.lower()
+    if any(fragment in lowered for fragment in FORBIDDEN_REVIEWER_FRAGMENTS):
+        raise SystemExit("Approved review requires an independent review authority")
+    reviewed_value = str(reviewed_at or "").strip()
+    if not UTC_REVIEWED_AT.fullmatch(reviewed_value):
+        raise SystemExit(
+            "Approved review requires --reviewed-at in UTC "
+            "YYYY-MM-DDTHH:MM:SSZ format"
+        )
+    evidence_path = require_checked_in_file(evidence, "evidence")
+    sources_path = require_checked_in_file(sources_sha256, "sources-sha256")
+    source_text = (REPO_ROOT / sources_path).read_text(
+        encoding="utf-8", errors="replace"
+    )
+    for digest in (
+        PINNED_BINARY_ASSET_SHA256,
+        PINNED_DATA_ARCHIVE_SHA256,
+    ):
+        if digest not in source_text:
+            raise SystemExit(
+                f"sources-sha256 does not contain required source pin {digest}"
+            )
+    return {
+        "status": "approved",
+        "missing": [],
+        "reviewer": reviewer_value,
+        "reviewed_at": reviewed_value,
+        "evidence": evidence_path,
+        "sources_sha256": sources_path,
+    }
+
+
+def validate_license_review(review: object, *, require_approved: bool) -> dict:
+    if not isinstance(review, dict):
+        raise RuntimeError("Poppler runtime license review is missing")
+    status = review.get("status")
+    if status == "blocked":
+        if require_approved:
+            raise RuntimeError(
+                "Poppler runtime license review is blocked; "
+                "release requires approved external evidence"
+            )
+        return review
+    if status != "approved":
+        raise RuntimeError("Poppler runtime license review state is invalid")
+    try:
+        expected = build_license_review(
+            status="approved",
+            reviewer=review.get("reviewer"),
+            reviewed_at=review.get("reviewed_at"),
+            evidence=review.get("evidence"),
+            sources_sha256=review.get("sources_sha256"),
+        )
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from exc
+    if review.get("missing"):
+        raise RuntimeError(
+            "Approved Poppler runtime license review still lists missing items"
+        )
+    return expected
+
+
+def expected_source(poppler_tag: str) -> dict:
+    return {
+        "project": "oschwartz10612/poppler-windows",
+        "tag": poppler_tag,
+        "url": (
+            "https://github.com/oschwartz10612/poppler-windows/releases/tag/"
+            + poppler_tag
+        ),
+        "binary_asset": PINNED_BINARY_ASSET,
+        "binary_asset_sha256": PINNED_BINARY_ASSET_SHA256,
+        "data_archive": PINNED_DATA_ARCHIVE,
+        "data_archive_sha256": PINNED_DATA_ARCHIVE_SHA256,
+    }
+
+
 def build_manifest(
     *,
     poppler_tag: str,
-    reviewer: str,
-    evidence: str,
+    license_status: str,
+    reviewer: str | None,
+    reviewed_at: str | None,
+    evidence: str | None,
+    sources_sha256: str | None,
 ) -> tuple[dict, str]:
     validate_required(SUPPORT)
     members = inventory_members(SUPPORT)
     if not members:
         raise SystemExit("No runtime members found under Library/ or share/poppler/")
     pinned = pinned_inventory_sha256(members)
-    reviewed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     manifest = {
         "schema": 1,
         "layout": {
@@ -112,39 +264,68 @@ def build_manifest(
             "data": "share/poppler",
             "manifest": "poppler-runtime-manifest.json",
         },
-        "source": {
-            "project": "oschwartz10612/poppler-windows",
-            "tag": poppler_tag,
-            "url": f"https://github.com/oschwartz10612/poppler-windows/releases/tag/{poppler_tag}",
-        },
-        "license_review": {
-            "status": "approved",
-            "missing": [],
-            "reviewer": reviewer,
-            "evidence": evidence,
-            "reviewed_at": reviewed_at,
-        },
+        "source": expected_source(poppler_tag),
+        "license_review": build_license_review(
+            status=license_status,
+            reviewer=reviewer,
+            reviewed_at=reviewed_at,
+            evidence=evidence,
+            sources_sha256=sources_sha256,
+        ),
         "members": members,
         "member_inventory_sha256": pinned,
     }
     return manifest, pinned
 
 
+def validate_existing_manifest(
+    support: Path = SUPPORT,
+    *,
+    require_approved: bool,
+) -> dict:
+    validate_required(support)
+    manifest_path = support / "poppler-runtime-manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid Poppler runtime manifest: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema") != 1:
+        raise RuntimeError("Poppler runtime manifest schema must be exactly 1")
+    if manifest.get("source") != expected_source(PINNED_POPPLER_TAG):
+        raise RuntimeError("Poppler runtime manifest source pins are incomplete")
+    validate_license_review(
+        manifest.get("license_review"),
+        require_approved=require_approved,
+    )
+
+    declared = manifest.get("members")
+    if not isinstance(declared, list):
+        raise RuntimeError("Poppler runtime manifest members must be a list")
+    actual = inventory_members(support)
+    if declared != actual:
+        raise RuntimeError(
+            "Poppler runtime files do not exactly match the manifest inventory"
+        )
+    actual_pinned = pinned_inventory_sha256(actual)
+    if manifest.get("member_inventory_sha256") != actual_pinned:
+        raise RuntimeError(
+            "Poppler runtime member inventory digest does not match"
+        )
+    return manifest
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--poppler-tag", default="v26.02.0-0")
+    parser.add_argument("--poppler-tag", default=PINNED_POPPLER_TAG)
     parser.add_argument(
-        "--reviewer",
-        default="owner-doctrine-2026-07-28-zero-ceremony-helpers",
+        "--license-status",
+        choices=("blocked", "approved"),
+        default="blocked",
     )
-    parser.add_argument(
-        "--evidence",
-        default=(
-            "THIRD_PARTY_NOTICES.md + Library/THIRD_PARTY_NOTICES.txt + "
-            "Library/licenses; free GPL/LGPL/BSD/Apache Poppler Windows runtime; "
-            "owner doctrine requires zero-ceremony helpers inside the RBZ"
-        ),
-    )
+    parser.add_argument("--reviewer")
+    parser.add_argument("--reviewed-at")
+    parser.add_argument("--evidence")
+    parser.add_argument("--sources-sha256")
     parser.add_argument(
         "--write",
         action="store_true",
@@ -153,8 +334,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     manifest, pinned = build_manifest(
         poppler_tag=args.poppler_tag,
+        license_status=args.license_status,
         reviewer=args.reviewer,
+        reviewed_at=args.reviewed_at,
         evidence=args.evidence,
+        sources_sha256=args.sources_sha256,
     )
     out = SUPPORT / "poppler-runtime-manifest.json"
     if args.write:

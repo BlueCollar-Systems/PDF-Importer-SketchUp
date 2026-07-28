@@ -47,7 +47,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Zero-ceremony release contract tests
-        run: python tools/test_build_release.py -v
+        run: |
+          python tools/test_build_release.py -v
+          python -m unittest tools.test_poppler_runtime_contract tools.test_workflow_poppler_contract
       - name: Release safety unit tests (R21-5)
         run: python tools/test_release_safety.py
       - name: Build zero-ceremony release in temporary output
@@ -84,6 +86,7 @@ jobs:
           python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext
           python3 tools/test_prune_poppler_bundle.py
           python3 tools/test_release_safety.py
+          python3 -m unittest tools.test_poppler_runtime_contract tools.test_workflow_poppler_contract
           find extracted/sketchup_ext test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
           ruby test/smoke_test.rb
           ruby test/ruby22_compat_test.rb
@@ -211,6 +214,8 @@ jobs:
           set -e
           TAG="v${{ steps.version.outputs.version }}"
           RBZ="SketchUp-PDF-Importer_v${{ steps.version.outputs.version }}.rbz"
+          SOURCE_CHECKSUMS="third_party/sources/SHA256SUMS.txt"
+          test -f "$SOURCE_CHECKSUMS"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — immutable; skipping asset upload."
@@ -235,7 +240,8 @@ jobs:
 
             **Install:** Download \`${RBZ}\` below, then in SketchUp: **Window > Extension Manager > Install Extension**." \
               --latest \
-              "$RBZ"
+              "$RBZ" \
+              "$SOURCE_CHECKSUMS"
             echo "minted=true" >> "$GITHUB_OUTPUT"
           fi
 

@@ -34,6 +34,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+from tools import build_poppler_runtime_manifest as runtime_manifest
+
 REPO_ROOT   = Path(__file__).parent.resolve()
 EXT_ROOT    = REPO_ROOT / "extracted" / "sketchup_ext"
 LOADER_FILE = EXT_ROOT / "bc_pdf_vector_importer.rb"
@@ -113,6 +115,10 @@ def _require_bundled_runtime() -> None:
             "Run: powershell -ExecutionPolicy Bypass -File "
             "tools/fetch_third_party_binaries.ps1"
         )
+    runtime_manifest.validate_existing_manifest(
+        SUPPORT_DIR,
+        require_approved=True,
+    )
     for name in REQUIRED_HELPERS:
         path = SUPPORT_DIR / "Library" / "bin" / name
         if not path.is_file():

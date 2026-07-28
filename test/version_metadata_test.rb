@@ -2,7 +2,6 @@ require 'minitest/autorun'
 
 class VersionMetadataTest < Minitest::Test
   ROOT = File.expand_path('..', __dir__)
-  EXPECTED_VERSION = '3.7.103'.freeze
 
   def read(path)
     File.read(File.join(ROOT, path))
@@ -12,12 +11,12 @@ class VersionMetadataTest < Minitest::Test
     loader = read('extracted/sketchup_ext/bc_pdf_vector_importer.rb')
     metadata = read('extracted/sketchup_ext/bc_pdf_vector_importer/metadata.rb')
     readme = read('README.md')
+    loader_version = loader[/PLUGIN_VERSION\s*=\s*'([^']+)'/, 1]
+    metadata_version = metadata[/VERSION\s*=\s*'([^']+)'/, 1]
+    readme_version = readme[/Version-([0-9.]+)-green/, 1]
 
-    assert_match(/PLUGIN_VERSION\s*=\s*'#{Regexp.escape(EXPECTED_VERSION)}'/,
-                 loader)
-    assert_match(/VERSION\s*=\s*'#{Regexp.escape(EXPECTED_VERSION)}'/,
-                 metadata)
-    assert_match(/Version-#{Regexp.escape(EXPECTED_VERSION)}-green/,
-                 readme)
+    refute_nil loader_version
+    assert_equal loader_version, metadata_version
+    assert_equal loader_version, readme_version
   end
 end
