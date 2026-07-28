@@ -62,14 +62,14 @@ module SketchupBatchImport
       SketchupBatchImport.write_progress!(
         job, binding, 'post_import_evidence_snapshot_started'
       )
-      after_manifest = SketchupHostEvidence.snapshot_entities(
+      live_after_manifest = SketchupHostEvidence.snapshot_entities(
         @model.active_entities, :compact => true
       )
       SketchupBatchImport.write_progress!(
         job, binding, 'post_import_evidence_snapshot_completed'
       )
       owned_manifest = SketchupHostEvidence.owned_manifest(
-        before_manifest, after_manifest
+        before_manifest, live_after_manifest
       )
       raise 'no recursively owned imported host entities found' if
         owned_manifest.empty?
@@ -89,6 +89,27 @@ module SketchupBatchImport
       raise 'model save failed' unless @model.save(job[:model_path])
       raise 'saved model missing' unless File.file?(job[:model_path])
       SketchupBatchImport.write_progress!(job, binding, 'model_saved')
+
+      # SketchUp 2017 heals nested page edges on the first save/load
+      # (~tens of edges). Continuity must compare the healed model to a
+      # second reopen — not the pre-heal in-memory snapshot.
+      SketchupBatchImport.write_progress!(
+        job, binding, 'host_heal_stabilize_started'
+      )
+      stabilize_model = reopen_model!(job[:model_path])
+      after_manifest = SketchupHostEvidence.snapshot_entities(
+        stabilize_model.active_entities, :compact => true
+      )
+      owned_manifest = SketchupHostEvidence.owned_manifest(
+        before_manifest, after_manifest
+      )
+      raise 'no recursively owned imported host entities found after heal' if
+        owned_manifest.empty?
+      raise 'stabilized model save failed' unless
+        stabilize_model.save(job[:model_path])
+      SketchupBatchImport.write_progress!(
+        job, binding, 'host_heal_stabilize_completed'
+      )
 
       report_source = stats[:import_report_path]
       report_copy = File.join(job[:output_dir], 'import_report.json')
@@ -118,7 +139,8 @@ module SketchupBatchImport
         'import_session_id' => import_session_id,
         'source_provenance' => provenance,
         'same_session_entities' => owned_manifest,
-        'post_import_entities' => after_manifest
+        'post_import_entities' => after_manifest,
+        'post_import_entities_pre_heal' => live_after_manifest
       )
       SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
 
@@ -133,9 +155,19 @@ module SketchupBatchImport
       SketchupBatchImport.write_progress!(
         job, binding, 'reopen_evidence_snapshot_completed'
       )
-      SketchupHostEvidence.verify_reopen_continuity!(
-        after_manifest, reopened_manifest
-      )
+      begin
+        SketchupHostEvidence.verify_reopen_continuity!(
+          after_manifest, reopened_manifest
+        )
+      rescue SketchupHostEvidence::EvidenceError => error
+        # Persist both sides so a reopen RED can be diagnosed without
+        # another full import (previous runs lost the reopened snapshot).
+        manifest_payload['reopened_entities'] = reopened_manifest
+        manifest_payload['reopen_persistent_id_verified'] = false
+        manifest_payload['reopen_continuity_error'] = error.message.to_s
+        SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
+        raise
+      end
       manifest_payload['reopened_entities'] = reopened_manifest
       manifest_payload['reopen_persistent_id_verified'] = true
       SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)

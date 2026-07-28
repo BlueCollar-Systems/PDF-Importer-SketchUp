@@ -33,20 +33,35 @@ module BlueCollarSystems
         stats = { merged_verts: 0, removed_dupes: 0, removed_micro: 0,
                   joined_collinear: 0, closed_gaps: 0 }
 
+        # Nested color/page Groups often hold the real edges. Top-level-only
+        # cleanup left them dirty so SketchUp 2017 save/reopen could heal
+        # them differently and break host continuity digests.
+        entities.grep(Sketchup::Group).each do |group|
+          next unless group.respond_to?(:valid?) && group.valid?
+          begin
+            nested = cleanup(group.entities, opts)
+            nested.each do |key, value|
+              stats[key] = (stats[key] || 0) + value.to_i
+            end
+          rescue StandardError => e
+            Logger.warn("GeometryCleanup", "nested group cleanup failed: #{e.message}")
+          end
+        end
+
         # Phase 1: Remove micro segments
-        stats[:removed_micro] = remove_micro_edges(entities, micro_len)
+        stats[:removed_micro] += remove_micro_edges(entities, micro_len)
 
         # Phase 2: Merge near-coincident vertices
-        stats[:merged_verts] = merge_vertices(entities, merge_tol)
+        stats[:merged_verts] += merge_vertices(entities, merge_tol)
 
         # Phase 3: Remove duplicate edges (same two endpoints)
-        stats[:removed_dupes] = remove_duplicate_edges(entities)
+        stats[:removed_dupes] += remove_duplicate_edges(entities)
 
         # Phase 4: Join collinear segments
-        stats[:joined_collinear] = join_collinear_edges(entities, collinear_tol)
+        stats[:joined_collinear] += join_collinear_edges(entities, collinear_tol)
 
         # Phase 5: Close tiny face gaps
-        stats[:closed_gaps] = close_face_gaps(entities, merge_tol * 2)
+        stats[:closed_gaps] += close_face_gaps(entities, merge_tol * 2)
 
         stats
       end
