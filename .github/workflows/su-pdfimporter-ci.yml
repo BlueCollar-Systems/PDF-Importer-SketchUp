@@ -128,5 +128,7 @@ jobs:
         run: python tools/test_build_release.py -v
       - name: Release safety unit tests (R21-5)
         run: python tools/test_release_safety.py
-      - name: Build zero-ceremony release in temporary output
-        run: python build_release.py --out "$env:RUNNER_TEMP\su-rbz"
+      - name: Smoke the checked-in Windows Poppler helpers
+        run: python tools/smoke_poppler_helpers.py --required
+      - name: Validate release publication state
+        run: python tools/check_release_publication.py

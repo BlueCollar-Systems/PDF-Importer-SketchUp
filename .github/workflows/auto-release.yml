@@ -40,6 +40,8 @@ jobs:
   source-only-build-windows:
     needs: ruby22-exact-parse
     runs-on: windows-latest
+    outputs:
+      publication_ready: ${{ steps.publication.outputs.publication_ready }}
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
@@ -52,12 +54,15 @@ jobs:
           python -m unittest tools.test_poppler_runtime_contract tools.test_workflow_poppler_contract
       - name: Release safety unit tests (R21-5)
         run: python tools/test_release_safety.py
-      - name: Build zero-ceremony release in temporary output
-        run: python build_release.py --out "$env:RUNNER_TEMP\su-rbz"
+      - name: Smoke the checked-in Windows Poppler helpers
+        run: python tools/smoke_poppler_helpers.py --required
+      - name: Evaluate release publication gate
+        id: publication
+        run: python tools/check_release_publication.py
 
   release:
     needs: [ruby22-exact-parse, source-only-build-windows]
-    if: "!startsWith(github.event.head_commit.message, 'chore: bump version to') && !contains(github.event.head_commit.message, 'automation/version-bump') && !contains(github.event.head_commit.message, '[skip release]')"
+    if: "needs.source-only-build-windows.outputs.publication_ready == 'true' && !startsWith(github.event.head_commit.message, 'chore: bump version to') && !contains(github.event.head_commit.message, 'automation/version-bump') && !contains(github.event.head_commit.message, '[skip release]')"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
