@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -50,7 +51,8 @@ class PopplerRuntimeContractTest(unittest.TestCase):
 
     def test_release_builder_rejects_the_blocked_checked_in_runtime(self):
         with self.assertRaisesRegex(
-            RuntimeError, "license review.*blocked|requires approved"
+            RuntimeError,
+            "license review.*blocked|requires approved|source offer is incomplete",
         ):
             build_release._require_bundled_runtime()
 
@@ -63,6 +65,48 @@ class PopplerRuntimeContractTest(unittest.TestCase):
         self.assertIn(manifest_builder.PINNED_BINARY_ASSET_SHA256, text)
         self.assertIn("Get-FileHash", text)
         self.assertIn("SHA256 mismatch", text)
+
+    def test_fetcher_preserves_the_reviewed_compliance_payload(self):
+        text = (
+            ROOT / "tools" / "fetch_third_party_binaries.ps1"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("@($BinDir, $ShareDir, $LicenseDir)", text)
+        self.assertNotIn(
+            "Set-Content -Path (Join-Path $SupportDir "
+            "'Library\\THIRD_PARTY_NOTICES.txt')",
+            text,
+        )
+        self.assertIn("--validate-compliance-only", text)
+
+    def test_source_offer_is_a_notice_member_not_an_unclassified_payload(self):
+        self.assertEqual(
+            "notice",
+            manifest_builder.category_for("Library/SOURCE_OFFER.txt"),
+        )
+
+    def test_complete_compliance_payload_is_required(self):
+        manifest_builder.validate_compliance_payload(
+            SUPPORT,
+            require_complete_offer=False,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(
+                RuntimeError, "compliance payload is incomplete"
+            ):
+                manifest_builder.validate_compliance_payload(
+                    Path(temp_dir),
+                    require_complete_offer=False,
+                )
+
+    def test_draft_source_offer_cannot_be_approved(self):
+        with self.assertRaisesRegex(
+            RuntimeError, "source offer is incomplete"
+        ):
+            manifest_builder.validate_compliance_payload(
+                SUPPORT,
+                require_complete_offer=True,
+            )
 
     def test_approved_review_requires_external_evidence_fields(self):
         with self.assertRaisesRegex(

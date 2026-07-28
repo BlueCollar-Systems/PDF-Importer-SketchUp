@@ -46,6 +46,41 @@ REQUIRED_DATA = (
     "share/poppler/cidToUnicode/Adobe-Japan1",
     "share/poppler/cidToUnicode/Adobe-Korea1",
 )
+REQUIRED_LICENSE_FILES = (
+    "Library/licenses/LGPL-2.1.txt",
+    "Library/licenses/MPL-1.1.txt",
+    "Library/licenses/cairo-COPYING",
+    "Library/licenses/curl-COPYING",
+    "Library/licenses/expat-COPYING",
+    "Library/licenses/fontconfig-COPYING",
+    "Library/licenses/freetype-FTL.TXT",
+    "Library/licenses/freetype-GPLv2.TXT",
+    "Library/licenses/freetype-LICENSE.TXT",
+    "Library/licenses/lcms2-COPYING",
+    "Library/licenses/lerc-LICENSE",
+    "Library/licenses/libdeflate-COPYING",
+    "Library/licenses/libjpeg-turbo-LICENSE.md",
+    "Library/licenses/libpng-LICENSE",
+    "Library/licenses/libssh2-COPYING",
+    "Library/licenses/libtiff-LICENSE.md",
+    "Library/licenses/openjpeg-LICENSE",
+    "Library/licenses/openssl-LICENSE.txt",
+    "Library/licenses/pixman-COPYING",
+    "Library/licenses/poppler-COPYING",
+    "Library/licenses/xz-COPYING.0BSD",
+    "Library/licenses/zlib-LICENSE",
+    "Library/licenses/zstd-LICENSE",
+)
+REQUIRED_COMPLIANCE_FILES = (
+    "Library/THIRD_PARTY_NOTICES.txt",
+    "Library/SOURCE_OFFER.txt",
+) + REQUIRED_LICENSE_FILES
+SOURCE_OFFER_REQUIRED_LABELS = (
+    "name:",
+    "postal address:",
+    "e-mail:",
+    "source publication url:",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -62,7 +97,10 @@ def sha256_file(path: Path) -> str:
 def category_for(rel: str) -> str:
     if rel.startswith("Library/bin/") and rel.lower().endswith((".exe", ".dll")):
         return "binary"
-    if rel.startswith("Library/licenses/") or rel == "Library/THIRD_PARTY_NOTICES.txt":
+    if rel.startswith("Library/licenses/") or rel in (
+        "Library/THIRD_PARTY_NOTICES.txt",
+        "Library/SOURCE_OFFER.txt",
+    ):
         return "notice"
     if rel.startswith("share/poppler/"):
         return "data"
@@ -110,6 +148,61 @@ def validate_required(root: Path) -> None:
         path = root / rel
         if not path.is_file():
             raise SystemExit(f"Missing required Poppler data: {rel}")
+
+
+def validate_compliance_payload(
+    support: Path,
+    *,
+    require_complete_offer: bool,
+) -> None:
+    missing = [
+        rel for rel in REQUIRED_COMPLIANCE_FILES if not (support / rel).is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Poppler compliance payload is incomplete; missing: "
+            + ", ".join(missing)
+        )
+
+    notices = (support / "Library" / "THIRD_PARTY_NOTICES.txt").read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+    unreferenced = [
+        rel for rel in REQUIRED_LICENSE_FILES if rel not in notices
+    ]
+    if unreferenced:
+        raise RuntimeError(
+            "Poppler third-party notice omits required license references: "
+            + ", ".join(unreferenced)
+        )
+
+    if not require_complete_offer:
+        return
+    offer = (support / "Library" / "SOURCE_OFFER.txt").read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+    lowered = offer.lower()
+    placeholders = (
+        "draft",
+        "<owner to complete",
+        "<insert",
+        "<to be completed",
+    )
+    missing_labels = [
+        label for label in SOURCE_OFFER_REQUIRED_LABELS if label not in lowered
+    ]
+    if (
+        any(placeholder in lowered for placeholder in placeholders)
+        or re.search(r"<[^>]+>", offer)
+        or missing_labels
+    ):
+        raise RuntimeError(
+            "Poppler source offer is incomplete; replace every draft "
+            "placeholder and provide name, postal address, e-mail, and "
+            "source publication URL before approval"
+        )
 
 
 def require_checked_in_file(reference: str | None, label: str) -> str:
@@ -253,6 +346,10 @@ def build_manifest(
     sources_sha256: str | None,
 ) -> tuple[dict, str]:
     validate_required(SUPPORT)
+    validate_compliance_payload(
+        SUPPORT,
+        require_complete_offer=license_status == "approved",
+    )
     members = inventory_members(SUPPORT)
     if not members:
         raise SystemExit("No runtime members found under Library/ or share/poppler/")
@@ -284,6 +381,10 @@ def validate_existing_manifest(
     require_approved: bool,
 ) -> dict:
     validate_required(support)
+    validate_compliance_payload(
+        support,
+        require_complete_offer=require_approved,
+    )
     manifest_path = support / "poppler-runtime-manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -331,7 +432,25 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Write poppler-runtime-manifest.json under the support folder",
     )
+    parser.add_argument(
+        "--validate-compliance-only",
+        action="store_true",
+        help=(
+            "Verify checked-in notices, source offer, and license texts "
+            "without rebuilding the runtime manifest"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.validate_compliance_only:
+        validate_compliance_payload(
+            SUPPORT,
+            require_complete_offer=False,
+        )
+        print(
+            "Poppler compliance payload present: "
+            f"{len(REQUIRED_COMPLIANCE_FILES)} required files"
+        )
+        return 0
     manifest, pinned = build_manifest(
         poppler_tag=args.poppler_tag,
         license_status=args.license_status,

@@ -1,0 +1,27 @@
+WRITTEN OFFER FOR SOURCE CODE
+========================================================================
+
+DRAFT -- requires the owner to insert contact details and publication URL,
+and requires review before publication.
+
+The binaries bundled with this extension are UNMODIFIED redistributions of
+the upstream release identified below. No patches were applied. A subset of
+the upstream DLLs was removed (pruning); no binary was rebuilt or altered.
+
+  Poppler Windows build : https://github.com/oschwartz10612/poppler-windows/releases/tag/v26.02.0-0
+  Release asset         : Release-26.02.0-0.zip
+  Asset SHA-256         : 993e4a94376ed712fafc7058d724ea0b943d118bbd2305cd9ed55174eb85cda5
+  poppler-data          : https://poppler.freedesktop.org/poppler-data-0.4.12.tar.gz
+  poppler-data SHA-256  : c835b640a40ce357e1b83666aabd95edffa24ddddd49b8daff63adb851cdab74
+
+Components under GPL or LGPL terms in this bundle:
+  - cairo            LGPL-2.1-or-later, MPL-1.1
+  - freetype         FTL, GPL-2.0-only
+  - poppler          GPL-2.0-or-later
+
+For a copy of the corresponding source code for any component above, contact:
+
+    <OWNER TO COMPLETE: name, postal address, e-mail>
+
+This offer is valid for at least three (3) years from the date of your
+receipt of these binaries.

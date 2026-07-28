@@ -1,23 +1,183 @@
-﻿Bundled third-party tools for PDF Vector Importer (SketchUp)
+THIRD-PARTY NOTICES -- PDF Vector Importer for SketchUp
+Bundled Poppler runtime
+========================================================================
 
-Poppler utilities, PE-reachable DLLs, and share/poppler language data
-(distributed under their upstream licenses; Poppler is GPL-family):
-  pdftocairo.exe, pdftotext.exe, pdffonts.exe + required DLLs + cid maps
+This extension bundles an unmodified redistribution of the Poppler Windows
+build listed below, together with its binary dependencies. Each component,
+its licence, and the file containing that licence's full text are listed.
 
-Fetched by tools/fetch_third_party_binaries.ps1 from pinned tag:
-  https://github.com/oschwartz10612/poppler-windows/releases/tag/v26.02.0-0
+The bundled helpers are invoked as SEPARATE PROCESSES (pdftocairo.exe,
+pdftotext.exe, pdffonts.exe). They are not statically linked into, and do not
+share an address space with, the importer's own Ruby code.
 
-Canonical layout:
-  Library/bin
-  Library/licenses
-  share/poppler
+UPSTREAM SOURCE (pinned, hash-verified)
+------------------------------------------------------------------------
+  archive_root                 poppler-26.02.0
+  asset                        Release-26.02.0-0.zip
+  asset_sha256                 993e4a94376ed712fafc7058d724ea0b943d118bbd2305cd9ed55174eb85cda5
+  gpl3_text_sha256             3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
+  gpl3_text_url                https://www.gnu.org/licenses/gpl-3.0.txt
+  poppler_data_archive_sha256  c835b640a40ce357e1b83666aabd95edffa24ddddd49b8daff63adb851cdab74
+  poppler_data_root            poppler-data-0.4.12
+  poppler_data_url             https://poppler.freedesktop.org/poppler-data-0.4.12.tar.gz
+  poppler_data_version         0.4.12
+  release_tag                  v26.02.0-0
+  release_url                  https://github.com/oschwartz10612/poppler-windows/releases/tag/v26.02.0-0
 
-After fetch, tools/prune_poppler_bundle.py drops unused sibling DLLs.
-The libcurl -> libssh2 -> libcrypto chain is retained because poppler.dll
-imports it (hard PE IAT dependency).
+COMPONENT INVENTORY
+------------------------------------------------------------------------
 
-MuPDF mutool is NOT bundled here (AGPL license review required).
-Ghostscript is NOT bundled here (optional font-repair helper).
+Component : cairo
+Licence   : LGPL-2.1-or-later, MPL-1.1
+Binaries  : Library/bin/cairo.dll
+Licence text: Library/licenses/cairo-COPYING
+  retrieved from: https://gitlab.freedesktop.org/cairo/cairo/-/raw/master/COPYING
+  sha256: 67228a9f7c5f9b67c58f556f1be178f62da4d9e2e6285318d8c74d567255abdf
+Licence text: Library/licenses/LGPL-2.1.txt
+  retrieved from: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
+  sha256: 20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95
+Licence text: Library/licenses/MPL-1.1.txt
+  retrieved from: https://www.mozilla.org/media/MPL/1.1/index.txt
+  sha256: f849fc26a7a99981611a3a370e83078deb617d12a45776d6c4cada4d338be469
 
-STABLE PUBLICATION IS BLOCKED until an independent qualified reviewer closes
-the exact binary dependency/license record. Integrity pins are not approval.
+Component : curl
+Licence   : curl
+Binaries  : Library/bin/libcurl.dll
+Licence text: Library/licenses/curl-COPYING
+  retrieved from: https://raw.githubusercontent.com/curl/curl/master/COPYING
+  sha256: 82f2f4427d6545ee5aaac4f0b80428da6cc8ba41c2cf5da3a03680ec327b9681
+
+Component : expat
+Licence   : MIT
+Binaries  : Library/bin/libexpat.dll
+Licence text: Library/licenses/expat-COPYING
+  retrieved from: https://raw.githubusercontent.com/libexpat/libexpat/master/expat/COPYING
+  sha256: 31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87
+
+Component : fontconfig
+Licence   : MIT
+Binaries  : Library/bin/fontconfig-1.dll
+Licence text: Library/licenses/fontconfig-COPYING
+  retrieved from: https://gitlab.freedesktop.org/fontconfig/fontconfig/-/raw/main/COPYING
+  sha256: 51a51aa9823704fd90bccc616cdd17ebabb5b2b3e9cbde886ca02c7002288067
+
+Component : freetype
+Licence   : FTL, GPL-2.0-only
+Binaries  : Library/bin/freetype.dll
+Licence text: Library/licenses/freetype-LICENSE.TXT
+  retrieved from: https://raw.githubusercontent.com/freetype/freetype/master/LICENSE.TXT
+  sha256: bd36c8b474855fa294c2ec5c184544478ef3720aad37d65a6296a4f264fd2d3b
+Licence text: Library/licenses/freetype-FTL.TXT
+  retrieved from: https://raw.githubusercontent.com/freetype/freetype/master/docs/FTL.TXT
+  sha256: 5a5ee54c5001bbad1cdc1a57cc3dd4c42199b2da09d39c7ee41fab002d02967f
+Licence text: Library/licenses/freetype-GPLv2.TXT
+  retrieved from: https://raw.githubusercontent.com/freetype/freetype/master/docs/GPLv2.TXT
+  sha256: c4120c6752c910c299e3bd9cb3a46ff262c268303ca2069b61f92f10a5656c18
+
+Component : lerc
+Licence   : Apache-2.0
+Binaries  : Library/bin/Lerc.dll
+Licence text: Library/licenses/lerc-LICENSE
+  retrieved from: https://raw.githubusercontent.com/Esri/lerc/master/LICENSE
+  sha256: 77a8b761727c75e2167b15bfdf61b2c0bcf8792271228bebe80779106ad00671
+
+Component : libdeflate
+Licence   : MIT
+Binaries  : Library/bin/deflate.dll
+Licence text: Library/licenses/libdeflate-COPYING
+  retrieved from: https://raw.githubusercontent.com/ebiggers/libdeflate/master/COPYING
+  sha256: 4ad69099cb4374836fd27583d9991e2838cd86b6e4666ab26b2d32582c91e73a
+
+Component : libjpeg-turbo
+Licence   : BSD-3-Clause, Zlib
+Binaries  : Library/bin/jpeg8.dll
+Licence text: Library/licenses/libjpeg-turbo-LICENSE.md
+  retrieved from: https://raw.githubusercontent.com/libjpeg-turbo/libjpeg-turbo/main/LICENSE.md
+  sha256: ba6bceebcba0fdd35488477c2cca8c4632ce82c74dbfbc87d886ce6fc4433579
+
+Component : libpng
+Licence   : Libpng-2.0
+Binaries  : Library/bin/libpng16.dll
+Licence text: Library/licenses/libpng-LICENSE
+  retrieved from: https://raw.githubusercontent.com/pnggroup/libpng/master/LICENSE
+  sha256: bdb0a645ea18c60507d0368379b1ac5474b92255fcc2d115e07486a7672ba526
+
+Component : libssh2
+Licence   : BSD-3-Clause
+Binaries  : Library/bin/libssh2.dll
+Licence text: Library/licenses/libssh2-COPYING
+  retrieved from: https://raw.githubusercontent.com/libssh2/libssh2/master/COPYING
+  sha256: a83a4da224ebeaaaea5efb4cd1ef1ab0998c1bd719d6f70b05e1d5c491372137
+
+Component : libtiff
+Licence   : libtiff
+Binaries  : Library/bin/tiff.dll
+Licence text: Library/licenses/libtiff-LICENSE.md
+  retrieved from: https://gitlab.com/libtiff/libtiff/-/raw/master/LICENSE.md
+  sha256: 0e27c2382d7b8147972bbb746e04059a1152c8d0fda9d03ef1399d1a433c4ade
+
+Component : little-cms
+Licence   : MIT
+Binaries  : Library/bin/lcms2.dll
+Licence text: Library/licenses/lcms2-COPYING
+  retrieved from: https://raw.githubusercontent.com/mm2/Little-CMS/master/LICENSE
+  sha256: 6dbd60437f8ef91d8de1f08ad75882547fd4931bfcc3566a0735f28db1484d31
+
+Component : openjpeg
+Licence   : BSD-2-Clause
+Binaries  : Library/bin/openjp2.dll
+Licence text: Library/licenses/openjpeg-LICENSE
+  retrieved from: https://raw.githubusercontent.com/uclouvain/openjpeg/master/LICENSE
+  sha256: a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6
+
+Component : openssl
+Licence   : Apache-2.0
+Binaries  : Library/bin/libcrypto-3-x64.dll
+Licence text: Library/licenses/openssl-LICENSE.txt
+  retrieved from: https://raw.githubusercontent.com/openssl/openssl/master/LICENSE.txt
+  sha256: 7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a
+
+Component : pixman
+Licence   : MIT
+Binaries  : Library/bin/pixman-1-0.dll
+Licence text: Library/licenses/pixman-COPYING
+  retrieved from: https://gitlab.freedesktop.org/pixman/pixman/-/raw/master/COPYING
+  sha256: fac9270f0987b96ff4533fca3548c633e02083cbba4a0172a3b149b2e4019793
+
+Component : poppler
+Licence   : GPL-2.0-or-later
+Binaries  : Library/bin/pdffonts.exe, Library/bin/pdftocairo.exe, Library/bin/pdftotext.exe, Library/bin/poppler.dll
+Licence text: Library/licenses/poppler-COPYING
+  retrieved from: https://gitlab.freedesktop.org/poppler/poppler/-/raw/master/COPYING
+  sha256: ab15fd526bd8dd18a9e77ebc139656bf4d33e97fc7238cd11bf60e2b9b8666c6
+
+Component : xz
+Licence   : 0BSD
+Binaries  : Library/bin/liblzma.dll
+Licence text: Library/licenses/xz-COPYING.0BSD
+  retrieved from: https://raw.githubusercontent.com/tukaani-project/xz/master/COPYING.0BSD
+  sha256: 0b01625d853911cd0e2e088dcfb743261034a091bb379246cb25a14cc4c74bf1
+
+Component : zlib
+Licence   : Zlib
+Binaries  : Library/bin/zlib.dll
+Licence text: Library/licenses/zlib-LICENSE
+  retrieved from: https://raw.githubusercontent.com/madler/zlib/develop/LICENSE
+  sha256: e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2
+
+Component : zstd
+Licence   : BSD-3-Clause
+Binaries  : Library/bin/zstd.dll
+Licence text: Library/licenses/zstd-LICENSE
+  retrieved from: https://raw.githubusercontent.com/facebook/zstd/dev/LICENSE
+  sha256: 7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8
+
+POPPLER DATA
+------------------------------------------------------------------------
+  poppler-data 0.4.12 is bundled under share/poppler/.
+  Its own licence files ship at share/poppler/COPYING, COPYING.adobe and
+  COPYING.gpl2, exactly as distributed upstream.
+
+SOURCE AVAILABILITY
+------------------------------------------------------------------------
+  See SOURCE_OFFER.txt in this directory.

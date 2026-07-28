@@ -1,6 +1,7 @@
 # fetch_third_party_binaries.ps1
 # Stage a free zero-ceremony Poppler runtime into the SketchUp extension:
-#   Library/bin + share/poppler + licenses + notices
+#   Library/bin + share/poppler
+# The reviewed, checked-in licenses/notices are preserved byte-for-byte.
 # Then prune DLLs, smoke helpers, and build the integrity manifest.
 #
 # Usage:
@@ -28,6 +29,12 @@ if (Test-Path $LegacyBin) {
 }
 
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+
+Write-Host "Validating checked-in compliance payload..."
+& python (Join-Path $RepoRoot 'tools\build_poppler_runtime_manifest.py') --validate-compliance-only
+if ($LASTEXITCODE -ne 0) {
+    throw "Checked-in Poppler compliance payload is incomplete."
+}
 
 Write-Host "Fetching Poppler Windows build (pinned $PopplerReleaseTag)..."
 $release = Invoke-RestMethod -Uri "https://api.github.com/repos/oschwartz10612/poppler-windows/releases/tags/$PopplerReleaseTag"
@@ -65,7 +72,7 @@ if (-not (Test-Path $sourceShare)) {
     throw "Could not locate share/poppler under $($popplerRoot.FullName)"
 }
 
-foreach ($dir in @($BinDir, $ShareDir, $LicenseDir)) {
+foreach ($dir in @($BinDir, $ShareDir)) {
     if (Test-Path $dir) {
         Remove-Item -Recurse -Force $dir
     }
@@ -101,41 +108,6 @@ foreach ($rel in $requiredData) {
         throw "Missing required Poppler language data: $rel"
     }
 }
-
-Get-ChildItem -Path $popplerRoot.FullName -Recurse -File |
-    Where-Object { $_.Name -match '^(COPYING|COPYRIGHT|LICENSE|NOTICE|README|AUTHORS)' } |
-    ForEach-Object {
-        $relative = $_.FullName.Substring($popplerRoot.FullName.Length).TrimStart('\', '/')
-        $safeName = $relative -replace '[\\/:*?"<>|]', '_'
-        Copy-Item -Path $_.FullName -Destination (Join-Path $LicenseDir $safeName) -Force
-        Write-Host "  + Library\licenses\$safeName"
-    }
-
-@"
-Bundled third-party tools for PDF Vector Importer (SketchUp)
-
-Poppler utilities, PE-reachable DLLs, and share/poppler language data
-(distributed under their upstream licenses; Poppler is GPL-family):
-  pdftocairo.exe, pdftotext.exe, pdffonts.exe + required DLLs + cid maps
-
-Fetched by tools/fetch_third_party_binaries.ps1 from pinned tag:
-  https://github.com/oschwartz10612/poppler-windows/releases/tag/$PopplerReleaseTag
-
-Canonical layout:
-  Library/bin
-  Library/licenses
-  share/poppler
-
-After fetch, tools/prune_poppler_bundle.py drops unused sibling DLLs.
-The libcurl -> libssh2 -> libcrypto chain is retained because poppler.dll
-imports it (hard PE IAT dependency).
-
-MuPDF mutool is NOT bundled here (AGPL license review required).
-Ghostscript is NOT bundled here (optional font-repair helper).
-
-STABLE PUBLICATION IS BLOCKED until an independent qualified reviewer closes
-the exact binary dependency/license record. Integrity pins are not approval.
-"@ | Set-Content -Path (Join-Path $SupportDir 'Library\THIRD_PARTY_NOTICES.txt') -Encoding UTF8
 
 Write-Host ""
 Write-Host "Pruning unused Poppler DLLs (PE import + delay-load walk)..."
