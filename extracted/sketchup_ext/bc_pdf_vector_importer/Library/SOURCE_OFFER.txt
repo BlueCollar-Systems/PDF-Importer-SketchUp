@@ -1,9 +1,6 @@
 WRITTEN OFFER FOR SOURCE CODE
 ========================================================================
 
-DRAFT -- requires the owner to insert contact details and publication URL,
-and requires review before publication.
-
 The binaries bundled with this extension are UNMODIFIED redistributions of
 the upstream release identified below. No patches were applied. A subset of
 the upstream DLLs was removed (pruning); no binary was rebuilt or altered.
@@ -21,7 +18,21 @@ Components under GPL or LGPL terms in this bundle:
 
 For a copy of the corresponding source code for any component above, contact:
 
-    <OWNER TO COMPLETE: name, postal address, e-mail>
+    Name: Rowdy Payton
+    Company: BlueCollar Systems
+    Postal address: 410 Oneil St, Alvord, TX 76225, United States
+    E-mail: dev@bluecollar-systems.com
+
+The corresponding source for every bundled component is published, unmodified,
+at the upstream locations pinned above. The primary reference is:
+
+    Source publication URL: https://github.com/oschwartz10612/poppler-windows/releases/tag/v26.02.0-0
+
+poppler-data source is published at:
+https://poppler.freedesktop.org/poppler-data-0.4.12.tar.gz
+
+If either location becomes unavailable, request the source using the contact
+details above and it will be supplied.
 
 This offer is valid for at least three (3) years from the date of your
 receipt of these binaries.

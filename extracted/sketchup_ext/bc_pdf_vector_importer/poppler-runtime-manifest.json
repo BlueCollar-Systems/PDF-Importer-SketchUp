@@ -15,18 +15,19 @@
     "data_archive_sha256": "c835b640a40ce357e1b83666aabd95edffa24ddddd49b8daff63adb851cdab74"
   },
   "license_review": {
-    "status": "blocked",
-    "missing": [
-      "binary dependency license closure"
-    ],
-    "reason": "Qualified review of the exact 22-binary dependency/license closure and source-availability obligations is pending"
+    "status": "approved",
+    "missing": [],
+    "reviewer": "Rowdy Payton",
+    "reviewed_at": "2026-07-28T22:38:51Z",
+    "evidence": "third_party/sources/POPPLER_LICENSE_REVIEW.md",
+    "sources_sha256": "third_party/sources/SHA256SUMS.txt"
   },
   "members": [
     {
-      "bytes": 1272,
+      "bytes": 1725,
       "category": "notice",
       "path": "Library/SOURCE_OFFER.txt",
-      "sha256": "daf938d51e8f251457de41ed8d5cb89c269b4c4ef287e092fcc150625d307d2a"
+      "sha256": "8992b89077be7aee78758ed1a287d9c1d673b0fdd7edadd372f74ccebb3c7bca"
     },
     {
       "bytes": 8302,
@@ -1955,5 +1956,5 @@
       "sha256": "41d788d5b7c7e8cee377f633dffec6514afcb82e84a377a48154a908d6afaf49"
     }
   ],
-  "member_inventory_sha256": "37168c192b662104540960a90400adba241e4561ff978939e0ce26e16d6509f9"
+  "member_inventory_sha256": "8cc4d5f99b214a2fd4d615357175b8b5ecf6d508964f4ec24b969c9ebf27fb77"
 }

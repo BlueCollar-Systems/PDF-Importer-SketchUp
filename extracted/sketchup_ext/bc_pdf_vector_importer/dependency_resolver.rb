@@ -13,7 +13,7 @@ module BlueCollarSystems
       PREF_KEY = 'bc_pdf_vector_importer'.freeze
       PREF_NOTICE = 'dependency_notice_shown'.freeze
       PINNED_MEMBER_INVENTORY_SHA256 =
-        '37168c192b662104540960a90400adba241e4561ff978939e0ce26e16d6509f9'.freeze
+        '8cc4d5f99b214a2fd4d615357175b8b5ecf6d508964f4ec24b969c9ebf27fb77'.freeze
       RUNTIME_MEMBER_KEYS = %w[bytes category path sha256].freeze
 
       DOWNLOADS = {
