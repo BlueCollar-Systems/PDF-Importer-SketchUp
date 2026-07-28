@@ -78,7 +78,7 @@ class DependencyResolverTest < Minitest::Test
     assert_includes joined, 'ghostscript.com'
   end
 
-  def test_missing_helper_notice_describes_source_only_distribution_truthfully
+  def test_missing_helper_notice_describes_bundled_runtime_truthfully
     status = {
       bundled_bin: false,
       pdftocairo: nil,
@@ -89,8 +89,9 @@ class DependencyResolverTest < Minitest::Test
     }
     message = @resolver.build_notice_message(status)
 
-    assert_includes message, 'source-only'
-    refute_match(/RBZ builds bundle/i, message)
+    assert_includes message, 'free bundled Poppler runtime'
+    assert_includes message, 'reinstall the latest RBZ'
+    refute_match(/source-only/i, message)
     refute_match(/Bundled copy path/i, message)
   end
 

@@ -1,8 +1,8 @@
 # Third-Party Notices — SketchUp PDF Importer
 
-The candidate Windows helper payload uses an extension-local Poppler runtime.
-Helper-bearing publication is fail-closed until a qualified licensing review
-approves the exact runtime manifest; source-only builds omit the payload.
+Windows release RBZ files ship a free zero-ceremony Poppler runtime so clean
+machines can import without a separate helper download. Publication requires an
+approved integrity manifest for the exact staged bytes.
 
 ## Bundled components
 
@@ -13,6 +13,7 @@ approves the exact runtime manifest; source-only builds omit the payload.
 | FreeType | Font rasterization | FTL/GPL dual |
 | OpenJPEG | JPEG 2000 decoding | BSD-2-Clause |
 | OpenSSL (`libcrypto`) / libcurl / libssh2 | Transitive Poppler dependencies | Apache-2.0 / curl / BSD-3-Clause |
+| Poppler `share/poppler` language data | CID/CMap completeness for helper rendering | Poppler upstream |
 
 The canonical binaries live under `bc_pdf_vector_importer/Library/bin/`, and
 Poppler character-map/data files live under
@@ -21,17 +22,16 @@ Poppler character-map/data files live under
 ## Where the license texts are
 
 - `bc_pdf_vector_importer/Library/licenses/` — preserved runtime license texts.
-- `bc_pdf_vector_importer/Library/THIRD_PARTY_NOTICES.txt` — runtime provenance and publication status.
+- `bc_pdf_vector_importer/Library/THIRD_PARTY_NOTICES.txt` — runtime provenance.
 
 ## Authoritative manifest
 
 `bc_pdf_vector_importer/poppler-runtime-manifest.json` is the machine-readable
 inventory of binaries, Poppler data, notices, licenses, sizes, SHA-256 values,
-source pins, semantic scope, and license-review state.
+source pins, and license-review state.
 
 ## Source availability
 
-The manifest pins unmodified upstream binary and data archives. This notice is
-not by itself a source-offer or publication-approval claim. Publication remains
-blocked unless the exact dependency obligations are closed and the manifest's
-license review is approved with no missing items.
+The manifest pins unmodified upstream binary and data archives from the free
+`oschwartz10612/poppler-windows` release used by `tools/fetch_third_party_binaries.ps1`.
+MuPDF and Ghostscript are not bundled.

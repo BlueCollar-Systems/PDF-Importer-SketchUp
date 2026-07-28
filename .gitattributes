@@ -19,3 +19,5 @@
 *.zip binary
 *.rbz binary
 *.skp binary
+*.exe binary
+*.dll binary

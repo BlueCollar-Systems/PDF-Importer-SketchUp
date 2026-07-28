@@ -18,15 +18,16 @@ Usage:
   python build_release.py --out /path/to/output_dir
   python build_release.py --require-poppler-smoke --out /path/to/output_dir
 
-Every RBZ is source-only. Current and legacy Poppler runtime payloads are
-always excluded; installed extensions use only explicitly approved environment
-or system helper paths discovered by the importer.
+Windows releases ship a free zero-ceremony Poppler runtime under
+Library/bin + share/poppler with an approved integrity manifest. Legacy
+direct bin/ trees are rejected. Helper smoke is required for release builds.
 
 Output:
   SketchUp-PDF-Importer_v<VERSION>.rbz
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -43,6 +44,14 @@ EXCLUDE_FILES = {"build_release.py", ".gitignore", ".gitattributes"}
 EXCLUDE_SUFFIXES = {".bak", ".swp", ".pyo", ".pyc"}
 
 SMOKE_SCRIPT = REPO_ROOT / "tools" / "smoke_poppler_helpers.py"
+REQUIRED_HELPERS = ("pdftocairo.exe", "pdftotext.exe", "pdffonts.exe")
+REQUIRED_DATA = (
+    "share/poppler/cidToUnicode/Adobe-GB1",
+    "share/poppler/cidToUnicode/Adobe-CNS1",
+    "share/poppler/cidToUnicode/Adobe-Japan1",
+    "share/poppler/cidToUnicode/Adobe-Korea1",
+)
+
 
 def _should_exclude(rel: Path) -> bool:
     for part in rel.parts:
@@ -55,18 +64,14 @@ def _should_exclude(rel: Path) -> bool:
     return False
 
 
-def _is_poppler_payload(rel: Path) -> bool:
-    """Identify runtime members that a source-only RBZ must never contain."""
+def _is_legacy_bin_payload(rel: Path) -> bool:
+    """Legacy direct bin/ trees are forbidden; Library/bin is required."""
     parts = rel.parts
-    if len(parts) < 2 or parts[0] != SUPPORT_DIR.name:
-        return False
-
-    payload = parts[1:]
-    if payload == ("poppler-runtime-manifest.json",):
-        return True
-    if payload[0] in {"bin", "Library"}:
-        return True
-    return len(payload) >= 2 and payload[:2] == ("share", "poppler")
+    return (
+        len(parts) >= 2
+        and parts[0] == SUPPORT_DIR.name
+        and parts[1] == "bin"
+    )
 
 
 def _read_version() -> str:
@@ -94,11 +99,36 @@ def _run_poppler_smoke(*, required: bool = False) -> None:
     subprocess.run(command, check=True)
 
 
-def build(out_dir: Path, *, require_helpers: bool = False, require_poppler_smoke: bool = False) -> Path:
-    if require_helpers:
+def _require_bundled_runtime() -> None:
+    legacy = SUPPORT_DIR / "bin"
+    if legacy.exists():
         raise RuntimeError(
-            "RBZ builds are source-only; bundled runtime inclusion is forbidden"
+            f"Legacy direct bin/ payload is forbidden: {legacy}. "
+            "Use Library/bin + share/poppler."
         )
+    manifest = SUPPORT_DIR / "poppler-runtime-manifest.json"
+    if not manifest.is_file():
+        raise RuntimeError(
+            "Missing poppler-runtime-manifest.json. "
+            "Run: powershell -ExecutionPolicy Bypass -File "
+            "tools/fetch_third_party_binaries.ps1"
+        )
+    for name in REQUIRED_HELPERS:
+        path = SUPPORT_DIR / "Library" / "bin" / name
+        if not path.is_file():
+            raise RuntimeError(f"Missing bundled Poppler helper: {path}")
+    for rel in REQUIRED_DATA:
+        path = SUPPORT_DIR / Path(*rel.split("/"))
+        if not path.is_file():
+            raise RuntimeError(f"Missing bundled Poppler data: {rel}")
+
+
+def build(
+    out_dir: Path,
+    *,
+    require_helpers: bool = True,
+    require_poppler_smoke: bool = True,
+) -> Path:
     version  = _read_version()
     rbz_name = f"SketchUp-PDF-Importer_v{version}.rbz"
     rbz_path = out_dir / rbz_name
@@ -112,10 +142,16 @@ def build(out_dir: Path, *, require_helpers: bool = False, require_poppler_smoke
         ],
         check=True,
     )
+    if require_helpers:
+        _require_bundled_runtime()
     if require_poppler_smoke:
-        # An explicit smoke request remains authoritative for the approved
-        # system/development helper, but its payload is never archived.
-        _run_poppler_smoke(required=True)
+        if os.name == "nt":
+            _run_poppler_smoke(required=True)
+        else:
+            print(
+                "SKIP: Poppler helper smoke requires Windows; "
+                "bundled runtime files are still required and archived"
+            )
 
     file_count = 0
     skipped    = 0
@@ -126,7 +162,7 @@ def build(out_dir: Path, *, require_helpers: bool = False, require_poppler_smoke
             zf.write(LOADER_FILE, LOADER_FILE.name)
             file_count += 1
 
-        # Support folder
+        # Support folder (includes approved Poppler runtime)
         for abs_path in sorted(SUPPORT_DIR.rglob("*")):
             if not abs_path.is_file():
                 continue
@@ -134,9 +170,10 @@ def build(out_dir: Path, *, require_helpers: bool = False, require_poppler_smoke
             if _should_exclude(rel):
                 skipped += 1
                 continue
-            if _is_poppler_payload(rel):
-                skipped += 1
-                continue
+            if _is_legacy_bin_payload(rel):
+                raise RuntimeError(
+                    f"Refusing to archive legacy bin/ member: {rel.as_posix()}"
+                )
             zf.write(abs_path, str(rel))
             file_count += 1
 
@@ -152,11 +189,16 @@ def main() -> None:
     parser.add_argument("--allow-missing-bundled-poppler", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--require-poppler-smoke", action="store_true",
-                        help="Require Poppler helper smoke to pass (Windows release gate).")
+                        default=True,
+                        help="Require Poppler helper smoke (default: on).")
+    parser.add_argument("--skip-poppler-smoke", action="store_true",
+                        help="Skip Poppler helper smoke (debug only).")
     args   = parser.parse_args()
     out    = Path(args.out).resolve()
-    rbz    = build(out, require_helpers=False,
-                   require_poppler_smoke=args.require_poppler_smoke)
+    require_helpers = not args.allow_missing_bundled_poppler
+    require_smoke = args.require_poppler_smoke and not args.skip_poppler_smoke
+    rbz    = build(out, require_helpers=require_helpers,
+                   require_poppler_smoke=require_smoke)
     print(f"\nRelease ready: {rbz}")
 
 

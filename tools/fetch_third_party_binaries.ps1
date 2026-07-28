@@ -1,6 +1,7 @@
 # fetch_third_party_binaries.ps1
-# Download Windows Poppler utilities into the SketchUp extension bundled bin folder.
-# Run from repo root before building the .rbz release.
+# Stage a free zero-ceremony Poppler runtime into the SketchUp extension:
+#   Library/bin + share/poppler + licenses + notices
+# Then prune DLLs, smoke helpers, and build the integrity manifest.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File .\tools\fetch_third_party_binaries.ps1
@@ -9,20 +10,27 @@
 
 $ErrorActionPreference = 'Stop'
 
-# R21-8 / QQ-4: pin a known-good poppler-windows release tag (not releases/latest).
-# Default: keep the pin. Escape hatch / bump path (deliberate maintenance commit):
-#   1) Set $PopplerReleaseTag to the new oschwartz10612/poppler-windows tag
-#   2) Re-run this script (fetch → prune → empirical smoke)
-#   3) Confirm THIRD_PARTY_NOTICES.txt records the new tag
-#   4) Commit fetch script + bin/ notices (+ any prune lock test updates)
-# CVE fixes arrive only on such bumps — that is intentional, not a freeze forever.
+# Pin a known-good poppler-windows release tag (not releases/latest).
 $PopplerReleaseTag = 'v26.02.0-0'
 
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$BinDir = Join-Path $RepoRoot 'extracted\sketchup_ext\bc_pdf_vector_importer\bin'
+$SupportDir = Join-Path $RepoRoot 'extracted\sketchup_ext\bc_pdf_vector_importer'
+$BinDir = Join-Path $SupportDir 'Library\bin'
+$ShareDir = Join-Path $SupportDir 'share\poppler'
+$LicenseDir = Join-Path $SupportDir 'Library\licenses'
+$LegacyBin = Join-Path $SupportDir 'bin'
 $TempDir = Join-Path $env:TEMP ('bc_poppler_fetch_' + [guid]::NewGuid().ToString('N'))
 
-New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+if (Test-Path $LegacyBin) {
+    throw "Legacy direct bin/ must be removed before staging Library/bin: $LegacyBin"
+}
+
+foreach ($dir in @($BinDir, $ShareDir, $LicenseDir)) {
+    if (Test-Path $dir) {
+        Remove-Item -Recurse -Force $dir
+    }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+}
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
 Write-Host "Fetching Poppler Windows build (pinned $PopplerReleaseTag)..."
@@ -49,6 +57,14 @@ if (-not (Test-Path $sourceBin)) {
     throw "Could not locate Poppler bin folder under $($popplerRoot.FullName)"
 }
 
+$sourceShare = Join-Path $popplerRoot.FullName 'share\poppler'
+if (-not (Test-Path $sourceShare)) {
+    $sourceShare = Join-Path $popplerRoot.FullName 'Library\share\poppler'
+}
+if (-not (Test-Path $sourceShare)) {
+    throw "Could not locate share/poppler under $($popplerRoot.FullName)"
+}
+
 $required = @('pdftocairo.exe', 'pdftotext.exe', 'pdffonts.exe')
 foreach ($name in $required) {
     $src = Join-Path $sourceBin $name
@@ -56,49 +72,60 @@ foreach ($name in $required) {
         throw "Missing required Poppler tool: $name"
     }
     Copy-Item -Path $src -Destination (Join-Path $BinDir $name) -Force
-    Write-Host "  + $name"
+    Write-Host "  + Library\bin\$name"
 }
 
 Get-ChildItem -Path $sourceBin -Filter '*.dll' | ForEach-Object {
     Copy-Item -Path $_.FullName -Destination (Join-Path $BinDir $_.Name) -Force
-    Write-Host "  + $($_.Name)"
+    Write-Host "  + Library\bin\$($_.Name)"
 }
 
-$LicenseDir = Join-Path $BinDir 'licenses'
-New-Item -ItemType Directory -Force -Path $LicenseDir | Out-Null
+Write-Host "Copying Poppler data tree..."
+Copy-Item -Path (Join-Path $sourceShare '*') -Destination $ShareDir -Recurse -Force
+$requiredData = @(
+    'cidToUnicode\Adobe-GB1',
+    'cidToUnicode\Adobe-CNS1',
+    'cidToUnicode\Adobe-Japan1',
+    'cidToUnicode\Adobe-Korea1'
+)
+foreach ($rel in $requiredData) {
+    $path = Join-Path $ShareDir $rel
+    if (-not (Test-Path $path)) {
+        throw "Missing required Poppler language data: $rel"
+    }
+}
+
 Get-ChildItem -Path $popplerRoot.FullName -Recurse -File |
     Where-Object { $_.Name -match '^(COPYING|COPYRIGHT|LICENSE|NOTICE|README|AUTHORS)' } |
     ForEach-Object {
         $relative = $_.FullName.Substring($popplerRoot.FullName.Length).TrimStart('\', '/')
         $safeName = $relative -replace '[\\/:*?"<>|]', '_'
         Copy-Item -Path $_.FullName -Destination (Join-Path $LicenseDir $safeName) -Force
-        Write-Host "  + licenses\$safeName"
+        Write-Host "  + Library\licenses\$safeName"
     }
 
 @"
 Bundled third-party tools for PDF Vector Importer (SketchUp)
 
-Poppler utilities and supporting DLLs (distributed under their upstream
-licenses; Poppler itself is GPL-family licensed, and the Windows bundle also
-contains LGPL/MIT/BSD-style support libraries):
-  pdftocairo.exe, pdftotext.exe, pdffonts.exe and PE-reachable required DLLs
+Poppler utilities, PE-reachable DLLs, and share/poppler language data
+(distributed under their upstream licenses; Poppler is GPL-family):
+  pdftocairo.exe, pdftotext.exe, pdffonts.exe + required DLLs + cid maps
 
 Fetched by tools/fetch_third_party_binaries.ps1 from pinned tag:
   https://github.com/oschwartz10612/poppler-windows/releases/tag/$PopplerReleaseTag
 
-After fetch, tools/prune_poppler_bundle.py drops unused sibling DLLs
-(poppler-glib/cpp, iconv, duplicate libtiff/libzstd, etc.). The
-libcurl → libssh2 → libcrypto chain is retained because poppler.dll
-imports it (hard PE IAT dependency), even though local conversion
-never uses network/SSH.
+Canonical layout:
+  Library/bin
+  Library/licenses
+  share/poppler
 
-For exact license files, source links, and component versions, preserve this
-notice plus the copied licenses/ folder with each published BlueCollar Systems
-release.
+After fetch, tools/prune_poppler_bundle.py drops unused sibling DLLs.
+The libcurl → libssh2 → libcrypto chain is retained because poppler.dll
+imports it (hard PE IAT dependency).
 
 MuPDF mutool is NOT bundled here (AGPL license review required).
-Ghostscript is NOT bundled here (large installer; user one-click install documented).
-"@ | Set-Content -Path (Join-Path $BinDir 'THIRD_PARTY_NOTICES.txt') -Encoding UTF8
+Ghostscript is NOT bundled here (optional font-repair helper).
+"@ | Set-Content -Path (Join-Path $SupportDir 'Library\THIRD_PARTY_NOTICES.txt') -Encoding UTF8
 
 Write-Host ""
 Write-Host "Pruning unused Poppler DLLs (PE import + delay-load walk)..."
@@ -107,21 +134,26 @@ if ($LASTEXITCODE -ne 0) {
     throw "prune_poppler_bundle.py failed with exit code $LASTEXITCODE"
 }
 
-# R21-8: empirical post-prune smoke — static PE walks cannot see LoadLibrary.
-# Delegates to tools/smoke_poppler_helpers.py (writes a synthetic PDF at runtime;
-# visible-skips off Windows / when bin absent — R4-2).
 Write-Host ""
 Write-Host "Running post-prune Poppler helper smoke..."
-& python (Join-Path $RepoRoot 'tools\smoke_poppler_helpers.py')
+& python (Join-Path $RepoRoot 'tools\smoke_poppler_helpers.py') --required
 if ($LASTEXITCODE -ne 0) {
     throw "smoke_poppler_helpers.py failed with exit code $LASTEXITCODE"
 }
 
 Write-Host ""
-Write-Host "Poppler tools copied to:"
-Write-Host "  $BinDir"
+Write-Host "Building poppler-runtime-manifest.json..."
+& python (Join-Path $RepoRoot 'tools\build_poppler_runtime_manifest.py') --write --poppler-tag $PopplerReleaseTag
+if ($LASTEXITCODE -ne 0) {
+    throw "build_poppler_runtime_manifest.py failed with exit code $LASTEXITCODE"
+}
+
+Write-Host ""
+Write-Host "Poppler runtime staged under:"
+Write-Host "  $SupportDir"
 Write-Host "  pinned tag: $PopplerReleaseTag"
 Write-Host ""
-Write-Host "Next: python build_release.py"
+Write-Host "Next: update PINNED_MEMBER_INVENTORY_SHA256 in dependency_resolver.rb,"
+Write-Host "      then python build_release.py --require-poppler-smoke"
 
 Remove-Item -Recurse -Force $TempDir

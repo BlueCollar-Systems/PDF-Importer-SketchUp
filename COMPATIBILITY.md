@@ -31,12 +31,12 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 
 | Dependency | Shipped in Windows RBZ? |
 |------------|-------------------------|
-| Poppler (`pdftocairo`, `pdftotext`, `pdffonts`) | ❌ Not bundled — free optional helper |
+| Poppler (`pdftocairo`, `pdftotext`, `pdffonts` + `share/poppler`) | ✅ Bundled — free zero-ceremony helper |
 | MuPDF `mutool` | ❌ Not bundled — free optional helper |
 | Ghostscript | ❌ Not bundled — optional font repair |
 
-Every release RBZ is source-only. The builder rejects embedded helper
-executables, DLL/data trees, and runtime manifests.
+Windows releases include an integrity-checked Poppler runtime. Legacy direct
+`bin/` trees are rejected; only `Library/bin` + `share/poppler` is accepted.
 
 ## Legacy hardware notes
 
@@ -48,7 +48,7 @@ executables, DLL/data trees, and runtime manifests.
 
 ## Offline install
 
-The Windows **RBZ** installs without internet and core vector import works offline. Poppler, MuPDF, and Ghostscript are not bundled; helper-dependent text, raster, SVG, or font-repair paths need a free helper installed or configured separately.
+The Windows **RBZ** installs without internet. Core vector import and bundled Poppler helpers work offline. MuPDF and Ghostscript are not bundled; those optional paths need a free helper installed or configured separately when used.
 
 ## Enterprise / multi-user
 

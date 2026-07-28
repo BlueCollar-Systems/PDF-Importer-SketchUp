@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -22,8 +23,46 @@ if str(REPO_ROOT) not in sys.path:
 import build_release as br  # noqa: E402
 
 
+def _write_runtime(support: Path) -> None:
+    bin_dir = support / "Library" / "bin"
+    data = support / "share" / "poppler" / "cidToUnicode"
+    licenses = support / "Library" / "licenses"
+    for path in (bin_dir, data, licenses):
+        path.mkdir(parents=True, exist_ok=True)
+    for name in ("pdftocairo.exe", "pdftotext.exe", "pdffonts.exe"):
+        (bin_dir / name).write_bytes(b"MZ helper")
+    for name in ("Adobe-GB1", "Adobe-CNS1", "Adobe-Japan1", "Adobe-Korea1"):
+        (data / name).write_bytes(b"cmap")
+    (support / "Library" / "THIRD_PARTY_NOTICES.txt").write_text(
+        "notices\n", encoding="utf-8"
+    )
+    (licenses / "COPYING").write_text("gpl\n", encoding="utf-8")
+    (support / "poppler-runtime-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "layout": {
+                    "bin": "Library/bin",
+                    "data": "share/poppler",
+                    "manifest": "poppler-runtime-manifest.json",
+                },
+                "license_review": {
+                    "status": "approved",
+                    "missing": [],
+                    "reviewer": "test",
+                    "evidence": "unit-test",
+                    "reviewed_at": "2026-07-28T00:00:00Z",
+                },
+                "members": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class BuildReleaseTest(unittest.TestCase):
-    def test_source_only_build_excludes_current_and_legacy_runtime_payloads(self):
+    def test_release_build_includes_library_runtime_and_rejects_legacy_bin(self):
         original_ext_root = br.EXT_ROOT
         original_loader = br.LOADER_FILE
         original_support = br.SUPPORT_DIR
@@ -36,16 +75,7 @@ class BuildReleaseTest(unittest.TestCase):
                 loader = ext_root / "bc_pdf_vector_importer.rb"
                 loader.write_text("PLUGIN_VERSION = 'test'\n", encoding="utf-8")
                 (support / "safe_source.rb").write_text("# source\n", encoding="utf-8")
-
-                payloads = [
-                    support / "bin" / "pdftocairo.exe",
-                    support / "Library" / "bin" / "pdftocairo.exe",
-                    support / "share" / "poppler" / "cidToUnicode" / "Adobe-GB1",
-                    support / "poppler-runtime-manifest.json",
-                ]
-                for payload in payloads:
-                    payload.parent.mkdir(parents=True, exist_ok=True)
-                    payload.write_bytes(b"runtime payload")
+                _write_runtime(support)
 
                 br.EXT_ROOT = ext_root
                 br.LOADER_FILE = loader
@@ -53,38 +83,63 @@ class BuildReleaseTest(unittest.TestCase):
                 with mock.patch.object(br.subprocess, "run"), mock.patch.object(
                     br, "_run_poppler_smoke"
                 ):
-                    archive = br.build(root / "out")
+                    archive = br.build(
+                        root / "out",
+                        require_helpers=True,
+                        require_poppler_smoke=True,
+                    )
 
                 with zipfile.ZipFile(archive) as built:
                     names = set(built.namelist())
 
                 self.assertIn("bc_pdf_vector_importer.rb", names)
                 self.assertIn("bc_pdf_vector_importer/safe_source.rb", names)
-                for payload in payloads:
-                    relative = payload.relative_to(ext_root).as_posix()
-                    self.assertNotIn(relative, names)
+                self.assertIn(
+                    "bc_pdf_vector_importer/Library/bin/pdftocairo.exe", names
+                )
+                self.assertIn(
+                    "bc_pdf_vector_importer/share/poppler/cidToUnicode/Adobe-GB1",
+                    names,
+                )
+                self.assertIn(
+                    "bc_pdf_vector_importer/poppler-runtime-manifest.json", names
+                )
+
+                legacy = support / "bin" / "pdftocairo.exe"
+                legacy.parent.mkdir(parents=True, exist_ok=True)
+                legacy.write_bytes(b"MZ bad")
+                with mock.patch.object(br.subprocess, "run"), mock.patch.object(
+                    br, "_run_poppler_smoke"
+                ):
+                    with self.assertRaises(RuntimeError):
+                        br.build(
+                            root / "out2",
+                            require_helpers=True,
+                            require_poppler_smoke=False,
+                        )
         finally:
             br.EXT_ROOT = original_ext_root
             br.LOADER_FILE = original_loader
             br.SUPPORT_DIR = original_support
 
-    def test_auto_release_rejects_runtime_payload_members(self):
+    def test_auto_release_requires_zero_ceremony_runtime(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
             encoding="utf-8"
         )
 
-        self.assertNotIn(
-            '"bc_pdf_vector_importer/bin/pdftocairo.exe"', workflow
+        self.assertIn("required_runtime", workflow)
+        self.assertIn(
+            "RBZ missing required zero-ceremony Poppler runtime", workflow
         )
-        self.assertIn("forbidden_runtime", workflow)
-        self.assertIn("Source-only RBZ contains forbidden runtime payload", workflow)
-        self.assertIn("source-only-build-windows", workflow)
-        self.assertIn("test_build_release.py", workflow)
-        self.assertNotIn("poppler-smoke-windows", workflow)
-        self.assertNotIn("--require-poppler-smoke", workflow)
-        self.assertNotIn("Build release with required Poppler smoke", workflow)
+        self.assertIn("forbidden legacy bin/ payload", workflow)
+        self.assertIn(
+            "bc_pdf_vector_importer/Library/bin/pdftocairo.exe", workflow
+        )
+        self.assertNotIn(
+            "Source-only RBZ contains forbidden runtime payload", workflow
+        )
 
-    def test_release_docs_match_source_only_archive_contract(self):
+    def test_release_docs_describe_bundled_helpers(self):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         compatibility = (REPO_ROOT / "COMPATIBILITY.md").read_text(
             encoding="utf-8"
@@ -95,79 +150,25 @@ class BuildReleaseTest(unittest.TestCase):
             ("COMPATIBILITY.md", compatibility),
         ):
             normalized = document.lower()
-            self.assertIn("source-only", normalized, name)
-            self.assertNotIn("poppler helpers are bundled", normalized, name)
-            self.assertNotIn("poppler bundled", normalized, name)
-            self.assertNotIn("release rbz files also bundle poppler", normalized, name)
-            self.assertNotIn("release rbz files include poppler", normalized, name)
-            self.assertNotIn("release build fails if bundled poppler", normalized, name)
+            self.assertIn("zero-ceremony", normalized, name)
+            self.assertIn("bundled", normalized, name)
+            self.assertNotIn(
+                "every release rbz is source-only", normalized, name
+            )
 
-    def test_shipped_ruby_guidance_does_not_claim_poppler_is_bundled(self):
-        support = REPO_ROOT / "extracted" / "sketchup_ext" / "bc_pdf_vector_importer"
+    def test_shipped_ruby_guidance_prefers_bundled_runtime(self):
         sources = "\n".join(
             path.read_text(encoding="utf-8")
-            for path in sorted(support.glob("*.rb"))
-        ).lower()
-
-        self.assertNotIn("bundled poppler", sources)
-
-    def test_run_poppler_smoke_required_missing_script(self):
-        original = br.SMOKE_SCRIPT
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                br.SMOKE_SCRIPT = Path(tmp) / "missing_smoke.py"
-                with self.assertRaises(RuntimeError) as ctx:
-                    br._run_poppler_smoke(required=True)
-                self.assertIn("Poppler smoke script not found", str(ctx.exception))
-        finally:
-            br.SMOKE_SCRIPT = original
-
-    def test_run_poppler_smoke_optional_missing_script_silently_skips(self):
-        original = br.SMOKE_SCRIPT
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                br.SMOKE_SCRIPT = Path(tmp) / "missing_smoke.py"
-                # Should not raise when not required.
-                br._run_poppler_smoke(required=False)
-        finally:
-            br.SMOKE_SCRIPT = original
-
-    def test_run_poppler_smoke_required_propagates_called_process_error(self):
-        original = br.SMOKE_SCRIPT
-        with tempfile.TemporaryDirectory() as tmp:
-            smoke_path = Path(tmp) / "failing_smoke.py"
-            smoke_path.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
-            try:
-                br.SMOKE_SCRIPT = smoke_path
-                with self.assertRaises(subprocess.CalledProcessError):
-                    br._run_poppler_smoke(required=True)
-            finally:
-                br.SMOKE_SCRIPT = original
-
-    def test_build_require_poppler_smoke_missing_script_raises(self):
-        original = br.SMOKE_SCRIPT
-        with tempfile.TemporaryDirectory() as tmp:
-            out_dir = Path(tmp) / "out"
-            br.SMOKE_SCRIPT = Path(tmp) / "missing_smoke.py"
-            try:
-                with self.assertRaises(RuntimeError) as ctx:
-                    br.build(out_dir, require_helpers=False, require_poppler_smoke=True)
-                self.assertIn("Poppler smoke script not found", str(ctx.exception))
-            finally:
-                br.SMOKE_SCRIPT = original
-
-    def test_build_require_poppler_smoke_failing_smoke_raises(self):
-        original = br.SMOKE_SCRIPT
-        with tempfile.TemporaryDirectory() as tmp:
-            out_dir = Path(tmp) / "out"
-            smoke_path = Path(tmp) / "failing_smoke.py"
-            smoke_path.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
-            br.SMOKE_SCRIPT = smoke_path
-            try:
-                with self.assertRaises(subprocess.CalledProcessError):
-                    br.build(out_dir, require_helpers=False, require_poppler_smoke=True)
-            finally:
-                br.SMOKE_SCRIPT = original
+            for path in (
+                REPO_ROOT
+                / "extracted"
+                / "sketchup_ext"
+                / "bc_pdf_vector_importer"
+                / "dependency_resolver.rb",
+            )
+        )
+        self.assertIn("ship a free bundled poppler runtime", sources.lower())
+        self.assertNotIn("never bundle this runtime", sources.lower())
 
 
 if __name__ == "__main__":

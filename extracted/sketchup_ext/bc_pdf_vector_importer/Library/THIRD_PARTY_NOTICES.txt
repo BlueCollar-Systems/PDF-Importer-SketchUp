@@ -1,0 +1,20 @@
+﻿Bundled third-party tools for PDF Vector Importer (SketchUp)
+
+Poppler utilities, PE-reachable DLLs, and share/poppler language data
+(distributed under their upstream licenses; Poppler is GPL-family):
+  pdftocairo.exe, pdftotext.exe, pdffonts.exe + required DLLs + cid maps
+
+Fetched by tools/fetch_third_party_binaries.ps1 from pinned tag:
+  https://github.com/oschwartz10612/poppler-windows/releases/tag/v26.02.0-0
+
+Canonical layout:
+  Library/bin
+  Library/licenses
+  share/poppler
+
+After fetch, tools/prune_poppler_bundle.py drops unused sibling DLLs.
+The libcurl â†’ libssh2 â†’ libcrypto chain is retained because poppler.dll
+imports it (hard PE IAT dependency).
+
+MuPDF mutool is NOT bundled here (AGPL license review required).
+Ghostscript is NOT bundled here (optional font-repair helper).

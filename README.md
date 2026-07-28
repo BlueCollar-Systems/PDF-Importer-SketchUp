@@ -3,11 +3,11 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.103-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.105-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
-Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support. Core vector import uses the built-in Ruby parser. Release RBZ files are source-only; higher-fidelity text/raster/SVG paths use separately installed free Poppler or MuPDF helpers when available. Ghostscript remains optional for non-embedded font repair.
+Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support. Core vector import uses the built-in Ruby parser. Windows release RBZ files ship a free zero-ceremony Poppler runtime for higher-fidelity text/raster/SVG paths. MuPDF remains an optional free alternate; Ghostscript remains optional for non-embedded font repair.
 
 ---
 
@@ -127,7 +127,7 @@ assets, checksums, license, and notes.
 
 The extension registers under **File > Import** and adds a PDF Vector Importer toolbar.
 
-**Offline install:** The source-only GitHub Release `.rbz` installs without internet and its built-in vector parser works offline. Poppler, MuPDF, and Ghostscript are not in the RBZ. Helper-dependent text, raster, and SVG paths require a free helper to be installed or configured separately.
+**Offline install:** The GitHub Release `.rbz` installs without internet. Core vector import and the bundled free Poppler helpers work offline. MuPDF and Ghostscript are not in the RBZ; only those optional paths need a separate free install when used.
 
 For SketchUp 2025 users: native PDF import discoverability changed in SketchUp UI,
 but this extension still provides dedicated PDF import menu and toolbar commands.
@@ -142,14 +142,14 @@ Install the RBZ **per Windows user** on each PC where SketchUp runs. Avoid roami
 
 ## External Helpers / Any-PC Behavior
 
-The importer must run on a supported PC without hardcoded local paths. Optional
-helpers are detected at runtime and reported through **Extensions > PDF Vector
+The importer must run on a supported PC without hardcoded local paths. Helpers
+are detected at runtime and reported through **Extensions > PDF Vector
 Importer > Compatibility Report**.
 
-Every release RBZ is source-only. The release builder and workflow reject
-Poppler/MuPDF executables, DLL trees, data trees, and runtime manifests inside
-the archive. Install a free system or portable Poppler/MuPDF package separately,
-then expose the executable on `PATH` or set the environment override below.
+Windows releases ship a free **zero-ceremony** Poppler runtime inside the RBZ
+(`Library/bin` + `share/poppler` + integrity manifest). Clean-machine users do
+not need to download Poppler separately for helper-dependent text, raster, or
+SVG paths. MuPDF and Ghostscript remain optional free/system installs when used.
 Use **Compatibility Report** to verify the exact helper path before importing.
 
 | Helper | Used for | If missing |

@@ -21,7 +21,14 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BIN_DIR = REPO_ROOT / "extracted" / "sketchup_ext" / "bc_pdf_vector_importer" / "bin"
+BIN_DIR = (
+    REPO_ROOT
+    / "extracted"
+    / "sketchup_ext"
+    / "bc_pdf_vector_importer"
+    / "Library"
+    / "bin"
+)
 HELPERS = ("pdftotext.exe", "pdftocairo.exe", "pdffonts.exe")
 
 # Minimal valid one-page PDF (Helvetica "OK") — regenerated each run so we

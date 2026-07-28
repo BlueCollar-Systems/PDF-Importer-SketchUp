@@ -83,14 +83,14 @@ checks. `unmatched_source_runs`, `unmatched_placements`,
 each be present as arrays and empty. A missing collection fails closed. This is
 a fixture-scoped exception, not a general CID-completeness claim.
 
-**Source-only releases and legacy runtime trust:** release RBZ files do not ship
-helper runtimes. Legacy extension-adjacent runtime recognition remains
-fail-closed: a runtime is eligible only after its canonical member digest, exact
-files/directories, sizes, and hashes validate. A direct `bin` tree, an extra
-member, or a symlinked manifest/path component disables selection. Only a
-successful full verification is cached, and symlink trust paths are still
-checked before each selection. Normal installs should use an explicitly
-configured environment path or a system helper discovered by the importer.
+**Zero-ceremony Poppler and legacy runtime trust:** Windows release RBZ files
+ship a free integrity-checked Poppler runtime under `Library/bin` and
+`share/poppler`. Selection is fail-closed: a runtime is eligible only after its
+canonical member digest, exact files/directories, sizes, and hashes validate. A
+direct `bin` tree, an extra member, or a symlinked manifest/path component
+disables selection. Only a successful full verification is cached, and symlink
+trust paths are still checked before each selection. System/env helpers remain
+available as overrides.
 
 ### PDF layers / SketchUp Tags
 

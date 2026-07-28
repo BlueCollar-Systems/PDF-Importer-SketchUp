@@ -124,9 +124,9 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Source-only release contract tests
+      - name: Zero-ceremony release contract tests
         run: python tools/test_build_release.py -v
       - name: Release safety unit tests (R21-5)
         run: python tools/test_release_safety.py
-      - name: Build source-only release in temporary output
+      - name: Build zero-ceremony release in temporary output
         run: python build_release.py --out "$env:RUNNER_TEMP\su-rbz"

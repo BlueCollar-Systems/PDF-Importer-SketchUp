@@ -46,11 +46,11 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Source-only release contract tests
+      - name: Zero-ceremony release contract tests
         run: python tools/test_build_release.py -v
       - name: Release safety unit tests (R21-5)
         run: python tools/test_release_safety.py
-      - name: Build source-only release in temporary output
+      - name: Build zero-ceremony release in temporary output
         run: python build_release.py --out "$env:RUNNER_TEMP\su-rbz"
 
   release:
@@ -168,19 +168,32 @@ jobs:
           missing = sorted(required - names)
           if missing:
               raise SystemExit(f"RBZ missing required files: {missing}")
-          forbidden_runtime = sorted(
+          legacy_bin = sorted(
               name for name in names
-              if name == "bc_pdf_vector_importer/poppler-runtime-manifest.json"
-              or name.startswith("bc_pdf_vector_importer/bin/")
-              or name.startswith("bc_pdf_vector_importer/Library/")
-              or name.startswith("bc_pdf_vector_importer/share/poppler/")
+              if name.startswith("bc_pdf_vector_importer/bin/")
           )
-          if forbidden_runtime:
+          if legacy_bin:
               raise SystemExit(
-                  "Source-only RBZ contains forbidden runtime payload: "
-                  + ", ".join(forbidden_runtime)
+                  "RBZ contains forbidden legacy bin/ payload: "
+                  + ", ".join(legacy_bin)
               )
-          print(f"PASS: {rbzs[0].name} is source-only and contains required extension files")
+          required_runtime = {
+              "bc_pdf_vector_importer/poppler-runtime-manifest.json",
+              "bc_pdf_vector_importer/Library/bin/pdftocairo.exe",
+              "bc_pdf_vector_importer/Library/bin/pdftotext.exe",
+              "bc_pdf_vector_importer/Library/bin/pdffonts.exe",
+              "bc_pdf_vector_importer/share/poppler/cidToUnicode/Adobe-GB1",
+          }
+          missing_runtime = sorted(required_runtime - names)
+          if missing_runtime:
+              raise SystemExit(
+                  "RBZ missing required zero-ceremony Poppler runtime: "
+                  + ", ".join(missing_runtime)
+              )
+          print(
+              f"PASS: {rbzs[0].name} includes required extension files "
+              "and zero-ceremony Poppler runtime"
+          )
           PY
 
       - name: Create or update release

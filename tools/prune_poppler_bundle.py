@@ -23,7 +23,14 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BIN_DIR = REPO_ROOT / "extracted" / "sketchup_ext" / "bc_pdf_vector_importer" / "bin"
+BIN_DIR = (
+    REPO_ROOT
+    / "extracted"
+    / "sketchup_ext"
+    / "bc_pdf_vector_importer"
+    / "Library"
+    / "bin"
+)
 ROOT_EXES = ("pdftocairo.exe", "pdftotext.exe", "pdffonts.exe")
 
 # IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT = 13

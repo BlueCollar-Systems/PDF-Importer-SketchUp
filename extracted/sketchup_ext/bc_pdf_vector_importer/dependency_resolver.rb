@@ -13,15 +13,15 @@ module BlueCollarSystems
       PREF_KEY = 'bc_pdf_vector_importer'.freeze
       PREF_NOTICE = 'dependency_notice_shown'.freeze
       PINNED_MEMBER_INVENTORY_SHA256 =
-        'a2c5d125fee4f3af1893556501efd50455a953ed7eb77c8a0d094819db2f5654'.freeze
+        '8b383b2218ca2f8b0fb7aa6139a6cdc4dfa62afa3f60c9cb1d8e94b53c241c75'.freeze
       RUNTIME_MEMBER_KEYS = %w[bytes category path sha256].freeze
 
       DOWNLOADS = {
         poppler: {
           label: 'Poppler for Windows (pdftocairo, pdftotext, pdffonts)',
           url: 'https://github.com/oschwartz10612/poppler-windows/releases/latest',
-          detail: 'RBZ releases are source-only and never bundle this runtime. Install the ' \
-                  'free portable package or place Poppler under Program Files.'
+          detail: 'Windows RBZ releases ship a free bundled Poppler runtime. If Compatibility ' \
+                  'Report still shows helpers missing, reinstall the latest RBZ.'
         },
         ghostscript: {
           label: 'Ghostscript 64-bit (font repair for non-embedded PDF fonts)',
@@ -87,7 +87,21 @@ module BlueCollarSystems
           # Cache only a successful full verification. The cheap symlink trust
           # boundary above is still rechecked before every helper selection.
           @verified_bundled_runtime_root = root
+          ensure_poppler_datadir!(root)
           true
+        end
+
+        def bundled_poppler_datadir
+          File.join(support_dir, 'share', 'poppler')
+        end
+
+        def ensure_poppler_datadir!(root = File.expand_path(support_dir))
+          data = File.join(root, 'share', 'poppler')
+          return unless File.directory?(data)
+          ENV['POPPLER_DATADIR'] = data
+        rescue StandardError => e
+          safe_warn('DependencyResolver',
+            "POPPLER_DATADIR setup failed: #{e.message}")
         end
 
         def scan
