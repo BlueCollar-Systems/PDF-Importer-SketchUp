@@ -126,6 +126,8 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Exact Poppler runtime contract unit tests
+        run: python tools/test_poppler_runtime_contract.py -v
       - name: Poppler PE prune lock (static-only evidence; R21-7/R21-8)
         run: python tools/test_prune_poppler_bundle.py -v
       - name: Poppler helper smoke (static-only visible-skip off Windows; R21-8)
@@ -139,11 +141,35 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Exact Poppler runtime contract unit tests
+        run: python tools/test_poppler_runtime_contract.py -v
       - name: Poppler PE prune lock (R21-7/R21-8)
         run: python tools/test_prune_poppler_bundle.py -v
       - name: Poppler helper smoke unit tests (R21-8)
         run: python tools/test_smoke_poppler_helpers.py -v
       - name: Release safety unit tests (R21-5)
         run: python tools/test_release_safety.py
+      - name: Verify checked-in runtime structure and hashes
+        run: >-
+          python tools/poppler_runtime_contract.py verify
+          --support-root extracted/sketchup_ext/bc_pdf_vector_importer
       - name: Build release with required Poppler smoke (R21-8)
         run: python build_release.py --require-poppler-smoke --out "$env:RUNNER_TEMP\su-rbz"
+      - name: Smoke the exact extracted RBZ
+        shell: pwsh
+        run: |
+          $Rbzs = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP\su-rbz" -Filter '*.rbz' -File)
+          if ($Rbzs.Count -ne 1) { throw "Expected one RBZ, found $($Rbzs.Count)" }
+          $Extracted = Join-Path $env:RUNNER_TEMP 'su-rbz-extracted'
+          Expand-Archive -LiteralPath $Rbzs[0].FullName -DestinationPath $Extracted
+          $ExtractedSupport = Join-Path $Extracted 'bc_pdf_vector_importer'
+          python tools/poppler_runtime_contract.py verify --support-root $ExtractedSupport --require-license-approved
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/smoke_poppler_helpers.py --support-root $ExtractedSupport --required
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload the Windows-smoked RBZ
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-windows-smoked-rbz
+          path: ${{ runner.temp }}\su-rbz\*.rbz
+          if-no-files-found: error

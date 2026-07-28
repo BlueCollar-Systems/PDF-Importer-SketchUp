@@ -75,6 +75,19 @@ def _minimal_pe_with_delay(dll_name: bytes) -> bytes:
     return bytes(out)
 
 
+class PruneLayoutContractTest(unittest.TestCase):
+    def test_default_bin_uses_the_shared_library_layout(self):
+        self.assertEqual(
+            REPO_TOOLS.parent
+            / "extracted"
+            / "sketchup_ext"
+            / "bc_pdf_vector_importer"
+            / "Library"
+            / "bin",
+            BIN_DIR,
+        )
+
+
 class PrunePopplerBundleTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

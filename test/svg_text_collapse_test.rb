@@ -88,6 +88,43 @@ class SvgTextCollapseTest < Minitest::Test
     assert_equal [9.0, 0.0, 0.0, -9.0, 10.0, 20.0], placements[0][:matrix]
   end
 
+  def test_zero_placements_is_a_render_attempt_failure
+    svg = '<svg viewBox="0 0 100 100"><defs>' \
+          '<path id="font_7_38" d="M.1 0L.2 0Z"/>' \
+          '</defs></svg>'
+
+    assert_equal :svg_zero_placements, R.svg_structure_failure(svg)
+  end
+
+  def test_placements_without_nonempty_glyph_outlines_are_a_failure
+    svg = '<svg viewBox="0 0 100 100"><defs>' \
+          '<path id="font_7_38" d=""/>' \
+          '</defs><use data-text="C" xlink:href="#font_7_38" ' \
+          'transform="matrix(9,0,0,-9,10,20)"/></svg>'
+
+    assert_equal :svg_zero_glyph_defs, R.svg_structure_failure(svg)
+  end
+
+  def test_mutool_svg_with_usable_outline_and_placement_is_structurally_valid
+    svg = '<svg viewBox="0 0 100 100"><defs>' \
+          '<path id="font_7_38" d="M.1 0L.2 0Z"/>' \
+          '</defs><use data-text="C" xlink:href="#font_7_38" ' \
+          'transform="matrix(9,0,0,-9,10,20)"/></svg>'
+
+    assert_nil R.svg_structure_failure(svg)
+  end
+
+  def test_active_semantic_override_requires_a_proof_callable
+    evidence = { :glyphs => { 'g' => 'M0 0L1 0Z' }, :placements => [{}] }
+
+    refute R.semantic_complete_for_svg_attempt?(
+      { :semantic_complete => true }, evidence
+    ), 'literal true must not bypass the production renderer gate'
+    assert R.semantic_complete_for_svg_attempt?(
+      { :semantic_complete => lambda { |_value| true } }, evidence
+    )
+  end
+
   def test_svg_render_args_support_mutool
     renderer = { kind: :mutool, exe: 'mutool' }
     variants = R.svg_render_arg_variants(renderer, 'in.pdf', 'out.svg', 3, true)

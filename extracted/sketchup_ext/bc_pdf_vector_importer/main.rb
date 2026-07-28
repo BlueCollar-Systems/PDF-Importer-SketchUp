@@ -17,6 +17,8 @@ module BlueCollarSystems
     require File.join(dir, 'primitives')
     require File.join(dir, 'logger')
     require File.join(dir, 'command_runner')
+    require File.join(dir, 'poppler_result_validator')
+    require File.join(dir, 'poppler_semantic_proof')
     require File.join(dir, 'dependency_resolver')
     require File.join(dir, 'pdf_open_gate')
     require File.join(dir, 'pdf_salvage')
@@ -53,7 +55,6 @@ module BlueCollarSystems
     require File.join(dir, 'hatch_detector')
     require File.join(dir, 'stroke_font')
     require File.join(dir, 'svg_text_renderer')
-    require File.join(dir, 'svg_geometry_renderer')
     require File.join(dir, 'metadata')
     # Tools & UI
     require File.join(dir, 'scale_tool')
@@ -130,6 +131,26 @@ module BlueCollarSystems
     rescue StandardError => e
       Logger.warn("Raster", "pdftocairo lookup failed: #{e.message}")
       nil
+    end
+
+    def self.safe_find_mutool
+      SvgTextRenderer.find_mutool
+    rescue StandardError => e
+      Logger.warn("Raster", "mutool lookup failed: #{e.message}")
+      nil
+    end
+
+    def self.render_svg_text_with_semantic_proof(entities, pdf_path, page_num,
+                                                  media_box, render_opts = {})
+      opts_with_proof = render_opts.dup
+      # Production owns this proof.  Callers cannot inject a blanket true:
+      # only the exact certified PDF/page/output set can override the one
+      # qualified Adobe-GB1 diagnostic cluster.
+      opts_with_proof[:semantic_complete] =
+        PopplerSemanticProof.for_svg_page(pdf_path, page_num)
+      SvgTextRenderer.render(
+        entities, pdf_path, page_num, media_box, opts_with_proof
+      )
     end
 
     def self.record_text_renderer(stats, page_num, attrs)
@@ -1510,7 +1531,7 @@ module BlueCollarSystems
         if use_svg_text && builder.page_group
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
           text_layer = layer_mgr.text_fallback_layer
-          svg_result = SvgTextRenderer.render(
+          svg_result = render_svg_text_with_semantic_proof(
             builder.page_group.entities, path, page_num, media_box,
             scale: opts[:scale], layer: text_layer, y_offset: page_y_offset,
             svg_page_box: svg_page_box,
@@ -1836,8 +1857,12 @@ module BlueCollarSystems
     end
 
     def self.import_page_as_raster(model, pdf_path, page_num, media_box, opts, import_start, y_offset = 0.0, render_box = nil)
-      exe = safe_find_pdftocairo
-      return false unless exe
+      renderers = []
+      poppler = safe_find_pdftocairo
+      renderers << { :kind => :pdftocairo, :exe => poppler } if poppler
+      mutool = safe_find_mutool
+      renderers << { :kind => :mutool, :exe => mutool } if mutool
+      return false if renderers.empty?
 
       # Render/placement box (usually CropBox when available, else MediaBox).
       render_box = media_box unless render_box.is_a?(Array) && render_box.length >= 4
@@ -1862,42 +1887,93 @@ module BlueCollarSystems
         Logger.warn("Raster", "cropbox compare failed: #{e.message}")
       end
 
-      # Render page to PNG
-      png_path = File.join(Dir.tmpdir,
-        "bc_raster_#{Process.pid}_#{Time.now.to_i}_p#{page_num}.png")
-
-      args = [exe, '-png', '-singlefile', '-r', dpi.to_s]
-      args << '-cropbox' if use_cropbox
-      args += [
-              '-f', page_num.to_s, '-l', page_num.to_s,
-              pdf_path, png_path.sub(/\.png$/, '')]
-      run = CommandRunner.run(
-        args,
-        timeout_s: 180,
-        context: "Raster.pdftocairo"
-      )
-
-      # With -singlefile, output should be exactly png_path.
-      # Keep legacy candidates for compatibility with older Poppler builds.
+      owned_artifacts = []
       actual_png = nil
-      [png_path,
-       png_path.sub(/\.png$/, "-#{page_num}.png"),
-       png_path.sub(/\.png$/, "-01.png"),
-       png_path.sub(/\.png$/, "-1.png")
-      ].each do |candidate|
-        if File.exist?(candidate)
-          actual_png = candidate
-          break
+      actual_renderer = nil
+      begin
+        renderers.each_with_index do |renderer, renderer_index|
+          stem = File.join(Dir.tmpdir,
+            "bc_raster_#{Process.pid}_#{Time.now.to_i}_#{rand(100000)}_p#{page_num}_#{renderer[:kind]}")
+          candidates = []
+          if renderer[:kind] == :pdftocairo
+            candidates = [
+              stem + '.png',
+              stem + "-#{page_num}.png",
+              stem + '-01.png',
+              stem + '-1.png'
+            ]
+            args = [renderer[:exe], '-png', '-singlefile', '-r', dpi.to_s]
+            args << '-cropbox' if use_cropbox
+            args += [
+              '-f', page_num.to_s, '-l', page_num.to_s,
+              pdf_path, stem
+            ]
+          else
+            png_path = stem + '.png'
+            candidates = [png_path]
+            args = [renderer[:exe], 'draw', '-q', '-F', 'png', '-r', dpi.to_s]
+            args += ['-b', 'CropBox'] if use_cropbox
+            args += ['-o', png_path, pdf_path, page_num.to_s]
+          end
+          owned_artifacts.concat(candidates)
+          candidates.each do |candidate|
+            begin
+              File.delete(candidate) if File.file?(candidate)
+            rescue StandardError
+              # The attempt-level and method-level cleanup paths retry.
+            end
+          end
+
+          run = CommandRunner.run(
+            args,
+            timeout_s: 180,
+            context: "Raster.#{renderer[:kind]}"
+          )
+          candidate_png = candidates.find do |candidate|
+            begin
+              File.file?(candidate) && File.size(candidate) > 0
+            rescue StandardError
+              false
+            end
+          end
+          attempt_ok = run[:ok] && !candidate_png.nil?
+          if renderer[:kind] == :pdftocairo
+            validation = PopplerResultValidator.validate(run,
+              :executable => renderer[:exe],
+              :argv => args,
+              :context => 'Raster.pdftocairo',
+              :page => page_num,
+              :attempt => renderer_index + 1,
+              :representation => :page_raster,
+              :artifacts => candidates,
+              :artifact_policy => :any_nonempty)
+            attempt_ok = validation[:ok]
+            PopplerResultValidator.log_rejection(
+              validation, 'Raster'
+            ) unless validation[:ok]
+          end
+
+          if attempt_ok && candidate_png
+            actual_png = candidate_png
+            actual_renderer = renderer[:kind]
+            break
+          end
+
+          candidates.each do |candidate|
+            begin
+              File.delete(candidate) if File.file?(candidate)
+            rescue StandardError => e
+              Logger.warn("Raster", "cleanup rejected PNG failed: #{e.message}")
+            end
+          end
         end
-      end
 
-      return false unless run[:ok] && actual_png && File.exist?(actual_png)
+        return false unless actual_png && File.file?(actual_png) && File.size(actual_png) > 0
 
-        begin
-          scale = opts[:scale] || 1.0
-          # Image size in inches = page pts / 72
-          img_w = page_w_pts / 72.0 * scale
-          img_h = page_h_pts / 72.0 * scale
+        scale = opts[:scale] || 1.0
+        # Image size in inches = page pts / 72
+        img_w = page_w_pts / 72.0 * scale
+        img_h = page_h_pts / 72.0 * scale
         box_offset_x = (render_min_x - media_min_x) / 72.0 * scale
         box_offset_y = (render_min_y - media_min_y) / 72.0 * scale
 
@@ -1922,7 +1998,8 @@ module BlueCollarSystems
             Logger.info(
               "Raster",
               "Page #{page_num}: placed #{box_msg} raster #{img_w.round(3)}x#{img_h.round(3)} in at " \
-              "(#{pt.x.round(3)},#{pt.y.round(3)}), dpi req=#{req}, eff=#{dpi}, cap=#{cap}, budget=#{dpi_plan[:pixel_budget]}"
+              "(#{pt.x.round(3)},#{pt.y.round(3)}), renderer=#{actual_renderer}, " \
+              "dpi req=#{req}, eff=#{dpi}, cap=#{cap}, budget=#{dpi_plan[:pixel_budget]}"
             )
             return true
           end
@@ -1932,10 +2009,12 @@ module BlueCollarSystems
       rescue StandardError => e
         Logger.warn("Raster", "Failed: #{e.message}")
       ensure
-        begin
-          File.delete(actual_png) if actual_png && File.exist?(actual_png)
-        rescue StandardError => e
-          Logger.warn("Main", "cleanup temp png failed: #{e.message}")
+        owned_artifacts.uniq.each do |artifact|
+          begin
+            File.delete(artifact) if File.file?(artifact)
+          rescue StandardError => e
+            Logger.warn("Main", "cleanup temp png failed: #{e.message}")
+          end
         end
       end
       false

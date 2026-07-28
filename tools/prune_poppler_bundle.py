@@ -3,8 +3,7 @@
 
 Walks the PE import tables (and delay-load import tables) of
 pdftocairo/pdftotext/pdffonts (and their transitive local DLL deps) and
-removes unused sibling DLLs from
-extracted/sketchup_ext/bc_pdf_vector_importer/bin.
+removes unused sibling DLLs from the shared runtime contract's Library/bin.
 
 Note: libcurl → libssh2 → libcrypto-3-x64 are REQUIRED by this
 oschwartz10612 poppler.dll build (hard IAT imports). They are not pruned
@@ -22,8 +21,16 @@ import struct
 import sys
 from pathlib import Path
 
+import poppler_runtime_contract
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BIN_DIR = REPO_ROOT / "extracted" / "sketchup_ext" / "bc_pdf_vector_importer" / "bin"
+BIN_DIR = (
+    REPO_ROOT
+    / "extracted"
+    / "sketchup_ext"
+    / "bc_pdf_vector_importer"
+    / poppler_runtime_contract.BIN_REL
+)
 ROOT_EXES = ("pdftocairo.exe", "pdftotext.exe", "pdffonts.exe")
 
 # IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT = 13

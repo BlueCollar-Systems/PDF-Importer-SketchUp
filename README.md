@@ -115,12 +115,17 @@ The importer must run on a supported PC without hardcoded local paths. Optional
 helpers are detected at runtime and reported through **Extensions > PDF Vector
 Importer > Compatibility Report**.
 
-Current Windows release RBZ files include Poppler `pdftocairo`, `pdftotext`,
-`pdffonts`, and PE-reachable required DLLs under the extension `bin/` folder.
-Source builds must run `tools/fetch_third_party_binaries.ps1` before
-`python build_release.py` (the fetch script prunes unused sibling DLLs via
-`tools/prune_poppler_bundle.py`); the build fails if the bundled helper set is
-missing.
+The candidate Windows helper layout places Poppler `pdftocairo`, `pdftotext`,
+`pdffonts`, and 19 required DLLs under extension-local `Library/bin`, with the
+complete pinned 271-file `share/poppler` data tree beside it. The checked-in
+`poppler-runtime-manifest.json` hashes every binary, data, notice, and license
+member. `tools/fetch_third_party_binaries.ps1` reconstructs and smokes that
+layout in isolation before a transactional install.
+
+Helper-bearing publication is currently fail-closed pending qualified license
+approval; see [`POPLER_RUNTIME_DATA_BLOCKER.md`](POPLER_RUNTIME_DATA_BLOCKER.md).
+The proven semantic claim is limited to the deterministic Adobe-GB1 fixture;
+other packaged standard collections have not yet been semantically proven.
 
 | Helper | Used for | If missing |
 |--------|----------|------------|
@@ -261,7 +266,6 @@ bc_pdf_vector_importer/
   recognizer.rb                      # Pattern recognizer
   hatch_detector.rb                  # Hatch pattern detection
   stroke_font.rb                     # Single-stroke font rendering
-  svg_geometry_renderer.rb           # SVG geometry path renderer
   svg_text_renderer.rb               # SVG text path renderer
   external_text_extractor.rb         # External text extraction support
   validator.rb                       # Input validation

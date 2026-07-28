@@ -35,7 +35,11 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 | MuPDF `mutool` | Optional helper if on PATH |
 | Ghostscript | ❌ Not bundled — optional font repair |
 
-Release build fails if bundled Poppler helpers are missing.
+The candidate helper-bearing build uses the exact extension-local
+`Library/bin` + `share/poppler` manifest contract. Release builds fail if any
+member is missing or changed, if the Adobe-GB1 fixture smoke fails, or while
+qualified `license_review` approval is absent. Other packaged standard
+collections are not yet semantically proven.
 
 ## Legacy hardware notes
 

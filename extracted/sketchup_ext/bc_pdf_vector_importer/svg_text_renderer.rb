@@ -12,6 +12,7 @@ require 'tmpdir'
 require File.join(File.dirname(__FILE__), 'command_runner')
 require File.join(File.dirname(__FILE__), 'logger')
 require File.join(File.dirname(__FILE__), 'dependency_resolver')
+require File.join(File.dirname(__FILE__), 'poppler_result_validator')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -24,14 +25,12 @@ module BlueCollarSystems
       GLYPH_POINT_TOLERANCE = 1.0e-7
 
       def self.render(entities, pdf_path, page_num, media_box, opts = {})
-        renderer = find_svg_renderer
-        return nil unless renderer
-
-        # If the PDF references non-embedded fonts (e.g. the base-14 "Symbol"
-        # font) that pdftocairo can't resolve on this platform, embed them once
-        # via Ghostscript so text renders instead of collapsing to a blob.
-        render_pdf = renderer[:kind] == :pdftocairo ?
-          ensure_renderable_pdf(pdf_path, renderer[:exe]) : pdf_path
+        failure_info = opts[:failure_info].is_a?(Hash) ? opts[:failure_info] : nil
+        renderers = find_svg_renderers
+        if renderers.empty?
+          failure_info[:reason] = 'no_renderer' if failure_info
+          return nil
+        end
 
         scale = opts[:scale] || 1.0
         y_offset = opts[:y_offset] || 0.0
@@ -61,43 +60,145 @@ module BlueCollarSystems
           Logger.warn("SvgTextRenderer", "cropbox compare failed: #{e.message}")
         end
 
-        arg_variants = svg_render_arg_variants(
-          renderer, render_pdf, svg_path, page_num, use_cropbox
-        )
-
         used_cropbox_fallback = false
         render_ok = false
         render_stderr = ""
-        arg_variants.each_with_index do |args, idx|
-          begin
-            File.delete(svg_path) if File.exist?(svg_path)
-          rescue StandardError
-            # best-effort cleanup
-          end
-
-          run = CommandRunner.run(
-            args,
-            timeout_s: 90,
-            context: "SvgTextRenderer.#{renderer[:kind]}"
+        renderer = nil
+        attempt_number = 0
+        svg = nil
+        glyphs = nil
+        placements = nil
+        renderers.each do |candidate|
+          # If the PDF references non-embedded fonts (e.g. the base-14
+          # "Symbol" font) that pdftocairo can't resolve on this platform,
+          # embed them once via Ghostscript while keeping glyph geometry as the
+          # requested representation.
+          render_pdf = candidate[:kind] == :pdftocairo ?
+            ensure_renderable_pdf(pdf_path, candidate[:exe]) : pdf_path
+          arg_variants = svg_render_arg_variants(
+            candidate, render_pdf, svg_path, page_num, use_cropbox
           )
-          if run[:ok] && File.exist?(svg_path)
-            used_cropbox_fallback = (idx == 1 && use_cropbox)
-            render_stderr = run[:stderr].to_s
-            render_ok = true
-            break
+
+          arg_variants.each_with_index do |args, idx|
+            attempt_number += 1
+            begin
+              File.delete(svg_path) if File.exist?(svg_path)
+            rescue StandardError
+              # best-effort cleanup before this attempt owns the path
+            end
+
+            run = CommandRunner.run(
+              args,
+              timeout_s: 90,
+              context: "SvgTextRenderer.#{candidate[:kind]}"
+            )
+            attempt_ok = run[:ok] && File.file?(svg_path) && File.size(svg_path) > 0
+            validation_opts = nil
+            transport_validation = nil
+            if candidate[:kind] == :pdftocairo
+              validation_opts = {
+                :executable => candidate[:exe],
+                :argv => args,
+                :context => 'SvgTextRenderer.pdftocairo',
+                :page => page_num,
+                :attempt => attempt_number,
+                :representation => :glyph_geometry,
+                :artifacts => [svg_path],
+                :artifact_policy => :all_nonempty
+              }
+              # Phase one validates the process and owned artifact.  The exact
+              # Adobe-GB1 diagnostic may be deferred only long enough to parse
+              # the SVG and run a caller-supplied full semantic proof.
+              transport_validation = PopplerResultValidator.validate(
+                run,
+                validation_opts.merge(:defer_semantic_completion => true)
+              )
+              attempt_ok = transport_validation[:ok]
+              PopplerResultValidator.log_rejection(
+                transport_validation, 'SvgTextRenderer'
+              ) unless transport_validation[:ok]
+            end
+
+            if attempt_ok
+              begin
+                candidate_svg = File.read(svg_path, encoding: 'UTF-8')
+                structure_failure = svg_structure_failure(candidate_svg)
+                if structure_failure
+                  attempt_ok = false
+                  failure_info[:reason] = structure_failure.to_s if failure_info
+                  Logger.warn("SvgTextRenderer",
+                    "Page #{page_num}: rejected #{candidate[:kind]} SVG (#{structure_failure})")
+                else
+                  candidate_glyphs = parse_glyph_defs(candidate_svg)
+                  candidate_placements = parse_use_placements(candidate_svg)
+                  if candidate[:kind] == :pdftocairo
+                    semantic_complete = false
+                    if transport_validation[:semantic_completion_deferred]
+                      semantic_complete = semantic_complete_for_svg_attempt?(
+                        opts,
+                        :svg => candidate_svg,
+                        :glyphs => candidate_glyphs,
+                        :placements => candidate_placements,
+                        :run => run,
+                        :renderer => candidate[:kind],
+                        :page => page_num,
+                        :attempt => attempt_number,
+                        :representation => :glyph_geometry
+                      )
+                    end
+                    final_validation = PopplerResultValidator.validate(
+                      run,
+                      validation_opts.merge(
+                        :semantic_complete => semantic_complete
+                      )
+                    )
+                    attempt_ok = final_validation[:ok]
+                    unless final_validation[:ok]
+                      failure_info[:reason] = final_validation[:reason].to_s if failure_info
+                      PopplerResultValidator.log_rejection(
+                        final_validation, 'SvgTextRenderer'
+                      )
+                    end
+                  end
+                  if attempt_ok
+                    svg = candidate_svg
+                    glyphs = candidate_glyphs
+                    placements = candidate_placements
+                  end
+                end
+              rescue StandardError => e
+                attempt_ok = false
+                failure_info[:reason] = 'svg_structure_invalid' if failure_info
+                Logger.warn("SvgTextRenderer",
+                  "Page #{page_num}: SVG inspection failed: #{e.message}")
+              end
+            end
+
+            if attempt_ok
+              renderer = candidate
+              used_cropbox_fallback = (idx == 1 && use_cropbox)
+              render_stderr = run[:stderr].to_s
+              render_ok = true
+              failure_info.delete(:reason) if failure_info
+              break
+            end
+            if run[:timed_out]
+              failure_info[:reason] = 'timeout' if failure_info
+              break
+            end
           end
-          break if run[:timed_out]
+          break if render_ok
         end
-        return nil unless render_ok
+        unless render_ok
+          if failure_info && failure_info[:reason].to_s.empty?
+            failure_info[:reason] = 'render_failed'
+          end
+          return nil
+        end
         if used_cropbox_fallback
           Logger.warn("SvgTextRenderer",
             "Page #{page_num}: #{renderer[:kind]} crop box render unavailable; used media box SVG fallback")
         end
-
-        svg = File.read(svg_path, encoding: 'UTF-8')
-        glyphs = parse_glyph_defs(svg)
-        placements = parse_use_placements(svg)
-        return { edges: 0, glyphs: 0, renderer: renderer[:kind] } if placements.empty?
 
         # OCR-backed PDFs can contain many "#source-*" uses for embedded images.
         # Do not disable glyph rendering solely because of source image uses:
@@ -301,6 +402,7 @@ module BlueCollarSystems
         rescue StandardError
           # Logger may be unavailable in minimal runtime/test contexts.
         end
+        failure_info[:reason] = 'exception' if failure_info && failure_info[:reason].to_s.empty?
         nil
       ensure
         begin
@@ -510,13 +612,18 @@ module BlueCollarSystems
       end
 
       def self.find_svg_renderer
+        find_svg_renderers.first
+      end
+
+      def self.find_svg_renderers
+        renderers = []
         poppler = find_pdftocairo
-        return { kind: :pdftocairo, exe: poppler } if poppler
+        renderers << { kind: :pdftocairo, exe: poppler } if poppler
 
         mupdf = find_mutool
-        return { kind: :mutool, exe: mupdf } if mupdf
+        renderers << { kind: :mutool, exe: mupdf } if mupdf
 
-        nil
+        renderers
       end
 
       def self.find_pdftocairo
@@ -593,6 +700,35 @@ module BlueCollarSystems
           a << { glyph_id: id, x: x, y: y, matrix: matrix }
         end
         a
+      end
+
+      # A successful process and a non-empty SVG file are not enough: both
+      # requested outline modes require at least one usable glyph definition
+      # and placement.  Treat empty output as an attempt failure so callers use
+      # their established same-representation/fidelity fallback.
+      def self.svg_structure_failure(svg)
+        placements = parse_use_placements(svg.to_s)
+        return :svg_zero_placements if placements.empty?
+        glyphs = parse_glyph_defs(svg.to_s)
+        return :svg_zero_glyph_defs if glyphs.empty?
+        nil
+      rescue StandardError
+        :svg_structure_invalid
+      end
+
+      # This hook is intentionally proof-driven.  A non-empty SVG is never a
+      # semantic-completeness claim.  Production supplies a page-specific Proc
+      # that compares the parsed glyph/placement set with an independently
+      # certified source-span set. A literal true is deliberately insufficient
+      # at this active boundary even though the low-level validator supports it.
+      def self.semantic_complete_for_svg_attempt?(opts, evidence)
+        proof = opts[:semantic_complete]
+        return false unless proof.respond_to?(:call)
+        proof.call(evidence) == true
+      rescue StandardError => e
+        Logger.warn("SvgTextRenderer",
+          "semantic completeness proof failed: #{e.message}")
+        false
       end
 
       def self.glyph_reference_id?(id)
@@ -693,9 +829,25 @@ module BlueCollarSystems
         begin
           pf = find_pdffonts(pdftocairo_exe)
           if pf
-            run = CommandRunner.run([pf.to_s, '--', pdf_path.to_s],
+            args = [pf.to_s, '--', pdf_path.to_s]
+            run = CommandRunner.run(args,
               timeout_s: 30, context: 'SvgTextRenderer.pdffonts')
-            result = run[:ok] && pdffonts_reports_unembedded?(run[:stdout].to_s)
+            validation = PopplerResultValidator.validate(run,
+              :executable => pf,
+              :argv => args,
+              :context => 'SvgTextRenderer.pdffonts',
+              :attempt => 1,
+              :representation => :font_inventory,
+              :artifacts => [],
+              :artifact_policy => :none)
+            if validation[:ok]
+              result = pdffonts_reports_unembedded?(run[:stdout].to_s)
+            else
+              PopplerResultValidator.log_rejection(
+                validation, 'SvgTextRenderer'
+              )
+              result = false
+            end
           end
         rescue StandardError => e
           warn_safe("pdf_needs_embedding? failed: #{e.message}")

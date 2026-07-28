@@ -1,0 +1,32 @@
+Bundled third-party runtime for PDF Vector Importer (SketchUp)
+
+Layout:
+  Library/bin/{pdftocairo.exe,pdftotext.exe,pdffonts.exe,required DLLs}
+  share/poppler/**
+  poppler-runtime-manifest.json
+
+Windows binaries are pruned from the exact pinned asset:
+  Release: v26.02.0-0 / Release-26.02.0-0.zip
+  SHA-256: 993e4a94376ed712fafc7058d724ea0b943d118bbd2305cd9ed55174eb85cda5
+  URL: https://github.com/oschwartz10612/poppler-windows/releases/tag/v26.02.0-0
+
+The complete poppler-data 0.4.12 tree is pinned independently:
+  SHA-256: c835b640a40ce357e1b83666aabd95edffa24ddddd49b8daff63adb851cdab74
+  URL: https://poppler.freedesktop.org/poppler-data-0.4.12.tar.gz
+
+The GPLv3 text is provided separately from the official GNU URL because it is
+not a member of the poppler-data archive:
+  SHA-256: 3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
+  URL: https://www.gnu.org/licenses/gpl-3.0.txt
+
+The exact binary, data, notice, license, size, and SHA-256 inventory is in
+poppler-runtime-manifest.json. Its per-binary component/license identifiers are
+an audit aid, not a qualified legal determination.
+
+PUBLICATION IS BLOCKED. license_review remains "blocked" until qualified
+review closes every binary dependency's notices, license texts, and source or
+offer obligations. Structural verification and the Adobe-GB1 deterministic
+fixture smoke do not constitute publication approval. Other packaged standard
+collections have not been semantically proven.
+
+MuPDF mutool and Ghostscript are not bundled.
