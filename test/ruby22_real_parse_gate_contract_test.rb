@@ -83,8 +83,9 @@ class Ruby22RealParseGateContractTest < Minitest::Test
     end
     assert_includes ci, '--smoke'
     assert_includes release, '--smoke'
+    assert_includes release, 'Build approved Windows release bytes'
     assert_operator release.index(SOURCE_HELPER), :<,
-                    release.index('Build .rbz')
+                    release.index('Build approved Windows release bytes')
   end
 
   def test_gate_rejects_any_runtime_other_than_exact_224_p230

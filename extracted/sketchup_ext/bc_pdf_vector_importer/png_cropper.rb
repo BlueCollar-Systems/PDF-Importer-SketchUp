@@ -140,7 +140,7 @@ module BlueCollarSystems
               alpha_index += 4
             end
             visual_digest.update(canonical_visual_row(row))
-            compressed << deflater.deflate("\x00".b + row)
+            compressed << deflater.deflate(png_filter_none_row(row))
           end
         end
         compressed << deflater.finish
@@ -358,7 +358,7 @@ module BlueCollarSystems
             row = input.read(row_bytes)
             raise_contract('PNG raw row truncated') unless
               row && row.bytesize == row_bytes
-            compressed << deflater.deflate("\x00".b + row)
+            compressed << deflater.deflate(png_filter_none_row(row))
           end
         end
         compressed << deflater.finish
