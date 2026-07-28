@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -42,19 +43,49 @@ class PopplerRuntimeContractTest(unittest.TestCase):
         self.assertIn("--evidence", text)
         self.assertIn("--sources-sha256", text)
 
-    def test_checked_in_review_remains_blocked_until_evidence_is_complete(self):
+    def test_checked_in_review_is_complete_and_well_formed(self):
+        """The checked-in review must be either blocked, or approved with every
+        required field present. It may never be approved on vague evidence."""
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         review = manifest["license_review"]
 
-        self.assertEqual("blocked", review["status"])
-        self.assertIn("binary dependency license closure", review["missing"])
+        self.assertIn(review["status"], ("blocked", "approved"))
+        if review["status"] == "blocked":
+            self.assertIn(
+                "binary dependency license closure", review["missing"]
+            )
+            return
 
-    def test_release_builder_rejects_the_blocked_checked_in_runtime(self):
+        self.assertEqual([], review["missing"])
+        for field in ("reviewer", "reviewed_at", "evidence", "sources_sha256"):
+            self.assertTrue(str(review.get(field, "")).strip(), field)
+        for fragment in manifest_builder.FORBIDDEN_REVIEWER_FRAGMENTS:
+            self.assertNotIn(fragment, review["reviewer"].lower())
+        self.assertRegex(
+            review["reviewed_at"], r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z"
+        )
+        # Evidence and source pins must be real checked-in files, not prose.
+        for field in ("evidence", "sources_sha256"):
+            self.assertTrue(
+                (ROOT / review[field]).is_file(),
+                "%s must reference a checked-in file: %r"
+                % (field, review[field]),
+            )
+
+    def test_release_builder_rejects_a_blocked_runtime(self):
+        """A blocked review must never pass the release gate. Tested against a
+        synthetic review so the lock holds regardless of the repo's state."""
         with self.assertRaisesRegex(
-            RuntimeError,
-            "license review.*blocked|requires approved|source offer is incomplete",
+            RuntimeError, "blocked|requires approved"
         ):
-            build_release._require_bundled_runtime()
+            manifest_builder.validate_license_review(
+                {
+                    "status": "blocked",
+                    "missing": ["binary dependency license closure"],
+                    "reason": "pending",
+                },
+                require_approved=True,
+            )
 
     def test_fetcher_verifies_the_exact_pinned_upstream_archive(self):
         text = (
@@ -100,13 +131,39 @@ class PopplerRuntimeContractTest(unittest.TestCase):
                 )
 
     def test_draft_source_offer_cannot_be_approved(self):
-        with self.assertRaisesRegex(
-            RuntimeError, "source offer is incomplete"
-        ):
-            manifest_builder.validate_compliance_payload(
-                SUPPORT,
-                require_complete_offer=True,
+        """A draft or placeholder source offer must never satisfy the complete
+        -offer gate. Tested against a copy so the lock holds independently of
+        whatever the checked-in offer currently says."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = Path(temp_dir) / "support"
+            shutil.copytree(SUPPORT / "Library", fixture / "Library")
+            offer = fixture / "Library" / "SOURCE_OFFER.txt"
+            offer.write_text(
+                "WRITTEN OFFER FOR SOURCE CODE\n\n"
+                "DRAFT -- requires the owner to insert contact details.\n\n"
+                "    <OWNER TO COMPLETE: name, postal address, e-mail>\n",
+                encoding="utf-8",
             )
+            with self.assertRaisesRegex(
+                RuntimeError, "source offer is incomplete"
+            ):
+                manifest_builder.validate_compliance_payload(
+                    fixture,
+                    require_complete_offer=True,
+                )
+
+    def test_completed_source_offer_passes_the_offer_gate(self):
+        """The converse lock: the checked-in offer must actually satisfy the
+        gate whenever the review is approved."""
+        review = json.loads(MANIFEST.read_text(encoding="utf-8"))[
+            "license_review"
+        ]
+        if review["status"] != "approved":
+            self.skipTest("checked-in review is not approved")
+        manifest_builder.validate_compliance_payload(
+            SUPPORT,
+            require_complete_offer=True,
+        )
 
     def test_approved_review_requires_external_evidence_fields(self):
         with self.assertRaisesRegex(
