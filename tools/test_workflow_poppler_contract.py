@@ -35,6 +35,26 @@ class WorkflowPopplerContractTest(unittest.TestCase):
             text,
         )
 
+    def test_release_publishes_the_windows_built_rbz_without_rebuilding(self):
+        text = (
+            ROOT / ".github" / "workflows" / "auto-release.yml"
+        ).read_text(encoding="utf-8")
+        windows_job = text[
+            text.index("  source-only-build-windows:"):
+            text.index("\n  release:")
+        ]
+        release_job = text[text.index("\n  release:"):]
+
+        self.assertIn("python build_release.py", windows_job)
+        self.assertIn("actions/upload-artifact@", windows_job)
+        self.assertIn("rbz_sha256", windows_job)
+        self.assertIn("actions/download-artifact@", release_job)
+        self.assertIn(
+            "needs.source-only-build-windows.outputs.rbz_sha256",
+            release_job,
+        )
+        self.assertNotIn("run: python build_release.py", release_job)
+
     def test_release_publishes_the_checked_source_inventory_with_the_rbz(self):
         text = (
             ROOT / ".github" / "workflows" / "auto-release.yml"

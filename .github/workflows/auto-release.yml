@@ -42,6 +42,7 @@ jobs:
     runs-on: windows-latest
     outputs:
       publication_ready: ${{ steps.publication.outputs.publication_ready }}
+      rbz_sha256: ${{ steps.artifact_identity.outputs.rbz_sha256 }}
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
@@ -59,6 +60,27 @@ jobs:
       - name: Evaluate release publication gate
         id: publication
         run: python tools/check_release_publication.py
+      - name: Build approved Windows release bytes
+        if: steps.publication.outputs.publication_ready == 'true'
+        run: python build_release.py --out "$env:RUNNER_TEMP\su-rbz"
+      - name: Record Windows RBZ identity
+        if: steps.publication.outputs.publication_ready == 'true'
+        id: artifact_identity
+        run: |
+          $rbz = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP\su-rbz" -Filter 'SketchUp-PDF-Importer_v*.rbz' -File)
+          if ($rbz.Count -ne 1) {
+            throw "Expected exactly one Windows-built RBZ, found $($rbz.Count)."
+          }
+          $sha256 = (Get-FileHash -LiteralPath $rbz[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "rbz_sha256=$sha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Upload approved Windows RBZ
+        if: steps.publication.outputs.publication_ready == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: approved-windows-rbz
+          path: ${{ runner.temp }}\su-rbz\SketchUp-PDF-Importer_v*.rbz
+          if-no-files-found: error
+          retention-days: 1
 
   release:
     needs: [ruby22-exact-parse, source-only-build-windows]
@@ -73,6 +95,21 @@ jobs:
           # GITHUB_TOKEN always authenticates checkout; RELEASE_BUMP_TOKEN is used
           # only when pushing the version-bump commit past branch protection.
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download approved Windows RBZ
+        uses: actions/download-artifact@v8
+        with:
+          name: approved-windows-rbz
+          path: .
+
+      - name: Verify downloaded Windows RBZ identity
+        run: |
+          set -e
+          RBZ_COUNT=$(find . -maxdepth 1 -type f -name 'SketchUp-PDF-Importer_v*.rbz' | wc -l)
+          test "$RBZ_COUNT" -eq 1
+          RBZ=$(find . -maxdepth 1 -type f -name 'SketchUp-PDF-Importer_v*.rbz')
+          ACTUAL_SHA256=$(sha256sum "$RBZ" | cut -d' ' -f1)
+          test "$ACTUAL_SHA256" = "${{ needs.source-only-build-windows.outputs.rbz_sha256 }}"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -153,9 +190,6 @@ jobs:
       - name: Set release target
         run: |
           echo "RELEASE_TARGET=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
-      - name: Build .rbz
-        run: python build_release.py
 
       - name: Smoke RBZ structure
         run: |
