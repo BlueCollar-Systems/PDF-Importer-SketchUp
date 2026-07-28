@@ -38,9 +38,14 @@ module BlueCollarSystems
             :placement_index => entry[:placement_index]
           }
         end
-        match = CairoGlyphSource.match_spans(pens, [item], media_box)
+        match = if opts[:precomputed_match].is_a?(Hash)
+                  opts[:precomputed_match]
+                else
+                  CairoGlyphSource.match_spans(pens, [item], media_box)
+                end
         selection = select_item_placements(
-          source_id, mode, match, pens, media_box, opts[:peer_items]
+          source_id, mode, match, pens, media_box, opts[:peer_items],
+          opts[:precomputed_peer_boxes]
         )
         indices = selection[:indices]
         entries = Array(placed).select do |entry|
@@ -289,13 +294,15 @@ module BlueCollarSystems
       # the source bbox belongs unambiguously to this item. Peer overlap rejects
       # the entire candidate set instead of duplicating another text artifact.
       def self.select_item_placements(source_id, mode, match, pens, media_box,
-                                      peer_items)
+                                      peer_items,
+                                      precomputed_peer_boxes = nil)
         exact = Array(match[:placement_matches]).select do |record|
           record[:source_span_id].to_s == source_id
         end.map { |record| record[:placement_index].to_i }.uniq.sort
         unless exact.empty?
           ambiguous = ambiguous_peer_placements(
-            exact, pens, media_box, source_id, peer_items
+            exact, pens, media_box, source_id, peer_items,
+            precomputed_peer_boxes
           )
           return {
             :indices => ambiguous.empty? ? exact : [],
@@ -315,7 +322,8 @@ module BlueCollarSystems
           values + Array(failure[:placement_indices]).map { |index| index.to_i }
         end.uniq.sort
         ambiguous = ambiguous_peer_placements(
-          candidates, pens, media_box, source_id, peer_items
+          candidates, pens, media_box, source_id, peer_items,
+          precomputed_peer_boxes
         )
         {
           :indices => ambiguous.empty? ? candidates : [],
@@ -326,32 +334,41 @@ module BlueCollarSystems
       end
 
       def self.ambiguous_peer_placements(candidate_indices, pens, media_box,
-                                         source_id, peer_items)
+                                         source_id, peer_items,
+                                         precomputed_peer_boxes = nil)
         candidates = Array(candidate_indices)
         return [] if candidates.empty?
-        base_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
-        base_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
-        tolerance = if CairoGlyphSource.const_defined?(
-          :SPAN_MATCH_TOLERANCE_PT
-        )
-                      CairoGlyphSource::SPAN_MATCH_TOLERANCE_PT.to_f
-                    else
-                      2.0
-                    end
-        peer_boxes = Array(peer_items).map do |peer|
-          peer_id = RepresentationFidelity.source_span_id(peer)
-          next if peer_id == source_id
-          box = CairoGlyphSource.item_bbox_media_relative(peer, base_x, base_y)
-          unless box
-            raise RepresentationFidelity::ContractError,
-                  "#{source_id}: peer source bbox is unavailable; Geometry " \
-                  'ownership cannot be verified'
-          end
-          x0, x1 = [box[0].to_f, box[2].to_f].minmax
-          y0, y1 = [box[1].to_f, box[3].to_f].minmax
-          [x0 - tolerance, y0 - tolerance,
-           x1 + tolerance, y1 + tolerance]
-        end.compact
+        peer_boxes = if precomputed_peer_boxes.is_a?(Hash)
+                       precomputed_peer_boxes.reject do |peer_id, _box|
+                         peer_id.to_s == source_id.to_s
+                       end.values
+                     elsif precomputed_peer_boxes.is_a?(Array)
+                       Array(precomputed_peer_boxes)
+                     else
+                       base_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
+                       base_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
+                       tolerance = if CairoGlyphSource.const_defined?(
+                         :SPAN_MATCH_TOLERANCE_PT
+                       )
+                                     CairoGlyphSource::SPAN_MATCH_TOLERANCE_PT.to_f
+                                   else
+                                     2.0
+                                   end
+                       Array(peer_items).map do |peer|
+                         peer_id = RepresentationFidelity.source_span_id(peer)
+                         next if peer_id == source_id
+                         box = CairoGlyphSource.item_bbox_media_relative(peer, base_x, base_y)
+                         unless box
+                           raise RepresentationFidelity::ContractError,
+                                 "#{source_id}: peer source bbox is unavailable; Geometry " \
+                                 'ownership cannot be verified'
+                         end
+                         x0, x1 = [box[0].to_f, box[2].to_f].minmax
+                         y0, y1 = [box[1].to_f, box[3].to_f].minmax
+                         [x0 - tolerance, y0 - tolerance,
+                          x1 + tolerance, y1 + tolerance]
+                       end.compact
+                     end
         Array(pens).select do |pen|
           index = pen[:placement_index].to_i
           next false unless candidates.include?(index)

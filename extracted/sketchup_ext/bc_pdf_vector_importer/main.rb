@@ -615,7 +615,8 @@ module BlueCollarSystems
       stats, model, target_entities, pdf_path, page_num, item,
       requested_mode, controller, history, media_box, render_box,
       page_rotation, opts, import_start, y_offset, svg_document,
-      text_layer = nil, peer_items = []
+      text_layer = nil, peer_items = [],
+      precomputed_match = nil, precomputed_peer_boxes = nil
     )
       source_id = RepresentationFidelity.source_span_id(item)
       context = svg_source_context(svg_document, page_num, {})
@@ -628,7 +629,9 @@ module BlueCollarSystems
           :y_offset => 0.0,
           :layer => text_layer,
           :peer_items => peer_items,
-          :source_context => context
+          :source_context => context,
+          :precomputed_match => precomputed_match,
+          :precomputed_peer_boxes => precomputed_peer_boxes
         )
         unless result.is_a?(Hash) && Array(result[:failures]).empty?
           raise RepresentationFidelity::ContractError,
@@ -689,6 +692,49 @@ module BlueCollarSystems
               "#{source_id}: terminal item Raster recording failed: " \
               "#{error.message}; cleaned #{cleanup.join(', ')}"
       end
+    end
+
+    def self.prepare_item_page_match_and_peer_boxes(
+      svg, media_box, text_items, opts, render_box, y_offset = 0.0
+    )
+      base_opts = {
+        :scale => opts[:scale],
+        :svg_page_box => render_box,
+        :y_offset => y_offset.to_f
+      }
+      placed = CairoGlyphSource.model_space_loops(svg, media_box, base_opts)
+      pens = Array(placed).map do |entry|
+        {
+          :x => Array(entry[:pen_pdf])[0],
+          :y => Array(entry[:pen_pdf])[1],
+          :placement_index => entry[:placement_index]
+        }
+      end
+      match = CairoGlyphSource.match_spans(pens, text_items, media_box)
+
+      base_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
+      base_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
+      tolerance = if CairoGlyphSource.const_defined?(
+        :SPAN_MATCH_TOLERANCE_PT
+      )
+                    CairoGlyphSource::SPAN_MATCH_TOLERANCE_PT.to_f
+                  else
+                    2.0
+                  end
+      peer_boxes = {}
+      Array(text_items).each do |item|
+        source_id = RepresentationFidelity.source_span_id(item)
+        box = CairoGlyphSource.item_bbox_media_relative(item, base_x, base_y)
+        next unless box
+        x0, x1 = [box[0].to_f, box[2].to_f].minmax
+        y0, y1 = [box[1].to_f, box[3].to_f].minmax
+        peer_boxes[source_id] = [
+          x0 - tolerance, y0 - tolerance,
+          x1 + tolerance, y1 + tolerance
+        ]
+      end
+
+      [match, peer_boxes]
     end
 
     def self.item_raster_crop_geometry(item, media_box, page_rotation, dpi,
@@ -768,6 +814,11 @@ module BlueCollarSystems
         proofs_by_id[source_id] = proof
       end
 
+      precomputed_match, precomputed_peer_boxes =
+        prepare_item_page_match_and_peer_boxes(
+          svg_document[:svg], media_box, text_items, opts, render_box, 0.0
+        )
+
       proofs_by_id.each do |source_id, initial_proof|
         item = items_by_id[source_id]
         raise RepresentationFidelity::ContractError,
@@ -784,7 +835,8 @@ module BlueCollarSystems
           import_start, y_offset, svg_document, nil,
           Array(text_items).reject do |peer|
             RepresentationFidelity.source_span_id(peer) == source_id
-          end
+          end,
+          precomputed_match, precomputed_peer_boxes
         )
       end
       true
@@ -893,6 +945,13 @@ module BlueCollarSystems
       Array(result[:transition_proofs]).each do |proof|
         transition_by_id[proof[:source_span_id].to_s] = proof
       end
+
+      label_peer_items = Array(all_page_text_items || text_items)
+      precomputed_match, precomputed_peer_boxes =
+        prepare_item_page_match_and_peer_boxes(
+          svg_document[:svg], media_box, label_peer_items, opts, render_box, 0.0
+        )
+
       undelivered = failed_items.reject do |item|
         delivered_ids.include?(RepresentationFidelity.source_span_id(item))
       end
@@ -917,7 +976,8 @@ module BlueCollarSystems
           import_start, y_offset, svg_document, text_layer,
           Array(all_page_text_items || text_items).reject do |peer|
             RepresentationFidelity.source_span_id(peer) == source_id
-          end
+          end,
+          precomputed_match, precomputed_peer_boxes
         )
       end
       true
