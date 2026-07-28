@@ -7,7 +7,7 @@ require File.join(File.dirname(__FILE__), 'representation_fidelity')
 module BlueCollarSystems
   module PDFVectorImporter
     module SvgItemRepresentationRenderer
-      SIZE_TOLERANCE_INCHES = 1.0e-6
+      SIZE_TOLERANCE_INCHES = 0.001
       SUPPORTED_MODES = [:glyphs, :geometry].freeze
 
       def self.render_svg(entities, svg, media_box, item, requested_mode,

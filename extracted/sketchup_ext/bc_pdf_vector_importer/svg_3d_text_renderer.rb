@@ -483,9 +483,14 @@ module BlueCollarSystems
         clean = []
         Array(points).each do |point|
           next unless point && point.respond_to?(:x) && point.respond_to?(:y)
-          clean << point if clean.empty? || !same_point?(clean[-1], point)
+          if clean.empty?
+            clean << point
+          elsif point.distance(clean[-1]).to_f > HOST_POINT_TOLERANCE_INCHES
+            clean << point
+          end
         end
-        clean.pop if clean.length > 1 && same_point?(clean[0], clean[-1])
+        clean.pop if clean.length > 1 &&
+                     clean[-1].distance(clean[0]).to_f <= HOST_POINT_TOLERANCE_INCHES
         return nil if clean.length < 3
         area = signed_area(clean)
         raise 'source contour area is nonfinite' unless area.finite?
