@@ -211,6 +211,22 @@ bom_frac = make_item('3 5/16', 400.0, 200.0, 412.0, 230.0, font_size: 6.0)
 assert_true(builder.send(:label_angle_pdf, bom_frac).abs < 0.01,
             'stacked fraction dimension stays horizontal with BOM context active')
 
+# Two-digit mixed numbers in tall pdftotext cells stay horizontal when the
+# PDF angle is near zero (shop-drawing dimension breaks, not vertical runs).
+wide_mixed = make_item('13 3/4', 300.0, 400.0, 312.0, 430.0, angle: 0.0, font_size: 6.0)
+assert_true(builder.send(:label_angle_pdf, wide_mixed).abs < 0.01,
+            'two-digit stacked fraction stays horizontal at PDF angle 0')
+wx, _, _ = builder.send(:label_insertion_pdf, wide_mixed)
+assert_true(wx > 300.0 && wx < 312.0,
+            'two-digit stacked fraction centers in its dimension break')
+
+# Diagonal brace dimensions keep the extractor angle so Labels → 3D Text
+# preserves the source tilt instead of snapping to 90°.
+diag_dim = make_item('13 3/4', 500.0, 200.0, 520.0, 230.0, angle: 33.0, font_size: 6.0)
+diag_ang = builder.send(:label_angle_pdf, diag_dim)
+assert_true((diag_ang - 33.0).abs < 0.01,
+            "diagonal dimension keeps PDF angle (got #{diag_ang})")
+
 if $failures.empty?
   puts "PASS: #{$pass_count} category placement assertions"
   exit 0

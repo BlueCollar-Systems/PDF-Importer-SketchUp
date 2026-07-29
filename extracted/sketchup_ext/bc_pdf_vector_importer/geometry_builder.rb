@@ -1509,8 +1509,7 @@ module BlueCollarSystems
 
       def verify_annotation_label(text, expected_text, expected_point,
                                   display_angle,
-                                  verify_leader = false,
-                                  accept_rotation = false)
+                                  verify_leader = false)
         type = if text.respond_to?(:typename)
                  text.typename.to_s
                else
@@ -1536,11 +1535,11 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError, 'label anchor verification failed' unless placement_ok
 
         # SketchUp::Text#vector is the leader vector, not a text-orientation
-        # axis. For :labels mode a nonzero source rotation is an affirmative
-        # host impossibility that advances the fallback ladder. For :text mode
-        # this is a known in-mode host limitation: the text is placed at the
-        # correct anchor and the rotation absence is explicitly accepted.
-        unless display_angle.to_f.abs <= 1.0e-12 || accept_rotation
+        # axis. Native labels therefore cannot represent non-horizontal PDF
+        # text, and that known host limitation must be handled before add_text
+        # is called. A zero source angle is the only label orientation that can
+        # be certified here; the leader vector is verified separately below.
+        unless display_angle.to_f.abs <= 1.0e-12
           raise RepresentationFidelity::ContractError,
                 'native SketchUp Text cannot preserve source text rotation'
         end
@@ -1591,9 +1590,10 @@ module BlueCollarSystems
         display_angle = display_text_angle(item, label_angle)
         pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
         rotated = display_angle.to_f.abs > 1.0e-12
-        normalized_requested = normalize_text_mode_symbol(requested_mode)
-        if rotated && normalized_requested != :text
-          # Labels mode cannot express rotation — advance the fallback ladder.
+        if rotated
+          # Labels cannot express glyph rotation. Emit an item-scoped
+          # impossibility proof so the finite ladder advances Labels → 3D Text
+          # (which preserves source angle). Never place unrotated text.
           proof = host_unsupported_label_rotation_proof(item, display_angle, pt)
           rung[:transition_proof] = proof
           return stop_requested_text_delivery!(
@@ -1601,29 +1601,23 @@ module BlueCollarSystems
             'label_rotation_unsupported_by_host', proof
           )
         end
-        # For :text mode, rotation is a known host limitation: place at the
-        # correct anchor and record that glyph angle is unavailable in-mode.
         leader_vector = zero_label_leader_vector
         before = RepresentationFidelity.snapshot(entities)
         text = try_add_annotation_text(
           entities, item.text, pt, leader_vector, rung
         )
-        # :text mode accepts that SketchUp Text cannot rotate glyphs.
-        text_accept_rotation = normalized_requested == :text
-        delivered_as_mode = text_accept_rotation ? :text : :labels
         if text
           begin
             identity = RepresentationFidelity.stable_entity_id(text)
             evidence = verify_annotation_label(
-              text, item.text, pt, display_angle,
-              false, text_accept_rotation
+              text, item.text, pt, display_angle
             )
             hide_annotation_leader(text)
             # Re-read after mutating the host entity: the final point/content
             # and hidden-leader state are the delivery evidence. Text#vector
             # is never interpreted as text orientation.
             evidence = verify_annotation_label(
-              text, item.text, pt, display_angle, true, text_accept_rotation
+              text, item.text, pt, display_angle, true
             )
             set_layer(text, layer)
             expected_width = source_geometry[:expected_width]
@@ -1631,13 +1625,8 @@ module BlueCollarSystems
             evidence[:physical_geometry_verified] = true
             evidence[:physical_style_verified] = true
             evidence[:transform_verified] = true
-            if text_accept_rotation && rotated
-              evidence[:rotation_host_limitation] = true
-              evidence[:source_rotation_degrees] = display_angle.to_f
-            end
             evidence[:expected_evidence] = source_expected_for_created!(
-              item, delivered_as_mode, [text], pt,
-              text_accept_rotation ? 0.0 : display_angle,
+              item, :labels, [text], pt, display_angle,
               {
                 :expected_width => expected_width,
                 :expected_height => expected_height,
@@ -1651,8 +1640,8 @@ module BlueCollarSystems
             )
             entity_ids = [identity]
             @text_count += 1
-            record_text_span_provenance(item, 'native_text', entity_ids, delivered_as_mode)
-            complete_text_rung!(attempt, rung, delivered_as_mode, entity_ids, evidence)
+            record_text_span_provenance(item, 'native_label', entity_ids, :labels)
+            complete_text_rung!(attempt, rung, :labels, entity_ids, evidence)
             return true
           rescue RepresentationFidelity::ContractError => e
             cleanup_unverified_label!(
@@ -2102,18 +2091,21 @@ module BlueCollarSystems
         fs = [font_size_pts.to_f, 1.0].max
         t = text.to_s.strip
         if t =~ /\A\d{1,2}\/\d{1,2}"?\z/
-          fs * 0.58
+          fs * 0.72
         elsif t =~ /\A\d+\s+\d{1,2}\/\d{1,2}"?\z/
-          fs * 1.05
+          # Mixed number (e.g. "2 1/2", "13 3/4"): SketchUp Label glyphs are
+          # wider than condensed CAD ink; underestimate shifts the visual
+          # center to the right of the dimension break.
+          fs * (0.62 + (0.38 * t.gsub(/[^0-9]/, '').length))
         elsif t =~ /\A\d{1,2}\z/
-          fs * 0.55
+          fs * 0.72
         elsif feet_inch_dimension_label?(t)
           feet_inch_label_width_pts(t, fs)
         else
-          t.length * fs * 0.55
+          t.length * fs * 0.62
         end
       rescue StandardError
-        [font_size_pts.to_f * 0.55, 1.0].max
+        [font_size_pts.to_f * 0.62, 1.0].max
       end
 
       def dimension_label_est_width_pts(text, font_size_pts, bbox_w_pts)
@@ -2151,9 +2143,13 @@ module BlueCollarSystems
 
       def narrow_fraction_dimension_stays_horizontal?(text, bbox_w_pts, bbox_h_pts, font_size_pts, angle_deg)
         return false unless should_center_dimension_label?(text, bbox_w_pts, bbox_h_pts, font_size_pts, angle_deg)
+        # Near-zero PDF angles with a tall pdftotext cell are stacked-fraction /
+        # dimension-break layouts, not 90° runs. Only force vertical when the
+        # extractor already reports a near-vertical angle.
+        return false if angle_deg.to_f.abs >= 45.0
         t = text.to_s.strip
-        # Single-digit stacked fractions (e.g. "1 1/2") stay horizontal in narrow bbox.
-        !!(t =~ /\A\d{1}\s+\d{1,2}\/\d{1,2}"?\z/)
+        !!(t =~ /\A\d+\s+\d{1,2}\/\d{1,2}"?\z/ ||
+           t =~ /\A\d{1,2}\/\d{1,2}"?\z/)
       rescue StandardError
         false
       end
@@ -2214,7 +2210,10 @@ module BlueCollarSystems
           if bbox_w && bbox_h && vertical_dimension_bbox?(item, bbox_w, bbox_h) &&
              !narrow_fraction_dimension_stays_horizontal?(item.text, bbox_w, bbox_h, fs, angle)
             raw = item.respond_to?(:angle) ? item.angle.to_f : 0.0
-            return raw if raw.abs >= 45.0
+            # Trust the extractor when it already reports a meaningful tilt
+            # (diagonal brace dims). Only synthesize 90° for upright PDF
+            # angles whose tall/narrow bbox evidences a vertical run.
+            return raw if raw.abs >= 12.0
             return 90.0
           end
           return 0.0 if angle.abs < 12.0
