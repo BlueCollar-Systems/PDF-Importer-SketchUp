@@ -195,6 +195,8 @@ module SketchupBatchImport
         'normalized_pdf_sha256' => source_lineage['normalized_pdf_sha256'],
         'salvage_note' => source_lineage['salvage_note'],
         'delivery_summary_mode' => stats[:text_mode].to_s,
+        'pages' => stats[:pages].to_i,
+        'selected_pages' => Array(stats[:selected_pages]).map(&:to_i),
         'import_session_id' => import_session_id,
         'model_path' => job[:model_path],
         'model_sha256' => Digest::SHA256.file(job[:model_path]).hexdigest,
