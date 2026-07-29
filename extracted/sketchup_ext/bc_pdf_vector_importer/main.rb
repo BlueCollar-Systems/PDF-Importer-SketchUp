@@ -892,6 +892,7 @@ module BlueCollarSystems
         :scale => opts[:scale], :svg_page_box => render_box,
         :y_offset => 0.0, :depth => depth, :layer => text_layer,
         :page_number => page_num,
+        :match_text_items => Array(all_page_text_items || text_items),
         :preserve_unmatched_source_placements => false,
         :source_context => svg_source_context(svg_document, page_num, {})
       )

@@ -2615,8 +2615,16 @@ class RepresentationFidelityContractTest < Minitest::Test
       svg: '<svg viewBox="0 0 100 100"></svg>', renderer: :pdftocairo,
       missing_fonts: [], missing_language_packs: []
     }
+    captured_text3d = nil
+    render_text3d = lambda do |_parent, _svg, _box, render_items, options|
+      captured_text3d = {
+        :render_items => render_items,
+        :options => options
+      }
+      result
+    end
 
-    IMP::Svg3DTextRenderer.stub(:render_svg, result) do
+    IMP::Svg3DTextRenderer.stub(:render_svg, render_text3d) do
       IMP::SvgItemRepresentationRenderer.stub(:render_svg, vector) do
         IMP::SvgItemRepresentationRenderer.stub(
           :verify_transformed_delivery!, true
@@ -2634,6 +2642,11 @@ class RepresentationFidelityContractTest < Minitest::Test
     end
 
     assert_equal ['text_span:1:1', 'text_span:1:1'], vector_ids
+    assert_equal [first, second], captured_text3d[:render_items]
+    assert_equal [first, second, successful_label_peer],
+                 captured_text3d[:options][:match_text_items]
+    assert_equal false,
+                 captured_text3d[:options][:preserve_unmatched_source_placements]
     assert_includes peer_ids, 'text_span:1:0'
     assert_includes peer_ids, 'text_span:1:2'
     refute_includes peer_ids, 'text_span:1:1'

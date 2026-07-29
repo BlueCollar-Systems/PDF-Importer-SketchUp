@@ -19,6 +19,14 @@ module BlueCollarSystems
 
       def self.render_svg(entities, svg, media_box, text_items, opts = {})
         result = base_result
+        render_items = Array(text_items)
+        match_items = if opts.key?(:match_text_items)
+                        Array(opts[:match_text_items])
+                      else
+                        render_items
+                      end
+        result[:authoritative_match_span_count] = match_items.length
+        result[:render_target_span_count] = render_items.length
         depth = opts.key?(:depth) ? opts[:depth].to_f : DEFAULT_DEPTH_INCHES
         result[:requested_depth] = depth
         if !depth.finite? || depth <= 0.0
@@ -54,21 +62,58 @@ module BlueCollarSystems
             :source_primary_axis => entry[:source_primary_axis]
           }
         end
-        match = CairoGlyphSource.match_spans(pens, text_items, media_box)
+        render_ids = render_items.map do |item|
+          RepresentationFidelity.source_span_id(item)
+        end
+        match_ids = match_items.map do |item|
+          RepresentationFidelity.source_span_id(item)
+        end
+        if render_ids.uniq.length != render_ids.length ||
+           match_ids.uniq.length != match_ids.length
+          result[:failures] << hard_failure(
+            nil, :duplicate_semantic_source_identity,
+            '3D text render and match inventories require unique source-span IDs'
+          )
+          return result
+        end
+        missing_ids = render_ids.reject { |source_id| match_ids.include?(source_id) }
+        unless missing_ids.empty?
+          result[:failures] << hard_failure(
+            nil, :render_target_absent_from_match_inventory,
+            "3D text render target is absent from authoritative match inventory: " \
+            "#{missing_ids.join(', ')}"
+          )
+          return result
+        end
+
+        match = CairoGlyphSource.match_spans(pens, match_items, media_box)
         result[:match] = match
 
-        if Array(text_items).empty? && placed.empty?
+        if render_items.empty? && placed.empty?
+          result[:match_scope_verified] = true
           result[:ok] = true
           result[:no_semantic_text] = true
           return result
         end
 
         matched_by_span = {}
+        assigned_placements = {}
         Array(match[:placement_matches]).each do |record|
           id = record[:source_span_id].to_s
+          placement_index = record[:placement_index].to_i
+          if assigned_placements.key?(placement_index)
+            result[:failures] << hard_failure(
+              id, :duplicate_source_placement_assignment,
+              "SVG placement #{placement_index} is assigned to more than one " \
+              'semantic source span'
+            )
+            return result
+          end
+          assigned_placements[placement_index] = id
           matched_by_span[id] = [] unless matched_by_span.key?(id)
-          matched_by_span[id] << record[:placement_index].to_i
+          matched_by_span[id] << placement_index
         end
+        result[:match_scope_verified] = true
         source_ink_by_span = {}
         Array(match[:source_ink_matches]).each do |evidence|
           next unless evidence.is_a?(Hash)
@@ -76,7 +121,7 @@ module BlueCollarSystems
         end
 
         owned_groups = []
-        Array(text_items).each do |item|
+        render_items.each do |item|
           source_id = begin
             RepresentationFidelity.source_span_id(item)
           rescue StandardError => e
@@ -189,7 +234,10 @@ module BlueCollarSystems
           :transition_proofs => [],
           :failures => [],
           :source_placements => 0,
-          :no_semantic_text => false
+          :no_semantic_text => false,
+          :authoritative_match_span_count => 0,
+          :render_target_span_count => 0,
+          :match_scope_verified => false
         }
       end
 

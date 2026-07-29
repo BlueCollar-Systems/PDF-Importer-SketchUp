@@ -376,6 +376,49 @@ class SvgText3DRendererTest < Minitest::Test
     assert_empty result[:transition_proofs]
   end
 
+  def test_partial_render_uses_authoritative_full_page_match_inventory
+    horizontal = span('text_span:1:0', [8.0, 18.0, 25.0, 35.0])
+    rotated = span('text_span:1:1', [68.0, 78.0, 85.0, 95.0])
+    captured_items = nil
+    synthetic_match = {
+      :matched_items => [horizontal, rotated],
+      :placement_matches => [{
+        :source_span_id => rotated.source_span_id,
+        :placement_index => 1
+      }],
+      :unmatched_source_runs => [],
+      :unmatched_placements => [],
+      :coverage_failures => [],
+      :source_ink_matches => [],
+      :runs_matched => 2,
+      :runs_unmatched => 0,
+      :placements_unmatched => 0
+    }
+    matcher = lambda do |_pens, items, _media_box|
+      captured_items = items
+      synthetic_match
+    end
+
+    result = BlueCollarSystems::PDFVectorImporter::CairoGlyphSource.stub(
+      :match_spans, matcher
+    ) do
+      RENDERER.render_svg(
+        Svg3DEntities.new, square_svg_with_unjoined_source_glyph,
+        MEDIA_BOX, [rotated],
+        :match_text_items => [horizontal, rotated],
+        :preserve_unmatched_source_placements => false,
+        :depth => 0.05
+      )
+    end
+
+    assert_equal [horizontal, rotated], captured_items
+    assert result[:ok], result[:failures].inspect
+    assert_equal [1], result[:span_results][0][:placement_indices]
+    assert_equal 2, result[:authoritative_match_span_count]
+    assert_equal 1, result[:render_target_span_count]
+    assert_equal true, result[:match_scope_verified]
+  end
+
   # Ghosting behavior contract (R-D, LOOP-1 Welding-Symbol-Chart su overlap
   # 0.2957): extruded source glyphs delivered with nil materials render as
   # white-filled outlines — edges only, no face ink. Delivered 3D Text must
