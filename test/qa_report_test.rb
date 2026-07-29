@@ -88,6 +88,12 @@ class QAReportTest < Minitest::Test
           explode_ms: 1_234.5
         }
       ],
+      pipeline_performance: {
+        text3d_render_ms: 31_250.5,
+        text3d_transform_ms: 725.25,
+        text3d_record_ms: 845.75,
+        commit_ms: 312_500.0
+      },
       page_text_sources: { 1 => :external, 2 => :internal },
       text_mode: :geometry,
       resolved_scale: {
@@ -116,6 +122,9 @@ class QAReportTest < Minitest::Test
                  report[:extra][:geometry_staging][0]['exploded_entity_count']
     assert_in_delta 18_250.75,
                     report[:extra][:geometry_staging][0]['builder_elapsed_ms'],
+                    0.001
+    assert_in_delta 312_500.0,
+                    report[:extra][:pipeline_performance]['commit_ms'],
                     0.001
     assert_in_delta 48.0, report[:extra][:resolved_scale]['factor'], 0.01
     assert_equal 'high', report[:extra][:diagnostics][:quality_level]

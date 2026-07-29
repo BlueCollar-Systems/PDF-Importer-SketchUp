@@ -278,6 +278,9 @@ module BlueCollarSystems
         {
           text_renderers: renderers,
           geometry_staging: geometry_staging,
+          pipeline_performance: normalize_json(
+            stats[:pipeline_performance] || stats['pipeline_performance'] || {}
+          ),
           delivered_text_entity_counts: delivered_text_entity_counts(stats),
           execution_scope: (stats[:execution_scope] ||
                             stats['execution_scope'] || :host_import).to_s,

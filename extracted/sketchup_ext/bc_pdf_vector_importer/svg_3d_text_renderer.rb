@@ -19,6 +19,7 @@ module BlueCollarSystems
       TEXT_INK_RGB = [0, 0, 0].freeze
 
       def self.render_svg(entities, svg, media_box, text_items, opts = {})
+        render_started = monotonic_ms
         result = base_result
         solid_cache = nil
         owned_groups = []
@@ -62,7 +63,7 @@ module BlueCollarSystems
           result[:failures] << hard_failure(
             nil, :source_loop_binding_mismatch, detail
           )
-          publish_performance!(result, solid_cache)
+          publish_performance!(result, solid_cache, render_started)
           return result
         end
         inventory_started = monotonic_ms
@@ -111,7 +112,7 @@ module BlueCollarSystems
           result[:match_scope_verified] = true
           result[:ok] = true
           result[:no_semantic_text] = true
-          publish_performance!(result, solid_cache)
+          publish_performance!(result, solid_cache, render_started)
           return result
         end
 
@@ -141,6 +142,17 @@ module BlueCollarSystems
         end
         record_phase_ms!(result, :verification_ms, assignment_started)
 
+        entries_by_span = {}
+        placed.each do |entry|
+          assigned_source_id =
+            assigned_placements[entry[:placement_index].to_i]
+          next unless assigned_source_id
+          entries_by_span[assigned_source_id] = [] unless
+            entries_by_span.key?(assigned_source_id)
+          entries_by_span[assigned_source_id] << entry
+        end
+
+        span_build_started = monotonic_ms
         render_items.each do |item|
           source_id = begin
             RepresentationFidelity.source_span_id(item)
@@ -151,9 +163,7 @@ module BlueCollarSystems
             next
           end
           indices = Array(matched_by_span[source_id]).uniq.sort
-          entries = placed.select do |entry|
-            indices.include?(entry[:placement_index].to_i)
-          end
+          entries = Array(entries_by_span[source_id])
 
           ink_evidence = source_ink_by_span[source_id]
           if ink_evidence &&
@@ -217,6 +227,7 @@ module BlueCollarSystems
             )
           end
         end
+        record_phase_ms!(result, :span_build_ms, span_build_started)
 
         preserve_unmatched = if opts.key?(:preserve_unmatched_source_placements)
                                opts[:preserve_unmatched_source_placements] == true
@@ -241,7 +252,7 @@ module BlueCollarSystems
             solid_cache.metrics.merge(:enabled => true)
           )
         end
-        publish_performance!(result, solid_cache)
+        publish_performance!(result, solid_cache, render_started)
 
         result[:ok] = result[:failures].empty? &&
           result[:transition_proofs].empty?
@@ -257,7 +268,7 @@ module BlueCollarSystems
           )
         end
         result[:failures] << hard_failure(nil, :renderer_exception, e.message)
-        publish_performance!(result, solid_cache)
+        publish_performance!(result, solid_cache, render_started)
         result[:ok] = false
         result
       end
@@ -289,6 +300,8 @@ module BlueCollarSystems
             :instance_placement_ms => 0.0,
             :match_ms => 0.0,
             :parse_ms => 0.0,
+            :span_build_ms => 0.0,
+            :total_ms => 0.0,
             :verification_ms => 0.0
           }
         }
@@ -1243,8 +1256,12 @@ module BlueCollarSystems
           (monotonic_ms - started_ms.to_f)
       end
 
-      def self.publish_performance!(result, solid_cache)
+      def self.publish_performance!(result, solid_cache, render_started = nil)
         result[:performance] ||= {}
+        if render_started
+          result[:performance][:total_ms] =
+            monotonic_ms - render_started.to_f
+        end
         metrics = solid_cache ? solid_cache.metrics : {}
         result[:performance][:definition_build_ms] =
           metrics.fetch(:definition_build_ms, 0.0).to_f
@@ -1252,7 +1269,7 @@ module BlueCollarSystems
           metrics.fetch(:instance_placement_ms, 0.0).to_f
         [
           :definition_build_ms, :instance_placement_ms, :match_ms,
-          :parse_ms, :verification_ms
+          :parse_ms, :span_build_ms, :total_ms, :verification_ms
         ].each do |key|
           result[:performance][key] =
             result[:performance].fetch(key, 0.0).to_f.round(3)

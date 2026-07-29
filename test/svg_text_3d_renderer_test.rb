@@ -568,7 +568,7 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal(
       [
         :definition_build_ms, :instance_placement_ms, :match_ms,
-        :parse_ms, :verification_ms
+        :parse_ms, :span_build_ms, :total_ms, :verification_ms
       ],
       result[:performance].keys.sort
     )

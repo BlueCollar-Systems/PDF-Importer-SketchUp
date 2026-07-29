@@ -2963,6 +2963,7 @@ module BlueCollarSystems
                 selected_pages: pages.dup,
                 match_pdf_layers: match_pdf_layers,
                 text_renderers: [], geometry_staging: [],
+                pipeline_performance: {},
                 page_text_sources: {}, peak_mb: 0.0,
                 model_3d_texts: [], page_text_map: {},
                 recognition_skipped_pages: [],
@@ -3655,6 +3656,7 @@ module BlueCollarSystems
           # read as ghosted duplicates on shop drawings. Truly source-only
           # symbol ink without a span identity still advances via the item
           # fallback ladder / transition proofs, not a second anonymous paint.
+          text3d_render_started = Time.now
           text3d_result = Svg3DTextRenderer.render_svg(
             representation_parent, svg_document[:svg], media_box, text_items,
             :scale => opts[:scale],
@@ -3669,6 +3671,8 @@ module BlueCollarSystems
               svg_document, page_num, svg_failure
             )
           )
+          stats[:pipeline_performance][:text3d_render_ms] =
+            ((Time.now - text3d_render_started) * 1000.0).round(3)
 
           unless Array(text3d_result[:failures]).empty?
             failures = text3d_result[:failures].map do |failure|
@@ -3696,12 +3700,15 @@ module BlueCollarSystems
           else
             all_source_rows = Array(text3d_result[:span_results]) +
               Array(text3d_result[:unmatched_source_results])
+            text3d_transform_started = Time.now
             transforms_ok = all_source_rows.all? do |row|
               apply_and_verify_page_representation_transform(
                 row[:group], media_box, opts[:scale], page_rotation,
                 page_y_offset, row
               )
             end
+            stats[:pipeline_performance][:text3d_transform_ms] =
+              ((Time.now - text3d_transform_started) * 1000.0).round(3)
             unless transforms_ok
               all_source_rows.each do |row|
                 group = row[:group]
@@ -3721,10 +3728,13 @@ module BlueCollarSystems
               )
             end
             unless all_source_rows.empty?
+              text3d_record_started = Time.now
               record_svg_3d_text_delivery!(
                 stats, page_num, delivered_items, text3d_result, :text3d, {},
                 page_rotation
               )
+              stats[:pipeline_performance][:text3d_record_ms] =
+                ((Time.now - text3d_record_started) * 1000.0).round(3)
             end
             # QA text_entities counts created host text-representation groups;
             # the placement count remains explicit in renderer/provenance data.
@@ -3876,9 +3886,14 @@ module BlueCollarSystems
         stats[:model_3d] = Model3DExtruder.extrude_imported(model, pre_import_entities, opts)
       end
 
+      verified_commit_started = Time.now
       cleanup_item_raster_page_cache!(opts)
       verify_cached_source_pdf_bindings!(opts)
       model.commit_operation
+      stats[:pipeline_performance][:commit_ms] =
+        ((Time.now - verified_commit_started) * 1000.0).round(3)
+      stats[:pipeline_performance][:commit_includes_source_binding_verification] =
+        true
 
       layer_mgr.register_imported_names!
       stats[:layers] = layer_mgr.imported_names
