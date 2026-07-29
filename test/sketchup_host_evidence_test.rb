@@ -133,6 +133,29 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  class CountingStyleComponent < FakeComponent
+    attr_reader :style_calls
+
+    def initialize(entity_id, children, options = {})
+      super
+      @style_calls = 0
+    end
+
+    [:layer, :material, :back_material].each do |method_name|
+      define_method(method_name) do
+        @style_calls += 1
+        nil
+      end
+    end
+
+    [:casts_shadows?, :receives_shadows?].each do |method_name|
+      define_method(method_name) do
+        @style_calls += 1
+        true
+      end
+    end
+  end
+
   class FakeImage < FakeEntity
     attr_reader :width, :height
 
@@ -487,6 +510,50 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_equal fidelity.canonical_sha256(value),
                  Digest::SHA256.hexdigest(actual)
     assert_operator cache.length, :>=, 3
+  end
+
+  def test_import_cache_reuses_identical_component_instance_style
+    definition = FakeDefinition.new([
+      FakeEntity.new(139, 'Edge')
+    ])
+    first = CountingStyleComponent.new(140, [], :definition => definition)
+    second = CountingStyleComponent.new(141, [], :definition => definition)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    definition_cache = {}
+    canonical_cache = {}
+    verified_style_keys = { definition.object_id => true }
+
+    fidelity.physical_evidence(
+      [first], definition_cache, canonical_cache, verified_style_keys
+    )
+    cached_second = fidelity.physical_evidence(
+      [second], definition_cache, canonical_cache, verified_style_keys
+    )
+
+    assert_operator first.style_calls, :>, 0
+    assert_equal 0, second.style_calls
+    assert_equal fidelity.physical_evidence([second]), cached_second
+  end
+
+  def test_import_cache_does_not_assume_generic_component_instance_style
+    definition = FakeDefinition.new([
+      FakeEntity.new(142, 'Edge')
+    ])
+    first = CountingStyleComponent.new(143, [], :definition => definition)
+    second = CountingStyleComponent.new(144, [], :definition => definition)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    definition_cache = {}
+    canonical_cache = {}
+
+    fidelity.physical_evidence([first], definition_cache, canonical_cache)
+    cached_second = fidelity.physical_evidence(
+      [second], definition_cache, canonical_cache
+    )
+    cached_style_calls = second.style_calls
+
+    assert_operator first.style_calls, :>, 0
+    assert_operator cached_style_calls, :>, 0
+    assert_equal fidelity.physical_evidence([second]), cached_second
   end
 
   def test_snapshot_reads_each_entity_bounds_once

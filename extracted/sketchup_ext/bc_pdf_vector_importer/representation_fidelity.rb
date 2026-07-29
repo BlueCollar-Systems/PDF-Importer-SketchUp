@@ -971,7 +971,11 @@ module BlueCollarSystems
         if shared_child_payloads
           geometry = geometry_entity_payload(entity, [])
           geometry[:children] = shared_child_payloads[:geometry_children]
-          style = style_entity_payload(entity, [])
+          if shared_child_payloads[:root_style_payload]
+            style = shared_child_payloads[:root_style_payload].dup
+          else
+            style = style_entity_payload(entity, [])
+          end
           style[:children] = shared_child_payloads[:style_children]
         else
           geometry = geometry_entity_payload(
@@ -1022,19 +1026,36 @@ module BlueCollarSystems
 
       # Component definitions are immutable while one synchronous import
       # delivery is being finalized. Reuse their already-captured physical
-      # child trees, while rebuilding every instance root so its own bounds,
-      # transform, style, liveness, and topology remain independently hashed.
+      # child trees. Import-created instances of one exact glyph definition
+      # also share the first verified root style; every instance still rebuilds
+      # its own bounds, transform, liveness, and topology. The independent
+      # save/reopen verifier does not receive this importer cache and therefore
+      # reads every persisted instance style directly.
       def physical_entity_tree_with_definition_cache(entity, cache,
-                                                     canonical_json_cache = nil)
+                                                     canonical_json_cache = nil,
+                                                     root_style_cache_keys = nil)
         definition_key = shared_component_definition_key(entity)
         if definition_key && cache.key?(definition_key)
           entry = cache[definition_key]
-          return physical_entity_tree(entity, entry[:trees], entry)
+          style_cache_allowed = root_style_cache_keys &&
+            root_style_cache_keys[definition_key] == true
+          shared_payloads = entry
+          unless style_cache_allowed
+            shared_payloads = entry.dup
+            shared_payloads.delete(:root_style_payload)
+          end
+          tree = physical_entity_tree(entity, entry[:trees], shared_payloads)
+          if style_cache_allowed && !entry[:root_style_payload]
+            root_style_payload = tree[:style_payload].dup
+            root_style_payload.delete(:children)
+            entry[:root_style_payload] = root_style_payload
+          end
+          return tree
         end
 
         children = entity_children(entity).map do |child|
           physical_entity_tree_with_definition_cache(
-            child, cache, canonical_json_cache
+            child, cache, canonical_json_cache, root_style_cache_keys
           )
         end
         tree = physical_entity_tree(entity, children)
@@ -1044,6 +1065,12 @@ module BlueCollarSystems
             :geometry_children => tree[:geometry_payload][:children],
             :style_children => tree[:style_payload][:children]
           }
+          if root_style_cache_keys &&
+             root_style_cache_keys[definition_key] == true
+            root_style_payload = tree[:style_payload].dup
+            root_style_payload.delete(:children)
+            entry[:root_style_payload] = root_style_payload
+          end
           cache[definition_key] = entry
           store_canonical_json_fragment!(
             entry[:geometry_children], canonical_json_cache
@@ -1092,18 +1119,22 @@ module BlueCollarSystems
       end
 
       def physical_evidence(entities, definition_tree_cache = nil,
-                            canonical_json_cache = nil)
+                            canonical_json_cache = nil,
+                            root_style_cache_keys = nil)
         values = Array(entities).compact
         raise ContractError, 'physical evidence has no entities' if values.empty?
         cache = definition_tree_cache
         unless cache.nil? || cache.is_a?(Hash)
           raise ContractError, 'physical definition tree cache must be a Hash'
         end
+        unless root_style_cache_keys.nil? || root_style_cache_keys.is_a?(Hash)
+          raise ContractError, 'physical root style cache keys must be a Hash'
+        end
         physical_evidence_from_trees(
           values.map do |entity|
             if cache
               physical_entity_tree_with_definition_cache(
-                entity, cache, canonical_json_cache
+                entity, cache, canonical_json_cache, root_style_cache_keys
               )
             else
               physical_entity_tree(entity)
@@ -1153,7 +1184,8 @@ module BlueCollarSystems
         physical = physical_evidence(
           values[:entities],
           values[:physical_definition_tree_cache],
-          values[:physical_canonical_json_cache]
+          values[:physical_canonical_json_cache],
+          values[:physical_root_style_cache_keys]
         )
         evidence = {
           :schema => SOURCE_EXPECTED_SCHEMA,

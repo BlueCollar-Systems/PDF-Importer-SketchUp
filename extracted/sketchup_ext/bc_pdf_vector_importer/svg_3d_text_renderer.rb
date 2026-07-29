@@ -353,6 +353,8 @@ module BlueCollarSystems
         }
         bounds_elapsed = monotonic_ms - bounds_started
         physical_started = monotonic_ms
+        physical_root_style_cache_keys =
+          row.delete(:component_definition_style_cache_keys)
         expected = RepresentationFidelity.source_expected_evidence(
           item, :text3d,
           :entities => [row[:group]],
@@ -369,6 +371,8 @@ module BlueCollarSystems
             physical_definition_tree_cache,
           :physical_canonical_json_cache =>
             physical_canonical_json_cache,
+          :physical_root_style_cache_keys =>
+            physical_root_style_cache_keys,
           :source_font_identity => {
             :source => 'pdf_renderer_svg_glyph_outlines',
             :glyph_ids => Array(row[:glyph_ids]).map { |id| id.to_s }.sort
@@ -662,6 +666,12 @@ module BlueCollarSystems
           :component_definition_keys => definition_records.map do |record|
             record[:key]
           end.uniq.sort,
+          :component_definition_style_cache_keys =>
+            definition_records.inject({}) do |memo, record|
+              definition = record[:definition]
+              memo[definition.object_id] = true if definition
+              memo
+            end,
           :definition_reuse_verified => true
         }
       end
