@@ -11,10 +11,6 @@ module BlueCollarSystems
       DEFAULT_DEPTH_INCHES = 1.0 / 64.0
       SIZE_TOLERANCE_INCHES = 1.0e-6
       HOST_POINT_TOLERANCE_INCHES = 0.001
-      # Points closer than this are merged and collinear middle points are
-      # dropped before add_face, reducing polygon count and construction-scale
-      # work on older hardware without visibly changing the glyph.
-      CONTOUR_CULL_TOLERANCE_INCHES = 0.0003
       MAX_CONSTRUCTION_SCALE = 1_000_000.0
       # Default SVG fill is black. Source SVG colors replace this fallback when
       # pdftocairo/mutool supplies inherited or per-use fill evidence.
@@ -548,70 +544,17 @@ module BlueCollarSystems
       end
 
       def self.normalized_contour(points)
-        clean = cull_contour_points(points)
+        clean = []
+        Array(points).each do |point|
+          next unless point && point.respond_to?(:x) && point.respond_to?(:y)
+          clean << point if clean.empty? || !same_point?(clean[-1], point)
+        end
+        clean.pop if clean.length > 1 && same_point?(clean[0], clean[-1])
         return nil if clean.length < 3
         area = signed_area(clean)
         raise 'source contour area is nonfinite' unless area.finite?
         return nil if area == 0.0
         clean
-      end
-
-      def self.cull_contour_points(points, tol = CONTOUR_CULL_TOLERANCE_INCHES)
-        tol_f = tol.to_f
-        tol2 = tol_f * tol_f
-        stack = []
-        Array(points).each do |point|
-          next unless point && point.respond_to?(:x) && point.respond_to?(:y)
-          stack << point
-          while stack.length >= 3
-            a = stack[-3]
-            b = stack[-2]
-            c = stack[-1]
-            if near_point?(a, b, tol2)
-              stack.delete_at(-2)
-              next
-            end
-            if redundant_midpoint?(a, b, c, tol_f)
-              stack.delete_at(-2)
-              next
-            end
-            break
-          end
-        end
-        # Close the loop without an explicit duplicate endpoint.
-        while stack.length > 1 && near_point?(stack[0], stack[-1], tol2)
-          stack.pop
-        end
-        stack
-      end
-
-      def self.near_point?(left, right, tol2)
-        return false unless left && right
-        dx = left.x.to_f - right.x.to_f
-        dy = left.y.to_f - right.y.to_f
-        dz = (left.respond_to?(:z) ? left.z.to_f : 0.0) -
-             (right.respond_to?(:z) ? right.z.to_f : 0.0)
-        (dx * dx) + (dy * dy) + (dz * dz) <= tol2
-      end
-
-      def self.redundant_midpoint?(a, b, c, tol)
-        ax = a.x.to_f
-        ay = a.y.to_f
-        bx = b.x.to_f
-        by = b.y.to_f
-        cx = c.x.to_f
-        cy = c.y.to_f
-        dx = cx - ax
-        dy = cy - ay
-        len2 = (dx * dx) + (dy * dy)
-        return false if len2 < tol * tol
-        # Distance from b to the line through a and c.
-        cross = ((bx - ax) * dy) - ((by - ay) * dx)
-        dist = cross.abs / Math.sqrt(len2)
-        return false unless dist <= tol
-        # And b must lie between a and c.
-        dot = ((bx - ax) * dx) + ((by - ay) * dy)
-        dot >= -tol && dot <= (len2 + tol)
       end
 
       def self.construction_origin_for(entries)

@@ -366,6 +366,29 @@ assert_true(rotated_failure && rotated_failure[:transition_proof] &&
             rotated_failure[:transition_proof][:to_mode] == :text3d,
             'rotated Labels may move only to the adjacent 3D Text rung')
 
+rotated_text_entities = DummyEntities.new
+rotated_text_attempt = label_builder.send(
+  :begin_text_attempt, rotated_item, :text
+)
+rotated_text_delivered = label_builder.send(
+  :place_annotation_label, rotated_text_entities, rotated_item,
+  0.0, 0.0, 'TextLayer', :text, rotated_text_attempt
+)
+assert_true(!rotated_text_delivered,
+            'rotated Text must not complete as an unrotated native annotation')
+assert_true(rotated_text_entities.texts.empty?,
+            'rotated Text must not create a visually false native annotation')
+rotated_text_failure = label_builder.text_delivery_failures.last
+rotated_text_proof = rotated_text_failure &&
+  rotated_text_failure[:transition_proof]
+assert_true(rotated_text_proof &&
+            rotated_text_proof[:from_mode] == :labels &&
+            rotated_text_proof[:to_mode] == :text3d,
+            'rotated Text must advance Labels to the adjacent 3D Text rung')
+assert_true(rotated_text_proof &&
+            rotated_text_proof[:reason_code] == :host_representation_unsupported,
+            'rotated Text fallback requires affirmative host impossibility')
+
 rotated_mesh_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil, 140.0, 250.0, 148.0, 292.0,
   nil, 'text_span:1:2'
