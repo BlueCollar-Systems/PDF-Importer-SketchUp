@@ -429,6 +429,36 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_empty row['children']
   end
 
+  def test_physical_evidence_cache_reuses_definition_but_keeps_instance_transform
+    definition_entities = CountingCollection.new([
+      FakeEntity.new(135, 'Face'),
+      FakeEntity.new(136, 'Edge')
+    ])
+    definition = FakeDefinition.new(definition_entities)
+    first = FakeComponent.new(
+      137, [], :definition => definition,
+      :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
+                          0, 0, 1, 0, 10, 20, 0, 1]
+    )
+    second = FakeComponent.new(
+      138, [], :definition => definition,
+      :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
+                          0, 0, 1, 0, 30, 40, 0, 1]
+    )
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    cache = {}
+
+    first_physical = fidelity.physical_evidence([first], cache)
+    second_physical = fidelity.physical_evidence([second], cache)
+
+    assert_equal 1, definition_entities.to_a_calls,
+                 'shared immutable definition must be enumerated once'
+    refute_equal first_physical[:physical_geometry_sha256],
+                 second_physical[:physical_geometry_sha256],
+                 'each component instance transform remains independently hashed'
+    assert_equal 1, cache.length
+  end
+
   def test_snapshot_reads_each_entity_bounds_once
     bounds = FakeBounds.new(
       FakePoint.new(1, 2, 3), FakePoint.new(4, 5, 6)

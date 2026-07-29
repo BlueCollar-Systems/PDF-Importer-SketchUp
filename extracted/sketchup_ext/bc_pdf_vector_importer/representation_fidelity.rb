@@ -950,6 +950,35 @@ module BlueCollarSystems
         }
       end
 
+      # Component definitions are immutable while one synchronous import
+      # delivery is being finalized. Reuse their already-captured physical
+      # child trees, while rebuilding every instance root so its own bounds,
+      # transform, style, liveness, and topology remain independently hashed.
+      def physical_entity_tree_with_definition_cache(entity, cache)
+        definition_key = shared_component_definition_key(entity)
+        children = if definition_key && cache.key?(definition_key)
+                     cache[definition_key]
+                   else
+                     entity_children(entity).map do |child|
+                       physical_entity_tree_with_definition_cache(child, cache)
+                     end
+                   end
+        cache[definition_key] = children if definition_key &&
+          !cache.key?(definition_key)
+        physical_entity_tree(entity, children)
+      end
+
+      def shared_component_definition_key(entity)
+        return nil if entity.respond_to?(:entities)
+        return nil unless entity_type(entity) == 'ComponentInstance'
+        return nil unless entity.respond_to?(:definition)
+        definition = entity.definition
+        return nil unless definition && definition.respond_to?(:entities)
+        definition.object_id
+      rescue StandardError
+        nil
+      end
+
       def physical_evidence_from_trees(trees)
         values = Array(trees).compact
         raise ContractError, 'physical evidence has no entity trees' if
@@ -969,11 +998,21 @@ module BlueCollarSystems
         }
       end
 
-      def physical_evidence(entities)
+      def physical_evidence(entities, definition_tree_cache = nil)
         values = Array(entities).compact
         raise ContractError, 'physical evidence has no entities' if values.empty?
+        cache = definition_tree_cache
+        unless cache.nil? || cache.is_a?(Hash)
+          raise ContractError, 'physical definition tree cache must be a Hash'
+        end
         physical_evidence_from_trees(
-          values.map { |entity| physical_entity_tree(entity) }
+          values.map do |entity|
+            if cache
+              physical_entity_tree_with_definition_cache(entity, cache)
+            else
+              physical_entity_tree(entity)
+            end
+          end
         )
       end
 
@@ -1014,7 +1053,9 @@ module BlueCollarSystems
         raise ContractError, 'source evidence representation is invalid' unless normalized_mode
         source_id = source_span_id(item)
         text = item.respond_to?(:text) ? item.text.to_s : values[:source_text].to_s
-        physical = physical_evidence(values[:entities])
+        physical = physical_evidence(
+          values[:entities], values[:physical_definition_tree_cache]
+        )
         evidence = {
           :schema => SOURCE_EXPECTED_SCHEMA,
           :source_span_id => source_id,

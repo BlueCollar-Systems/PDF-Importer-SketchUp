@@ -1357,6 +1357,7 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError,
               '3D text delivered source set does not equal the requested source set'
       end
+      physical_definition_tree_cache = {}
       rows.each do |row|
         item = items_by_id[row[:source_span_id].to_s]
         unless item
@@ -1364,7 +1365,7 @@ module BlueCollarSystems
                 "#{row[:source_span_id]} 3D Text source item is unavailable"
         end
         Svg3DTextRenderer.finalize_source_evidence!(
-          row, item, page_rotation
+          row, item, page_rotation, physical_definition_tree_cache
         )
         required = [
           :identity_verified, :placement_verified, :rotation_verified,

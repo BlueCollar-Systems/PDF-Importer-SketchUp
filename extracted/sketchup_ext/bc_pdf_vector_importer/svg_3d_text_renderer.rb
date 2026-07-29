@@ -307,7 +307,8 @@ module BlueCollarSystems
         }
       end
 
-      def self.finalize_source_evidence!(row, item, page_rotation = 0.0)
+      def self.finalize_source_evidence!(row, item, page_rotation = 0.0,
+                                         physical_definition_tree_cache = nil)
         unless row.is_a?(Hash) && row[:group] && row[:source_span_id]
           raise RepresentationFidelity::ContractError,
                 '3D Text row cannot be bound to a semantic source item'
@@ -360,6 +361,8 @@ module BlueCollarSystems
           :expected_depth => expected_box[:max][2] - expected_box[:min][2],
           :expected_bounds => expected_box,
           :expected_transformation => transform,
+          :physical_definition_tree_cache =>
+            physical_definition_tree_cache,
           :source_font_identity => {
             :source => 'pdf_renderer_svg_glyph_outlines',
             :glyph_ids => Array(row[:glyph_ids]).map { |id| id.to_s }.sort
