@@ -1374,19 +1374,27 @@ module BlueCollarSystems
           ty = (vb_h + vb_min_y - f) * unit + y_offset + box_offset_y_in
 
           loops = []
+          cache_local_loops = []
           local.each do |pts|
             loop_pts = []
+            cache_loop_pts = []
             pts.each do |pt|
               # Local glyph points are already inch-scaled and Y-flipped
               # (svg_path_to_points). Apply the same axes SvgTextRenderer
               # uses for placement: x' = a*x - c*y, y' = -b*x + d*y.
               lx = pt.x.to_f * scale
               ly = pt.y.to_f * scale
-              wx = tx + (a * lx) - (c * ly)
-              wy = ty - (b * lx) + (d * ly)
+              local_x = (a * lx) - (c * ly)
+              local_y = -(b * lx) + (d * ly)
+              wx = tx + local_x
+              wy = ty + local_y
+              cache_loop_pts << Geom::Point3d.new(local_x, local_y, 0.0)
               loop_pts << Geom::Point3d.new(wx, wy, 0.0)
             end
-            loops << loop_pts if loop_pts.length >= 2
+            if loop_pts.length >= 2
+              loops << loop_pts
+              cache_local_loops << cache_loop_pts
+            end
           end
           next if loops.empty?
 
@@ -1418,6 +1426,8 @@ module BlueCollarSystems
             ink_bbox_pdf: [ink_x.min, ink_y.min, ink_x.max, ink_y.max],
             fill_rgb: p[:fill_rgb] && p[:fill_rgb].dup,
             fill_opacity: p[:fill_opacity],
+            cache_local_loops: cache_local_loops,
+            cache_origin: [tx, ty, 0.0],
             loops: loops
           }
         end

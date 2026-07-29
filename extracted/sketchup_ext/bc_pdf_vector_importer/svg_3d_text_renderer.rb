@@ -4,6 +4,7 @@
 require File.join(File.dirname(__FILE__), 'cairo_glyph_source')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'logger')
+require File.join(File.dirname(__FILE__), 'svg_3d_text_solid_cache')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -19,6 +20,8 @@ module BlueCollarSystems
 
       def self.render_svg(entities, svg, media_box, text_items, opts = {})
         result = base_result
+        solid_cache = nil
+        owned_groups = []
         render_items = Array(text_items)
         match_items = if opts.key?(:match_text_items)
                         Array(opts[:match_text_items])
@@ -35,6 +38,12 @@ module BlueCollarSystems
             '3D text requires a finite positive extrusion depth'
           )
           return result
+        end
+        model = model_for_entities(entities)
+        candidate_cache = Svg3DTextSolidCache.new(model, depth)
+        if candidate_cache.supported_for?(entities)
+          solid_cache = candidate_cache
+          result[:solid_cache] = solid_cache.metrics.merge(:enabled => true)
         end
 
         placed = CairoGlyphSource.model_space_loops(svg, media_box, opts)
@@ -120,7 +129,6 @@ module BlueCollarSystems
           source_ink_by_span[evidence[:source_span_id].to_s] = evidence
         end
 
-        owned_groups = []
         render_items.each do |item|
           source_id = begin
             RepresentationFidelity.source_span_id(item)
@@ -179,7 +187,7 @@ module BlueCollarSystems
               group, source_id, :text_span, opts[:layer], indices
             )
             span_result = build_span_group(
-              group, entries, source_id, depth, :text_span
+              group, entries, source_id, depth, :text_span, solid_cache
             )
             span_result[:source_ink_coverage] = ink_evidence if ink_evidence
             result[:span_results] << span_result
@@ -205,14 +213,21 @@ module BlueCollarSystems
                              end
         if preserve_unmatched
           render_unmatched_source_placements!(
-            entities, placed, match, depth, opts, owned_groups, result
+            entities, placed, match, depth, opts, owned_groups, result,
+            solid_cache
           )
         end
 
         unless result[:failures].empty?
           cleanup_all_owned!(entities, owned_groups, result)
+          cleanup_solid_cache!(solid_cache, result)
           result[:span_results] = []
           result[:unmatched_source_results] = []
+        end
+        if solid_cache
+          result[:solid_cache] = result[:solid_cache].merge(
+            solid_cache.metrics.merge(:enabled => true)
+          )
         end
 
         result[:ok] = result[:failures].empty? &&
@@ -220,6 +235,14 @@ module BlueCollarSystems
         result
       rescue StandardError => e
         result ||= base_result
+        begin
+          cleanup_all_owned!(entities, owned_groups || [], result)
+          cleanup_solid_cache!(solid_cache, result)
+        rescue StandardError => cleanup_error
+          result[:failures] << hard_failure(
+            nil, :renderer_cleanup_exception, cleanup_error.message
+          )
+        end
         result[:failures] << hard_failure(nil, :renderer_exception, e.message)
         result[:ok] = false
         result
@@ -237,7 +260,16 @@ module BlueCollarSystems
           :no_semantic_text => false,
           :authoritative_match_span_count => 0,
           :render_target_span_count => 0,
-          :match_scope_verified => false
+          :match_scope_verified => false,
+          :solid_cache => {
+            :enabled => false,
+            :definition_builds => 0,
+            :cache_hits => 0,
+            :cache_misses => 0,
+            :instance_placements => 0,
+            :unique_cache_keys => 0,
+            :transaction_abort_required => false
+          }
         }
       end
 
@@ -311,9 +343,14 @@ module BlueCollarSystems
       end
 
       def self.build_span_group(group, entries, source_id, depth,
-                                source_kind = :text_span)
+                                source_kind = :text_span, solid_cache = nil)
         child = group.respond_to?(:entities) ? group.entities : nil
         raise 'owned source-span group has no entities collection' unless child
+        if solid_cache && solid_cache.supported_for?(child)
+          return build_cached_span_group(
+            group, entries, source_id, depth, source_kind, solid_cache
+          )
+        end
         faces = []
         construction_origin = construction_origin_for(entries)
         construction_scale = safe_construction_scale(entries, construction_origin)
@@ -441,6 +478,140 @@ module BlueCollarSystems
           :depth => actual_depth,
           :bounds => actual,
           :expected_outline_extent => expected
+        }
+      end
+
+      def self.build_cached_span_group(group, entries, source_id, depth,
+                                       source_kind, solid_cache)
+        child = group.respond_to?(:entities) ? group.entities : nil
+        raise 'owned cached source-span group has no entities collection' unless child
+        instances = []
+        definition_records = []
+        Array(entries).each do |entry|
+          record = solid_cache.fetch(entry) do |definition_entities, local_entry|
+            unless definition_entities.respond_to?(:add_group)
+              raise 'exact glyph definition cannot create an owned geometry group'
+            end
+            definition_group = definition_entities.add_group
+            raise 'exact glyph definition group was not created' unless
+              definition_group
+            row = build_span_group(
+              definition_group, [local_entry],
+              "definition:#{entry[:glyph_id]}", depth,
+              :svg_glyph_definition, nil
+            )
+            {
+              :face_count => row[:face_count],
+              :extruded_face_count => row[:extruded_face_count],
+              :source_outline_vertex_count => row[:source_outline_vertex_count],
+              :construction_scale => row[:construction_scale],
+              :host_tolerance_adapted => row[:host_tolerance_adapted],
+              :definition_group_entity_id => row[:group_entity_id]
+            }
+          end
+          instance = solid_cache.add_instance(child, record)
+          instances << instance
+          definition_records << record
+        end
+        raise 'source span produced no exact glyph component instance' if
+          instances.empty?
+
+        expected = CairoGlyphSource.loops_extent(entries)
+        raise 'source outline extent is unavailable' unless expected
+        actual = bounds_hash(group)
+        expected_width = expected[2].to_f - expected[0].to_f
+        expected_height = expected[3].to_f - expected[1].to_f
+        actual_width = actual[:max_x] - actual[:min_x]
+        actual_height = actual[:max_y] - actual[:min_y]
+        actual_depth = actual[:max_z] - actual[:min_z]
+        position_ok = close_size?(actual[:min_x], expected[0]) &&
+          close_size?(actual[:min_y], expected[1]) &&
+          close_size?(actual[:max_x], expected[2]) &&
+          close_size?(actual[:max_y], expected[3]) &&
+          close_size?(actual[:min_z], 0.0) &&
+          close_size?(actual[:max_z], depth)
+        width_ok = close_size?(actual_width, expected_width)
+        height_ok = close_size?(actual_height, expected_height)
+        depth_ok = actual_depth > SIZE_TOLERANCE_INCHES &&
+          close_size?(actual_depth, depth)
+        unless width_ok && height_ok && position_ok
+          raise 'cached source glyph width/height verification failed'
+        end
+        unless depth_ok
+          raise 'cached source glyph has no verified positive Z depth'
+        end
+
+        source_ink_rgb = source_text_ink_rgb(entries)
+        ink_applied = apply_source_text_ink!(group, source_ink_rgb)
+        matrices = entries.map do |entry|
+          Array(entry[:svg_matrix]).map { |value| value.to_f }
+        end
+        ids = entries.map { |entry| entry[:glyph_id].to_s }
+        placement_indices = entries.map do |entry|
+          entry[:placement_index].to_i
+        end
+        build_metrics = definition_records.map { |record| record[:build_metrics] }
+        face_count = build_metrics.inject(0) do |sum, metrics|
+          sum + metrics[:face_count].to_i
+        end
+        extruded_count = build_metrics.inject(0) do |sum, metrics|
+          sum + metrics[:extruded_face_count].to_i
+        end
+        source_vertex_count = build_metrics.inject(0) do |sum, metrics|
+          sum + metrics[:source_outline_vertex_count].to_i
+        end
+        construction_scale = build_metrics.map do |metrics|
+          metrics[:construction_scale].to_f
+        end.max || 1.0
+        instance_ids = instances.map do |instance|
+          RepresentationFidelity.stable_entity_id(instance)
+        end
+        {
+          :source_span_id => source_kind == :text_span ? source_id : nil,
+          :source_unit_id => source_id,
+          :source_kind => source_kind,
+          :group => group,
+          :group_entity_id => RepresentationFidelity.stable_entity_id(group),
+          :renderer => :svg_source_3d_text,
+          :glyph_ids => ids,
+          :placement_indices => placement_indices,
+          :source_matrices => matrices.uniq,
+          :source_extent => expected.map { |value| value.to_f },
+          :source_placement_count => placement_indices.length,
+          :face_count => face_count,
+          :extruded_face_count => extruded_count,
+          :ink_applied => ink_applied,
+          :source_ink_rgb => source_ink_rgb,
+          :source_ink_material_name => material_name_for_rgb(source_ink_rgb),
+          :identity_verified => !ids.empty? && ids.none? { |id| id.empty? },
+          :placement_verified => !placement_indices.empty? &&
+            placement_indices.uniq.length == placement_indices.length,
+          :rotation_verified => matrices.length == entries.length &&
+            matrices.all? { |matrix| matrix.length >= 6 },
+          :size_verified => width_ok && height_ok,
+          :depth_verified => depth_ok,
+          :host_tolerance_adapted => build_metrics.any? do |metrics|
+            metrics[:host_tolerance_adapted] == true
+          end,
+          :construction_scale => construction_scale,
+          :construction_origin => [
+            (expected[0].to_f + expected[2].to_f) * 0.5,
+            (expected[1].to_f + expected[3].to_f) * 0.5,
+            0.0
+          ],
+          :construction_group_entity_id => nil,
+          :collapsed_host_equal_vertices => 0,
+          :source_outline_vertex_count => source_vertex_count,
+          :width => actual_width,
+          :height => actual_height,
+          :depth => actual_depth,
+          :bounds => actual,
+          :expected_outline_extent => expected,
+          :component_instance_entity_ids => instance_ids,
+          :component_definition_keys => definition_records.map do |record|
+            record[:key]
+          end.uniq.sort,
+          :definition_reuse_verified => true
         }
       end
 
@@ -785,7 +956,8 @@ module BlueCollarSystems
       # them as verified positive-depth 3D source glyphs with a page-scoped
       # physical identity; never omit them and never invent a semantic span ID.
       def self.render_unmatched_source_placements!(entities, placed, match, depth,
-                                                   opts, owned_groups, result)
+                                                   opts, owned_groups, result,
+                                                   solid_cache = nil)
         # Coverage-mismatch entries are nested evidence for placements already
         # assigned to a semantic bbox; rendering those anonymously would leave
         # partial duplicate ink beside the item fallback. Preserve only truly
@@ -823,7 +995,7 @@ module BlueCollarSystems
             group, source_id, :svg_glyph_placement, opts[:layer], indices
           )
           row = build_span_group(
-            group, entries, source_id, depth, :svg_glyph_placement
+            group, entries, source_id, depth, :svg_glyph_placement, solid_cache
           )
           row[:semantic_identity_available] = false
           row[:physical_source_identity_verified] = true
@@ -1004,6 +1176,34 @@ module BlueCollarSystems
             )
           end
         end
+      end
+
+      def self.model_for_entities(entities)
+        if entities && entities.respond_to?(:model)
+          model = entities.model
+          return model if model
+        end
+        parent = if entities && entities.respond_to?(:parent)
+                   entities.parent
+                 end
+        return parent if parent && parent.respond_to?(:definitions)
+        if parent && parent.respond_to?(:model)
+          model = parent.model
+          return model if model
+        end
+        nil
+      rescue StandardError
+        nil
+      end
+
+      def self.cleanup_solid_cache!(solid_cache, result)
+        return true unless solid_cache
+        cleaned = solid_cache.cleanup_all!
+        metrics = solid_cache.metrics.merge(:enabled => true)
+        metrics[:cleanup_outcome] = cleaned ?
+          :verified : :transaction_abort_required
+        result[:solid_cache] = metrics
+        cleaned
       end
     end
   end

@@ -30,14 +30,18 @@ module Geom
   end unless const_defined?(:Point3d)
 
   class Transformation
-    attr_reader :scale, :origin
-    def initialize(scale, origin = nil)
+    attr_reader :scale, :origin, :translation
+    def initialize(scale, origin = nil, translation = nil)
       @scale = scale.to_f
       @origin = origin
+      @translation = translation
     end
     def self.scaling(*args)
       return new(args[0]) if args.length == 1
       new(args[1], args[0])
+    end
+    def self.translation(values)
+      new(1.0, nil, Array(values).map { |value| value.to_f })
     end
   end unless const_defined?(:Transformation)
 end
@@ -121,12 +125,22 @@ class Svg3DEntities
   end
 
   def to_a; @items.dup; end
+  def model; @options[:model]; end
 
   def add_group
     group = Svg3DGroup.new(self, next_id, @options)
     @items << group
     @groups << group
     group
+  end
+
+  def add_instance(definition, transformation)
+    instance = Svg3DInstance.new(
+      self, next_id, definition, transformation, @options
+    )
+    @items << instance
+    definition.register_instance(instance)
+    instance
   end
 
   def add_face(points)
@@ -152,10 +166,15 @@ class Svg3DEntities
 
   def erase_entities(*entities)
     entities.flatten.each do |entity|
+      entity.erase_owned_children! if entity.respond_to?(:erase_owned_children!)
       @items.delete(entity)
       @groups.delete(entity)
       @erased << entity
     end
+  end
+
+  def erase_all!
+    erase_entities(@items.dup)
   end
 
 
@@ -227,11 +246,98 @@ class Svg3DGroup
     true
   end
 
+  def erase_owned_children!
+    @entities.erase_all!
+  end
+
 
   def transform!(transformation)
     @transform_calls << transformation
     @transformation = transformation
     self
+  end
+end
+
+class Svg3DDefinition
+  attr_reader :name, :entities, :instances
+
+  def initialize(name, model, options = {})
+    @name = name
+    @entities = Svg3DEntities.new(options.merge(:model => model))
+    @instances = []
+  end
+
+  def register_instance(instance)
+    @instances << instance
+  end
+
+  def unregister_instance(instance)
+    @instances.delete(instance)
+  end
+end
+
+class Svg3DDefinitions
+  def initialize(model, options = {})
+    @model = model
+    @options = options
+    @items = []
+  end
+
+  def add(name)
+    definition = Svg3DDefinition.new(name, @model, @options)
+    @items << definition
+    definition
+  end
+
+  def remove(definition)
+    raise 'definition still has instances' unless definition.instances.empty?
+    @items.delete(definition)
+    true
+  end
+
+  def to_a
+    @items.dup
+  end
+end
+
+class Svg3DInstance
+  attr_reader :persistent_id, :definition, :transformation
+
+  def initialize(owner, id, definition, transformation, options)
+    @owner = owner
+    @persistent_id = id
+    @definition = definition
+    @transformation = transformation
+    @options = options
+  end
+
+  def typename; 'ComponentInstance'; end
+  def model; @options[:model]; end
+
+  def bounds
+    points = []
+    @definition.entities.to_a.each do |entity|
+      next unless entity.respond_to?(:bounds)
+      box = entity.bounds
+      points << translated_point(box.min) << translated_point(box.max)
+    end
+    raise 'empty component instance bounds' if points.empty?
+    Svg3DBounds.new(points)
+  end
+
+  def erase_owned_children!
+    @definition.unregister_instance(self)
+  end
+
+  private
+
+  def translated_point(point)
+    values = Array(@transformation.translation)
+    Geom::Point3d.new(
+      point.x.to_f + values.fetch(0, 0.0),
+      point.y.to_f + values.fetch(1, 0.0),
+      point.z.to_f + values.fetch(2, 0.0)
+    )
   end
 end
 
@@ -261,10 +367,13 @@ class Svg3DMaterials
 end
 
 class Svg3DModel
-  attr_reader :materials
+  attr_reader :materials, :definitions
 
-  def initialize
+  def initialize(options = {})
     @materials = Svg3DMaterials.new
+    @definitions = if options[:with_definitions]
+                     Svg3DDefinitions.new(self, options)
+                   end
   end
 end
 
@@ -417,6 +526,95 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal 2, result[:authoritative_match_span_count]
     assert_equal 1, result[:render_target_span_count]
     assert_equal true, result[:match_scope_verified]
+  end
+
+  def test_repeated_source_glyph_builds_one_exact_solid_and_two_instances
+    model = Svg3DModel.new(:with_definitions => true)
+    entities = Svg3DEntities.new(:model => model)
+    wide = Svg3DSpan.new(
+      'AA', 'pdftotext', 'text_span:1:0',
+      8.0, 18.0, 85.0, 95.0
+    )
+    synthetic_match = {
+      :matched_items => [wide],
+      :placement_matches => [
+        { :source_span_id => wide.source_span_id, :placement_index => 0 },
+        { :source_span_id => wide.source_span_id, :placement_index => 1 }
+      ],
+      :unmatched_source_runs => [],
+      :unmatched_placements => [],
+      :coverage_failures => [],
+      :source_ink_matches => [],
+      :runs_matched => 1,
+      :runs_unmatched => 0,
+      :placements_unmatched => 0
+    }
+
+    result = BlueCollarSystems::PDFVectorImporter::CairoGlyphSource.stub(
+      :match_spans, synthetic_match
+    ) do
+      RENDERER.render_svg(
+        entities, square_svg_with_unjoined_source_glyph,
+        MEDIA_BOX, [wide], :depth => 0.05
+      )
+    end
+
+    assert result[:ok], result[:failures].inspect
+    assert_equal 1, result[:solid_cache][:definition_builds]
+    assert_equal 1, result[:solid_cache][:cache_misses]
+    assert_equal 1, result[:solid_cache][:cache_hits]
+    assert_equal 2, result[:solid_cache][:instance_placements]
+    assert_equal 1, model.definitions.to_a.length
+    instances = result[:span_results][0][:group].entities.to_a.select do |entity|
+      entity.typename == 'ComponentInstance'
+    end
+    assert_equal 2, instances.length
+  end
+
+  def test_exact_cache_key_ignores_translation_but_separates_affine_and_depth
+    entries = BlueCollarSystems::PDFVectorImporter::CairoGlyphSource.
+      model_space_loops(
+        square_svg_with_unjoined_source_glyph, MEDIA_BOX
+      )
+    model = Svg3DModel.new(:with_definitions => true)
+    cache = BlueCollarSystems::PDFVectorImporter::Svg3DTextSolidCache.new(
+      model, 0.05
+    )
+
+    assert_equal cache.key_for(entries[0]), cache.key_for(entries[1]),
+                 'identical source solids at different translations must reuse'
+
+    rotated = BlueCollarSystems::PDFVectorImporter::CairoGlyphSource.
+      model_space_loops(
+        square_svg('matrix(0,1,-1,0,20,-10)'), MEDIA_BOX
+      )[0]
+    refute_equal cache.key_for(entries[0]), cache.key_for(rotated),
+                 'different affine source solids must not alias'
+
+    other_depth = BlueCollarSystems::PDFVectorImporter::Svg3DTextSolidCache.new(
+      model, 0.025
+    )
+    refute_equal cache.key_for(entries[0]), other_depth.key_for(entries[0]),
+                 'different extrusion depths must not alias'
+  end
+
+  def test_cached_definition_is_removed_when_exact_face_creation_fails
+    model = Svg3DModel.new(
+      :with_definitions => true, :fail_add_face => true
+    )
+    entities = Svg3DEntities.new(
+      :model => model, :with_definitions => true, :fail_add_face => true
+    )
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, [span], :depth => 0.05
+    )
+
+    refute result[:ok]
+    assert_equal :host_face_creation_exception,
+                 result[:failures][0][:reason_code]
+    assert_empty entities.groups
+    assert_empty model.definitions.to_a
+    assert_equal :verified, result[:solid_cache][:cleanup_outcome]
   end
 
   # Ghosting behavior contract (R-D, LOOP-1 Welding-Symbol-Chart su overlap
