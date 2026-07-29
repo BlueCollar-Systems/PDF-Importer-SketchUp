@@ -133,6 +133,20 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  class CountingComponent < FakeComponent
+    attr_reader :bounds_calls
+
+    def initialize(entity_id, children, options = {})
+      super
+      @bounds_calls = 0
+    end
+
+    def bounds
+      @bounds_calls += 1
+      @bounds
+    end
+  end
+
   class FakeImage < FakeEntity
     attr_reader :width, :height
 
@@ -431,17 +445,33 @@ class SketchupHostEvidenceTest < Minitest::Test
 
   def test_physical_evidence_cache_reuses_definition_but_keeps_instance_transform
     definition_entities = CountingCollection.new([
-      FakeEntity.new(135, 'Face'),
-      FakeEntity.new(136, 'Edge')
+      FakeEntity.new(
+        135, 'Face',
+        :bounds => FakeBounds.new(
+          FakePoint.new(0, 0, 0), FakePoint.new(1, 1, 0)
+        )
+      ),
+      FakeEntity.new(
+        136, 'Edge',
+        :bounds => FakeBounds.new(
+          FakePoint.new(0, 0, 0), FakePoint.new(1, 1, 0)
+        )
+      )
     ])
     definition = FakeDefinition.new(definition_entities)
-    first = FakeComponent.new(
+    first = CountingComponent.new(
       137, [], :definition => definition,
+      :bounds => FakeBounds.new(
+        FakePoint.new(10, 20, 0), FakePoint.new(11, 21, 0)
+      ),
       :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
                           0, 0, 1, 0, 10, 20, 0, 1]
     )
-    second = FakeComponent.new(
+    second = CountingComponent.new(
       138, [], :definition => definition,
+      :bounds => FakeBounds.new(
+        FakePoint.new(30, 40, 0), FakePoint.new(31, 41, 0)
+      ),
       :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
                           0, 0, 1, 0, 30, 40, 0, 1]
     )
@@ -458,6 +488,8 @@ class SketchupHostEvidenceTest < Minitest::Test
 
     assert_equal 1, definition_entities.to_a_calls,
                  'shared immutable definition must be enumerated once'
+    assert_equal 0, first.bounds_calls
+    assert_equal 0, second.bounds_calls
     assert_equal fidelity.physical_evidence([first]), first_physical,
                  'caching must preserve the exact physical evidence contract'
     refute_equal first_physical[:physical_geometry_sha256],
