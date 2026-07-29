@@ -55,6 +55,19 @@ class WorkflowPopplerContractTest(unittest.TestCase):
         )
         self.assertNotIn("run: python build_release.py", release_job)
 
+    def test_release_verifies_rbz_in_an_isolated_download_directory(self):
+        text = (
+            ROOT / ".github" / "workflows" / "auto-release.yml"
+        ).read_text(encoding="utf-8")
+        release_job = text[text.index("\n  release:"):]
+
+        self.assertNotIn("          path: .\n", release_job)
+        self.assertIn("path: approved-windows-rbz-download", release_job)
+        self.assertIn(
+            "find approved-windows-rbz-download -maxdepth 1",
+            release_job,
+        )
+
     def test_release_publishes_the_checked_source_inventory_with_the_rbz(self):
         text = (
             ROOT / ".github" / "workflows" / "auto-release.yml"

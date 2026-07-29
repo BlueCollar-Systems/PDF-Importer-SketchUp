@@ -100,14 +100,14 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: approved-windows-rbz
-          path: .
+          path: approved-windows-rbz-download
 
       - name: Verify downloaded Windows RBZ identity
         run: |
           set -e
-          RBZ_COUNT=$(find . -maxdepth 1 -type f -name 'SketchUp-PDF-Importer_v*.rbz' | wc -l)
+          RBZ_COUNT=$(find approved-windows-rbz-download -maxdepth 1 -type f -name 'SketchUp-PDF-Importer_v*.rbz' | wc -l)
           test "$RBZ_COUNT" -eq 1
-          RBZ=$(find . -maxdepth 1 -type f -name 'SketchUp-PDF-Importer_v*.rbz')
+          RBZ=$(find approved-windows-rbz-download -maxdepth 1 -type f -name 'SketchUp-PDF-Importer_v*.rbz')
           ACTUAL_SHA256=$(sha256sum "$RBZ" | cut -d' ' -f1)
           test "$ACTUAL_SHA256" = "${{ needs.source-only-build-windows.outputs.rbz_sha256 }}"
 
@@ -204,7 +204,10 @@ jobs:
           match = re.search(r"PLUGIN_VERSION\s*=\s*'(\d+\.\d+\.\d+)'", version)
           if not match:
               raise SystemExit("Could not read PLUGIN_VERSION for RBZ smoke")
-          expected = Path(f"SketchUp-PDF-Importer_v{match.group(1)}.rbz")
+          expected = (
+              Path("approved-windows-rbz-download")
+              / f"SketchUp-PDF-Importer_v{match.group(1)}.rbz"
+          )
           if not expected.is_file():
               raise SystemExit(f"Expected RBZ missing: {expected}")
           with zipfile.ZipFile(expected) as zf:
@@ -252,7 +255,7 @@ jobs:
         run: |
           set -e
           TAG="v${{ steps.version.outputs.version }}"
-          RBZ="SketchUp-PDF-Importer_v${{ steps.version.outputs.version }}.rbz"
+          RBZ="approved-windows-rbz-download/SketchUp-PDF-Importer_v${{ steps.version.outputs.version }}.rbz"
           SOURCE_CHECKSUMS="third_party/sources/SHA256SUMS.txt"
           test -f "$SOURCE_CHECKSUMS"
 
