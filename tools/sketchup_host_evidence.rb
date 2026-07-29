@@ -95,7 +95,11 @@ module SketchupHostEvidence
       raise EvidenceError, 'host entity collection cannot be enumerated'
     end
     compact = options.is_a?(Hash) && options[:compact] == true
-    context = { :definition_child_results => {} }
+    context = {
+      :definition_child_results => {},
+      :definition_child_payloads => {},
+      :canonical_json_cache => {}
+    }
     Array(entities.to_a).map do |entity|
       snapshot_entity_with_physical_tree(
         entity, [], compact, true, context
@@ -397,7 +401,11 @@ module SketchupHostEvidence
   private_class_method :normalized_path
 
   def self.snapshot_entity(entity, ancestors)
-    context = { :definition_child_results => {} }
+    context = {
+      :definition_child_results => {},
+      :definition_child_payloads => {},
+      :canonical_json_cache => {}
+    }
     snapshot_entity_with_physical_tree(
       entity, ancestors, false, false, context
     ).first
@@ -425,13 +433,20 @@ module SketchupHostEvidence
     typename = host_typename(entity)
     representation = representation_identity_evidence(entity)
     fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
-    physical_tree = fidelity.physical_entity_tree(entity, child_trees)
+    definition_key = compact ? shared_definition_cache_key(entity) : nil
+    shared_payloads = definition_key ?
+      context[:definition_child_payloads][definition_key] : nil
+    physical_tree = fidelity.physical_entity_tree(
+      entity, child_trees, shared_payloads
+    )
     include_row = !compact || top_level || source_claim_root?(representation) ||
       !child_rows.empty?
     return [nil, physical_tree] unless include_row
 
     compact_partition = compact && compact_owner_typename?(typename)
-    physical = physical_tree_evidence(physical_tree, compact_partition)
+    physical = physical_tree_evidence(
+      physical_tree, compact_partition, context[:canonical_json_cache]
+    )
     row = {
       'entity_id' => host_positive_id(entity, :entityID, 'entityID'),
       'persistent_id' => host_positive_id(
@@ -467,6 +482,28 @@ module SketchupHostEvidence
     # remains independently enumerated and duplicate IDs can never be hidden.
     if cache_key && results.all? { |result| result[0].nil? }
       cache[cache_key] = results
+      trees = results.map { |result| result[1] }
+      fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+      canonical_cache = context[:canonical_json_cache]
+      payloads = {
+        :geometry_children => trees.map do |tree|
+          tree[:geometry_payload]
+        end.sort_by do |payload|
+          fidelity.canonical_json(payload, canonical_cache, false)
+        end,
+        :style_children => trees.map do |tree|
+          tree[:style_payload]
+        end.sort_by do |payload|
+          fidelity.canonical_json(payload, canonical_cache, false)
+        end
+      }
+      context[:definition_child_payloads][cache_key] = payloads
+      fidelity.store_canonical_json_fragment!(
+        payloads[:geometry_children], canonical_cache
+      )
+      fidelity.store_canonical_json_fragment!(
+        payloads[:style_children], canonical_cache
+      )
     end
     results
   end
@@ -483,9 +520,12 @@ module SketchupHostEvidence
   end
   private_class_method :shared_definition_cache_key
 
-  def self.physical_tree_evidence(tree, compact = false)
+  def self.physical_tree_evidence(tree, compact = false,
+                                  canonical_json_cache = nil)
     fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
-    evidence = fidelity.physical_evidence_from_trees([tree])
+    evidence = fidelity.physical_evidence_from_trees(
+      [tree], canonical_json_cache
+    )
     style_root = Array(evidence[:style_payload]).first || {}
     geometry = {
       'sha256' => evidence[:physical_geometry_sha256]

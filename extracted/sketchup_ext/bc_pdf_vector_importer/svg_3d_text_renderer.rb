@@ -308,7 +308,8 @@ module BlueCollarSystems
       end
 
       def self.finalize_source_evidence!(row, item, page_rotation = 0.0,
-                                         physical_definition_tree_cache = nil)
+                                         physical_definition_tree_cache = nil,
+                                         physical_canonical_json_cache = nil)
         unless row.is_a?(Hash) && row[:group] && row[:source_span_id]
           raise RepresentationFidelity::ContractError,
                 '3D Text row cannot be bound to a semantic source item'
@@ -318,6 +319,7 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError,
                 '3D Text source identity changed before evidence finalization'
         end
+        bounds_started = monotonic_ms
         actual = bounds_hash(row[:group])
         transform = RepresentationFidelity.entity_transformation_payload(row[:group])
         transform ||= { :kind => 'baked_geometry', :entity_count => 1 }
@@ -349,6 +351,8 @@ module BlueCollarSystems
           :min => [actual[:min_x], actual[:min_y], actual[:min_z]],
           :max => [actual[:max_x], actual[:max_y], actual[:max_z]]
         }
+        bounds_elapsed = monotonic_ms - bounds_started
+        physical_started = monotonic_ms
         expected = RepresentationFidelity.source_expected_evidence(
           item, :text3d,
           :entities => [row[:group]],
@@ -363,14 +367,24 @@ module BlueCollarSystems
           :expected_transformation => transform,
           :physical_definition_tree_cache =>
             physical_definition_tree_cache,
+          :physical_canonical_json_cache =>
+            physical_canonical_json_cache,
           :source_font_identity => {
             :source => 'pdf_renderer_svg_glyph_outlines',
             :glyph_ids => Array(row[:glyph_ids]).map { |id| id.to_s }.sort
           }
         )
+        physical_elapsed = monotonic_ms - physical_started
+        attach_started = monotonic_ms
         RepresentationFidelity.attach_source_evidence!(
           [row[:group]], expected, 'svg_source_3d_text'
         )
+        attach_elapsed = monotonic_ms - attach_started
+        row[:evidence_performance] = {
+          :bounds_ms => bounds_elapsed.round(3),
+          :physical_ms => physical_elapsed.round(3),
+          :attach_ms => attach_elapsed.round(3)
+        }
         row[:expected_evidence] = expected
         row[:content_verified] = true
         row[:physical_geometry_verified] = true

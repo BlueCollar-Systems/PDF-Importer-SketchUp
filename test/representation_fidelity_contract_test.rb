@@ -698,7 +698,10 @@ class RepresentationFidelityContractTest < Minitest::Test
     }
     IMP::Svg3DTextRenderer.stub(
       :finalize_source_evidence!,
-      lambda { |_result, _source, _page_rotation, _definition_cache| true }
+      lambda do |_result, _source, _page_rotation, _definition_cache,
+                 _canonical_json_cache|
+        true
+      end
     ) do
       IMP.record_svg_3d_text_delivery!(
         stats, 1, [source], {

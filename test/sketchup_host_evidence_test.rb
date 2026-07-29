@@ -447,16 +447,46 @@ class SketchupHostEvidenceTest < Minitest::Test
     )
     fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
     cache = {}
+    canonical_json_cache = {}
 
-    first_physical = fidelity.physical_evidence([first], cache)
-    second_physical = fidelity.physical_evidence([second], cache)
+    first_physical = fidelity.physical_evidence(
+      [first], cache, canonical_json_cache
+    )
+    second_physical = fidelity.physical_evidence(
+      [second], cache, canonical_json_cache
+    )
 
     assert_equal 1, definition_entities.to_a_calls,
                  'shared immutable definition must be enumerated once'
+    assert_equal fidelity.physical_evidence([first]), first_physical,
+                 'caching must preserve the exact physical evidence contract'
     refute_equal first_physical[:physical_geometry_sha256],
                  second_physical[:physical_geometry_sha256],
                  'each component instance transform remains independently hashed'
     assert_equal 1, cache.length
+    assert_equal 2, canonical_json_cache.length,
+                 'only reusable definition child fragments belong in memory'
+  end
+
+  def test_cached_canonical_json_is_byte_identical_to_contract_encoding
+    shared = {
+      :zeta => [1.2345678914, :symbol, nil],
+      :alpha => { :visible => true, :name => 'A"B' }
+    }
+    value = {
+      :second => [shared, shared],
+      :first => { :negative_zero => -0.0, :disabled => false }
+    }
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    expected = JSON.generate(fidelity.canonical_value(value))
+    cache = {}
+
+    actual = fidelity.canonical_json(value, cache)
+
+    assert_equal expected, actual
+    assert_equal fidelity.canonical_sha256(value),
+                 Digest::SHA256.hexdigest(actual)
+    assert_operator cache.length, :>=, 3
   end
 
   def test_snapshot_reads_each_entity_bounds_once

@@ -695,12 +695,74 @@ module BlueCollarSystems
         end
       end
 
-      def canonical_json(value)
-        JSON.generate(canonical_value(value))
+      # The optional cache is identity-based and valid only while the supplied
+      # payload graph is immutable. It produces the exact same bytes as
+      # JSON.generate(canonical_value(value)), but lets repeated shared
+      # component subtrees reuse their already-encoded JSON.
+      def canonical_json_scalar(value)
+        # Ruby 2.2's bundled JSON rejects top-level primitives unless quirks
+        # mode is enabled. Encoding inside an array and removing its brackets
+        # yields the identical token accepted by every supported runtime.
+        wrapped = JSON.generate([value])
+        wrapped[1, wrapped.length - 2]
       end
 
-      def canonical_sha256(value)
-        Digest::SHA256.hexdigest(canonical_json(value))
+      def canonical_json(value, cache = nil, write_cache = true)
+        return JSON.generate(canonical_value(value)) if cache.nil?
+        unless cache.is_a?(Hash)
+          raise ContractError, 'canonical JSON cache must be a Hash'
+        end
+
+        cacheable = value.is_a?(Hash) || value.is_a?(Array)
+        cache_key = cacheable ? value.object_id : nil
+        cached = cache_key ? cache[cache_key] : nil
+        if cached && cached[0].equal?(value)
+          return cached[1]
+        end
+
+        encoded = case value
+                  when Hash
+                    keys = {}
+                    value.keys.each do |key|
+                      name = key.to_s
+                      keys[name] = key unless keys.key?(name)
+                    end
+                    members = keys.keys.sort.map do |name|
+                      canonical_json_scalar(name) + ':' +
+                        canonical_json(value[keys[name]], cache, write_cache)
+                    end
+                    '{' + members.join(',') + '}'
+                  when Array
+                    '[' + value.map do |entry|
+                      canonical_json(entry, cache, write_cache)
+                    end.join(',') + ']'
+                  when Numeric
+                    canonical_json_scalar(canonical_number(value))
+                  when Symbol
+                    canonical_json_scalar(value.to_s)
+                  when true, false, nil
+                    canonical_json_scalar(value)
+                  else
+                    canonical_json_scalar(value.to_s)
+                  end
+        cache[cache_key] = [value, encoded] if cache_key && write_cache
+        encoded
+      end
+
+      def canonical_sha256(value, cache = nil, write_cache = true)
+        Digest::SHA256.hexdigest(
+          canonical_json(value, cache, write_cache)
+        )
+      end
+
+      def store_canonical_json_fragment!(value, cache)
+        return if cache.nil?
+        unless cache.is_a?(Hash)
+          raise ContractError, 'canonical JSON cache must be a Hash'
+        end
+        cache[value.object_id] = [
+          value, canonical_json(value, cache, false)
+        ]
       end
 
       def entity_type(entity)
@@ -897,7 +959,8 @@ module BlueCollarSystems
       # that already walked the descendants (the guarded save/reopen manifest)
       # can supply their child trees and avoid repeatedly enumerating the same
       # potentially enormous SketchUp collections.
-      def physical_entity_tree(entity, child_trees = nil)
+      def physical_entity_tree(entity, child_trees = nil,
+                               shared_child_payloads = nil)
         children = if child_trees.nil?
                      entity_children(entity).map do |child|
                        physical_entity_tree(child)
@@ -905,12 +968,19 @@ module BlueCollarSystems
                    else
                      Array(child_trees)
                    end
-        geometry = geometry_entity_payload(
-          entity, children.map { |child| child[:geometry_payload] }
-        )
-        style = style_entity_payload(
-          entity, children.map { |child| child[:style_payload] }
-        )
+        if shared_child_payloads
+          geometry = geometry_entity_payload(entity, [])
+          geometry[:children] = shared_child_payloads[:geometry_children]
+          style = style_entity_payload(entity, [])
+          style[:children] = shared_child_payloads[:style_children]
+        else
+          geometry = geometry_entity_payload(
+            entity, children.map { |child| child[:geometry_payload] }
+          )
+          style = style_entity_payload(
+            entity, children.map { |child| child[:style_payload] }
+          )
+        end
         direct_types = children.map do |child|
           child[:topology][:root_type].to_s
         end.sort
@@ -954,18 +1024,35 @@ module BlueCollarSystems
       # delivery is being finalized. Reuse their already-captured physical
       # child trees, while rebuilding every instance root so its own bounds,
       # transform, style, liveness, and topology remain independently hashed.
-      def physical_entity_tree_with_definition_cache(entity, cache)
+      def physical_entity_tree_with_definition_cache(entity, cache,
+                                                     canonical_json_cache = nil)
         definition_key = shared_component_definition_key(entity)
-        children = if definition_key && cache.key?(definition_key)
-                     cache[definition_key]
-                   else
-                     entity_children(entity).map do |child|
-                       physical_entity_tree_with_definition_cache(child, cache)
-                     end
-                   end
-        cache[definition_key] = children if definition_key &&
-          !cache.key?(definition_key)
-        physical_entity_tree(entity, children)
+        if definition_key && cache.key?(definition_key)
+          entry = cache[definition_key]
+          return physical_entity_tree(entity, entry[:trees], entry)
+        end
+
+        children = entity_children(entity).map do |child|
+          physical_entity_tree_with_definition_cache(
+            child, cache, canonical_json_cache
+          )
+        end
+        tree = physical_entity_tree(entity, children)
+        if definition_key
+          entry = {
+            :trees => children,
+            :geometry_children => tree[:geometry_payload][:children],
+            :style_children => tree[:style_payload][:children]
+          }
+          cache[definition_key] = entry
+          store_canonical_json_fragment!(
+            entry[:geometry_children], canonical_json_cache
+          )
+          store_canonical_json_fragment!(
+            entry[:style_children], canonical_json_cache
+          )
+        end
+        tree
       end
 
       def shared_component_definition_key(entity)
@@ -979,26 +1066,33 @@ module BlueCollarSystems
         nil
       end
 
-      def physical_evidence_from_trees(trees)
+      def physical_evidence_from_trees(trees, canonical_json_cache = nil)
         values = Array(trees).compact
         raise ContractError, 'physical evidence has no entity trees' if
           values.empty?
         geometry = values.map { |tree| tree[:geometry_payload] }
-        geometry = geometry.sort_by { |entry| canonical_json(entry) }
+        geometry = geometry.sort_by do |entry|
+          canonical_json(entry, canonical_json_cache, false)
+        end
         style = values.map { |tree| tree[:style_payload] }
-        style = style.sort_by { |entry| canonical_json(entry) }
+        style = style.sort_by do |entry|
+          canonical_json(entry, canonical_json_cache, false)
+        end
         {
           :geometry_payload => geometry,
           :style_payload => style,
-          :physical_geometry_sha256 => canonical_sha256(geometry),
-          :physical_style_sha256 => canonical_sha256(style),
+          :physical_geometry_sha256 =>
+            canonical_sha256(geometry, canonical_json_cache, false),
+          :physical_style_sha256 =>
+            canonical_sha256(style, canonical_json_cache, false),
           :physical_entity_count => values.inject(0) do |total, tree|
             total + tree[:physical_entity_count].to_i
           end
         }
       end
 
-      def physical_evidence(entities, definition_tree_cache = nil)
+      def physical_evidence(entities, definition_tree_cache = nil,
+                            canonical_json_cache = nil)
         values = Array(entities).compact
         raise ContractError, 'physical evidence has no entities' if values.empty?
         cache = definition_tree_cache
@@ -1008,11 +1102,14 @@ module BlueCollarSystems
         physical_evidence_from_trees(
           values.map do |entity|
             if cache
-              physical_entity_tree_with_definition_cache(entity, cache)
+              physical_entity_tree_with_definition_cache(
+                entity, cache, canonical_json_cache
+              )
             else
               physical_entity_tree(entity)
             end
-          end
+          end,
+          canonical_json_cache
         )
       end
 
@@ -1054,7 +1151,9 @@ module BlueCollarSystems
         source_id = source_span_id(item)
         text = item.respond_to?(:text) ? item.text.to_s : values[:source_text].to_s
         physical = physical_evidence(
-          values[:entities], values[:physical_definition_tree_cache]
+          values[:entities],
+          values[:physical_definition_tree_cache],
+          values[:physical_canonical_json_cache]
         )
         evidence = {
           :schema => SOURCE_EXPECTED_SCHEMA,

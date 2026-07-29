@@ -1358,6 +1358,7 @@ module BlueCollarSystems
               '3D text delivered source set does not equal the requested source set'
       end
       physical_definition_tree_cache = {}
+      physical_canonical_json_cache = {}
       rows.each do |row|
         item = items_by_id[row[:source_span_id].to_s]
         unless item
@@ -1365,7 +1366,8 @@ module BlueCollarSystems
                 "#{row[:source_span_id]} 3D Text source item is unavailable"
         end
         Svg3DTextRenderer.finalize_source_evidence!(
-          row, item, page_rotation, physical_definition_tree_cache
+          row, item, page_rotation, physical_definition_tree_cache,
+          physical_canonical_json_cache
         )
         required = [
           :identity_verified, :placement_verified, :rotation_verified,
@@ -1512,6 +1514,17 @@ module BlueCollarSystems
           :positive_z_depth_verified => true
         }
       end
+      render_result[:performance] ||= {}
+      [:bounds_ms, :physical_ms, :attach_ms].each do |key|
+        metric = :"evidence_#{key}"
+        render_result[:performance][metric] = rows.inject(0.0) do |sum, row|
+          sum + (row[:evidence_performance] || {}).fetch(key, 0.0).to_f
+        end.round(3)
+      end
+      render_result[:performance][:evidence_definition_cache_entries] =
+        physical_definition_tree_cache.length
+      render_result[:performance][:evidence_canonical_fragment_entries] =
+        physical_canonical_json_cache.length
       physical_count = physical_rows.inject(0) do |sum, row|
         sum + row[:source_placement_count].to_i
       end
