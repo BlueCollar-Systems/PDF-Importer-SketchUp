@@ -859,6 +859,12 @@ module BlueCollarSystems
         elsif normalized_mode == :labels
           valid = valid && evidence[:content_verified] == true &&
             evidence[:leader_verified] == true
+        elsif normalized_mode == :text
+          # Flat editable Text: content and placement verified; rotation is a
+          # known host limitation (SketchUp Text has no glyph-angle control)
+          # and is explicitly accepted in-mode rather than stopping the item.
+          valid = valid && evidence[:content_verified] == true &&
+            evidence[:leader_verified] == true
         else
           valid = false
         end
@@ -1503,7 +1509,8 @@ module BlueCollarSystems
 
       def verify_annotation_label(text, expected_text, expected_point,
                                   display_angle,
-                                  verify_leader = false)
+                                  verify_leader = false,
+                                  accept_rotation = false)
         type = if text.respond_to?(:typename)
                  text.typename.to_s
                else
@@ -1529,11 +1536,11 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError, 'label anchor verification failed' unless placement_ok
 
         # SketchUp::Text#vector is the leader vector, not a text-orientation
-        # axis. Native labels therefore cannot represent non-horizontal PDF
-        # text, and that known host limitation must be handled before add_text
-        # is called. A zero source angle is the only label orientation that can
-        # be certified here; the leader vector is verified separately below.
-        unless display_angle.to_f.abs <= 1.0e-12
+        # axis. For :labels mode a nonzero source rotation is an affirmative
+        # host impossibility that advances the fallback ladder. For :text mode
+        # this is a known in-mode host limitation: the text is placed at the
+        # correct anchor and the rotation absence is explicitly accepted.
+        unless display_angle.to_f.abs <= 1.0e-12 || accept_rotation
           raise RepresentationFidelity::ContractError,
                 'native SketchUp Text cannot preserve source text rotation'
         end
@@ -1584,7 +1591,9 @@ module BlueCollarSystems
         display_angle = display_text_angle(item, label_angle)
         pt = text_point_to_su(item, label_x, label_y, origin_x, origin_y)
         rotated = display_angle.to_f.abs > 1.0e-12
-        if rotated
+        normalized_requested = normalize_text_mode_symbol(requested_mode)
+        if rotated && normalized_requested != :text
+          # Labels mode cannot express rotation — advance the fallback ladder.
           proof = host_unsupported_label_rotation_proof(item, display_angle, pt)
           rung[:transition_proof] = proof
           return stop_requested_text_delivery!(
@@ -1592,23 +1601,29 @@ module BlueCollarSystems
             'label_rotation_unsupported_by_host', proof
           )
         end
+        # For :text mode, rotation is a known host limitation: place at the
+        # correct anchor and record that glyph angle is unavailable in-mode.
         leader_vector = zero_label_leader_vector
         before = RepresentationFidelity.snapshot(entities)
         text = try_add_annotation_text(
           entities, item.text, pt, leader_vector, rung
         )
+        # :text mode accepts that SketchUp Text cannot rotate glyphs.
+        text_accept_rotation = normalized_requested == :text
+        delivered_as_mode = text_accept_rotation ? :text : :labels
         if text
           begin
             identity = RepresentationFidelity.stable_entity_id(text)
             evidence = verify_annotation_label(
-              text, item.text, pt, display_angle
+              text, item.text, pt, display_angle,
+              false, text_accept_rotation
             )
             hide_annotation_leader(text)
             # Re-read after mutating the host entity: the final point/content
             # and hidden-leader state are the delivery evidence. Text#vector
             # is never interpreted as text orientation.
             evidence = verify_annotation_label(
-              text, item.text, pt, display_angle, true
+              text, item.text, pt, display_angle, true, text_accept_rotation
             )
             set_layer(text, layer)
             expected_width = source_geometry[:expected_width]
@@ -1616,8 +1631,13 @@ module BlueCollarSystems
             evidence[:physical_geometry_verified] = true
             evidence[:physical_style_verified] = true
             evidence[:transform_verified] = true
+            if text_accept_rotation && rotated
+              evidence[:rotation_host_limitation] = true
+              evidence[:source_rotation_degrees] = display_angle.to_f
+            end
             evidence[:expected_evidence] = source_expected_for_created!(
-              item, :labels, [text], pt, display_angle,
+              item, delivered_as_mode, [text], pt,
+              text_accept_rotation ? 0.0 : display_angle,
               {
                 :expected_width => expected_width,
                 :expected_height => expected_height,
@@ -1631,8 +1651,8 @@ module BlueCollarSystems
             )
             entity_ids = [identity]
             @text_count += 1
-            record_text_span_provenance(item, 'native_label', entity_ids, :labels)
-            complete_text_rung!(attempt, rung, :labels, entity_ids, evidence)
+            record_text_span_provenance(item, 'native_text', entity_ids, delivered_as_mode)
+            complete_text_rung!(attempt, rung, delivered_as_mode, entity_ids, evidence)
             return true
           rescue RepresentationFidelity::ContractError => e
             cleanup_unverified_label!(

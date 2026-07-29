@@ -585,20 +585,43 @@ module BlueCollarSystems
         raise 'source contour has coincident vertices that scaling cannot separate'
       end
 
+      # O(N log N) duplicate check: bucket points on quantized grid cells and
+      # compare only same-cell and adjacent-cell neighbours. This replaces the
+      # previous O(N²) all-pairs scan which made construction-scale detection
+      # agonizingly slow on glyph-dense pages on older hardware.
       def self.host_duplicate_points?(points)
         list = Array(points)
-        list.each_with_index do |left, left_index|
-          ((left_index + 1)...list.length).each do |right_index|
-            right = list[right_index]
-            dx = left.x.to_f - right.x.to_f
-            dy = left.y.to_f - right.y.to_f
-            left_z = left.respond_to?(:z) ? left.z.to_f : 0.0
-            right_z = right.respond_to?(:z) ? right.z.to_f : 0.0
-            dz = left_z - right_z
-            distance = Math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
-            return true if distance < HOST_POINT_TOLERANCE_INCHES
-            return true if left == right
+        return false if list.length < 2
+        tol = HOST_POINT_TOLERANCE_INCHES
+        # Quantize into grid cells whose side is tol. Two points closer than
+        # tol must share a cell or be in immediately adjacent cells.
+        bucket = {}
+        list.each do |pt|
+          px = pt.x.to_f
+          py = pt.y.to_f
+          pz = pt.respond_to?(:z) ? pt.z.to_f : 0.0
+          gx = (px / tol).floor
+          gy = (py / tol).floor
+          gz = (pz / tol).floor
+          (-1..1).each do |ix|
+            (-1..1).each do |iy|
+              (-1..1).each do |iz|
+                key = [(gx + ix), (gy + iy), (gz + iz)]
+                neighbours = bucket[key]
+                if neighbours
+                  neighbours.each do |nx, ny, nz|
+                    dx = px - nx
+                    dy = py - ny
+                    dz = pz - nz
+                    return true if (dx * dx) + (dy * dy) + (dz * dz) < tol * tol
+                  end
+                end
+              end
+            end
           end
+          cell = [gx, gy, gz]
+          bucket[cell] ||= []
+          bucket[cell] << [px, py, pz]
         end
         false
       end
