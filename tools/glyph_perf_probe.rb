@@ -37,7 +37,15 @@ require File.join(SRC, 'logger')
 require File.join(SRC, 'svg_text_renderer')
 
 R = BlueCollarSystems::PDFVectorImporter::SvgTextRenderer
-PDFTOCAIRO = File.join(SRC, 'bin', 'pdftocairo.exe')
+# The bundled runtime moved from the legacy bin/ tree to Library/bin as part of
+# the zero-ceremony packaging; dependency_resolver.rb now rejects a direct bin/
+# payload outright. Keep a fallback so the probe still runs against an older
+# checkout.
+PDFTOCAIRO = [
+  File.join(SRC, 'Library', 'bin', 'pdftocairo.exe'),
+  File.join(SRC, 'bin', 'pdftocairo.exe')
+].find { |candidate| File.file?(candidate) } ||
+  File.join(SRC, 'Library', 'bin', 'pdftocairo.exe')
 
 def render_svg(pdf, page)
   out = File.join(Dir.tmpdir, "probe_#{Process.pid}_#{rand(1_000_000)}")
