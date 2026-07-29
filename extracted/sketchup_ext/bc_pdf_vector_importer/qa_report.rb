@@ -270,8 +270,14 @@ module BlueCollarSystems
         renderers = Array(stats[:text_renderers]).map do |entry|
           normalize_json(entry)
         end
+        geometry_staging = Array(
+          stats[:geometry_staging] || stats['geometry_staging']
+        ).map do |entry|
+          normalize_json(entry)
+        end
         {
           text_renderers: renderers,
+          geometry_staging: geometry_staging,
           delivered_text_entity_counts: delivered_text_entity_counts(stats),
           execution_scope: (stats[:execution_scope] ||
                             stats['execution_scope'] || :host_import).to_s,

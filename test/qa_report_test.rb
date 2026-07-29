@@ -76,6 +76,18 @@ class QAReportTest < Minitest::Test
         },
         { page: 2, renderer: :labels, text_source: :internal, degraded: true }
       ],
+      geometry_staging: [
+        {
+          page: 1,
+          enabled: true,
+          path_count: 5649,
+          batch_count: 23,
+          explode_count: 23,
+          exploded_entity_count: 15134,
+          builder_elapsed_ms: 18_250.75,
+          explode_ms: 1_234.5
+        }
+      ],
       page_text_sources: { 1 => :external, 2 => :internal },
       text_mode: :geometry,
       resolved_scale: {
@@ -98,6 +110,12 @@ class QAReportTest < Minitest::Test
                  report[:extra][:text_renderers][0]['solid_cache']['definition_builds']
     assert_in_delta 1.25,
                     report[:extra][:text_renderers][0]['performance']['instance_placement_ms'],
+                    0.001
+    assert_equal 23, report[:extra][:geometry_staging][0]['batch_count']
+    assert_equal 15_134,
+                 report[:extra][:geometry_staging][0]['exploded_entity_count']
+    assert_in_delta 18_250.75,
+                    report[:extra][:geometry_staging][0]['builder_elapsed_ms'],
                     0.001
     assert_in_delta 48.0, report[:extra][:resolved_scale]['factor'], 0.01
     assert_equal 'high', report[:extra][:diagnostics][:quality_level]

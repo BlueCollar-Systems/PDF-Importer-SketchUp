@@ -2962,7 +2962,8 @@ module BlueCollarSystems
                 requested_text_mode: requested_text_mode,
                 selected_pages: pages.dup,
                 match_pdf_layers: match_pdf_layers,
-                text_renderers: [], page_text_sources: {}, peak_mb: 0.0,
+                text_renderers: [], geometry_staging: [],
+                page_text_sources: {}, peak_mb: 0.0,
                 model_3d_texts: [], page_text_map: {},
                 recognition_skipped_pages: [],
                 import_session_id: new_import_session_id,
@@ -3485,7 +3486,24 @@ module BlueCollarSystems
           page_rotation: page_rotation,
           provenance_bucket: provenance_opts[:provenance_bucket],
           import_session_id: provenance_opts[:import_session_id])
+        builder_started = Time.now
         result = builder.build
+        builder_elapsed_ms = ((Time.now - builder_started) * 1000.0).round(3)
+        if result[:geometry_staging].is_a?(Hash)
+          staging_evidence = result[:geometry_staging].merge(
+            :page => page_num,
+            :path_count => paths.length,
+            :builder_elapsed_ms => builder_elapsed_ms
+          )
+          stats[:geometry_staging] << staging_evidence
+          Logger.info(
+            "Pipeline",
+            "Page #{page_num}: geometry builder #{builder_elapsed_ms} ms; " \
+            "bulk staging=#{staging_evidence[:enabled]}, " \
+            "batches=#{staging_evidence[:batch_count]}, " \
+            "explode=#{staging_evidence[:explode_ms]} ms"
+          )
+        end
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
         merge_text_height_samples!(stats, result[:text_height_samples])

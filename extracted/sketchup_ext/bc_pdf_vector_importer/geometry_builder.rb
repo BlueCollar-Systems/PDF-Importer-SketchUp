@@ -15,6 +15,8 @@ module BlueCollarSystems
 
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
+      GEOMETRY_STAGING_PATH_THRESHOLD = 500
+      GEOMETRY_STAGING_CHUNK_PATHS = 250
 
       attr_reader :page_group, :text_group, :text_delivery_failures,
                   :text_attempts
@@ -71,6 +73,7 @@ module BlueCollarSystems
         # explicit stop; it is never permission to substitute representations.
         @text_delivery_failures = []
         @text_attempts = []
+        @geometry_staging = disabled_geometry_staging
       end
 
       def build
@@ -100,7 +103,8 @@ module BlueCollarSystems
         page_area_pts = page_width * page_height_pts
 
         # ── Vector geometry ──
-        heavy_page = @paths.length >= 500
+        heavy_page = @paths.length >= GEOMETRY_STAGING_PATH_THRESHOLD
+        configure_geometry_staging!(heavy_page)
         path_yield_every = heavy_page ? 100 : 0
         @paths.each_with_index do |path, path_idx|
           if path_yield_every > 0 && (path_idx % path_yield_every).zero?
@@ -151,18 +155,20 @@ module BlueCollarSystems
 
             su_points = remove_consecutive_duplicates(su_points)
             next if su_points.length < 2
+            draw_dest = staged_geometry_target(dest, path_idx)
 
             # Arc reconstruction on the polyline
             if @detect_arcs && dash_spec.nil? && su_points.length >= 5
-              draw_with_arc_detection(dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color)
+              draw_with_arc_detection(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color)
             else
-              draw_edges(dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed)
+              draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed)
               if should_fill && subpath.closed && su_points.length >= 3
-                draw_face(dest, su_points, path_layer, path.fill_color)
+                draw_face(draw_dest, su_points, path_layer, path.fill_color)
               end
             end
           end
         end
+        finalize_geometry_staging!
 
         # ── Text objects ──
         if @import_text && !@text_items.empty?
@@ -199,11 +205,106 @@ module BlueCollarSystems
           text_width_error_count: @text_width_error_count.to_i,
           text_delivery_failures: Array(@text_delivery_failures),
           text_attempts: Array(@text_attempts),
-          source_provenance_objects: Array(@provenance_bucket)
+          source_provenance_objects: Array(@provenance_bucket),
+          geometry_staging: geometry_staging_metrics
         }
       end
 
       private
+
+      def disabled_geometry_staging
+        {
+          :enabled => false,
+          :groups => [],
+          :parents => {},
+          :batch_count => 0,
+          :explode_count => 0,
+          :exploded_entity_count => 0,
+          :explode_ms => 0.0
+        }
+      end
+
+      def configure_geometry_staging!(heavy_page)
+        @geometry_staging = disabled_geometry_staging
+        @geometry_staging[:enabled] = heavy_page == true
+      end
+
+      def staged_geometry_target(parent_entities, path_index)
+        staging = @geometry_staging
+        return parent_entities unless staging[:enabled]
+        unless parent_entities.respond_to?(:add_group)
+          staging[:enabled] = false
+          return parent_entities
+        end
+
+        key = parent_entities.object_id
+        slot = staging[:parents][key]
+        new_path = slot.nil? || slot[:last_path_index] != path_index
+        if slot.nil? || (new_path &&
+                         slot[:path_count] >= GEOMETRY_STAGING_CHUNK_PATHS)
+          group = parent_entities.add_group
+          unless group && group.respond_to?(:entities) &&
+                 group.respond_to?(:explode)
+            raise 'host cannot create an exact bulk geometry staging group'
+          end
+          group.name = "PDF Geometry Batch #{staging[:batch_count] + 1}" if
+            group.respond_to?(:name=)
+          slot = {
+            :group => group,
+            :path_count => 0,
+            :last_path_index => nil
+          }
+          staging[:parents][key] = slot
+          staging[:groups] << group
+          staging[:batch_count] += 1
+          new_path = true
+        end
+        if new_path
+          slot[:path_count] += 1
+          slot[:last_path_index] = path_index
+        end
+        slot[:group].entities
+      end
+
+      def finalize_geometry_staging!
+        staging = @geometry_staging
+        return true unless staging[:enabled]
+        staging[:groups].each do |group|
+          started = builder_monotonic_ms
+          exploded = group.explode
+          unless exploded.is_a?(Array)
+            raise 'host rejected exact bulk geometry staging merge'
+          end
+          staging[:explode_count] += 1
+          staging[:exploded_entity_count] += exploded.length
+          staging[:explode_ms] += builder_monotonic_ms - started
+        end
+        staging[:groups] = []
+        staging[:parents] = {}
+        true
+      end
+
+      def geometry_staging_metrics
+        staging = @geometry_staging
+        {
+          :enabled => staging[:enabled] == true,
+          :path_threshold => GEOMETRY_STAGING_PATH_THRESHOLD,
+          :chunk_path_limit => GEOMETRY_STAGING_CHUNK_PATHS,
+          :batch_count => staging[:batch_count].to_i,
+          :explode_count => staging[:explode_count].to_i,
+          :exploded_entity_count => staging[:exploded_entity_count].to_i,
+          :explode_ms => staging[:explode_ms].to_f.round(3)
+        }
+      end
+
+      def builder_monotonic_ms
+        if Process.respond_to?(:clock_gettime) &&
+           defined?(Process::CLOCK_MONOTONIC)
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
+        else
+          Time.now.to_f * 1000.0
+        end
+      end
 
       # ---------------------------------------------------------------
       # Coordinate conversion
