@@ -688,12 +688,27 @@ class RepresentationFidelityContractTest < Minitest::Test
       ]
     }
 
+    solid_cache = {
+      :definition_builds => 1, :cache_hits => 1, :cache_misses => 1,
+      :instance_placements => 2
+    }
+    performance = {
+      :definition_build_ms => 1.2, :instance_placement_ms => 0.4,
+      :match_ms => 0.2, :parse_ms => 0.3, :verification_ms => 0.5
+    }
     IMP::Svg3DTextRenderer.stub(
       :finalize_source_evidence!,
       lambda { |_result, _source, _page_rotation| true }
     ) do
       IMP.record_svg_3d_text_delivery!(
-        stats, 1, [source], { span_results: [row] }, :text,
+        stats, 1, [source], {
+          :span_results => [row],
+          :solid_cache => solid_cache,
+          :performance => performance,
+          :authoritative_match_span_count => 1,
+          :render_target_span_count => 1,
+          :match_scope_verified => true
+        }, :text,
         { source_id => prior }, 0.0
       )
     end
@@ -702,6 +717,12 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal source_bbox, terminal[:source_bbox_pdf]
     assert_equal [:text, :labels, :text3d],
                  terminal[:attempt_history].map { |rung| rung[:mode] }
+    renderer = stats[:text_renderers].fetch(0)
+    assert_equal solid_cache, renderer[:solid_cache]
+    assert_equal performance, renderer[:performance]
+    assert_equal 1, renderer[:authoritative_match_span_count]
+    assert_equal 1, renderer[:render_target_span_count]
+    assert_equal true, renderer[:match_scope_verified]
     result = IMP::QAReport.send(:validate_representation_fidelity, stats)
     assert_equal true, result[:ready], result[:errors].inspect
   end

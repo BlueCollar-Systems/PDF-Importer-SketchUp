@@ -1527,6 +1527,12 @@ module BlueCollarSystems
         :unjoined_source_glyph_placement_count => physical_count,
         :source_glyph_identity_verified => true,
         :positive_z_depth_verified => true,
+        :solid_cache => render_result[:solid_cache],
+        :performance => render_result[:performance],
+        :authoritative_match_span_count =>
+          render_result[:authoritative_match_span_count],
+        :render_target_span_count => render_result[:render_target_span_count],
+        :match_scope_verified => render_result[:match_scope_verified],
         :depths => (rows + physical_rows).map { |row| row[:depth] }
       )
       true

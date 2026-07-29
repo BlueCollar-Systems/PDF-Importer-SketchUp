@@ -64,7 +64,16 @@ class QAReportTest < Minitest::Test
       layers: ['PDF Import', 'A-Notes'],
       elapsed_seconds: 1.25,
       text_renderers: [
-        { page: 1, renderer: :pdftocairo, text_source: :external, degraded: false },
+        {
+          page: 1, renderer: :pdftocairo, text_source: :external,
+          degraded: false,
+          solid_cache: {
+            definition_builds: 2, instance_placements: 8
+          },
+          performance: {
+            definition_build_ms: 4.5, instance_placement_ms: 1.25
+          }
+        },
         { page: 2, renderer: :labels, text_source: :internal, degraded: true }
       ],
       page_text_sources: { 1 => :external, 2 => :internal },
@@ -85,6 +94,11 @@ class QAReportTest < Minitest::Test
     assert_equal 2, report[:result][:layers]
     assert_equal 2, report[:extra][:text_renderers].length
     assert_equal 'pdftocairo', report[:extra][:text_renderers][0]['renderer']
+    assert_equal 2,
+                 report[:extra][:text_renderers][0]['solid_cache']['definition_builds']
+    assert_in_delta 1.25,
+                    report[:extra][:text_renderers][0]['performance']['instance_placement_ms'],
+                    0.001
     assert_in_delta 48.0, report[:extra][:resolved_scale]['factor'], 0.01
     assert_equal 'high', report[:extra][:diagnostics][:quality_level]
     assert_includes report[:extra][:diagnostics][:signals], 'good_vector_content'

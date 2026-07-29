@@ -90,12 +90,20 @@ def probe(pdf, page = 1)
   new_def_edge_ops = raw_now ? 0 : edge_counts.values.reduce(0, :+)
   new_instance_ops = raw_now ? 0 : placements.length
   new_raw_merge_ops = raw_now ? estimated : 0
+  reuse_ratio = if glyphs.empty?
+                  0.0
+                else
+                  placements.length.to_f / glyphs.length.to_f
+                end
 
   {
     file: File.basename(pdf),
     render_s: render_s.round(3),
     parse_s: parse_s.round(3),
     points_s: points_s.round(3),
+    physical_glyph_placements: placements.length,
+    unique_glyph_definitions: glyphs.length,
+    placement_to_definition_ratio: reuse_ratio.round(4),
     unique_glyphs: glyphs.length,
     placements: placements.length,
     estimated_edges: estimated,

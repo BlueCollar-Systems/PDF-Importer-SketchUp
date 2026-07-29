@@ -22,6 +22,8 @@ module BlueCollarSystems
           :cache_misses => 0,
           :instance_placements => 0,
           :unique_cache_keys => 0,
+          :definition_build_ms => 0.0,
+          :instance_placement_ms => 0.0,
           :transaction_abort_required => false
         }
       end
@@ -52,15 +54,17 @@ module BlueCollarSystems
         end
 
         @metrics[:cache_misses] += 1
-        definition = @definitions.add("BC_PDF_GLYPH_#{key[0, 24]}")
-        raise 'host rejected exact glyph component definition' unless definition
-        unless definition.respond_to?(:entities) && definition.entities
-          remove_created_definition!(definition)
-          raise 'exact glyph component definition has no entities collection'
-        end
-        @created_definitions << definition
-
+        definition_started = monotonic_ms
+        definition = nil
         begin
+          definition = @definitions.add("BC_PDF_GLYPH_#{key[0, 24]}")
+          raise 'host rejected exact glyph component definition' unless definition
+          unless definition.respond_to?(:entities) && definition.entities
+            remove_created_definition!(definition)
+            raise 'exact glyph component definition has no entities collection'
+          end
+          @created_definitions << definition
+
           build_metrics = yield(definition.entities, prepared[:entry])
           unless build_metrics.is_a?(Hash)
             raise 'exact glyph definition builder returned no metrics'
@@ -76,13 +80,18 @@ module BlueCollarSystems
           record.merge(:origin => prepared[:origin])
         rescue StandardError
           @records.delete(key)
-          @created_definitions.delete(definition)
-          remove_created_definition!(definition)
+          if definition
+            @created_definitions.delete(definition)
+            remove_created_definition!(definition)
+          end
           raise
+        ensure
+          @metrics[:definition_build_ms] += monotonic_ms - definition_started
         end
       end
 
       def add_instance(target_entities, record)
+        placement_started = monotonic_ms
         unless supported_for?(target_entities)
           raise 'host cannot place an exact glyph component instance'
         end
@@ -96,6 +105,11 @@ module BlueCollarSystems
         raise 'host rejected exact glyph component instance' unless instance
         @metrics[:instance_placements] += 1
         instance
+      ensure
+        if placement_started
+          @metrics[:instance_placement_ms] +=
+            monotonic_ms - placement_started
+        end
       end
 
       def metrics
@@ -263,6 +277,15 @@ module BlueCollarSystems
         number = value.to_f
         raise "#{label} is nonfinite" unless number.finite?
         number
+      end
+
+      def monotonic_ms
+        if Process.respond_to?(:clock_gettime) &&
+           defined?(Process::CLOCK_MONOTONIC)
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
+        else
+          Time.now.to_f * 1000.0
+        end
       end
 
       def remove_created_definition!(definition)

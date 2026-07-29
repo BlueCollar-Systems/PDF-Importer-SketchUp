@@ -565,6 +565,21 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal 1, result[:solid_cache][:cache_hits]
     assert_equal 2, result[:solid_cache][:instance_placements]
     assert_equal 1, model.definitions.to_a.length
+    assert_equal(
+      [
+        :definition_build_ms, :instance_placement_ms, :match_ms,
+        :parse_ms, :verification_ms
+      ],
+      result[:performance].keys.sort
+    )
+    result[:performance].each_value do |milliseconds|
+      assert_kind_of Numeric, milliseconds
+      assert_operator milliseconds, :>=, 0.0
+    end
+    assert_equal result[:source_placements],
+                 result[:solid_cache][:instance_placements]
+    assert_operator result[:solid_cache][:definition_builds], :<,
+                    result[:solid_cache][:instance_placements]
     instances = result[:span_results][0][:group].entities.to_a.select do |entity|
       entity.typename == 'ComponentInstance'
     end

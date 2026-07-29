@@ -46,11 +46,15 @@ module BlueCollarSystems
           result[:solid_cache] = solid_cache.metrics.merge(:enabled => true)
         end
 
+        parse_started = monotonic_ms
         placed = CairoGlyphSource.model_space_loops(svg, media_box, opts)
+        record_phase_ms!(result, :parse_ms, parse_started)
         result[:source_placements] = placed.length
+        verification_started = monotonic_ms
         loop_binding = CairoGlyphSource.verify_model_loop_bindings(
           svg, media_box, placed, opts
         )
+        record_phase_ms!(result, :verification_ms, verification_started)
         result[:source_loop_binding] = loop_binding
         unless loop_binding[:ok] == true
           detail = Array(loop_binding[:failures]).first
@@ -58,8 +62,10 @@ module BlueCollarSystems
           result[:failures] << hard_failure(
             nil, :source_loop_binding_mismatch, detail
           )
+          publish_performance!(result, solid_cache)
           return result
         end
+        inventory_started = monotonic_ms
         pens = placed.map do |entry|
           {
             :x => entry[:pen_pdf][0],
@@ -95,16 +101,21 @@ module BlueCollarSystems
           return result
         end
 
+        record_phase_ms!(result, :verification_ms, inventory_started)
+        match_started = monotonic_ms
         match = CairoGlyphSource.match_spans(pens, match_items, media_box)
+        record_phase_ms!(result, :match_ms, match_started)
         result[:match] = match
 
         if render_items.empty? && placed.empty?
           result[:match_scope_verified] = true
           result[:ok] = true
           result[:no_semantic_text] = true
+          publish_performance!(result, solid_cache)
           return result
         end
 
+        assignment_started = monotonic_ms
         matched_by_span = {}
         assigned_placements = {}
         Array(match[:placement_matches]).each do |record|
@@ -128,6 +139,7 @@ module BlueCollarSystems
           next unless evidence.is_a?(Hash)
           source_ink_by_span[evidence[:source_span_id].to_s] = evidence
         end
+        record_phase_ms!(result, :verification_ms, assignment_started)
 
         render_items.each do |item|
           source_id = begin
@@ -229,6 +241,7 @@ module BlueCollarSystems
             solid_cache.metrics.merge(:enabled => true)
           )
         end
+        publish_performance!(result, solid_cache)
 
         result[:ok] = result[:failures].empty? &&
           result[:transition_proofs].empty?
@@ -244,6 +257,7 @@ module BlueCollarSystems
           )
         end
         result[:failures] << hard_failure(nil, :renderer_exception, e.message)
+        publish_performance!(result, solid_cache)
         result[:ok] = false
         result
       end
@@ -269,6 +283,13 @@ module BlueCollarSystems
             :instance_placements => 0,
             :unique_cache_keys => 0,
             :transaction_abort_required => false
+          },
+          :performance => {
+            :definition_build_ms => 0.0,
+            :instance_placement_ms => 0.0,
+            :match_ms => 0.0,
+            :parse_ms => 0.0,
+            :verification_ms => 0.0
           }
         }
       end
@@ -1204,6 +1225,39 @@ module BlueCollarSystems
           :verified : :transaction_abort_required
         result[:solid_cache] = metrics
         cleaned
+      end
+
+      def self.monotonic_ms
+        if Process.respond_to?(:clock_gettime) &&
+           defined?(Process::CLOCK_MONOTONIC)
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
+        else
+          Time.now.to_f * 1000.0
+        end
+      end
+
+      def self.record_phase_ms!(result, key, started_ms)
+        result[:performance] ||= {}
+        result[:performance][key] =
+          result[:performance].fetch(key, 0.0).to_f +
+          (monotonic_ms - started_ms.to_f)
+      end
+
+      def self.publish_performance!(result, solid_cache)
+        result[:performance] ||= {}
+        metrics = solid_cache ? solid_cache.metrics : {}
+        result[:performance][:definition_build_ms] =
+          metrics.fetch(:definition_build_ms, 0.0).to_f
+        result[:performance][:instance_placement_ms] =
+          metrics.fetch(:instance_placement_ms, 0.0).to_f
+        [
+          :definition_build_ms, :instance_placement_ms, :match_ms,
+          :parse_ms, :verification_ms
+        ].each do |key|
+          result[:performance][key] =
+            result[:performance].fetch(key, 0.0).to_f.round(3)
+        end
+        result[:performance]
       end
     end
   end
