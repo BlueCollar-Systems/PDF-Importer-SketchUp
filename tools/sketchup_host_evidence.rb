@@ -485,10 +485,25 @@ module SketchupHostEvidence
       trees = results.map { |result| result[1] }
       fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
       canonical_cache = context[:canonical_json_cache]
-      payloads = fidelity.physical_shared_child_payloads(
-        trees, canonical_cache
-      )
+      payloads = {
+        :geometry_children => trees.map do |tree|
+          tree[:geometry_payload]
+        end.sort_by do |payload|
+          fidelity.canonical_json(payload, canonical_cache, false)
+        end,
+        :style_children => trees.map do |tree|
+          tree[:style_payload]
+        end.sort_by do |payload|
+          fidelity.canonical_json(payload, canonical_cache, false)
+        end
+      }
       context[:definition_child_payloads][cache_key] = payloads
+      fidelity.store_canonical_json_fragment!(
+        payloads[:geometry_children], canonical_cache
+      )
+      fidelity.store_canonical_json_fragment!(
+        payloads[:style_children], canonical_cache
+      )
     end
     results
   end

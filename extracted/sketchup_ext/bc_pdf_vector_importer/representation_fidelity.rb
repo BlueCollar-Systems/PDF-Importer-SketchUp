@@ -846,18 +846,12 @@ module BlueCollarSystems
         []
       end
 
-      def geometry_entity_payload(entity, child_payloads = nil,
-                                  payload_overrides = nil)
+      def geometry_entity_payload(entity, child_payloads = nil)
         type = entity_type(entity)
-        overrides = payload_overrides.is_a?(Hash) ?
-          payload_overrides : {}
         payload = {
           :type => type,
-          :bounds => overrides.key?(:bounds) ?
-            overrides[:bounds] : entity_bounds_payload(entity),
-          :transformation => overrides.key?(:transformation) ?
-            overrides[:transformation] :
-            entity_transformation_payload(entity)
+          :bounds => entity_bounds_payload(entity),
+          :transformation => entity_transformation_payload(entity)
         }
         if type == 'Edge'
           payload[:endpoints] = edge_points(entity)
@@ -961,117 +955,6 @@ module BlueCollarSystems
         end
       end
 
-      def definition_bounds_from_trees(trees)
-        values = Array(trees)
-        return nil if values.empty?
-        bounds = values.map do |tree|
-          payload = tree[:geometry_payload]
-          payload.is_a?(Hash) ? payload[:bounds] : nil
-        end
-        return nil unless bounds.all? do |box|
-          box.is_a?(Hash) && Array(box[:min]).length == 3 &&
-            Array(box[:max]).length == 3
-        end
-        {
-          :min => 3.times.map do |axis|
-            bounds.map { |box| box[:min][axis].to_f }.min
-          end,
-          :max => 3.times.map do |axis|
-            bounds.map { |box| box[:max][axis].to_f }.max
-          end
-        }
-      end
-
-      def transformed_bounds_payload(bounds, transformation)
-        return nil unless bounds.is_a?(Hash)
-        minimum = Array(bounds[:min])
-        maximum = Array(bounds[:max])
-        matrix = Array(transformation)
-        return nil unless minimum.length == 3 && maximum.length == 3 &&
-                          matrix.length == 16
-        points = [minimum[0], maximum[0]].product(
-          [minimum[1], maximum[1]], [minimum[2], maximum[2]]
-        ).map do |x, y, z|
-          [
-            (matrix[0].to_f * x.to_f) +
-              (matrix[4].to_f * y.to_f) +
-              (matrix[8].to_f * z.to_f) + matrix[12].to_f,
-            (matrix[1].to_f * x.to_f) +
-              (matrix[5].to_f * y.to_f) +
-              (matrix[9].to_f * z.to_f) + matrix[13].to_f,
-            (matrix[2].to_f * x.to_f) +
-              (matrix[6].to_f * y.to_f) +
-              (matrix[10].to_f * z.to_f) + matrix[14].to_f
-          ].map { |number| canonical_number(number) }
-        end
-        {
-          :min => 3.times.map do |axis|
-            points.map { |point| point[axis] }.min
-          end,
-          :max => 3.times.map do |axis|
-            points.map { |point| point[axis] }.max
-          end
-        }
-      rescue StandardError
-        nil
-      end
-
-      def physical_shared_child_payloads(trees, canonical_json_cache = nil)
-        children = Array(trees)
-        geometry_children = children.map do |child|
-          child[:geometry_payload]
-        end.sort_by do |payload|
-          canonical_json(payload, canonical_json_cache, false)
-        end
-        style_children = children.map do |child|
-          child[:style_payload]
-        end.sort_by do |payload|
-          canonical_json(payload, canonical_json_cache, false)
-        end
-        direct_types = children.map do |child|
-          child[:topology][:root_type].to_s
-        end.sort
-        descendant_counts = {}
-        children.each do |child|
-          topology = child[:topology]
-          root_type = topology[:root_type].to_s
-          descendant_counts[root_type] =
-            descendant_counts.fetch(root_type, 0) + 1
-          topology[:descendant_type_counts].each do |name, count|
-            key = name.to_s
-            descendant_counts[key] =
-              descendant_counts.fetch(key, 0) + count.to_i
-          end
-        end
-        descendant_counts = descendant_counts.keys.sort.inject({}) do |memo, key|
-          memo[key] = descendant_counts[key]
-          memo
-        end
-        payloads = {
-          :geometry_children => geometry_children,
-          :style_children => style_children,
-          :direct_child_types => direct_types,
-          :descendant_type_counts => descendant_counts,
-          :descendant_entity_count =>
-            descendant_counts.values.inject(0, :+),
-          :child_entity_count => children.inject(0) do |total, child|
-            total + child[:physical_entity_count].to_i
-          end,
-          :child_live_entity_count => children.inject(0) do |total, child|
-            total + child[:topology][:live_entity_count].to_i
-          end,
-          :definition_bounds => definition_bounds_from_trees(children),
-          :trees => children
-        }
-        store_canonical_json_fragment!(
-          geometry_children, canonical_json_cache
-        )
-        store_canonical_json_fragment!(
-          style_children, canonical_json_cache
-        )
-        payloads
-      end
-
       # Capture geometry, style, and descendants in one host walk.  Callers
       # that already walked the descendants (the guarded save/reopen manifest)
       # can supply their child trees and avoid repeatedly enumerating the same
@@ -1086,25 +969,10 @@ module BlueCollarSystems
                      Array(child_trees)
                    end
         if shared_child_payloads
-          transformation = entity_transformation_payload(entity)
-          derived_bounds = transformed_bounds_payload(
-            shared_child_payloads[:definition_bounds], transformation
-          )
-          overrides = { :transformation => transformation }
-          overrides[:bounds] = derived_bounds if derived_bounds
-          geometry = geometry_entity_payload(entity, [], overrides)
+          geometry = geometry_entity_payload(entity, [])
           geometry[:children] = shared_child_payloads[:geometry_children]
           style = style_entity_payload(entity, [])
           style[:children] = shared_child_payloads[:style_children]
-          direct_types = shared_child_payloads[:direct_child_types]
-          descendant_counts =
-            shared_child_payloads[:descendant_type_counts]
-          descendant_entity_count =
-            shared_child_payloads[:descendant_entity_count].to_i
-          child_entity_count =
-            shared_child_payloads[:child_entity_count].to_i
-          child_live_entity_count =
-            shared_child_payloads[:child_live_entity_count].to_i
         else
           geometry = geometry_entity_payload(
             entity, children.map { |child| child[:geometry_payload] }
@@ -1112,48 +980,42 @@ module BlueCollarSystems
           style = style_entity_payload(
             entity, children.map { |child| child[:style_payload] }
           )
-          direct_types = children.map do |child|
-            child[:topology][:root_type].to_s
-          end.sort
-          descendant_counts = {}
-          children.each do |child|
-            child_topology = child[:topology]
-            root_type = child_topology[:root_type].to_s
-            descendant_counts[root_type] =
-              descendant_counts.fetch(root_type, 0) + 1
-            child_topology[:descendant_type_counts].each do |name, count|
-              key = name.to_s
-              descendant_counts[key] =
-                descendant_counts.fetch(key, 0) + count.to_i
-            end
+        end
+        direct_types = children.map do |child|
+          child[:topology][:root_type].to_s
+        end.sort
+        descendant_counts = {}
+        children.each do |child|
+          child_topology = child[:topology]
+          root_type = child_topology[:root_type].to_s
+          descendant_counts[root_type] =
+            descendant_counts.fetch(root_type, 0) + 1
+          child_topology[:descendant_type_counts].each do |name, count|
+            key = name.to_s
+            descendant_counts[key] =
+              descendant_counts.fetch(key, 0) + count.to_i
           end
-          descendant_counts =
-            descendant_counts.keys.sort.inject({}) do |memo, key|
-              memo[key] = descendant_counts[key]
-              memo
-            end
-          descendant_entity_count =
-            descendant_counts.values.inject(0, :+)
-          child_entity_count = children.inject(0) do |total, child|
-            total + child[:physical_entity_count].to_i
-          end
-          child_live_entity_count = children.inject(0) do |total, child|
-            total + child[:topology][:live_entity_count].to_i
-          end
+        end
+        descendant_counts = descendant_counts.keys.sort.inject({}) do |memo, key|
+          memo[key] = descendant_counts[key]
+          memo
         end
         live = entity.respond_to?(:valid?) && entity.valid? == true &&
           entity.respond_to?(:deleted?) && entity.deleted? == false
         {
           :geometry_payload => geometry,
           :style_payload => style,
-          :physical_entity_count => 1 + child_entity_count,
+          :physical_entity_count => 1 + children.inject(0) do |total, child|
+            total + child[:physical_entity_count].to_i
+          end,
           :topology => {
             :root_type => geometry[:type].to_s,
             :direct_child_types => direct_types,
             :descendant_type_counts => descendant_counts,
-            :descendant_entity_count => descendant_entity_count,
-            :live_entity_count =>
-              (live ? 1 : 0) + child_live_entity_count
+            :descendant_entity_count => descendant_counts.values.inject(0, :+),
+            :live_entity_count => (live ? 1 : 0) + children.inject(0) do |total, child|
+              total + child[:topology][:live_entity_count].to_i
+            end
           }
         }
       end
@@ -1175,14 +1037,22 @@ module BlueCollarSystems
             child, cache, canonical_json_cache
           )
         end
+        tree = physical_entity_tree(entity, children)
         if definition_key
-          entry = physical_shared_child_payloads(
-            children, canonical_json_cache
-          )
+          entry = {
+            :trees => children,
+            :geometry_children => tree[:geometry_payload][:children],
+            :style_children => tree[:style_payload][:children]
+          }
           cache[definition_key] = entry
-          return physical_entity_tree(entity, children, entry)
+          store_canonical_json_fragment!(
+            entry[:geometry_children], canonical_json_cache
+          )
+          store_canonical_json_fragment!(
+            entry[:style_children], canonical_json_cache
+          )
         end
-        physical_entity_tree(entity, children)
+        tree
       end
 
       def shared_component_definition_key(entity)
