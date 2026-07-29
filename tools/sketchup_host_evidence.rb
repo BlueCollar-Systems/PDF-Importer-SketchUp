@@ -95,9 +95,10 @@ module SketchupHostEvidence
       raise EvidenceError, 'host entity collection cannot be enumerated'
     end
     compact = options.is_a?(Hash) && options[:compact] == true
+    context = { :definition_child_results => {} }
     Array(entities.to_a).map do |entity|
       snapshot_entity_with_physical_tree(
-        entity, [], compact, true
+        entity, [], compact, true, context
       ).first
     end.compact
   rescue EvidenceError
@@ -396,23 +397,23 @@ module SketchupHostEvidence
   private_class_method :normalized_path
 
   def self.snapshot_entity(entity, ancestors)
-    snapshot_entity_with_physical_tree(entity, ancestors, false, false).first
+    context = { :definition_child_results => {} }
+    snapshot_entity_with_physical_tree(
+      entity, ancestors, false, false, context
+    ).first
   end
   private_class_method :snapshot_entity
 
   def self.snapshot_entity_with_physical_tree(entity, ancestors, compact,
-                                              top_level)
+                                              top_level, context)
     raise EvidenceError, 'entity manifest contains nil' if entity.nil?
     identity = entity.object_id
     if ancestors.include?(identity)
       raise EvidenceError, 'recursive host entity cycle detected'
     end
-    children = child_entities(entity)
-    child_results = children.map do |child|
-      snapshot_entity_with_physical_tree(
-        child, ancestors + [identity], compact, false
-      )
-    end
+    child_results = snapshot_child_results(
+      entity, ancestors + [identity], compact, context
+    )
     child_rows = child_results.map { |result| result[0] }.compact
     child_trees = if compact
                     child_results.select { |result| result[0].nil? }.map do |result|
@@ -450,6 +451,37 @@ module SketchupHostEvidence
     [row, physical_tree]
   end
   private_class_method :snapshot_entity_with_physical_tree
+
+  def self.snapshot_child_results(entity, ancestors, compact, context)
+    cache_key = compact ? shared_definition_cache_key(entity) : nil
+    cache = context[:definition_child_results]
+    return cache[cache_key] if cache_key && cache.key?(cache_key)
+
+    results = child_entities(entity).map do |child|
+      snapshot_entity_with_physical_tree(
+        child, ancestors, compact, false, context
+      )
+    end
+    # Definition contents are shared immutable host objects during a snapshot.
+    # Reuse only physical trees with no manifest rows so source-claim identity
+    # remains independently enumerated and duplicate IDs can never be hidden.
+    if cache_key && results.all? { |result| result[0].nil? }
+      cache[cache_key] = results
+    end
+    results
+  end
+  private_class_method :snapshot_child_results
+
+  def self.shared_definition_cache_key(entity)
+    return nil unless host_typename(entity) == 'ComponentInstance'
+    return nil unless entity.respond_to?(:definition)
+    definition = entity.definition
+    return nil unless definition && definition.respond_to?(:entities)
+    definition.object_id
+  rescue StandardError
+    nil
+  end
+  private_class_method :shared_definition_cache_key
 
   def self.physical_tree_evidence(tree, compact = false)
     fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
@@ -1368,8 +1400,9 @@ module SketchupHostEvidence
           topology = compact_topology!(row, label)
           counts = hash_value(topology, :descendant_type_counts)
           types = counts.keys.map(&:to_s)
+          allowed = ['ComponentInstance', 'Group', 'Face', 'Edge']
           unless counts.fetch('Face', 0) > 0 && counts.fetch('Edge', 0) > 0 &&
-                 (types - ['Group', 'Face', 'Edge']).empty? &&
+                 (types - allowed).empty? &&
                  positive_z_depth?(hash_value(row, :bounds))
             raise EvidenceError, "#{label} is not positive-depth 3D Text geometry"
           end
@@ -1382,9 +1415,10 @@ module SketchupHostEvidence
         descendant_types = descendants.map do |child|
           hash_value(child, :typename).to_s
         end
+        allowed = ['ComponentInstance', 'Group', 'Face', 'Edge']
         unless descendant_types.include?('Face') &&
                descendant_types.include?('Edge') &&
-               (descendant_types - ['Group', 'Face', 'Edge']).empty? &&
+               (descendant_types - allowed).empty? &&
                positive_z_depth?(hash_value(row, :bounds))
           raise EvidenceError, "#{label} is not positive-depth 3D Text geometry"
         end

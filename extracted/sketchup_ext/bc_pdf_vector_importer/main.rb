@@ -891,6 +891,7 @@ module BlueCollarSystems
         target_entities, svg_document[:svg], media_box, failed_items,
         :scale => opts[:scale], :svg_page_box => render_box,
         :y_offset => 0.0, :depth => depth, :layer => text_layer,
+        :model => model,
         :page_number => page_num,
         :match_text_items => Array(all_page_text_items || text_items),
         :preserve_unmatched_source_placements => false,
@@ -3643,6 +3644,7 @@ module BlueCollarSystems
             :y_offset => 0.0,
             :depth => depth,
             :layer => layer_mgr.text_fallback_layer,
+            :model => model,
             :page_number => page_num,
             :preserve_unmatched_source_placements => Array(text_items).empty?,
             :source_context => svg_source_context(

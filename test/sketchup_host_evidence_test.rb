@@ -129,7 +129,7 @@ class SketchupHostEvidenceTest < Minitest::Test
 
     def initialize(entity_id, children, options = {})
       super(entity_id, 'ComponentInstance', options)
-      @definition = FakeDefinition.new(children)
+      @definition = options[:definition] || FakeDefinition.new(children)
     end
   end
 
@@ -384,6 +384,49 @@ class SketchupHostEvidenceTest < Minitest::Test
                  'root host children must be enumerated once per snapshot'
     assert_equal 1, nested_entities.to_a_calls,
                  'nested host children must be enumerated once per snapshot'
+  end
+
+  def test_compact_snapshot_reuses_shared_component_definition_tree
+    dictionary = 'BC_PDF_Importer'
+    definition_entities = CountingCollection.new([
+      FakeEntity.new(35, 'Face'),
+      FakeEntity.new(36, 'Edge')
+    ])
+    definition = FakeDefinition.new(definition_entities)
+    first = FakeComponent.new(
+      37, [], :definition => definition,
+      :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
+                          0, 0, 1, 0, 10, 20, 0, 1]
+    )
+    second = FakeComponent.new(
+      38, [], :definition => definition,
+      :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
+                          0, 0, 1, 0, 30, 40, 0, 1]
+    )
+    claim = FakeGroup.new(
+      34, [first, second],
+      :attributes => {
+        [dictionary, 'source_span_id'] => 'text_span:1:0',
+        [dictionary, 'source_kind'] => 'text_span',
+        [dictionary, 'representation'] => 'text3d',
+        [dictionary, 'renderer'] => 'svg_source_3d_text',
+        [dictionary, 'source_claim_root'] => true
+      }
+    )
+
+    row = SketchupHostEvidence.snapshot_entities(
+      [claim], :compact => true
+    ).first
+
+    assert_equal 1, definition_entities.to_a_calls,
+                 'a shared definition must be read once per compact snapshot'
+    topology = row['geometry_evidence']['topology']
+    assert_equal ['ComponentInstance', 'ComponentInstance'],
+                 topology['direct_child_types']
+    assert_equal 2, topology['descendant_type_counts']['ComponentInstance']
+    assert_equal 2, topology['descendant_type_counts']['Face']
+    assert_equal 2, topology['descendant_type_counts']['Edge']
+    assert_empty row['children']
   end
 
   def test_snapshot_reads_each_entity_bounds_once
@@ -1581,6 +1624,50 @@ class SketchupHostEvidenceTest < Minitest::Test
         'direct_child_types' => ['Group'],
         'descendant_type_counts' => {
           'Edge' => 1, 'Face' => 1, 'Group' => 1
+        },
+        'descendant_entity_count' => 3,
+        'live_entity_count' => 4
+      }
+    }
+    root['style_evidence'] = {
+      'schema' => schema,
+      'sha256' => expected[:physical_style_sha256],
+      'physical_entity_count' => expected[:physical_entity_count]
+    }
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, rows, :text3d, [1]
+    )
+  end
+
+  def test_compact_text3d_accepts_exact_component_instance_topology
+    rows = text3d_manifest
+    root = rows.first
+    raw_children = root['children']
+    root['children'] = [{
+      'entity_id' => 16, 'persistent_id' => 1016,
+      'typename' => 'ComponentInstance', 'valid' => true, 'deleted' => false,
+      'children' => raw_children
+    }]
+    expected = decorate_fixture_manifest!(
+      rows, :text3d, 'text_span:1:0', 'A'
+    )
+    stats = strict_text3d_stats
+    attempt = stats[:text_attempts].first
+    attempt[:expected_evidence] = expected
+    attempt[:attempt_history].last[:expected_evidence] = expected
+    root['children'] = []
+    root['representation_evidence']['source_claim_root'] = true
+    schema = 'bcs.host_physical_partition/1.0'
+    root['geometry_evidence'] = {
+      'schema' => schema,
+      'sha256' => expected[:physical_geometry_sha256],
+      'physical_entity_count' => expected[:physical_entity_count],
+      'topology' => {
+        'root_type' => 'Group',
+        'direct_child_types' => ['ComponentInstance'],
+        'descendant_type_counts' => {
+          'ComponentInstance' => 1, 'Face' => 1, 'Edge' => 1
         },
         'descendant_entity_count' => 3,
         'live_entity_count' => 4

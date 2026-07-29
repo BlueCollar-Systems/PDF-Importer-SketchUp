@@ -39,7 +39,7 @@ module BlueCollarSystems
           )
           return result
         end
-        model = model_for_entities(entities)
+        model = opts[:model] || model_for_entities(entities)
         candidate_cache = Svg3DTextSolidCache.new(model, depth)
         if candidate_cache.supported_for?(entities)
           solid_cache = candidate_cache

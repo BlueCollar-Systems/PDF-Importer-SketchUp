@@ -613,6 +613,21 @@ class SvgText3DRendererTest < Minitest::Test
                  'different extrusion depths must not alias'
   end
 
+  def test_explicit_import_model_enables_cache_on_older_entities_api
+    model = Svg3DModel.new(:with_definitions => true)
+    entities_without_model_lookup = Svg3DEntities.new
+
+    result = RENDERER.render_svg(
+      entities_without_model_lookup, square_svg, MEDIA_BOX, [span],
+      :depth => 0.05, :model => model
+    )
+
+    assert result[:ok], result[:failures].inspect
+    assert_equal true, result[:solid_cache][:enabled]
+    assert_equal 1, result[:solid_cache][:definition_builds]
+    assert_equal 1, result[:solid_cache][:instance_placements]
+  end
+
   def test_cached_definition_is_removed_when_exact_face_creation_fails
     model = Svg3DModel.new(
       :with_definitions => true, :fail_add_face => true
