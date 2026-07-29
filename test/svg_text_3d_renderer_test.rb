@@ -306,6 +306,14 @@ class SvgText3DRendererTest < Minitest::Test
       "<use href=\"#glyph-0-0\" x=\"10\" y=\"80\"#{transform_attr}/></g></svg>"
   end
 
+  def colored_square_svg
+    '<svg xmlns="http://www.w3.org/2000/svg" width="100pt" height="100pt" ' \
+      'viewBox="0 0 100 100"><defs><g id="glyph-0-0"><path ' \
+      'd="M 0 0 L 10 0 L 10 -10 L 0 -10 Z"/></g></defs>' \
+      '<g fill="rgb(18.562317%, 35.928345%, 59.213257%)">' \
+      '<use href="#glyph-0-0" x="10" y="80"/></g></svg>'
+  end
+
   def square_svg_with_unjoined_source_glyph
     '<svg xmlns="http://www.w3.org/2000/svg" width="100pt" height="100pt" ' \
       'viewBox="0 0 100 100"><defs><g id="glyph-0-0"><path ' \
@@ -391,6 +399,54 @@ class SvgText3DRendererTest < Minitest::Test
     color = group.material.color
     refute_nil color, 'text ink material must carry an explicit color'
     assert_equal [0, 0, 0], [color.red, color.green, color.blue]
+  end
+
+  def test_delivered_3d_text_uses_the_renderer_source_fill_color
+    model = Svg3DModel.new
+    entities = Svg3DEntities.new(:model => model)
+    result = RENDERER.render_svg(
+      entities, colored_square_svg, MEDIA_BOX, [span], :depth => 0.05
+    )
+
+    assert result[:ok], result[:failures].inspect
+    delivered = result[:span_results][0]
+    assert_equal true, delivered[:ink_applied]
+    assert_equal [47, 92, 151], delivered[:source_ink_rgb]
+    assert_equal 'PDF_47_92_151', delivered[:group].material.name
+    color = delivered[:group].material.color
+    assert_equal [47, 92, 151], [color.red, color.green, color.blue]
+  end
+
+  def test_byte_domain_source_material_does_not_turn_near_black_white
+    model = Svg3DModel.new
+    group = Svg3DEntities.new(:model => model).add_group
+
+    assert_equal true, RENDERER.apply_source_text_ink!(group, [1, 1, 1])
+    assert_equal 'PDF_1_1_1', group.material.name
+    color = group.material.color
+    assert_equal [1, 1, 1], [color.red, color.green, color.blue]
+  end
+
+  def test_non_solid_source_fill_fails_closed_instead_of_becoming_black
+    error = assert_raises(RuntimeError) do
+      RENDERER.source_text_ink_rgb([
+        { :glyph_id => 'glyph-0-0', :fill_rgb => nil }
+      ])
+    end
+    assert_match(/non-solid or unsupported fill color/, error.message)
+  end
+
+  def test_translucent_source_fill_fails_closed_instead_of_becoming_opaque
+    error = assert_raises(RuntimeError) do
+      RENDERER.source_text_ink_rgb([
+        {
+          :glyph_id => 'glyph-0-0',
+          :fill_rgb => [0.2, 0.4, 0.6],
+          :fill_opacity => 0.5
+        }
+      ])
+    end
+    assert_match(/opacity/, error.message)
   end
 
   # R20-2: a host (or fake) without material support must not silently claim

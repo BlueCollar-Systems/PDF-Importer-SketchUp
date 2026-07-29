@@ -12,8 +12,8 @@ module BlueCollarSystems
       SIZE_TOLERANCE_INCHES = 1.0e-6
       HOST_POINT_TOLERANCE_INCHES = 0.001
       MAX_CONSTRUCTION_SCALE = 1_000_000.0
-      # Shared with GeometryBuilder#get_or_create_material's cache key for
-      # [0,0,0] so a model reuses one black text-ink material.
+      # Default SVG fill is black. Source SVG colors replace this fallback when
+      # pdftocairo/mutool supplies inherited or per-use fill evidence.
       TEXT_INK_MATERIAL_NAME = 'PDF_0_0_0'.freeze
       TEXT_INK_RGB = [0, 0, 0].freeze
 
@@ -257,7 +257,7 @@ module BlueCollarSystems
         row[:expected_evidence] = expected
         row[:content_verified] = true
         row[:physical_geometry_verified] = true
-        row[:physical_style_verified] = true
+        row[:physical_style_verified] = row[:ink_applied] == true
         row[:transform_verified] = true
         row
       end
@@ -347,7 +347,8 @@ module BlueCollarSystems
           width_ok && height_ok && position_ok
         raise 'extruded source glyph has no verified positive Z depth' unless depth_ok
 
-        ink_applied = apply_source_text_ink!(group)
+        source_ink_rgb = source_text_ink_rgb(entries)
+        ink_applied = apply_source_text_ink!(group, source_ink_rgb)
 
         matrices = entries.map { |entry| Array(entry[:svg_matrix]).map { |v| v.to_f } }
         ids = entries.map { |entry| entry[:glyph_id].to_s }
@@ -367,6 +368,8 @@ module BlueCollarSystems
           :face_count => faces.length,
           :extruded_face_count => extruded,
           :ink_applied => ink_applied,
+          :source_ink_rgb => source_ink_rgb,
+          :source_ink_material_name => material_name_for_rgb(source_ink_rgb),
           :identity_verified => !ids.empty? && ids.none? { |id| id.empty? },
           :placement_verified => !placement_indices.empty? &&
             placement_indices.uniq.length == placement_indices.length,
@@ -397,24 +400,27 @@ module BlueCollarSystems
       # faces keep nil materials render as white-filled outlines — only their
       # edges draw, so text ghosts at any size. Painting the owned span group
       # lets every nil-material glyph face (caps and extrusion walls, nested
-      # construction group included) inherit visible black text ink, matching
-      # the native_3d_text path's TEXT_FACE_RGB behavior. Returns true only
+      # construction group included) inherit the renderer's source fill color.
+      # SVG's default black is used only when no explicit fill is present.
+      # Returns true only
       # when the host accepted the paint; callers record the outcome (R20-2 —
       # a headless host without materials reports ink_applied false, never a
       # silent claim).
-      def self.apply_source_text_ink!(group)
+      def self.apply_source_text_ink!(group, rgb = TEXT_INK_RGB)
         return false unless group.respond_to?(:material=) &&
                             group.respond_to?(:model)
         model = group.model
         materials = model && model.respond_to?(:materials) ? model.materials : nil
         return false unless materials
-        mat = materials[TEXT_INK_MATERIAL_NAME]
+        channels = normalize_source_ink_rgb(rgb) || TEXT_INK_RGB
+        material_name = material_name_for_rgb(channels)
+        mat = materials[material_name]
         unless mat
-          mat = materials.add(TEXT_INK_MATERIAL_NAME)
+          mat = materials.add(material_name)
           if mat && mat.respond_to?(:color=) &&
              defined?(Sketchup) && Sketchup.const_defined?(:Color)
             mat.color = Sketchup::Color.new(
-              TEXT_INK_RGB[0], TEXT_INK_RGB[1], TEXT_INK_RGB[2]
+              channels[0], channels[1], channels[2]
             )
           end
         end
@@ -427,6 +433,64 @@ module BlueCollarSystems
           "source text ink paint failed: #{e.message}"
         )
         false
+      end
+
+      def self.source_text_ink_rgb(entries)
+        unsupported_opacity = Array(entries).any? do |entry|
+          next false unless entry.is_a?(Hash) && entry.key?(:fill_opacity)
+          opacity = entry[:fill_opacity]
+          !opacity.is_a?(Numeric) || !opacity.to_f.finite? ||
+            (opacity.to_f - 1.0).abs > 1.0e-12
+        end
+        if unsupported_opacity
+          raise 'source text span has unsupported non-opaque fill opacity'
+        end
+        unsupported = Array(entries).any? do |entry|
+          entry.is_a?(Hash) && entry.key?(:fill_rgb) && entry[:fill_rgb].nil?
+        end
+        if unsupported
+          raise 'source text span has a non-solid or unsupported fill color'
+        end
+        colors = Array(entries).map do |entry|
+          next nil unless entry.is_a?(Hash)
+          normalize_source_ink_rgb(entry[:fill_rgb])
+        end.compact.uniq
+        return TEXT_INK_RGB.dup if colors.empty?
+        if colors.length > 1
+          raise 'source text span contains multiple fill colors'
+        end
+        colors.first
+      end
+
+      def self.normalize_source_ink_rgb(rgb)
+        return nil unless rgb.is_a?(Array) && rgb.length >= 3
+        raw_channels = rgb.first(3)
+        values = raw_channels.map do |channel|
+          value = channel.to_f
+          return nil unless value.finite?
+          value
+        end
+        byte_domain = raw_channels.all? { |channel| channel.is_a?(Integer) } ||
+          values.any? { |value| value > 1.0 }
+        values.map do |value|
+          if byte_domain
+            [[value, 0.0].max, 255.0].min.round
+          else
+            value = [[value, 0.0].max, 1.0].min
+            (value * 255.0).round
+          end
+        end
+      rescue StandardError
+        nil
+      end
+
+      def self.material_name_for_rgb(rgb)
+        channels = normalize_source_ink_rgb(rgb)
+        channels ||= Array(rgb).first(3).map { |channel| channel.to_i }
+        channels = TEXT_INK_RGB unless channels.length >= 3
+        "PDF_#{channels[0]}_#{channels[1]}_#{channels[2]}"
+      rescue StandardError
+        TEXT_INK_MATERIAL_NAME
       end
 
       # Build SVG non-zero-fill contours in descending area order. A contour is

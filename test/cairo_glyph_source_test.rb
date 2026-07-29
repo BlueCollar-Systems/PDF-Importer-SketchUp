@@ -690,6 +690,23 @@ class CairoGlyphSourceTest < Minitest::Test
     end
   end
 
+  def test_model_space_loops_preserves_coincident_uses_with_distinct_paint
+    svg = <<-SVG
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
+  <defs><g id="glyph-0-0"><path d="M 0 0 L 10 0 L 10 -10 L 0 -10 Z"/></g></defs>
+  <use xlink:href="#glyph-0-0" x="10" y="20" fill="#ff0000"/>
+  <use xlink:href="#glyph-0-0" x="10" y="20" fill="#0000ff"/>
+  <use xlink:href="#glyph-0-0" x="10" y="20" fill="none"/>
+</svg>
+    SVG
+
+    placed = CGS.model_space_loops(svg, [0, 0, 100, 100])
+
+    assert_equal 3, placed.length
+    assert_equal [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], nil],
+                 placed.map { |entry| entry[:fill_rgb] }
+  end
+
   def test_loop_binding_rejects_same_bbox_contour_mutation
     svg = <<-SVG
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">

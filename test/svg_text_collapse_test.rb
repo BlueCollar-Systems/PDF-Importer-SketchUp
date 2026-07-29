@@ -68,6 +68,24 @@ class SvgTextCollapseTest < Minitest::Test
     assert_equal 1, duplicates[0][:duplicate_placement_index]
   end
 
+  def test_exact_physical_deduplication_preserves_conflicting_paint
+    base = {
+      glyph_id: 'g', x: 0.0, y: 0.0,
+      matrix: [1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+      fill_rgb: [1.0, 0.0, 0.0], fill_opacity: 1.0
+    }
+    blue = base.merge(:fill_rgb => [0.0, 0.0, 1.0])
+    hidden = base.merge(:fill_rgb => nil)
+
+    unique, duplicates = R.deduplicate_exact_physical_placements(
+      [base, base.dup, blue, hidden]
+    )
+
+    assert_equal 3, unique.length
+    assert_equal [0, 2, 3], unique.map { |item| item[:source_placement_index] }
+    assert_equal 1, duplicates.length
+  end
+
   def test_transformed_source_ink_bbox_is_pdf_relative_and_finite
     points = [[
       DummyPoint.new(0.0, 0.0), DummyPoint.new(1.0, 0.0),
@@ -125,6 +143,65 @@ class SvgTextCollapseTest < Minitest::Test
     assert_equal 1, placements.length
     assert_equal 'font_7_38', placements[0][:glyph_id]
     assert_equal [9.0, 0.0, 0.0, -9.0, 10.0, 20.0], placements[0][:matrix]
+  end
+
+  def test_parse_use_placements_preserves_inherited_and_overridden_fill_colors
+    svg = '<svg viewBox="0 0 100 100"><defs>' \
+          '<path id="font_7_38" d="M.1 0L.2 0Z"/>' \
+          '</defs><g fill="rgb(18.562317%, 35.928345%, 59.213257%)">' \
+          '<use xlink:href="#font_7_38" x="10" y="20"/>' \
+          '<g style="fill:#336699">' \
+          '<use xlink:href="#font_7_38" x="30" y="40"/>' \
+          '</g></g></svg>'
+
+    placements = R.parse_use_placements(svg)
+
+    assert_equal 2, placements.length
+    expected_blue = [0.18562317, 0.35928345, 0.59213257]
+    expected_blue.each_with_index do |channel, index|
+      assert_in_delta channel, placements[0][:fill_rgb][index], 1.0e-8
+    end
+    expected_override = [0x33 / 255.0, 0x66 / 255.0, 0x99 / 255.0]
+    expected_override.each_with_index do |channel, index|
+      assert_in_delta channel, placements[1][:fill_rgb][index], 1.0e-8
+    end
+  end
+
+  def test_parse_use_placements_inherits_paint_through_generic_containers
+    svg = '<svg fill="#336699"><defs>' \
+          '<path id="font_7_38" d="M.1 0L.2 0Z"/>' \
+          '</defs><a><switch><symbol>' \
+          '<use xlink:href="#font_7_38" x="10" y="20"/>' \
+          '</symbol></switch></a></svg>'
+
+    placement = R.parse_use_placements(svg).first
+
+    expected = [0x33 / 255.0, 0x66 / 255.0, 0x99 / 255.0]
+    expected.each_with_index do |channel, index|
+      assert_in_delta channel, placement[:fill_rgb][index], 1.0e-8
+    end
+    assert_in_delta 1.0, placement[:fill_opacity], 1.0e-12
+  end
+
+  def test_parse_use_placements_tracks_inherited_and_direct_opacity
+    svg = '<svg><defs><path id="font_7_38" d="M.1 0L.2 0Z"/></defs>' \
+          '<g fill-opacity="50%" opacity="0.8">' \
+          '<use xlink:href="#font_7_38" opacity="0.5"/>' \
+          '</g></svg>'
+
+    placement = R.parse_use_placements(svg).first
+
+    assert_in_delta 0.2, placement[:fill_opacity], 1.0e-12
+  end
+
+  def test_parse_use_placements_rejects_malformed_rgb_channel
+    svg = '<svg><defs><path id="font_7_38" d="M.1 0L.2 0Z"/></defs>' \
+          '<use xlink:href="#font_7_38" fill="rgb(nope, 2, 3)"/>' \
+          '</svg>'
+
+    placement = R.parse_use_placements(svg).first
+
+    assert_nil placement[:fill_rgb]
   end
 
   def test_svg_render_args_support_mutool

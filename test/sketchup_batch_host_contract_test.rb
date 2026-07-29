@@ -186,6 +186,8 @@ class SketchupBatchHostContractTest < Minitest::Test
                     "'source_glyph_physical_deliveries' =>"
     assert_includes source,
                     "'text_renderers' => Array(stats[:text_renderers])"
+    assert_includes source,
+                    "'raster_fallback_used' => stats[:raster_fallback_used] == true"
     assert_includes source, "'worktree_metadata_version' =>"
     assert_includes source, "'loaded_importer_version' =>"
     assert_includes source, "'source_locations' => source_locations"

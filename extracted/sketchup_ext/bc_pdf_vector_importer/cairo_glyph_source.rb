@@ -1247,6 +1247,8 @@ module BlueCollarSystems
             y: ty,
             placement_index: placement_index,
             glyph_id: p[:glyph_id],
+            fill_rgb: p[:fill_rgb] && p[:fill_rgb].dup,
+            fill_opacity: p[:fill_opacity],
             source_primary_axis: source_primary_axis_for_matrix(m),
             ink_points_pdf: ink_points,
             ink_loops_pdf: ink_loops,
@@ -1272,7 +1274,11 @@ module BlueCollarSystems
           values[4] + p[:x].to_f,
           values[5] + p[:y].to_f
         ]
-        [p[:glyph_id].to_s, effective]
+        [
+          p[:glyph_id].to_s,
+          effective,
+          SvgTextRenderer.svg_paint_signature(p)
+        ]
       rescue StandardError
         [placement.object_id]
       end
@@ -1410,6 +1416,8 @@ module BlueCollarSystems
             ink_points_pdf: ink_loops_pdf.flatten(1),
             ink_loops_pdf: ink_loops_pdf,
             ink_bbox_pdf: [ink_x.min, ink_y.min, ink_x.max, ink_y.max],
+            fill_rgb: p[:fill_rgb] && p[:fill_rgb].dup,
+            fill_opacity: p[:fill_opacity],
             loops: loops
           }
         end

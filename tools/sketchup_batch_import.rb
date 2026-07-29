@@ -207,6 +207,7 @@ module SketchupBatchImport
         'text_renderers' => Array(stats[:text_renderers]),
         'text_source_span_ids' => Array(stats[:text_source_span_ids]),
         'text_attempts' => Array(stats[:text_attempts]),
+        'raster_fallback_used' => stats[:raster_fallback_used] == true,
         'source_provenance' => provenance,
         'page_text_delivery_records' =>
           Array(stats[:page_text_delivery_records]),

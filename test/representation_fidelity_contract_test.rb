@@ -2558,7 +2558,7 @@ class RepresentationFidelityContractTest < Minitest::Test
         placement_verified: true, rotation_verified: true,
         size_verified: true, depth_verified: true, depth: 0.02,
         width: 1.0, height: 0.5, face_count: 1,
-        extruded_face_count: 1
+        extruded_face_count: 1, ink_applied: true
       }],
       unmatched_source_results: [],
       transition_proofs: [text3d_second]

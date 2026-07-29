@@ -823,26 +823,193 @@ module BlueCollarSystems
 
       def self.parse_use_placements(svg)
         a = []
-        svg.scan(/<use\b[^>]*>/m) do |m|
+        # SVG presentation attributes inherit through nested groups. Cairo
+        # emits text color on the wrapping <g>, not on each glyph <use>; a
+        # use-only regex therefore discarded the PDF's source ink color.
+        # Track every balanced SVG element in document order so valid
+        # containers such as <a>, <switch>, and <symbol> cannot sever paint
+        # inheritance. This intentionally avoids an XML dependency inside
+        # SketchUp 2017's Ruby 2.2 runtime.
+        paint_stack = [{
+          :name => nil,
+          :fill_rgb => [0.0, 0.0, 0.0],
+          :fill_opacity => 1.0,
+          :opacity_product => 1.0
+        }]
+        svg.to_s.scan(/<\/?\s*[A-Za-z][A-Za-z0-9:_-]*\b[^>]*>/m) do |m|
           tag = m.is_a?(Array) ? m.first.to_s : m.to_s
-          href = tag[/\bxlink:href="([^"]+)"/, 1] || tag[/\bhref="([^"]+)"/, 1]
-          next unless href && href.start_with?('#')
-          id = href[1..-1]
-          next unless glyph_reference_id?(id)
-
-          x = (tag[/\bx="([^"]+)"/, 1] || '0').to_f
-          y = (tag[/\by="([^"]+)"/, 1] || '0').to_f
-
-          matrix = nil
-          tr = tag[/\btransform="([^"]+)"/, 1]
-          if tr && tr =~ /matrix\(([^)]+)\)/i
-            vals = $1.split(/[,\s]+/).reject(&:empty?).map(&:to_f)
-            matrix = vals[0, 6] if vals.length >= 6
+          if tag =~ /\A<\s*\/\s*([A-Za-z][A-Za-z0-9:_-]*)\b/i
+            paint_stack.pop if paint_stack.length > 1
+            next
           end
 
-          a << { glyph_id: id, x: x, y: y, matrix: matrix }
+          name_match = tag.match(/\A<\s*([A-Za-z][A-Za-z0-9:_-]*)\b/i)
+          next unless name_match
+          element_name = name_match[1].to_s.downcase
+          parent = paint_stack.last
+          fill_present, direct_fill = svg_fill_spec(tag)
+          fill_opacity_present, direct_fill_opacity =
+            svg_opacity_spec(tag, 'fill-opacity')
+          opacity_present, direct_opacity = svg_opacity_spec(tag, 'opacity')
+          frame = {
+            :name => element_name,
+            :fill_rgb => fill_present ? direct_fill : parent[:fill_rgb],
+            :fill_opacity => fill_opacity_present ? direct_fill_opacity :
+              parent[:fill_opacity],
+            :opacity_product => multiply_svg_opacity(
+              parent[:opacity_product],
+              opacity_present ? direct_opacity : 1.0
+            )
+          }
+          paint_stack << frame
+          self_closing = tag =~ /\/\s*>\s*\z/
+
+          if element_name == 'use'
+            href = svg_attribute_value(tag, 'xlink:href') ||
+              svg_attribute_value(tag, 'href')
+            if href && href.start_with?('#')
+              id = href[1..-1]
+              if glyph_reference_id?(id)
+                x = (svg_attribute_value(tag, 'x') || '0').to_f
+                y = (svg_attribute_value(tag, 'y') || '0').to_f
+
+                matrix = nil
+                tr = svg_attribute_value(tag, 'transform')
+                if tr && tr =~ /matrix\(([^)]+)\)/i
+                  vals = $1.split(/[,\s]+/).reject(&:empty?).map(&:to_f)
+                  matrix = vals[0, 6] if vals.length >= 6
+                end
+
+                fill_rgb = frame[:fill_rgb]
+                fill_opacity = multiply_svg_opacity(
+                  frame[:fill_opacity], frame[:opacity_product]
+                )
+                a << {
+                  glyph_id: id,
+                  x: x,
+                  y: y,
+                  matrix: matrix,
+                  fill_rgb: fill_rgb && fill_rgb.dup,
+                  fill_opacity: fill_opacity
+                }
+              end
+            end
+          end
+          paint_stack.pop if self_closing
         end
         a
+      end
+
+      def self.svg_attribute_value(tag, name)
+        escaped = Regexp.escape(name.to_s)
+        match = tag.to_s.match(/(?:\A|[\s<])#{escaped}\s*=\s*(['"])(.*?)\1/im)
+        match ? match[2] : nil
+      rescue StandardError
+        nil
+      end
+
+      # Returns [present, rgb]. present=true/rgb=nil represents an explicit
+      # non-solid fill such as "none", which must override inherited color.
+      # An inline style wins over the corresponding presentation attribute.
+      def self.svg_fill_spec(tag)
+        value = svg_style_property_value(tag, 'fill')
+        value = svg_attribute_value(tag, 'fill') if value.nil?
+        return [false, nil] if value.nil?
+        [true, parse_svg_color(value)]
+      rescue StandardError
+        [false, nil]
+      end
+
+      def self.svg_opacity_spec(tag, property)
+        value = svg_style_property_value(tag, property)
+        value = svg_attribute_value(tag, property) if value.nil?
+        return [false, nil] if value.nil?
+        [true, parse_svg_opacity(value)]
+      rescue StandardError
+        [false, nil]
+      end
+
+      def self.svg_style_property_value(tag, property)
+        style = svg_attribute_value(tag, 'style')
+        return nil unless style
+        escaped = Regexp.escape(property.to_s)
+        match = style.match(/(?:\A|;)\s*#{escaped}\s*:\s*([^;]+)/i)
+        match ? match[1].to_s.strip : nil
+      rescue StandardError
+        nil
+      end
+
+      def self.multiply_svg_opacity(left, right)
+        return nil unless left.is_a?(Numeric) && right.is_a?(Numeric)
+        product = left.to_f * right.to_f
+        product.finite? ? product : nil
+      rescue StandardError
+        nil
+      end
+
+      SVG_NUMBER_PATTERN =
+        /\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\z/
+
+      def self.parse_svg_opacity(value)
+        raw = value.to_s.strip
+        percent = raw.end_with?('%')
+        number_text = percent ? raw[0...-1].to_s.strip : raw
+        return nil unless number_text =~ SVG_NUMBER_PATTERN
+        number = number_text.to_f
+        return nil unless number.finite?
+        number /= 100.0 if percent
+        [[number, 0.0].max, 1.0].min
+      rescue StandardError
+        nil
+      end
+
+      def self.parse_svg_color(value)
+        text = value.to_s.strip
+        return nil if text.empty? || text.downcase == 'none'
+
+        if text =~ /\Argb\(\s*([^)]+)\s*\)\z/i
+          parts = $1.split(/\s*,\s*/)
+          return nil unless parts.length == 3
+          channels = parts.map do |part|
+            raw = part.to_s.strip
+            percent = raw.end_with?('%')
+            number_text = percent ? raw[0...-1].to_s.strip : raw
+            return nil unless number_text =~ SVG_NUMBER_PATTERN
+            number = number_text.to_f
+            return nil unless number.finite?
+            number = percent ? number / 100.0 : number / 255.0
+            [[number, 0.0].max, 1.0].min
+          end
+          return channels
+        end
+
+        if text =~ /\A#([0-9a-f]{6})\z/i
+          hex = $1
+          return [
+            hex[0, 2].to_i(16) / 255.0,
+            hex[2, 2].to_i(16) / 255.0,
+            hex[4, 2].to_i(16) / 255.0
+          ]
+        end
+        if text =~ /\A#([0-9a-f]{3})\z/i
+          hex = $1
+          return [
+            (hex[0, 1] * 2).to_i(16) / 255.0,
+            (hex[1, 1] * 2).to_i(16) / 255.0,
+            (hex[2, 1] * 2).to_i(16) / 255.0
+          ]
+        end
+
+        named = {
+          'black' => [0.0, 0.0, 0.0],
+          'white' => [1.0, 1.0, 1.0],
+          'red' => [1.0, 0.0, 0.0],
+          'green' => [0.0, 128.0 / 255.0, 0.0],
+          'blue' => [0.0, 0.0, 1.0]
+        }
+        named[text.downcase]
+      rescue StandardError
+        nil
       end
 
       # A successful helper process and nonempty file do not prove usable
@@ -884,9 +1051,29 @@ module BlueCollarSystems
           values[4] + p[:x].to_f,
           values[5] + p[:y].to_f
         ]
-        [p[:glyph_id].to_s, effective]
+        [p[:glyph_id].to_s, effective, svg_paint_signature(p)]
       rescue StandardError
         [placement.object_id]
+      end
+
+      def self.svg_paint_signature(placement)
+        p = placement.is_a?(Hash) ? placement : {}
+        fill = p.key?(:fill_rgb) ? p[:fill_rgb] : [0.0, 0.0, 0.0]
+        fill_signature = if fill.is_a?(Array) && fill.length >= 3
+                           fill.first(3).map { |value| value.to_f }
+                         else
+                           [:unsupported_fill]
+                         end
+        opacity = p.key?(:fill_opacity) ? p[:fill_opacity] : 1.0
+        opacity_signature = if opacity.is_a?(Numeric) &&
+                               opacity.to_f.finite?
+                              opacity.to_f
+                            else
+                              :unsupported_opacity
+                            end
+        [fill_signature, opacity_signature]
+      rescue StandardError
+        [[:unsupported_fill], :unsupported_opacity]
       end
 
       def self.deduplicate_exact_physical_placements(placements)
