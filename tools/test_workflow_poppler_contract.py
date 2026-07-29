@@ -74,11 +74,28 @@ class WorkflowPopplerContractTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("third_party/sources/SHA256SUMS.txt", text)
+        self.assertIn("SOURCE_SHA256SUMS.txt", text)
         self.assertIn('"$SOURCE_CHECKSUMS"', text)
         self.assertLess(
             text.index("python build_release.py"),
             text.index("gh release create"),
         )
+
+    def test_release_checksum_names_and_verifies_the_published_rbz(self):
+        text = (
+            ROOT / ".github" / "workflows" / "auto-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'RELEASE_CHECKSUMS="approved-windows-rbz-download/SHA256SUMS.txt"',
+            text,
+        )
+        self.assertIn(
+            'printf \'%s  %s\\n\' "$ACTUAL_SHA256" "$(basename "$RBZ")"',
+            text,
+        )
+        self.assertIn("sha256sum --check SHA256SUMS.txt", text)
+        self.assertIn('"$RELEASE_CHECKSUMS"', text)
 
 
 if __name__ == "__main__":

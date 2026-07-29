@@ -256,8 +256,10 @@ jobs:
           set -e
           TAG="v${{ steps.version.outputs.version }}"
           RBZ="approved-windows-rbz-download/SketchUp-PDF-Importer_v${{ steps.version.outputs.version }}.rbz"
-          SOURCE_CHECKSUMS="third_party/sources/SHA256SUMS.txt"
-          test -f "$SOURCE_CHECKSUMS"
+          SOURCE_CHECKSUMS_INPUT="third_party/sources/SHA256SUMS.txt"
+          SOURCE_CHECKSUMS="approved-windows-rbz-download/SOURCE_SHA256SUMS.txt"
+          RELEASE_CHECKSUMS="approved-windows-rbz-download/SHA256SUMS.txt"
+          test -f "$SOURCE_CHECKSUMS_INPUT"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — immutable; skipping asset upload."
@@ -275,6 +277,13 @@ jobs:
               --warnings-file .release-safety/warnings.json
             exit 0
           else
+            ACTUAL_SHA256=$(sha256sum "$RBZ" | cut -d' ' -f1)
+            printf '%s  %s\n' "$ACTUAL_SHA256" "$(basename "$RBZ")" > "$RELEASE_CHECKSUMS"
+            cp "$SOURCE_CHECKSUMS_INPUT" "$SOURCE_CHECKSUMS"
+            (
+              cd "$(dirname "$RELEASE_CHECKSUMS")"
+              sha256sum --check SHA256SUMS.txt
+            )
             gh release create "$TAG" \
               --target "${RELEASE_TARGET:-$GITHUB_SHA}" \
               --title "$TAG — PDF Vector Importer for SketchUp" \
@@ -283,6 +292,7 @@ jobs:
             **Install:** Download \`${RBZ}\` below, then in SketchUp: **Window > Extension Manager > Install Extension**." \
               --latest \
               "$RBZ" \
+              "$RELEASE_CHECKSUMS" \
               "$SOURCE_CHECKSUMS"
             echo "minted=true" >> "$GITHUB_OUTPUT"
           fi
