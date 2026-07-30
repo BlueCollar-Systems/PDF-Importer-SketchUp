@@ -21,7 +21,7 @@ module SketchupBatchImport
       host_identity = require_su2017_ruby_identity!
       verify_plugins_disabled!
       install_modal_guard!
-      plugin_root = File.expand_path('../extracted/sketchup_ext', __dir__)
+      plugin_root = SketchupBatchImport.plugin_root
       load File.join(plugin_root, 'bc_pdf_vector_importer', 'main.rb')
       importer = BlueCollarSystems::PDFVectorImporter
       expected_root = File.expand_path(plugin_root)
@@ -76,6 +76,7 @@ module SketchupBatchImport
       SketchupHostEvidence.verify_delivery_evidence!(
         stats, owned_manifest, requested_mode, job[:pages]
       )
+      source_delivery_manifest = owned_manifest
 
       import_session_id = stats[:import_session_id].to_s.strip
       raise 'pipeline import_session_id is missing' if import_session_id.empty?
@@ -97,14 +98,21 @@ module SketchupBatchImport
         job, binding, 'host_heal_stabilize_started'
       )
       stabilize_model = reopen_model!(job[:model_path])
+      begin
+        GC.start
+      rescue StandardError
+      end
       after_manifest = SketchupHostEvidence.snapshot_entities(
         stabilize_model.active_entities, :compact => true
       )
-      owned_manifest = SketchupHostEvidence.owned_manifest(
+      stabilized_owned_manifest = SketchupHostEvidence.owned_manifest(
         before_manifest, after_manifest
       )
       raise 'no recursively owned imported host entities found after heal' if
-        owned_manifest.empty?
+        stabilized_owned_manifest.empty?
+      SketchupHostEvidence.verify_host_heal_preservation!(
+        source_delivery_manifest, stabilized_owned_manifest
+      )
       raise 'stabilized model save failed' unless
         stabilize_model.save(job[:model_path])
       SketchupBatchImport.write_progress!(
@@ -138,9 +146,11 @@ module SketchupBatchImport
         'source_lineage' => source_lineage,
         'import_session_id' => import_session_id,
         'source_provenance' => provenance,
-        'same_session_entities' => owned_manifest,
+        'same_session_entities' => source_delivery_manifest,
+        'stabilized_owned_entities' => stabilized_owned_manifest,
         'post_import_entities' => after_manifest,
-        'post_import_entities_pre_heal' => live_after_manifest
+        'post_import_entities_pre_heal' => live_after_manifest,
+        'host_heal_preservation_verified' => true
       )
       SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
 
@@ -149,6 +159,10 @@ module SketchupBatchImport
       SketchupBatchImport.write_progress!(
         job, binding, 'reopen_evidence_snapshot_started'
       )
+      begin
+        GC.start
+      rescue StandardError
+      end
       reopened_manifest = SketchupHostEvidence.snapshot_entities(
         reopened_model.active_entities, :compact => true
       )
@@ -204,6 +218,7 @@ module SketchupBatchImport
         'import_report_sha256' => Digest::SHA256.file(report_copy).hexdigest,
         'entity_manifest_path' => manifest_path,
         'entity_manifest_sha256' => Digest::SHA256.file(manifest_path).hexdigest,
+        'host_heal_preservation_verified' => true,
         'reopen_persistent_id_verified' => true,
         'text_entities' => stats[:text].to_i,
         'text_renderers' => Array(stats[:text_renderers]),
@@ -395,6 +410,11 @@ module SketchupBatchImport
     end
 
     def reopen_model!(model_path)
+      # SketchUp 2017 can native-crash when open_file keeps the previous
+      # solid-text tree live while loading another copy of the same large
+      # model (1011 Text→3D Text ≈ 4k glyph instances). Drop the live model
+      # and solicit GC before reload.
+      release_live_model_for_reopen!
       result = Sketchup.open_file(model_path)
       raise 'saved model reopen failed' if result == false
       model = Sketchup.active_model
@@ -402,9 +422,41 @@ module SketchupBatchImport
       @model = model
       model
     end
+
+    def release_live_model_for_reopen!
+      model = @model
+      model = Sketchup.active_model if !model && defined?(Sketchup)
+      if model && model.respond_to?(:close)
+        begin
+          model.close(true)
+        rescue StandardError
+          # file_new below remains the fail-soft path when close is refused.
+        end
+      end
+      @model = nil
+      if defined?(Sketchup) && Sketchup.respond_to?(:file_new)
+        begin
+          Sketchup.file_new
+        rescue StandardError
+          # open_file below remains authoritative.
+        end
+      end
+      begin
+        GC.start
+      rescue StandardError
+      end
+      true
+    end
   end
 
   module_function
+
+  def plugin_root(environment = ENV)
+    configured = environment['BC_SKETCHUP_IMPORTER_SOURCE_ROOT'].to_s.strip
+    configured = File.expand_path('../extracted/sketchup_ext', __dir__) if
+      configured.empty?
+    File.expand_path(configured)
+  end
 
   def write_progress!(job, binding, phase, detail = nil)
     payload = binding.merge(

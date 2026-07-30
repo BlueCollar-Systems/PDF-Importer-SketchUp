@@ -4,13 +4,23 @@ require 'json'
 require 'digest'
 require 'fileutils'
 require 'tmpdir'
-require File.expand_path(
-  '../extracted/sketchup_ext/bc_pdf_vector_importer/representation_fidelity',
-  __dir__
+
+module SketchupHostEvidence
+  IMPORTER_SOURCE_ROOT = begin
+    configured = ENV['BC_SKETCHUP_IMPORTER_SOURCE_ROOT'].to_s.strip
+    configured = File.expand_path('../extracted/sketchup_ext', __dir__) if
+      configured.empty?
+    File.expand_path(configured)
+  end unless const_defined?(:IMPORTER_SOURCE_ROOT, false)
+end
+
+require File.join(
+  SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
+  'bc_pdf_vector_importer', 'representation_fidelity'
 )
-require File.expand_path(
-  '../extracted/sketchup_ext/bc_pdf_vector_importer/png_cropper',
-  __dir__
+require File.join(
+  SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
+  'bc_pdf_vector_importer', 'png_cropper'
 )
 
 module SketchupHostEvidence
@@ -43,7 +53,7 @@ module SketchupHostEvidence
   SOURCE_SPAN_ID = /\Atext_span:([1-9][0-9]*):(0|[1-9][0-9]*)\z/.freeze unless
     const_defined?(:SOURCE_SPAN_ID, false)
   MODE_LADDERS = {
-    :text => [:text, :labels, :text3d, :glyphs, :geometry, :raster],
+    :text => [:text, :text3d, :glyphs, :geometry, :raster],
     :labels => [:labels, :text3d, :glyphs, :geometry, :raster],
     :text3d => [:text3d, :glyphs, :geometry, :raster],
     :glyphs => [:glyphs, :geometry, :raster],
@@ -100,11 +110,23 @@ module SketchupHostEvidence
       :definition_child_payloads => {},
       :canonical_json_cache => {}
     }
-    Array(entities.to_a).map do |entity|
-      snapshot_entity_with_physical_tree(
+    rows = []
+    Array(entities.to_a).each_with_index do |entity, index|
+      # Large solid-text imports (hundreds of claim-root groups) retain deep
+      # temporary trees during compact snapshots. Periodic GC keeps SketchUp
+      # 2017 from exhausting the host process mid-walk.
+      if (index % 64) == 0
+        begin
+          GC.start
+        rescue StandardError
+        end
+      end
+      row = snapshot_entity_with_physical_tree(
         entity, [], compact, true, context
       ).first
-    end.compact
+      rows << row if row
+    end
+    rows
   rescue EvidenceError
     raise
   rescue StandardError => error
@@ -139,6 +161,60 @@ module SketchupHostEvidence
       raise EvidenceError, 'reopened persistent_id set mismatch'
     end
     verify_persistent_rows!(saved, reopened)
+  end
+
+  # SketchUp 2017 can normalize a compact solid-text geometry partition on
+  # its first save/load. Accept only that digest normalization: every
+  # persistent identity, bound, transform, source/content claim, style,
+  # parent/child relationship, entity count, and topology must remain exact.
+  # A second strict reopen check then proves the normalized bytes are stable.
+  def self.verify_host_heal_preservation!(source_manifest, healed_manifest)
+    source = persistent_rows(source_manifest)
+    healed = persistent_rows(healed_manifest)
+    if source.empty?
+      raise EvidenceError, 'source manifest has no persistent_id identities'
+    end
+    unless source.keys.sort == healed.keys.sort
+      raise EvidenceError, 'host heal persistent_id set mismatch'
+    end
+    source.each do |persistent_id, row|
+      other = healed[persistent_id]
+      unless hash_value(row, :valid) == true &&
+             hash_value(row, :deleted) == false &&
+             hash_value(other, :valid) == true &&
+             hash_value(other, :deleted) == false
+        raise EvidenceError,
+              "host heal entity is not live for persistent_id:#{persistent_id}"
+      end
+      {
+        :typename => 'typename',
+        :transformation => 'transformation',
+        :bounds => 'bounds',
+        :representation_evidence => 'representation identity',
+        :content_evidence => 'content evidence',
+        :style_evidence => 'style evidence'
+      }.each do |field, label|
+        unless evidence_payload_equal?(
+          hash_value(row, field), hash_value(other, field)
+        )
+          raise EvidenceError,
+                "host heal #{label} mismatch for persistent_id:#{persistent_id}"
+        end
+      end
+      unless direct_child_persistent_ids(row) ==
+             direct_child_persistent_ids(other)
+        raise EvidenceError,
+              "host heal child structure mismatch for persistent_id:#{persistent_id}"
+      end
+      unless host_heal_geometry_equivalent?(
+        hash_value(row, :geometry_evidence),
+        hash_value(other, :geometry_evidence)
+      )
+        raise EvidenceError,
+              "host heal geometry/topology mismatch for persistent_id:#{persistent_id}"
+      end
+    end
+    true
   end
 
   def self.verify_owned_reopen_continuity!(owned_manifest, reopened_manifest)
@@ -236,6 +312,26 @@ module SketchupHostEvidence
     values.sort
   end
   private_class_method :direct_child_persistent_ids
+
+  def self.host_heal_geometry_equivalent?(source, healed)
+    return true if evidence_payload_equal?(source, healed)
+    return false unless source.is_a?(Hash) && healed.is_a?(Hash)
+    schema = 'bcs.host_physical_partition/1.0'
+    return false unless hash_value(source, :schema).to_s == schema &&
+                        hash_value(healed, :schema).to_s == schema
+    source_sha = hash_value(source, :sha256).to_s.downcase
+    healed_sha = hash_value(healed, :sha256).to_s.downcase
+    return false unless source_sha =~ /\A[0-9a-f]{64}\z/ &&
+                        healed_sha =~ /\A[0-9a-f]{64}\z/
+    source_without_digest = source.dup
+    healed_without_digest = healed.dup
+    source_without_digest.delete('sha256')
+    source_without_digest.delete(:sha256)
+    healed_without_digest.delete('sha256')
+    healed_without_digest.delete(:sha256)
+    evidence_payload_equal?(source_without_digest, healed_without_digest)
+  end
+  private_class_method :host_heal_geometry_equivalent?
 
   def self.verify_delivery_evidence!(stats, manifest, requested_mode = nil,
                                      selected_pages = nil)

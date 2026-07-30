@@ -152,6 +152,21 @@ class CairoGlyphSourceTest < Minitest::Test
     refute_same first[0][:loops][0][0], second[0][:loops][0][0]
   end
 
+  def test_model_space_loops_can_skip_full_page_cache_for_single_use_render
+    svg = fixture_svg + "\n<!-- single-use-render-cache-regression -->"
+    cache = CGS.instance_variable_get(:@model_space_loops_cache) || {}
+    before = cache.length
+
+    placed = CGS.model_space_loops(
+      svg, FIXTURE_MEDIA_BOX, :cache_model_space_loops => false
+    )
+
+    refute_empty placed
+    cache = CGS.instance_variable_get(:@model_space_loops_cache) || {}
+    assert_equal before, cache.length,
+                 'single-use host rendering must not retain a duplicate full-page point graph'
+  end
+
   def test_known_value_coordinate_mapping_simple_use
     # Hand-checkable synthetic SVG: one square glyph (baseline-relative,
     # y negative-up), one placement at pen (72, 96) on a 612x396 page.
@@ -379,6 +394,32 @@ class CairoGlyphSourceTest < Minitest::Test
     assert_equal 'glyph_outline', entry[:created_entity_type]
     assert_equal 'cairo_svg', entry[:glyph_source]
     assert_equal [100.0, 100.0, 150.0, 110.0], entry[:source_bbox_pdf]
+  end
+
+  def test_match_spans_candidate_checks_scale_with_local_overlap
+    spans = []
+    pens = []
+    200.times do |index|
+      x0 = index * 20.0
+      spans << SpanItem.new(
+        'A', 'pdftotext', "text_span:1:#{index}",
+        x0, 0.0, x0 + 10.0, 10.0
+      )
+      pens << {
+        :x => x0 + 5.0, :y => 5.0, :placement_index => index,
+        :ink_bbox_pdf => [x0 + 2.0, 2.0, x0 + 8.0, 8.0]
+      }
+    end
+
+    match = CGS.match_spans(pens, spans, [0.0, 0.0, 4_000.0, 100.0])
+
+    assert_equal 200, match[:runs_matched]
+    assert_equal 0, match[:runs_unmatched]
+    assert_operator(
+      match.fetch(:candidate_pair_checks, spans.length * pens.length),
+      :<, 2_000,
+      'local glyph matching must not compare every placement with every span'
+    )
   end
 
   def test_match_spans_normalizes_internal_items_by_media_origin
@@ -727,6 +768,58 @@ class CairoGlyphSourceTest < Minitest::Test
     refute binding[:ok],
            'a matching bbox cannot certify a physically different contour'
     assert binding[:failures].any? { |failure| failure[:field] == :source_contours }
+  end
+
+  def test_loop_binding_reads_each_model_coordinate_once
+    svg = <<-SVG
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
+  <defs><g id="glyph-0-0"><path d="M 0 0 L 10 0 L 10 -10 L 0 -10 Z"/></g></defs>
+  <use xlink:href="#glyph-0-0" x="10" y="20"/>
+</svg>
+    SVG
+    counting_point = Class.new do
+      attr_reader :coordinate_reads
+
+      def initialize(point)
+        @x = point.x.to_f
+        @y = point.y.to_f
+        @z = point.z.to_f
+        @coordinate_reads = 0
+      end
+
+      def x
+        @coordinate_reads += 1
+        @x
+      end
+
+      def y
+        @coordinate_reads += 1
+        @y
+      end
+
+      def z
+        @z
+      end
+    end
+    placed = CGS.model_space_loops(
+      svg, [0, 0, 100, 100], :cache_model_space_loops => false
+    )
+    points = placed[0][:loops].flatten.map { |point| counting_point.new(point) }
+    offset = 0
+    placed[0][:loops] = placed[0][:loops].map do |loop_points|
+      replacement = points.slice(offset, loop_points.length)
+      offset += loop_points.length
+      replacement
+    end
+
+    binding = CGS.verify_model_loop_bindings(
+      svg, [0, 0, 100, 100], placed
+    )
+
+    assert binding[:ok], binding[:failures].inspect
+    assert_equal points.length * 2,
+                 points.inject(0) { |sum, point| sum + point.coordinate_reads },
+                 'bbox and contour verification must share one coordinate traversal'
   end
 
   def test_curved_contour_inventory_is_scale_invariant_and_source_bound

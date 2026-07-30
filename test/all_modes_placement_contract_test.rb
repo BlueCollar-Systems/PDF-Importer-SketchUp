@@ -134,6 +134,34 @@ class AllModesPlacementContractTest < Minitest::Test
                  rung[:transition_proof][:reason_code]
   end
 
+  # Native SketchUp annotations have no source-font size or run-width control.
+  # A horizontal PDF span requested as visually faithful Text must therefore
+  # advance before add_text; accepting an unmeasured screen label is the
+  # alignment/scale defect visible in the 1011 blueprint regression.
+  def test_text_mode_does_not_claim_unmeasured_horizontal_label_as_exact
+    b = make_mode_builder(use_3d: false)
+    item = identified_text_item(
+      'SHOP BOLTS', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil,
+      100.0, 198.0, 160.0, 210.0
+    )
+    ents = LabelModeEntities.new
+    attempt = b.send(:begin_text_attempt, item, :text)
+
+    refute b.send(
+      :place_annotation_label, ents, item, 0.0, 0.0, 'TextLayer',
+      :text, attempt
+    )
+
+    assert_empty ents.texts
+    rung = attempt[:attempt_history].fetch(0)
+    proof = rung[:transition_proof]
+    assert_equal :failed, rung[:outcome]
+    assert_equal :labels, proof[:from_mode]
+    assert_equal :text3d, proof[:to_mode]
+    assert_equal :host_representation_unsupported, proof[:reason_code]
+    assert_match(/width|size/i, proof[:evidence][:host_api_fact])
+  end
+
   # Geometry and Glyphs may share free SVG extraction, but every source item
   # owns a distinct physical structure: raw edges vs glyph groups.
   def test_geometry_and_glyphs_force_distinct_host_entity_structures

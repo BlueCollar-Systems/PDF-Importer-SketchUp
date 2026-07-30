@@ -1132,6 +1132,59 @@ module BlueCollarSystems
         }
       end
 
+      def host_unsupported_label_size_proof(item, display_angle, anchor)
+        source_id = RepresentationFidelity.source_span_id(item)
+        binding = RepresentationFidelity.proof_binding(source_id)
+        source_text = item.respond_to?(:text) ? item.text.to_s : ''
+        source_bbox = RepresentationFidelity.strict_source_bbox_pdf(item)
+        source_anchor = RepresentationFidelity.numeric_point(anchor)
+        expected_width = (source_bbox[2] - source_bbox[0]).abs *
+          PDF_POINT_TO_INCH * @scale.to_f
+        expected_height = (source_bbox[3] - source_bbox[1]).abs *
+          PDF_POINT_TO_INCH * @scale.to_f
+        rotation_radians = display_angle.to_f * Math::PI / 180.0
+        unless !source_text.empty? && source_anchor &&
+               expected_width.finite? && expected_width > 0.0 &&
+               expected_height.finite? && expected_height > 0.0 &&
+               rotation_radians.finite?
+          raise RepresentationFidelity::ContractError,
+                'native label size-impossibility evidence is unavailable'
+        end
+        {
+          :source_span_id => source_id,
+          :importer_id => binding[:importer_id],
+          :page_number => binding[:page_number],
+          :scope => :item,
+          :category => :exact_representation_impossible,
+          :affirmative_impossibility => true,
+          :generic_failure => false,
+          :from_mode => :labels,
+          :to_mode => :text3d,
+          :reason_code => :host_representation_unsupported,
+          :attempted_renderer => 'sketchup_native_text',
+          :created_entity_ids => [],
+          :cleaned_entity_ids => [],
+          :cleanup_outcome => :not_required,
+          :evidence => {
+            :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
+            :source_bbox_pdf => source_bbox,
+            :source_anchor => source_anchor,
+            :source_rotation_radians =>
+              RepresentationFidelity.canonical_number(rotation_radians),
+            :expected_width =>
+              RepresentationFidelity.canonical_number(expected_width),
+            :expected_height =>
+              RepresentationFidelity.canonical_number(expected_height),
+            :source_rotation_degrees => display_angle.to_f,
+            :host_entity_type => 'Sketchup::Text',
+            :host_api_fact =>
+              'Sketchup::Text exposes neither glyph-size nor source run-width control',
+            :verification =>
+              'native annotation width and height cannot be matched to the source PDF'
+          }
+        }
+      end
+
       def text_fit_tolerance(target_width, target_height)
         largest = [target_width.to_f.abs, target_height.to_f.abs, 1.0].max
         largest * 1.0e-5
@@ -1708,6 +1761,21 @@ module BlueCollarSystems
             'label_rotation_unsupported_by_host', proof
           )
         end
+        if normalize_text_mode_symbol(requested_mode) == :text
+          # The Text request promises source-aligned visual text. SketchUp's
+          # only flat text API creates screen annotations whose glyph size and
+          # run width cannot be controlled or verified. Do not create a label
+          # and then call its unmeasured result visually exact; advance the
+          # item-bound ladder to exact source-outline 3D Text.
+          proof = host_unsupported_label_size_proof(
+            item, display_angle, pt
+          )
+          rung[:transition_proof] = proof
+          return stop_requested_text_delivery!(
+            requested_mode, item, attempt, rung,
+            'label_source_size_unsupported_by_host', proof
+          )
+        end
         leader_vector = zero_label_leader_vector
         before = RepresentationFidelity.snapshot(entities)
         text = try_add_annotation_text(
@@ -2233,11 +2301,16 @@ module BlueCollarSystems
         t = text.to_s.strip
         raw_w = dimension_label_raw_width_pts(text, fs)
         return true if narrow_vertical_dimension_bbox?(bw, bh)
-        return true if (t =~ /\A\d{1,2}\z/) && bw < fs * 1.8
         return true if (t =~ /\A\d{1,2}\/\d{1,2}"?\z/) &&
                        bh >= bw * 0.85 && bw > raw_w * 1.04
-        return true if (t =~ /\A\d{2}\s+\d{1,2}\/\d{1,2}"?\z/) &&
-                       bh <= bw * 1.05 && bw > raw_w * 1.04
+        # Mixed numbers center only when the cell shape supports a dimension
+        # break. A one-digit whole number is common in ordinary horizontal
+        # annotations, so require its cell to remain tight to the rendered run.
+        mixed = /\A(\d+)\s+\d{1,2}\/\d{1,2}"?\z/.match(t)
+        if mixed && bh <= bw * 1.05 && bw > raw_w * 1.04
+          return true if mixed[1].length >= 2
+          return true if bw < raw_w * 1.35
+        end
         # Feet-inch horizontal dims: center when pdftotext bbox is wider than glyphs.
         if feet_inch_dimension_label?(t) && bh <= bw * 1.05
           est_w = [raw_w, bw * 0.95].min

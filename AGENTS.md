@@ -21,7 +21,7 @@ UI / code names from `ImportDialog::TEXT_MODE_CHOICES` / symbols `:text`, `:labe
 | **Geometry** | Page/source path geometry | Item Raster |
 | **Raster** | Verified item crop, or verified page image for a selected zero-canonical-text page | None; Raster is already terminal |
 
-The exact ladders are Text → Labels → 3D Text → Glyphs → Geometry → item Raster;
+The exact ladders are Text → 3D Text → Glyphs → Geometry → item Raster;
 Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry
 → item Raster; Glyphs → Geometry → item Raster; and Geometry → item Raster.
 Raster has no next rung. Terminal Raster can still fail verification; a failed

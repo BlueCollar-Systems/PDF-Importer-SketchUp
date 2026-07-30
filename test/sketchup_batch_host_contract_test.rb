@@ -123,6 +123,26 @@ class SketchupBatchHostContractTest < Minitest::Test
                     "'requested_text_mode' => requested_mode.to_s"
   end
 
+  def test_runner_defaults_source_root_to_repository_extension
+    load_runner_library
+    expected = File.expand_path(
+      File.join(REPO_ROOT, 'extracted', 'sketchup_ext')
+    )
+
+    assert_equal expected, SketchupBatchImport.plugin_root({})
+  end
+
+  def test_runner_accepts_explicit_installed_source_root
+    load_runner_library
+    Dir.mktmpdir('su-installed-source') do |dir|
+      configured = File.join(dir, 'Plugins')
+
+      assert_equal File.expand_path(configured), SketchupBatchImport.plugin_root(
+        'BC_SKETCHUP_IMPORTER_SOURCE_ROOT' => configured
+      )
+    end
+  end
+
   def test_full_page_raster_job_uses_raster_as_effective_evidence_mode
     load_runner_library
     session = SketchupBatchImport::RealHostSession.new
@@ -203,6 +223,9 @@ class SketchupBatchHostContractTest < Minitest::Test
                     'after_manifest, reopened_manifest'
     assert_includes source, "'post_import_evidence_snapshot_started'"
     assert_includes source, "'post_import_evidence_snapshot_completed'"
+    assert_includes source, "'stabilized_owned_entities'"
+    assert_includes source,
+                    'SketchupHostEvidence.verify_host_heal_preservation!'
     assert_includes source, "'reopen_evidence_snapshot_started'"
     assert_includes source, "'reopen_evidence_snapshot_completed'"
     assert_equal 4, source.scan(':compact => true').length,

@@ -390,7 +390,7 @@ module Sketchup
 end
 
 Svg3DSpan = Struct.new(:text, :font_name, :source_span_id,
-                       :bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1)
+                       :bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1, :angle)
 
 class SvgText3DRendererTest < Minitest::Test
   RENDERER = BlueCollarSystems::PDFVectorImporter::Svg3DTextRenderer
@@ -483,6 +483,32 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal 'text_span:1:0',
       delivered[:group].attributes[['BC_PDF_Importer', 'source_span_id']]
     assert_empty result[:transition_proofs]
+  end
+
+  def test_exact_svg_outline_orientation_is_not_overridden_by_semantic_hint
+    unless Geom::Transformation.respond_to?(:rotation)
+      Geom::Transformation.define_singleton_method(:rotation) do |_pivot, _axis, _radians|
+        new(1.0)
+      end
+    end
+    unless defined?(Geom::Vector3d)
+      Geom.const_set(:Vector3d, Class.new do
+        def initialize(*); end
+      end)
+    end
+    source = span
+    source.angle = -33.699810049
+    entities = Svg3DEntities.new
+
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, [source], :depth => 0.05
+    )
+
+    assert result[:ok], result[:failures].inspect
+    delivered = result[:span_results][0]
+    assert_empty delivered[:group].transform_calls
+    assert_empty delivered[:group].entities.transform_entity_calls,
+                 'the PDF renderer source outline already contains its orientation'
   end
 
   def test_partial_render_uses_authoritative_full_page_match_inventory
@@ -1139,4 +1165,5 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal [0], result[:unmatched_source_results][0][:placement_indices]
     assert result[:unmatched_source_results][0][:depth_verified]
   end
+
 end

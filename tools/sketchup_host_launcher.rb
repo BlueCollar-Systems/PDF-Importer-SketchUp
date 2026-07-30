@@ -283,7 +283,10 @@ module SketchupHostLauncher
       guard.suppress!
       guard_active = true
       verify_source_unchanged_before_spawn!(snapshot)
-      environment = controlled_environment(binding)
+      source_root = options[:source_root].to_s.strip
+      source_root = ENV['BC_SKETCHUP_IMPORTER_SOURCE_ROOT'].to_s.strip if
+        source_root.empty?
+      environment = controlled_environment(binding, source_root)
       runner = File.expand_path('sketchup_batch_import.rb', __dir__)
       command = [
         executable,
@@ -301,10 +304,15 @@ module SketchupHostLauncher
         if state[:state] == :exited
           process_done = true
           candidate = read_bound_final_result(job[:result_path], binding)
-          if state[:exit_code] != 0
+          abnormal_exit = state[:term_signal] ||
+            (!state[:exit_code].nil? && state[:exit_code] != 0)
+          if abnormal_exit
+            detail = state[:term_signal] ?
+              "signal #{state[:term_signal]}" :
+              "exit code #{state[:exit_code].inspect}"
             result = error_result(
               binding,
-              "SketchUp exited with exit code #{state[:exit_code].inspect}"
+              "SketchUp exited with #{detail}"
             )
           elsif candidate.nil?
             result = error_result(
@@ -436,12 +444,18 @@ module SketchupHostLauncher
     true
   end
 
-  def controlled_environment(binding)
-    {
+  def controlled_environment(binding, source_root = nil)
+    environment = {
       'BC_PDF_IMPORTER_BATCH_NONINTERACTIVE' => '1',
       'BC_HOST_JOB_ID' => binding['job_id'],
       'BC_HOST_JOB_SHA256' => binding['job_sha256']
     }
+    configured = source_root.to_s.strip
+    unless configured.empty?
+      environment['BC_SKETCHUP_IMPORTER_SOURCE_ROOT'] =
+        File.expand_path(configured)
+    end
+    environment
   end
 
   def verify_terminal_result!(result, job, binding)
@@ -607,16 +621,25 @@ module SketchupHostLauncher
                    'manifest reopen proof')
     require_equal!(result['reopen_persistent_id_verified'], true,
                    'result reopen proof')
+    require_equal!(result['host_heal_preservation_verified'], true,
+                   'result host-heal preservation proof')
     require_equal!(manifest['source_lineage'], terminal_lineage(result),
                    'manifest source lineage')
     owned = manifest['same_session_entities']
+    stabilized_owned = manifest['stabilized_owned_entities']
     post_import = manifest['post_import_entities']
     reopened = manifest['reopened_entities']
     if !owned.is_a?(Array) || owned.empty? ||
+       !stabilized_owned.is_a?(Array) || stabilized_owned.empty? ||
        !post_import.is_a?(Array) || post_import.empty? ||
        !reopened.is_a?(Array)
       raise LaunchError, 'manifest entity evidence is missing'
     end
+    require_equal!(manifest['host_heal_preservation_verified'], true,
+                   'manifest host-heal preservation proof')
+    SketchupHostEvidence.verify_host_heal_preservation!(
+      owned, stabilized_owned
+    )
     SketchupHostEvidence.verify_reopen_continuity!(post_import, reopened)
 
     evidence = result.dup

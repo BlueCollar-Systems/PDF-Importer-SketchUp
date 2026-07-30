@@ -51,4 +51,20 @@ class ExternalTextExtractorBBoxTest < Minitest::Test
     refute_nil merged
     assert_bbox [100.0, 200.0, 130.0, 212.0], merged
   end
+
+  def test_angle_mark_stitch_accepts_variable_numeric_fragment_widths
+    head = item('a1', 100.0, [100.0, 200.0, 114.0, 214.0])
+    middle = item('0', 107.0, [107.0, 195.0, 114.0, 209.0])
+    tail = item('20', 110.0, [110.0, 184.0, 124.0, 198.0])
+
+    result = EXTRACTOR.send(
+      :stitch_angle_mark_fragments, [head, middle, tail]
+    )
+    merged = result.find { |candidate| candidate.text == 'a1020' }
+
+    refute_nil merged
+    assert_equal ['a1020'], result.map(&:text)
+    assert_bbox [100.0, 184.0, 124.0, 214.0], merged
+    assert_in_delta(-58.0, merged.angle, 1.0)
+  end
 end

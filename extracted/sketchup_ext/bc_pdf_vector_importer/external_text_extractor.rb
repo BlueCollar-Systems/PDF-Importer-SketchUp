@@ -347,47 +347,55 @@ module BlueCollarSystems
         end
 
         # Diagonal angle-member marks in shop drawings can arrive as three bbox
-        # lines, e.g. "a1" + "00" + "5" on a descending brace. Rebuild into one
-        # rotated a-prefixed part-mark item (pattern: a + digits).
+        # lines with variable numeric splits, e.g. "a1" + "00" + "5" or
+        # "a1" + "0" + "20". Rebuild into one rotated a-prefixed part-mark
+        # item (pattern: a + four digits).
         def stitch_angle_mark_fragments(items)
           return items if items.length < 3
 
           used = Array.new(items.length, false)
           merged = []
           a1_indices = items.each_index.select { |idx| items[idx].text.to_s.strip =~ /\Aa1\z/i }
-          zero_indices = items.each_index.select { |idx| items[idx].text.to_s.strip == '00' }
-          digit_indices = items.each_index.select { |idx| items[idx].text.to_s.strip =~ /\A\d\z/ }
+          numeric_indices = items.each_index.select do |idx|
+            items[idx].text.to_s.strip =~ /\A\d{1,2}\z/
+          end
 
           a1_indices.each do |ai|
             next if used[ai]
             a1 = items[ai]
             best = nil
 
-            zero_indices.each do |zi|
-              next if used[zi] || zi == ai
-              z = items[zi]
-              next unless angle_mark_fragment_neighbor?(a1, z)
+            numeric_indices.each do |middle_idx|
+              next if used[middle_idx] || middle_idx == ai
+              middle = items[middle_idx]
+              next unless angle_mark_fragment_neighbor?(a1, middle)
 
-              digit_indices.each do |di|
-                next if used[di] || di == ai || di == zi
-                d = items[di]
-                next unless angle_mark_fragment_neighbor?(z, d)
-                next unless angle_mark_fragment_neighbor?(a1, d, 4.0)
+              numeric_indices.each do |tail_idx|
+                next if used[tail_idx] || tail_idx == ai || tail_idx == middle_idx
+                tail = items[tail_idx]
+                suffix = middle.text.to_s.strip + tail.text.to_s.strip
+                next unless suffix.length == 3
+                next unless angle_mark_fragment_neighbor?(middle, tail)
+                next unless angle_mark_fragment_neighbor?(a1, tail, 4.0)
 
-                angle = fragment_angle(a1, d)
+                angle = fragment_angle(a1, tail)
                 next if angle.abs < 15.0 || angle.abs > 75.0
-                score = fragment_distance(a1, z) + fragment_distance(z, d) +
-                        (fragment_collinearity(a1, z, d) * 10.0)
-                best = [score, zi, di, angle] if best.nil? || score < best[0]
+                score = fragment_distance(a1, middle) +
+                        fragment_distance(middle, tail) +
+                        (fragment_collinearity(a1, middle, tail) * 10.0)
+                candidate = [score, middle_idx, tail_idx, angle]
+                best = candidate if best.nil? || score < best[0]
               end
             end
 
             next unless best
-            _, zi, di, angle = best
-            merged << build_angle_mark_item(a1, items[zi], items[di], angle)
+            _, middle_idx, tail_idx, angle = best
+            merged << build_angle_mark_item(
+              a1, items[middle_idx], items[tail_idx], angle
+            )
             used[ai] = true
-            used[zi] = true
-            used[di] = true
+            used[middle_idx] = true
+            used[tail_idx] = true
           end
 
           out = []
@@ -458,8 +466,8 @@ module BlueCollarSystems
           Float::INFINITY
         end
 
-        def build_angle_mark_item(a1, zeros, digit, angle)
-          items = [a1, zeros, digit]
+        def build_angle_mark_item(a1, middle, tail, angle)
+          items = [a1, middle, tail]
           xs0 = items.map { |it| it.bbox_x0 || it.x }.map(&:to_f)
           ys0 = items.map { |it| it.bbox_y0 || it.y }.map(&:to_f)
           xs1 = items.map { |it| it.bbox_x1 || it.x }.map(&:to_f)
@@ -468,7 +476,7 @@ module BlueCollarSystems
           by0 = ys0.min
           bx1 = xs1.max
           by1 = ys1.max
-          merged_text = "#{a1.text.to_s.strip}#{zeros.text.to_s.strip}#{digit.text.to_s.strip}"
+          merged_text = items.map { |item| item.text.to_s.strip }.join
           TextParser::TextItem.new(
             merged_text,
             bx0,

@@ -5,6 +5,8 @@ require 'json'
 require 'digest'
 require 'fileutils'
 require 'zlib'
+require 'open3'
+require 'rbconfig'
 
 module Sketchup; end unless defined?(Sketchup)
 
@@ -84,6 +86,21 @@ class SketchupHostEvidenceTest < Minitest::Test
     def bounds
       @bounds_calls += 1
       @bounds
+    end
+  end
+
+  class CountingCanonicalHash < Hash
+    attr_reader :keys_calls
+
+    def initialize(values = {})
+      super()
+      update(values)
+      @keys_calls = 0
+    end
+
+    def keys
+      @keys_calls += 1
+      super
     end
   end
 
@@ -195,6 +212,33 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert File.file?(EVIDENCE_TOOL),
            'tools/sketchup_host_evidence.rb must exist'
     load EVIDENCE_TOOL unless defined?(SketchupHostEvidence)
+  end
+
+  def test_evidence_dependencies_follow_explicit_importer_source_root
+    Dir.mktmpdir('su-evidence-source') do |dir|
+      plugin_dir = File.join(dir, 'bc_pdf_vector_importer')
+      FileUtils.mkdir_p(plugin_dir)
+      %w[representation_fidelity.rb png_cropper.rb].each do |name|
+        FileUtils.cp(
+          File.join(
+            REPO_ROOT, 'extracted', 'sketchup_ext',
+            'bc_pdf_vector_importer', name
+          ),
+          File.join(plugin_dir, name)
+        )
+      end
+      script = [
+        "require #{EVIDENCE_TOOL.dump}",
+        'puts SketchupHostEvidence::IMPORTER_SOURCE_ROOT'
+      ].join(';')
+      stdout, stderr, status = Open3.capture3(
+        { 'BC_SKETCHUP_IMPORTER_SOURCE_ROOT' => dir },
+        RbConfig.ruby, '-e', script
+      )
+
+      assert status.success?, stderr
+      assert_equal File.expand_path(dir), stdout.strip
+    end
   end
 
   def with_texture_writer(writer)
@@ -491,6 +535,32 @@ class SketchupHostEvidenceTest < Minitest::Test
                  'only reusable definition child fragments belong in memory'
   end
 
+  def test_physical_evidence_cache_reuses_definition_topology_summary
+    definition_entities = CountingCollection.new([
+      FakeEntity.new(235, 'Face'),
+      FakeEntity.new(236, 'Edge')
+    ])
+    definition = FakeDefinition.new(definition_entities)
+    first = FakeComponent.new(237, [], :definition => definition)
+    second = FakeComponent.new(238, [], :definition => definition)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    cache = {}
+
+    fidelity.physical_evidence([first], cache, {})
+    entry = cache.fetch(definition.object_id)
+
+    assert entry[:topology_children_summary],
+           'shared definitions must cache their immutable topology aggregate'
+    entry[:trees].each do |tree|
+      tree[:topology].define_singleton_method(:[]) do |_key|
+        raise 'cached definition topology was traversed again'
+      end
+    end
+
+    cached = fidelity.physical_evidence([second], cache, {})
+    assert_equal fidelity.physical_evidence([second]), cached
+  end
+
   def test_cached_canonical_json_is_byte_identical_to_contract_encoding
     shared = {
       :zeta => [1.2345678914, :symbol, nil],
@@ -510,6 +580,71 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_equal fidelity.canonical_sha256(value),
                  Digest::SHA256.hexdigest(actual)
     assert_operator cache.length, :>=, 3
+  end
+
+  def test_physical_evidence_serializes_each_root_payload_once
+    geometry = CountingCanonicalHash.new(
+      :type => 'Group',
+      :children => [{ :type => 'Face', :children => [] }]
+    )
+    style = CountingCanonicalHash.new(
+      :type => 'Group',
+      :children => [{ :type => 'Face', :children => [] }]
+    )
+    tree = {
+      :geometry_payload => geometry,
+      :style_payload => style,
+      :physical_entity_count => 2
+    }
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+
+    evidence = fidelity.physical_evidence_from_trees([tree], {})
+
+    assert_match(/\A[0-9a-f]{64}\z/, evidence[:physical_geometry_sha256])
+    assert_match(/\A[0-9a-f]{64}\z/, evidence[:physical_style_sha256])
+    assert_equal 1, geometry.keys_calls,
+                 'geometry must not be serialized once for sorting and again for hashing'
+    assert_equal 1, style.keys_calls,
+                 'style must not be serialized once for sorting and again for hashing'
+  end
+
+  def test_definition_capture_reuses_canonical_child_fragments
+    children = 24.times.map do |index|
+      FakeEntity.new(500 + index, 'Edge')
+    end
+    definition = FakeDefinition.new(children)
+    component = FakeComponent.new(
+      600, [], :definition => definition,
+      :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
+                          0, 0, 1, 0, 10, 20, 0, 1]
+    )
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    singleton = class << fidelity; self; end
+    canonical_value_calls = 0
+    singleton.class_eval do
+      alias_method :canonical_value_before_fragment_count,
+                   :canonical_value
+    end
+    singleton.send(:define_method, :canonical_value) do |value|
+      canonical_value_calls += 1
+      canonical_value_before_fragment_count(value)
+    end
+
+    fidelity.physical_evidence([component], {}, {})
+
+    assert_equal 0, canonical_value_calls,
+                 'cached definition capture must never re-canonicalize a ' \
+                 'complete child payload graph'
+  ensure
+    if singleton
+      singleton.class_eval do
+        if method_defined?(:canonical_value_before_fragment_count)
+          alias_method :canonical_value,
+                       :canonical_value_before_fragment_count
+          remove_method :canonical_value_before_fragment_count
+        end
+      end
+    end
   end
 
   def test_import_cache_reuses_identical_component_instance_style
@@ -853,6 +988,26 @@ class SketchupHostEvidenceTest < Minitest::Test
     ])
 
     assert SketchupHostEvidence.verify_reopen_continuity!(before, reopened)
+  end
+
+  def test_host_heal_preservation_accepts_stable_compact_topology_normalization
+    before = compact_heal_manifest('a' * 64)
+    healed = Marshal.load(Marshal.dump(before))
+    healed[0]['entity_id'] = 90
+    healed[0]['geometry_evidence']['sha256'] = 'b' * 64
+
+    assert SketchupHostEvidence.verify_host_heal_preservation!(before, healed)
+  end
+
+  def test_host_heal_preservation_rejects_visual_or_structural_drift
+    before = compact_heal_manifest('a' * 64)
+    healed = Marshal.load(Marshal.dump(before))
+    healed[0]['bounds']['max'][0] = 2.0
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_host_heal_preservation!(before, healed)
+    end
+    assert_match(/bounds/i, error.message)
   end
 
   def test_reopen_continuity_rejects_changed_transform_for_same_persistent_id
@@ -1433,9 +1588,9 @@ class SketchupHostEvidenceTest < Minitest::Test
   end
 
   def test_requested_text_rebinds_capability_proof_and_global_ledger_to_source
-    stats = strict_flat_text_to_label_stats
+    stats = strict_flat_text_to_text3d_stats
     assert SketchupHostEvidence.verify_delivery_evidence!(
-      stats, label_manifest, :text, [1]
+      stats, text3d_manifest, :text, [1]
     )
 
     source_mismatch = Marshal.load(Marshal.dump(stats))
@@ -1450,7 +1605,7 @@ class SketchupHostEvidenceTest < Minitest::Test
     source_mismatch[:fallback_transitions] = [Marshal.load(Marshal.dump(local))]
     error = assert_raises(StandardError) do
       SketchupHostEvidence.verify_delivery_evidence!(
-        source_mismatch, label_manifest, :text, [1]
+        source_mismatch, text3d_manifest, :text, [1]
       )
     end
     assert_match(/source|Text|capability|transition/i, error.message)
@@ -1463,7 +1618,7 @@ class SketchupHostEvidenceTest < Minitest::Test
     global[:evidence][:evidence_sha256] = fidelity.canonical_sha256(unsigned)
     error = assert_raises(StandardError) do
       SketchupHostEvidence.verify_delivery_evidence!(
-        ledger_mismatch, label_manifest, :text, [1]
+        ledger_mismatch, text3d_manifest, :text, [1]
       )
     end
     assert_match(/ledger|transition|source/i, error.message)
@@ -1896,6 +2051,42 @@ class SketchupHostEvidenceTest < Minitest::Test
 
   private
 
+  def compact_heal_manifest(geometry_sha)
+    [{
+      'entity_id' => 13, 'persistent_id' => 7013,
+      'typename' => 'Group', 'valid' => true, 'deleted' => false,
+      'bounds' => {
+        'min' => [0.0, 0.0, 0.0], 'max' => [1.0, 1.0, 0.1]
+      },
+      'transformation' => (0..15).map(&:to_f),
+      'representation_evidence' => {
+        'source_span_id' => 'text_span:1:0',
+        'representation' => 'text3d'
+      },
+      'content_evidence' => nil,
+      'geometry_evidence' => {
+        'schema' => 'bcs.host_physical_partition/1.0',
+        'sha256' => geometry_sha,
+        'physical_entity_count' => 3,
+        'topology' => {
+          'root_type' => 'Group',
+          'direct_child_types' => ['ComponentInstance'],
+          'descendant_type_counts' => {
+            'ComponentInstance' => 1, 'Face' => 1
+          },
+          'descendant_entity_count' => 2,
+          'live_entity_count' => 3
+        }
+      },
+      'style_evidence' => {
+        'schema' => 'bcs.host_physical_partition/1.0',
+        'sha256' => 'c' * 64,
+        'physical_entity_count' => 3
+      },
+      'children' => []
+    }]
+  end
+
   def compact_fixture(mode)
     rows = case mode
            when :text3d then text3d_manifest
@@ -2187,13 +2378,13 @@ class SketchupHostEvidenceTest < Minitest::Test
     )
   end
 
-  def strict_flat_text_to_label_stats
+  def strict_flat_text_to_text3d_stats
     source_id = 'text_span:1:0'
     source_text = 'A'
     source_bbox = [0.0, 0.0, 72.0, 72.0]
     proof = flat_text_capability_proof(source_id, source_text, source_bbox)
-    expected = fixture_expected_evidence(:labels, source_id, source_text)
-    flags = fixture_mode_flags(:labels)
+    expected = fixture_expected_evidence(:text3d, source_id, source_text)
+    flags = fixture_mode_flags(:text3d)
     ready_stats(
       :requested_text_mode => :text,
       :text_source_span_ids => [source_id],
@@ -2201,7 +2392,7 @@ class SketchupHostEvidenceTest < Minitest::Test
         :source_span_id => source_id, :page => 1,
         :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
         :source_bbox_pdf => source_bbox,
-        :requested_mode => :text, :delivered_mode => :labels,
+        :requested_mode => :text, :delivered_mode => :text3d,
         :resulting_entity_ids => ['entity_id:13'],
         :expected_evidence => expected,
         :attempt_history => [{
@@ -2210,7 +2401,7 @@ class SketchupHostEvidenceTest < Minitest::Test
           :cleaned_entity_ids => [], :cleanup_outcome => :not_required,
           :transition_proof => proof
         }, {
-          :mode => :labels, :outcome => :complete,
+          :mode => :text3d, :outcome => :complete,
           :resulting_entity_ids => ['entity_id:13'],
           :expected_evidence => expected,
           :cleanup_outcome => :not_required
@@ -2219,7 +2410,8 @@ class SketchupHostEvidenceTest < Minitest::Test
       :source_provenance_objects => [{
         :span_id => source_id, :page => 1,
         :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
-        :created_entity_type => 'native_label',
+        :created_entity_type => 'source_glyph_3d_text',
+        :renderer => 'svg_source_3d_text',
         :resulting_entity_ids => ['entity_id:13']
       }],
       :fallback_transitions => [Marshal.load(Marshal.dump(proof))]
@@ -2253,7 +2445,7 @@ class SketchupHostEvidenceTest < Minitest::Test
       :page_number => 1, :requested_mode => :text, :scope => :item,
       :category => :exact_representation_impossible,
       :affirmative_impossibility => true, :generic_failure => false,
-      :from_mode => :text, :to_mode => :labels,
+      :from_mode => :text, :to_mode => :text3d,
       :reason_code => :host_representation_unsupported,
       :attempted_renderer =>
         'sketchup_flat_editable_text_capability_observation',

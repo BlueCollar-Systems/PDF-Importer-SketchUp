@@ -170,11 +170,25 @@ class SketchupHostLauncherTest < Minitest::Test
         end
         assert File.file?(paid_plugin), 'normal paid plugin must remain untouched'
         assert_equal '1', environment['BC_PDF_IMPORTER_BATCH_NONINTERACTIVE']
+        refute environment.key?('BC_SKETCHUP_IMPORTER_SOURCE_ROOT')
         assert_equal 1, backend.spawned_command.count { |arg| arg == '-RubyStartupArg' }
         refute_equal job_path, backend.spawned_command.last
         refute_includes backend.spawned_command, paid_plugin
       end
     end
+  end
+
+  def test_launcher_forwards_explicit_importer_source_root
+    environment = SketchupHostLauncher.send(
+      :controlled_environment,
+      { 'job_id' => 'job-123', 'job_sha256' => 'a' * 64 },
+      'C:/installed/SketchUp/Plugins'
+    )
+
+    assert_equal(
+      File.expand_path('C:/installed/SketchUp/Plugins'),
+      environment['BC_SKETCHUP_IMPORTER_SOURCE_ROOT']
+    )
   end
 
   def test_timeout_restores_preference_writes_error_and_kills_only_child
@@ -229,6 +243,23 @@ class SketchupHostLauncherTest < Minitest::Test
 
       assert_equal 'ERROR', result['status']
       assert_match(/exit code 23/, result['error'])
+      assert_equal [:suppress, :restore], guard.calls
+    end
+  end
+
+  def test_nil_gui_exit_code_accepts_complete_verified_terminal_evidence
+    Dir.mktmpdir('su-launch') do |dir|
+      job_path, result_path, _pdf = write_job(dir)
+      guard = FakePluginStateGuard.new
+      backend = FakeBackend.new([
+        { :state => :exited, :exit_code => nil }
+      ]) do |process|
+        write_complete_result(process, result_path)
+      end
+
+      result = run_launcher(job_path, backend, guard)
+
+      assert_equal 'OK', result['status']
       assert_equal [:suppress, :restore], guard.calls
     end
   end
@@ -494,6 +525,9 @@ class SketchupHostLauncherTest < Minitest::Test
       same_session_entities
     )
     post_import_entities = Marshal.load(Marshal.dump(same_session_entities))
+    stabilized_owned_entities = Marshal.load(
+      Marshal.dump(same_session_entities)
+    )
     reopened_entities = Marshal.load(Marshal.dump(same_session_entities))
     reopened_entities[0]['entity_id'] = 91
     manifest = binding.merge(
@@ -503,8 +537,10 @@ class SketchupHostLauncherTest < Minitest::Test
       'source_lineage' => lineage,
       'import_session_id' => 'session-1',
       'same_session_entities' => same_session_entities,
+      'stabilized_owned_entities' => stabilized_owned_entities,
       'post_import_entities' => post_import_entities,
       'reopened_entities' => reopened_entities,
+      'host_heal_preservation_verified' => true,
       'reopen_persistent_id_verified' => true
     )
     SketchupHostLauncher.atomic_write_json(manifest_path, manifest)
@@ -542,6 +578,7 @@ class SketchupHostLauncherTest < Minitest::Test
       'import_report_sha256' => Digest::SHA256.file(report_path).hexdigest,
       'entity_manifest_path' => manifest_path,
       'entity_manifest_sha256' => Digest::SHA256.file(manifest_path).hexdigest,
+      'host_heal_preservation_verified' => true,
       'reopen_persistent_id_verified' => true,
       'text_source_span_ids' => ['text_span:1:0'],
       'text_attempts' => [{

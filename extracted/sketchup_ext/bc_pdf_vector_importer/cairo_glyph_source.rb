@@ -65,6 +65,8 @@ module BlueCollarSystems
       # within 0.39 pt of the declared span xMin; 2 pt absorbs baseline vs
       # box-bottom semantics without crossing to neighbouring spans.
       SPAN_MATCH_TOLERANCE_PT = 2.0
+      SPAN_MATCH_GRID_CELL_PT = 32.0
+      MAX_SPAN_GRID_CELLS = 4_096
 
       # ------------------------------------------------------------------
       # Per-import decision
@@ -338,7 +340,8 @@ module BlueCollarSystems
           unmatched_source_runs: [], unmatched_placements: [],
           coverage_failures: [], source_ink_matches: [],
           runs_matched: 0, runs_unmatched: 0,
-          placements_unmatched: 0
+          placements_unmatched: 0,
+          candidate_pair_checks: 0
         }
         pens = Array(placements_pdf)
         base_x = media_box.is_a?(Array) && media_box.length >= 2 ?
@@ -368,6 +371,7 @@ module BlueCollarSystems
           }
         end
 
+        spatial_index = build_span_spatial_index(rows)
         pen_records = []
         pens.each_with_index do |pen, enumerated_index|
           begin
@@ -379,12 +383,18 @@ module BlueCollarSystems
             px = pen[:x].to_f
             py = pen[:y].to_f
             ink_bbox = source_ink_bbox(pen)
-            pen_records << {
+            pen_record = {
               :pen_index => enumerated_index,
               :placement_index => placement_index,
-              :placement => pen, :ink_bbox => ink_bbox
+              :placement => pen, :ink_bbox => ink_bbox,
+              :row_candidates => []
             }
-            rows.each do |row|
+            pen_records << pen_record
+            candidate_rows = span_spatial_candidate_rows(
+              spatial_index, px, py, ink_bbox
+            )
+            result[:candidate_pair_checks] += candidate_rows.length
+            candidate_rows.each do |row|
               pen_inside = px >= row[:x0] && px <= row[:x1] &&
                 py >= row[:y0] && py <= row[:y1]
               ink_inside = ink_bbox.is_a?(Array) &&
@@ -398,7 +408,7 @@ module BlueCollarSystems
               height = [row[:y1] - row[:y0], 1.0].max
               dx = (px - ((row[:x0] + row[:x1]) * 0.5)) / width
               dy = (py - ((row[:y0] + row[:y1]) * 0.5)) / height
-              row[:candidates] << {
+              candidate = {
                 :pen_index => enumerated_index,
                 :placement_index => placement_index,
                 :ink_bbox => ink_bbox,
@@ -409,6 +419,8 @@ module BlueCollarSystems
                   :item => row[:item], :placement => pen
                 }
               }
+              row[:candidates] << candidate
+              pen_record[:row_candidates] << [row, candidate]
             end
           rescue StandardError
             pen_records << {
@@ -564,6 +576,93 @@ module BlueCollarSystems
         result
       end
 
+      # Exact spatial preselection for glyph/span matching. Rows are indexed by
+      # their tolerance-expanded source boxes. A placement queries both its pen
+      # point and physical ink box, then the existing exact predicates remain
+      # authoritative. Oversized or malformed ranges deliberately fall back to
+      # the full row inventory so indexing can never hide a valid association.
+      def self.build_span_spatial_index(rows)
+        index = {
+          :cell_size => SPAN_MATCH_GRID_CELL_PT,
+          :buckets => Hash.new { |hash, key| hash[key] = [] },
+          :overflow_rows => [],
+          :all_rows => Array(rows)
+        }
+        Array(rows).each do |row|
+          cells = span_grid_cells_for_box(
+            [row[:x0], row[:y0], row[:x1], row[:y1]],
+            index[:cell_size]
+          )
+          if cells.nil?
+            index[:overflow_rows] << row
+          else
+            cells.each { |cell| index[:buckets][cell] << row }
+          end
+        end
+        index
+      end
+
+      def self.span_spatial_candidate_rows(index, px, py, ink_bbox)
+        return Array(index[:all_rows]) unless index.is_a?(Hash)
+
+        ranges = [[px, py, px, py]]
+        ranges << ink_bbox if ink_bbox.is_a?(Array) && ink_bbox.length >= 4
+        seen = {}
+        candidates = []
+        ranges.each do |box|
+          cells = span_grid_cells_for_box(box, index[:cell_size])
+          return Array(index[:all_rows]) if cells.nil?
+          cells.each do |cell|
+            Array(index[:buckets][cell]).each do |row|
+              row_id = row[:index]
+              next if seen[row_id]
+              seen[row_id] = true
+              candidates << row
+            end
+          end
+        end
+        Array(index[:overflow_rows]).each do |row|
+          row_id = row[:index]
+          next if seen[row_id]
+          seen[row_id] = true
+          candidates << row
+        end
+        candidates.sort_by { |row| row[:index] }
+      rescue StandardError
+        Array(index[:all_rows])
+      end
+
+      def self.span_grid_cells_for_box(box, cell_size)
+        values = Array(box)[0, 4].map { |value| value.to_f }
+        return nil unless values.length == 4
+        return nil unless values.all? do |value|
+          !value.respond_to?(:finite?) || value.finite?
+        end
+        size = cell_size.to_f
+        return nil unless size > 0.0
+
+        x0, x1 = [values[0], values[2]].minmax
+        y0, y1 = [values[1], values[3]].minmax
+        cell_x0 = (x0 / size).floor
+        cell_x1 = (x1 / size).floor
+        cell_y0 = (y0 / size).floor
+        cell_y1 = (y1 / size).floor
+        width = cell_x1 - cell_x0 + 1
+        height = cell_y1 - cell_y0 + 1
+        return nil if width <= 0 || height <= 0
+        return nil if width * height > MAX_SPAN_GRID_CELLS
+
+        cells = []
+        (cell_x0..cell_x1).each do |cell_x|
+          (cell_y0..cell_y1).each do |cell_y|
+            cells << [cell_x, cell_y]
+          end
+        end
+        cells
+      rescue StandardError
+        nil
+      end
+
       # Allocate real SVG ink by its physical overlap with extractor rows.
       # This is deliberately separate from the legacy character-capacity
       # matcher: Unicode scalar count is not a glyph count after shaping
@@ -577,11 +676,15 @@ module BlueCollarSystems
           ink_bbox = record[:ink_bbox]
           next unless ink_bbox.is_a?(Array)
           contenders = []
-          rows.each do |row|
+          row_candidates = record[:row_candidates]
+          row_candidates = rows.map do |row|
             candidate = row[:candidates].find do |entry|
               entry[:pen_index] == record[:pen_index]
             end
-            next unless candidate
+            candidate ? [row, candidate] : nil
+          end.compact unless row_candidates.is_a?(Array)
+          row_candidates.each do |pair|
+            row, candidate = pair
             overlap = source_ink_overlap_ratio(ink_bbox, row)
             next unless overlap > 0.0
             center_distance = source_ink_center_distance(ink_bbox, row)
@@ -1307,13 +1410,17 @@ module BlueCollarSystems
         svg_page_box = opts[:svg_page_box] || media_box
         scale = (opts[:scale] || 1.0).to_f
         y_offset = (opts[:y_offset] || 0.0).to_f
-        cache_key = [
-          svg.respond_to?(:length) ? Digest::MD5.hexdigest(svg) : svg.object_id,
-          scale, y_offset, svg_page_box, media_box
-        ]
-        @model_space_loops_cache ||= {}
-        cached = @model_space_loops_cache[cache_key]
-        return copy_model_space_loop_value(cached) if cached
+        cache_enabled = opts[:cache_model_space_loops] != false
+        cache_key = nil
+        if cache_enabled
+          cache_key = [
+            svg.respond_to?(:length) ? Digest::MD5.hexdigest(svg) : svg.object_id,
+            scale, y_offset, svg_page_box, media_box
+          ]
+          @model_space_loops_cache ||= {}
+          cached = @model_space_loops_cache[cache_key]
+          return copy_model_space_loop_value(cached) if cached
+        end
 
         media_min_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
         media_min_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
@@ -1431,8 +1538,12 @@ module BlueCollarSystems
             loops: loops
           }
         end
-        @model_space_loops_cache[cache_key] = out
-        copy_model_space_loop_value(out)
+        if cache_enabled
+          @model_space_loops_cache[cache_key] = out
+          copy_model_space_loop_value(out)
+        else
+          out
+        end
       end
 
       # Cached outline entries are canonical source evidence. Renderers hand
@@ -1498,7 +1609,10 @@ module BlueCollarSystems
             }
             next
           end
-          actual_bbox = model_loop_bbox_pdf(model, unit, y_offset)
+          inspection = inspect_model_loop_binding(
+            source[:ink_loops_pdf], model, unit, y_offset
+          )
+          actual_bbox = inspection[:bbox]
           compare_loop_binding_values(
             failures, placement_index, :pen,
             [source[:x], source[:y]], model[:pen_pdf]
@@ -1511,10 +1625,15 @@ module BlueCollarSystems
             failures, placement_index, :reported_model_ink_bbox,
             model[:ink_bbox_pdf], actual_bbox
           )
-          compare_loop_binding_contours(
-            failures, placement_index, source[:ink_loops_pdf],
-            model_loop_points_pdf(model, unit, y_offset)
-          )
+          unless inspection[:contours_valid]
+            failures << {
+              :reason => :physical_loop_contour_mismatch,
+              :placement_index => placement_index,
+              :field => :source_contours,
+              :expected_loop_lengths => inspection[:expected_loop_lengths],
+              :actual_loop_lengths => inspection[:actual_loop_lengths]
+            }
+          end
         end if unit.finite? && unit != 0.0
 
         {
@@ -1552,57 +1671,47 @@ module BlueCollarSystems
         mapped
       end
 
-      def self.model_loop_bbox_pdf(entry, unit, y_offset)
-        points = Array(entry[:loops]).flatten
-        raise 'model placement has no physical loop points' if points.empty?
-        xs = points.map { |point| point.x.to_f / unit }
-        ys = points.map { |point| (point.y.to_f - y_offset) / unit }
-        values = [xs.min, ys.min, xs.max, ys.max]
-        raise 'model loop bbox is nonfinite' unless values.all?(&:finite?)
-        values
-      end
-
-      def self.model_loop_points_pdf(entry, unit, y_offset)
-        Array(entry[:loops]).map do |loop_points|
-          Array(loop_points).map do |point|
-            [
-              point.x.to_f / unit,
-              (point.y.to_f - y_offset) / unit
-            ]
-          end
-        end
-      end
-
-      def self.compare_loop_binding_contours(failures, placement_index,
-                                             expected, actual)
+      def self.inspect_model_loop_binding(expected, entry, unit, y_offset)
         expected_loops = Array(expected)
-        actual_loops = Array(actual)
+        actual_loops = Array(entry[:loops])
         valid = !expected_loops.empty? &&
           expected_loops.length == actual_loops.length
-        if valid
-          valid = expected_loops.each_with_index.all? do |loop_points, loop_index|
-            expected_points = Array(loop_points)
-            actual_points = Array(actual_loops[loop_index])
-            expected_points.length == actual_points.length &&
-              !expected_points.empty? &&
-              expected_points.each_with_index.all? do |point, point_index|
-                expected_pair = Array(point).first(2).map { |value| value.to_f }
-                actual_pair = Array(actual_points[point_index]).first(2).map do |value|
-                  value.to_f
-                end
-                expected_pair.length == 2 && actual_pair.length == 2 &&
-                  expected_pair.all?(&:finite?) && actual_pair.all?(&:finite?) &&
-                  expected_pair.each_with_index.all? do |value, coordinate|
-                    (value - actual_pair[coordinate]).abs <= 1.0e-7
-                  end
-              end
+        min_x = nil
+        min_y = nil
+        max_x = nil
+        max_y = nil
+        actual_loops.each_with_index do |actual_points, loop_index|
+          model_points = Array(actual_points)
+          expected_points = Array(expected_loops[loop_index])
+          valid = false if model_points.empty? ||
+                           model_points.length != expected_points.length
+          model_points.each_with_index do |point, point_index|
+            x = point.x.to_f / unit
+            y = (point.y.to_f - y_offset) / unit
+            unless x.finite? && y.finite?
+              valid = false
+              next
+            end
+            min_x = x if min_x.nil? || x < min_x
+            max_x = x if max_x.nil? || x > max_x
+            min_y = y if min_y.nil? || y < min_y
+            max_y = y if max_y.nil? || y > max_y
+            expected_pair = Array(expected_points[point_index])
+            if expected_pair.length < 2
+              valid = false
+              next
+            end
+            expected_x = expected_pair[0].to_f
+            expected_y = expected_pair[1].to_f
+            valid = false unless expected_x.finite? && expected_y.finite? &&
+                                 (expected_x - x).abs <= 1.0e-7 &&
+                                 (expected_y - y).abs <= 1.0e-7
           end
         end
-        return if valid
-        failures << {
-          :reason => :physical_loop_contour_mismatch,
-          :placement_index => placement_index,
-          :field => :source_contours,
+        raise 'model placement has no physical loop points' if min_x.nil?
+        {
+          :bbox => [min_x, min_y, max_x, max_y],
+          :contours_valid => valid,
           :expected_loop_lengths => expected_loops.map { |loop_points| Array(loop_points).length },
           :actual_loop_lengths => actual_loops.map { |loop_points| Array(loop_points).length }
         }

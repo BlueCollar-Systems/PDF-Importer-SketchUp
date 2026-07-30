@@ -227,6 +227,16 @@ diag_ang = builder.send(:label_angle_pdf, diag_dim)
 assert_true((diag_ang - 33.0).abs < 0.01,
             "diagonal dimension keeps PDF angle (got #{diag_ang})")
 
+# A wide-short AABB is the normal shape of horizontal dimensions and BOM
+# values. It is not evidence of a 90° text matrix.
+wide_short = make_item('3', 100.0, 200.0, 118.0, 206.0, angle: 0.0, font_size: 8.0)
+assert_true(builder.send(:label_angle_pdf, wide_short).abs < 0.01,
+            'wide-short horizontal dimension stays horizontal without a source angle')
+wide_feet = make_item("5'-11 1/16\"", 100.0, 200.0, 146.0, 209.0,
+                      angle: 0.0, font_size: 8.0)
+assert_true(builder.send(:label_angle_pdf, wide_feet).abs < 0.01,
+            'wide feet-inch dimension stays horizontal without a source angle')
+
 if $failures.empty?
   puts "PASS: #{$pass_count} category placement assertions"
   exit 0

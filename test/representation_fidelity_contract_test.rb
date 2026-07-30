@@ -507,7 +507,7 @@ class RepresentationFidelityContractTest < Minitest::Test
     end
   end
 
-  def test_flat_text_capability_rung_is_bound_before_label_delivery
+  def test_flat_text_capability_rung_is_bound_before_text3d_delivery
     source = item('EDITABLE', 0.0, 24.0, 10.0)
     prepared = IMP.prepare_flat_text_fallback_controllers!([source])
     row = prepared.fetch(source.source_span_id)
@@ -517,22 +517,43 @@ class RepresentationFidelityContractTest < Minitest::Test
       source_bbox_pdf: [source.bbox_x0, source.bbox_y0,
                         source.bbox_x1, source.bbox_y1],
       requested_mode: :text,
-      delivered_mode: :labels,
+      delivered_mode: :text3d,
       attempt_history: [{
-        mode: :labels, outcome: :complete,
+        mode: :text3d, outcome: :complete,
         resulting_entity_ids: ['persistent_id:501']
       }]
     }
 
     IMP.bind_flat_text_capability_attempt!(attempt, row[:proof])
 
-    assert_equal [:text, :labels],
+    assert_equal [:text, :text3d],
                  attempt[:attempt_history].map { |entry| entry[:mode] }
     text_rung = attempt[:attempt_history].first
     assert_equal :failed, text_rung[:outcome]
     assert_equal row[:proof], text_rung[:transition_proof]
-    assert_equal :labels, row[:controller].current_mode
+    assert_equal :text3d, row[:controller].current_mode
     assert_equal :text, attempt[:requested_mode]
+  end
+
+  def test_direct_flat_text_3d_attempt_records_one_bound_transition
+    source = item('DIRECT', 0.0, 24.0, 10.0)
+    prepared = IMP.prepare_flat_text_fallback_controllers!([source])
+    stats = {}
+
+    attempts = IMP.direct_flat_text_3d_attempts!(
+      stats, 1, [source], prepared
+    )
+
+    attempt = attempts.fetch(source.source_span_id)
+    assert_equal :text, attempt[:requested_mode]
+    assert_equal [:text],
+                 attempt[:attempt_history].map { |entry| entry[:mode] }
+    assert_equal :text3d,
+                 prepared.fetch(source.source_span_id).
+                   fetch(:controller).current_mode
+    assert_equal 1, stats.fetch(:fallback_transitions).length
+    assert_equal :text3d,
+                 stats.fetch(:fallback_transitions).first[:to_mode]
   end
 
   def test_flat_text_capability_attempt_rejects_source_sha_mismatch
@@ -544,7 +565,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       source_text_sha256: 'f' * 64,
       source_bbox_pdf: [source.bbox_x0, source.bbox_y0,
                         source.bbox_x1, source.bbox_y1],
-      requested_mode: :text, delivered_mode: :labels,
+      requested_mode: :text, delivered_mode: :text3d,
       attempt_history: []
     }
 
@@ -559,11 +580,11 @@ class RepresentationFidelityContractTest < Minitest::Test
       fetch(source.source_span_id).fetch(:proof)
     flags = {
       visual_fidelity_verified: true, placement_verified: true,
-      rotation_verified: true, content_verified: true,
-      entity_type_verified: true, leader_verified: true
+      rotation_verified: true, width_verified: true,
+      height_verified: true, entity_type_verified: true
     }
     complete = {
-      mode: :labels, outcome: :complete,
+      mode: :text3d, outcome: :complete,
       resulting_entity_ids: ['persistent_id:601'],
       cleanup_outcome: :not_required
     }.merge(flags)
@@ -573,7 +594,8 @@ class RepresentationFidelityContractTest < Minitest::Test
       text_source_span_ids: [source.source_span_id],
       source_provenance_objects: [{
         object_id: 'text_delivery:1:0', page: 1, source_kind: 'text_span',
-        span_id: source.source_span_id, created_entity_type: 'native_label',
+        span_id: source.source_span_id,
+        created_entity_type: 'source_glyph_3d_text',
         resulting_entity_ids: ['persistent_id:601']
       }],
       text_attempts: [{
@@ -581,7 +603,7 @@ class RepresentationFidelityContractTest < Minitest::Test
         source_text_sha256: Digest::SHA256.hexdigest(source.text),
         source_bbox_pdf: [source.bbox_x0, source.bbox_y0,
                           source.bbox_x1, source.bbox_y1],
-        requested_mode: :text, delivered_mode: :labels,
+        requested_mode: :text, delivered_mode: :text3d,
         resulting_entity_ids: ['persistent_id:601'],
         attempt_history: [failed, complete]
       }.merge(flags)],
@@ -618,31 +640,20 @@ class RepresentationFidelityContractTest < Minitest::Test
     )[:ready]
   end
 
-  def test_text_labels_text3d_terminal_record_preserves_source_bbox_chain
+  def test_text_to_text3d_terminal_record_preserves_source_bbox_chain
     source = item('ROTATED', -90.0, 24.0, 10.0)
     source_id = source.source_span_id
     source_bbox = [source.bbox_x0, source.bbox_y0,
                    source.bbox_x1, source.bbox_y1]
     text_proof = IMP.prepare_flat_text_fallback_controllers!([source]).
       fetch(source_id).fetch(:proof)
-    label_builder = builder(:labels)
-    label_x, label_y, = label_builder.send(:label_insertion_pdf, source)
-    label_anchor = label_builder.send(
-      :text_point_to_su, source, label_x, label_y, 0.0, 0.0
-    )
-    label_proof = label_builder.send(
-      :host_unsupported_label_rotation_proof, source, -90.0, label_anchor
-    )
     prior = {
       source_span_id: source_id,
       source_text_sha256: Digest::SHA256.hexdigest(source.text),
       source_bbox_pdf: source_bbox,
       requested_mode: :text,
       delivered_mode: nil,
-      attempt_history: [
-        IMP.failed_item_rung_from_transition(text_proof),
-        IMP.failed_item_rung_from_transition(label_proof)
-      ]
+      attempt_history: [IMP.failed_item_rung_from_transition(text_proof)]
     }
     expected = {
       source_text_sha256: Digest::SHA256.hexdigest(source.text),
@@ -682,10 +693,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       text_attempts: [],
       text_renderers: [],
       source_provenance_objects: [],
-      fallback_transitions: [
-        Marshal.load(Marshal.dump(text_proof)),
-        Marshal.load(Marshal.dump(label_proof))
-      ]
+      fallback_transitions: [Marshal.load(Marshal.dump(text_proof))]
     }
 
     solid_cache = {
@@ -718,7 +726,7 @@ class RepresentationFidelityContractTest < Minitest::Test
 
     terminal = stats[:text_attempts].fetch(0)
     assert_equal source_bbox, terminal[:source_bbox_pdf]
-    assert_equal [:text, :labels, :text3d],
+    assert_equal [:text, :text3d],
                  terminal[:attempt_history].map { |rung| rung[:mode] }
     renderer = stats[:text_renderers].fetch(0)
     assert_equal solid_cache, renderer[:solid_cache]
@@ -1532,7 +1540,7 @@ class RepresentationFidelityContractTest < Minitest::Test
 
   def test_runtime_ladders_are_finite_closest_to_farthest_and_end_in_real_raster
     expected = {
-      text: [:text, :labels, :text3d, :glyphs, :geometry, :raster],
+      text: [:text, :text3d, :glyphs, :geometry, :raster],
       labels: [:labels, :text3d, :glyphs, :geometry, :raster],
       text3d: [:text3d, :glyphs, :geometry, :raster],
       glyphs: [:glyphs, :geometry, :raster],

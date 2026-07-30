@@ -11,7 +11,7 @@ alwaysApply: true
 
 1. **Stay in the requested mode** and fix transforms / placement / height there.
 2. Treat fallback as unauthorized unless affirmative evidence proves the requested representation impossible for the exact source item and the alternative has its own certified type-and-visual attempt.
-3. After affirmative item-scoped impossibility, advance exactly one rung in the requested-specific finite closest ladder and certify that attempt: Text → Labels → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; Geometry → item Raster. Without that proof, erase partial artifacts, identify the exact source span, and stop.
+3. After affirmative item-scoped impossibility, advance exactly one rung in the requested-specific finite closest ladder and certify that attempt: Text → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; Geometry → item Raster. Without that proof, erase partial artifacts, identify the exact source span, and stop.
 4. **Free only** — bundled / host-native. No paid-only path.
 5. Prove Raster from actual saved/reopened host pixels. A real SketchUp `TextureWriter` export, successful output file, decoded RGB/RGBA visual digest, and dimensions must match; importer attributes are not physical evidence. Item crops retain RGBA provenance and visible pixels, but a valid opaque crop need not contain an `alpha < 255` pixel.
 

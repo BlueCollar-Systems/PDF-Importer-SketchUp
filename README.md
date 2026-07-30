@@ -3,11 +3,18 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.113-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.114-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
+
+### Recent fixes (v3.7.114)
+
+- **Rotated text fidelity**: exact pdftocairo source-glyph outlines keep their own source orientation without a second semantic rotation; native Labels still use the PDF text-matrix angle.
+- **Dimension placement**: horizontal wide-short dimensions are no longer misclassified as 90° text, one-digit mixed numbers center only in tight dimension breaks, and split diagonal part marks such as `a1` + `0` + `20` rejoin as `a1020`.
+- **Text accuracy**: a Text request no longer accepts an unmeasured SketchUp screen label as visually exact. Because `Sketchup::Text` exposes no source glyph-size or run-width control, the item-bound ladder advances automatically to exact source-outline 3D Text; the explicit Labels option remains native and editable.
+- **Older-hardware performance**: source-glyph matching uses exact spatial preselection, single-use host renders avoid retaining a duplicate full-page point graph, and repeated component evidence reuses immutable definition topology and canonical fragments. On the installed SketchUp 2017 build, the 1011 regression page's exact 3D evidence time fell from 90.5 s to 20.5 s and total host import time from 170.0 s to 96.3 s without changing its 791-span/4,134-glyph delivery.
 
 ### Recent fixes (v3.7.113)
 
@@ -48,7 +55,7 @@ assets, checksums, license, and notes.
 
   | Requested representation | Delivered object | Fidelity contract |
   |--------------------------|------------------|-------------------|
-  | **Text** | Distinct flat editable model text | Never aliases to Labels. SketchUp 2017 exposes no distinct constructor, so only the exact signed item capability proof may advance to Labels. |
+  | **Text** | Closest verified text representation | Never silently aliases to Labels. SketchUp 2017 exposes no distinct flat editable constructor, and native annotations expose no source glyph-size/run-width control; signed item proofs therefore advance automatically to exact source-outline 3D Text. |
   | **Labels** | Editable `Sketchup::Text` annotation | Exact content/anchor and hidden leader are read back; nonzero glyph rotation is a proven host limit for that item. |
   | **3D Text** | Positive-depth source-glyph solid text | Model-space placement, rotation, size, source glyphs, and depth are verified. |
   | **Glyphs** | Per-glyph grouped source outlines | Outline identity, grouping, placement, rotation, size, and visibility are verified. |
@@ -70,9 +77,10 @@ assets, checksums, license, and notes.
 
   Use **3D Text** for go-live visual comparison against Adobe at equal zoom.
   Use **Labels** only when you need to edit piece marks or notes after import.
-  Use **Text** only when the parent host exposes that distinct editable model
-  representation. Use **Glyphs** or **Geometry** when the corresponding exact
-  outline structure is preferred. The selected option is sacred: fix transforms in-mode; do
+  Use **Text** when you want the closest verified text result automatically;
+  SketchUp 2017 reaches exact source-outline 3D Text because its flat annotation
+  API cannot preserve source size. Use **Glyphs** or **Geometry** when the
+  corresponding exact outline structure is preferred. The selected option is sacred: fix transforms in-mode; do
   not switch representation to paper over alignment/rotation/scale bugs
   just to make a defect less visible.
 
@@ -90,7 +98,7 @@ assets, checksums, license, and notes.
   When an exact item-specific source/host inventory affirmatively proves the
   current representation impossible, only these requested-specific ladders apply:
 
-  - Text → Labels → 3D Text → Glyphs → Geometry → item Raster
+  - Text → 3D Text → Glyphs → Geometry → item Raster
   - Labels → 3D Text → Glyphs → Geometry → item Raster
   - 3D Text → Glyphs → Geometry → item Raster
   - Glyphs → Geometry → item Raster

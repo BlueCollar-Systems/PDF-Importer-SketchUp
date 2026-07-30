@@ -24,7 +24,7 @@ module BlueCollarSystems
         # verified real raster. FallbackController is the only authority that
         # may advance this finite ladder, and it accepts only affirmative,
         # item-specific impossibility evidence with verified owned cleanup.
-        text:     [:text, :labels, :text3d, :glyphs, :geometry, :raster],
+        text:     [:text, :text3d, :glyphs, :geometry, :raster],
         labels:   [:labels, :text3d, :glyphs, :geometry, :raster],
         text3d:   [:text3d, :glyphs, :geometry, :raster],
         glyphs:   [:glyphs, :geometry, :raster],
@@ -276,7 +276,9 @@ module BlueCollarSystems
       # leader, not a model-space glyph rotation.  This observation-only probe
       # never creates an entity.  It proves, for one exact source item, that
       # the distinct flat editable Text representation is absent before the
-      # controller may advance to Labels.
+      # controller may advance directly to exact source-outline 3D Text. Native
+      # Labels are a separately requested screen-annotation representation and
+      # cannot verify source glyph size or run width.
       def flat_editable_text_impossibility_proof(item)
         source_id = source_span_id(item)
         binding = proof_binding(source_id)
@@ -346,7 +348,7 @@ module BlueCollarSystems
           :affirmative_impossibility => true,
           :generic_failure => false,
           :from_mode => :text,
-          :to_mode => :labels,
+          :to_mode => :text3d,
           :reason_code => :host_representation_unsupported,
           :attempted_renderer =>
             'sketchup_flat_editable_text_capability_observation',
@@ -755,13 +757,13 @@ module BlueCollarSystems
         )
       end
 
-      def store_canonical_json_fragment!(value, cache)
+      def store_canonical_json_fragment!(value, cache, source_cache = nil)
         return if cache.nil?
         unless cache.is_a?(Hash)
           raise ContractError, 'canonical JSON cache must be a Hash'
         end
         cache[value.object_id] = [
-          value, canonical_json(value, cache, false)
+          value, canonical_json(value, source_cache || cache, false)
         ]
       end
 
@@ -846,7 +848,9 @@ module BlueCollarSystems
         []
       end
 
-      def geometry_entity_payload(entity, child_payloads = nil)
+      def geometry_entity_payload(entity, child_payloads = nil,
+                                  canonical_json_cache = nil,
+                                  write_canonical_cache = false)
         type = entity_type(entity)
         payload = {
           :type => type,
@@ -867,12 +871,19 @@ module BlueCollarSystems
         end
         children = if child_payloads.nil?
                      entity_children(entity).map do |child|
-                       geometry_entity_payload(child)
+                       geometry_entity_payload(
+                         child, nil, canonical_json_cache,
+                         write_canonical_cache
+                       )
                      end
                    else
                      Array(child_payloads)
                    end
-        payload[:children] = children.sort_by { |child| canonical_json(child) }
+        payload[:children] = children.sort_by do |child|
+          canonical_json(
+            child, canonical_json_cache, write_canonical_cache
+          )
+        end
         payload
       end
 
@@ -922,7 +933,9 @@ module BlueCollarSystems
         nil
       end
 
-      def style_entity_payload(entity, child_payloads = nil)
+      def style_entity_payload(entity, child_payloads = nil,
+                               canonical_json_cache = nil,
+                               write_canonical_cache = false)
         layer = layer_payload(entity)
         payload = {
           :type => entity_type(entity),
@@ -940,12 +953,19 @@ module BlueCollarSystems
         }
         children = if child_payloads.nil?
                      entity_children(entity).map do |child|
-                       style_entity_payload(child)
+                       style_entity_payload(
+                         child, nil, canonical_json_cache,
+                         write_canonical_cache
+                       )
                      end
                    else
                      Array(child_payloads)
                    end
-        payload[:children] = children.sort_by { |child| canonical_json(child) }
+        payload[:children] = children.sort_by do |child|
+          canonical_json(
+            child, canonical_json_cache, write_canonical_cache
+          )
+        end
         payload
       end
 
@@ -960,36 +980,77 @@ module BlueCollarSystems
       # can supply their child trees and avoid repeatedly enumerating the same
       # potentially enormous SketchUp collections.
       def physical_entity_tree(entity, child_trees = nil,
-                               shared_child_payloads = nil)
+                               shared_child_payloads = nil,
+                               canonical_json_cache = nil,
+                               write_canonical_cache = false)
         children = if child_trees.nil?
                      entity_children(entity).map do |child|
-                       physical_entity_tree(child)
+                       physical_entity_tree(
+                         child, nil, nil, canonical_json_cache,
+                         write_canonical_cache
+                       )
                      end
                    else
                      Array(child_trees)
                    end
         if shared_child_payloads
-          geometry = geometry_entity_payload(entity, [])
+          geometry = geometry_entity_payload(
+            entity, [], canonical_json_cache, write_canonical_cache
+          )
           geometry[:children] = shared_child_payloads[:geometry_children]
           if shared_child_payloads[:root_style_payload]
             style = shared_child_payloads[:root_style_payload].dup
           else
-            style = style_entity_payload(entity, [])
+            style = style_entity_payload(
+              entity, [], canonical_json_cache, write_canonical_cache
+            )
           end
           style[:children] = shared_child_payloads[:style_children]
         else
           geometry = geometry_entity_payload(
-            entity, children.map { |child| child[:geometry_payload] }
+            entity, children.map { |child| child[:geometry_payload] },
+            canonical_json_cache, write_canonical_cache
           )
           style = style_entity_payload(
-            entity, children.map { |child| child[:style_payload] }
+            entity, children.map { |child| child[:style_payload] },
+            canonical_json_cache, write_canonical_cache
           )
         end
-        direct_types = children.map do |child|
+        topology_summary = if shared_child_payloads &&
+                              shared_child_payloads[:topology_children_summary]
+                             shared_child_payloads[:topology_children_summary]
+                           else
+                             topology_children_summary(children)
+                           end
+        direct_types = topology_summary[:direct_child_types]
+        descendant_counts = topology_summary[:descendant_type_counts]
+        live = entity.respond_to?(:valid?) && entity.valid? == true &&
+          entity.respond_to?(:deleted?) && entity.deleted? == false
+        {
+          :geometry_payload => geometry,
+          :style_payload => style,
+          :physical_entity_count =>
+            1 + topology_summary[:physical_entity_count].to_i,
+          :topology => {
+            :root_type => geometry[:type].to_s,
+            :direct_child_types => direct_types,
+            :descendant_type_counts => descendant_counts,
+            :descendant_entity_count => descendant_counts.values.inject(0, :+),
+            :live_entity_count => (live ? 1 : 0) +
+              topology_summary[:live_entity_count].to_i
+          }
+        }
+      end
+
+      def topology_children_summary(children)
+        values = Array(children)
+        direct_types = values.map do |child|
           child[:topology][:root_type].to_s
         end.sort
         descendant_counts = {}
-        children.each do |child|
+        physical_entity_count = 0
+        live_entity_count = 0
+        values.each do |child|
           child_topology = child[:topology]
           root_type = child_topology[:root_type].to_s
           descendant_counts[root_type] =
@@ -999,28 +1060,18 @@ module BlueCollarSystems
             descendant_counts[key] =
               descendant_counts.fetch(key, 0) + count.to_i
           end
+          physical_entity_count += child[:physical_entity_count].to_i
+          live_entity_count += child_topology[:live_entity_count].to_i
         end
         descendant_counts = descendant_counts.keys.sort.inject({}) do |memo, key|
           memo[key] = descendant_counts[key]
           memo
         end
-        live = entity.respond_to?(:valid?) && entity.valid? == true &&
-          entity.respond_to?(:deleted?) && entity.deleted? == false
         {
-          :geometry_payload => geometry,
-          :style_payload => style,
-          :physical_entity_count => 1 + children.inject(0) do |total, child|
-            total + child[:physical_entity_count].to_i
-          end,
-          :topology => {
-            :root_type => geometry[:type].to_s,
-            :direct_child_types => direct_types,
-            :descendant_type_counts => descendant_counts,
-            :descendant_entity_count => descendant_counts.values.inject(0, :+),
-            :live_entity_count => (live ? 1 : 0) + children.inject(0) do |total, child|
-              total + child[:topology][:live_entity_count].to_i
-            end
-          }
+          :direct_child_types => direct_types,
+          :descendant_type_counts => descendant_counts,
+          :physical_entity_count => physical_entity_count,
+          :live_entity_count => live_entity_count
         }
       end
 
@@ -1044,7 +1095,10 @@ module BlueCollarSystems
             shared_payloads = entry.dup
             shared_payloads.delete(:root_style_payload)
           end
-          tree = physical_entity_tree(entity, entry[:trees], shared_payloads)
+          tree = physical_entity_tree(
+            entity, entry[:trees], shared_payloads,
+            canonical_json_cache, false
+          )
           if style_cache_allowed && !entry[:root_style_payload]
             root_style_payload = tree[:style_payload].dup
             root_style_payload.delete(:children)
@@ -1053,17 +1107,28 @@ module BlueCollarSystems
           return tree
         end
 
+        definition_json_cache = definition_key ? {} : canonical_json_cache
         children = entity_children(entity).map do |child|
-          physical_entity_tree_with_definition_cache(
-            child, cache, canonical_json_cache, root_style_cache_keys
-          )
+          if definition_key
+            physical_entity_tree(
+              child, nil, nil, definition_json_cache, true
+            )
+          else
+            physical_entity_tree_with_definition_cache(
+              child, cache, canonical_json_cache, root_style_cache_keys
+            )
+          end
         end
-        tree = physical_entity_tree(entity, children)
+        tree = physical_entity_tree(
+          entity, children, nil, definition_json_cache,
+          definition_key ? true : false
+        )
         if definition_key
           entry = {
             :trees => children,
             :geometry_children => tree[:geometry_payload][:children],
-            :style_children => tree[:style_payload][:children]
+            :style_children => tree[:style_payload][:children],
+            :topology_children_summary => topology_children_summary(children)
           }
           if root_style_cache_keys &&
              root_style_cache_keys[definition_key] == true
@@ -1073,10 +1138,12 @@ module BlueCollarSystems
           end
           cache[definition_key] = entry
           store_canonical_json_fragment!(
-            entry[:geometry_children], canonical_json_cache
+            entry[:geometry_children], canonical_json_cache,
+            definition_json_cache
           )
           store_canonical_json_fragment!(
-            entry[:style_children], canonical_json_cache
+            entry[:style_children], canonical_json_cache,
+            definition_json_cache
           )
         end
         tree
@@ -1097,25 +1164,42 @@ module BlueCollarSystems
         values = Array(trees).compact
         raise ContractError, 'physical evidence has no entity trees' if
           values.empty?
-        geometry = values.map { |tree| tree[:geometry_payload] }
-        geometry = geometry.sort_by do |entry|
-          canonical_json(entry, canonical_json_cache, false)
-        end
-        style = values.map { |tree| tree[:style_payload] }
-        style = style.sort_by do |entry|
-          canonical_json(entry, canonical_json_cache, false)
-        end
+        geometry, geometry_sha256 = sorted_payload_and_sha256(
+          values.map { |tree| tree[:geometry_payload] },
+          canonical_json_cache
+        )
+        style, style_sha256 = sorted_payload_and_sha256(
+          values.map { |tree| tree[:style_payload] },
+          canonical_json_cache
+        )
         {
           :geometry_payload => geometry,
           :style_payload => style,
-          :physical_geometry_sha256 =>
-            canonical_sha256(geometry, canonical_json_cache, false),
-          :physical_style_sha256 =>
-            canonical_sha256(style, canonical_json_cache, false),
+          :physical_geometry_sha256 => geometry_sha256,
+          :physical_style_sha256 => style_sha256,
           :physical_entity_count => values.inject(0) do |total, tree|
             total + tree[:physical_entity_count].to_i
           end
         }
+      end
+
+      # The contract hash is the SHA-256 of the canonical JSON array after its
+      # entries are sorted by their canonical bytes. Preserve those exact bytes
+      # and feed them straight to the digest instead of serializing every
+      # potentially enormous physical tree once for sorting and again for
+      # hashing.
+      def sorted_payload_and_sha256(values, canonical_json_cache = nil)
+        encoded = Array(values).map do |entry|
+          [canonical_json(entry, canonical_json_cache, false), entry]
+        end.sort_by { |pair| pair[0] }
+        digest = Digest::SHA256.new
+        digest.update('[')
+        encoded.each_with_index do |pair, index|
+          digest.update(',') unless index.zero?
+          digest.update(pair[0])
+        end
+        digest.update(']')
+        [encoded.map { |pair| pair[1] }, digest.hexdigest]
       end
 
       def physical_evidence(entities, definition_tree_cache = nil,

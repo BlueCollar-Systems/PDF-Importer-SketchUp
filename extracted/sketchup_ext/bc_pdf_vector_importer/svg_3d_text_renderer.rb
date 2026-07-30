@@ -48,7 +48,8 @@ module BlueCollarSystems
         end
 
         parse_started = monotonic_ms
-        placed = CairoGlyphSource.model_space_loops(svg, media_box, opts)
+        loop_opts = opts.merge(:cache_model_space_loops => false)
+        placed = CairoGlyphSource.model_space_loops(svg, media_box, loop_opts)
         record_phase_ms!(result, :parse_ms, parse_started)
         result[:source_placements] = placed.length
         verification_started = monotonic_ms
@@ -343,7 +344,10 @@ module BlueCollarSystems
             close_size?(value, expected_values[index])
           end
             raise RepresentationFidelity::ContractError,
-                  '3D Text final bounds differ from source outlines and page transform'
+                  "3D Text final bounds differ from source outlines and page transform " \
+                  "(span=#{row[:source_span_id]}, " \
+                  "expected=#{expected_values.inspect}, " \
+                  "actual=#{actual_values.inspect})"
           end
           transform = row[:source_page_transformation]
         end

@@ -321,6 +321,38 @@ module BlueCollarSystems
       prepared
     end
 
+    def self.direct_flat_text_3d_attempts!(stats, page_num, text_items, prepared)
+      attempts = {}
+      Array(text_items).each do |item|
+        source_id = RepresentationFidelity.source_span_id(item)
+        row = prepared.is_a?(Hash) ? prepared[source_id] : nil
+        proof = row.is_a?(Hash) ? row[:proof] : nil
+        controller = row.is_a?(Hash) ? row[:controller] : nil
+        unless proof.is_a?(Hash) && controller &&
+               controller.current_mode == :text3d
+          raise RepresentationFidelity::ContractError,
+                "#{source_id}: direct Text -> 3D Text proof is unavailable"
+        end
+        evidence = proof[:evidence]
+        unless evidence.is_a?(Hash)
+          raise RepresentationFidelity::ContractError,
+                "#{source_id}: direct Text capability evidence is unavailable"
+        end
+        record_fallback_transitions!(
+          stats, page_num, controller.transitions
+        )
+        attempts[source_id] = {
+          :source_span_id => source_id,
+          :requested_mode => :text,
+          :delivered_mode => nil,
+          :source_text_sha256 => evidence[:source_text_sha256],
+          :source_bbox_pdf => evidence[:source_bbox_pdf],
+          :attempt_history => [failed_item_rung_from_transition(proof)]
+        }
+      end
+      attempts
+    end
+
     def self.bind_flat_text_capability_attempt!(attempt, proof)
       unless attempt.is_a?(Hash) && proof.is_a?(Hash)
         raise RepresentationFidelity::ContractError,
@@ -814,7 +846,8 @@ module BlueCollarSystems
     def self.complete_text3d_item_fallbacks!(
       stats, model, target_entities, pdf_path, page_num, text_items,
       media_box, render_box, page_rotation, opts, import_start, y_offset,
-      svg_document, initial_proofs
+      svg_document, initial_proofs, requested_mode = :text3d,
+      prepared_controllers = nil
     )
       items_by_id = {}
       Array(text_items).each do |item|
@@ -838,14 +871,25 @@ module BlueCollarSystems
         item = items_by_id[source_id]
         raise RepresentationFidelity::ContractError,
               "fallback proof has no source item #{source_id}" unless item
-        controller = RepresentationFidelity::FallbackController.new(
-          :text3d, source_id
+        prepared = prepared_controllers.is_a?(Hash) ?
+          prepared_controllers[source_id] : nil
+        controller = prepared.is_a?(Hash) ? prepared[:controller] : nil
+        controller ||= RepresentationFidelity::FallbackController.new(
+          requested_mode, source_id
         )
-        controller.advance!(initial_proof)
+        unless controller.current_mode == :text3d
+          raise RepresentationFidelity::ContractError,
+                "#{source_id}: controller is not at the 3D Text rung"
+        end
         history = []
+        if prepared.is_a?(Hash)
+          append_failed_item_rung!(history, prepared[:proof])
+        end
+        controller.advance!(initial_proof)
         append_failed_item_rung!(history, initial_proof)
         complete_item_representation_ladder!(
-          stats, model, target_entities, pdf_path, page_num, item, :text3d,
+          stats, model, target_entities, pdf_path, page_num, item,
+          requested_mode,
           controller, history, media_box, render_box, page_rotation, opts,
           import_start, y_offset, svg_document, nil,
           Array(text_items).reject do |peer|
@@ -3465,7 +3509,8 @@ module BlueCollarSystems
         # Labels with layer matching use internal parsing so each span lands on its OCG tag.
         use_svg_text = [:geometry, :glyphs].include?(requested_text_mode) &&
                        opts[:import_text]
-        use_svg_3d_text = requested_text_mode == :text3d && opts[:import_text]
+        use_svg_3d_text = [:text, :text3d].include?(requested_text_mode) &&
+                          opts[:import_text]
         use_item_raster = requested_text_mode == :raster && opts[:import_text]
         if match_pdf_layers && !ocg.layer_list.empty? &&
            [:text, :labels].include?(requested_text_mode)
@@ -3542,7 +3587,7 @@ module BlueCollarSystems
         merge_text_width_crosscheck!(stats, result)
 
         builder_failures = Array(result[:text_delivery_failures])
-        if requested_text_mode == :text
+        if requested_text_mode == :text && !use_svg_3d_text
           bind_flat_text_capability_rows!(
             result[:text_attempts], builder_failures, flat_text_fallbacks
           )
@@ -3651,6 +3696,8 @@ module BlueCollarSystems
         # outlines. Arial/native-font substitution is never used as a visual
         # correction. Each source span owns one independently verified group.
         if use_svg_3d_text && builder.page_group
+          exact_3d_requested_mode =
+            requested_text_mode == :text ? :text : :text3d
           svg_failure = {}
           use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
             (a.to_f - b.to_f).abs > 0.01
@@ -3674,7 +3721,9 @@ module BlueCollarSystems
                 :reason => reason
               }
             end
-            enforce_requested_text_delivery!(page_num, :text3d, failures)
+            enforce_requested_text_delivery!(
+              page_num, exact_3d_requested_mode, failures
+            )
           end
 
           representation_parent = builder.page_group.entities
@@ -3710,7 +3759,9 @@ module BlueCollarSystems
                 :reason => failure[:reason_code].to_s
               }
             end
-            enforce_requested_text_delivery!(page_num, :text3d, failures)
+            enforce_requested_text_delivery!(
+              page_num, exact_3d_requested_mode, failures
+            )
           end
 
           transition_proofs = Array(text3d_result[:transition_proofs])
@@ -3719,9 +3770,9 @@ module BlueCollarSystems
               stats, page_num,
               :renderer => :no_semantic_text,
               :mode => :text3d,
-              :requested_mode => :text3d,
+              :requested_mode => exact_3d_requested_mode,
               :delivered_mode => :text3d,
-              :degraded => false,
+              :degraded => exact_3d_requested_mode != :text3d,
               :count => 0,
               :no_semantic_text => true,
               :source_svg_inspected => true
@@ -3758,8 +3809,17 @@ module BlueCollarSystems
             end
             unless all_source_rows.empty?
               text3d_record_started = Time.now
+              prior_attempts = if exact_3d_requested_mode == :text
+                                 direct_flat_text_3d_attempts!(
+                                   stats, page_num, delivered_items,
+                                   flat_text_fallbacks
+                                 )
+                               else
+                                 {}
+                               end
               record_svg_3d_text_delivery!(
-                stats, page_num, delivered_items, text3d_result, :text3d, {},
+                stats, page_num, delivered_items, text3d_result,
+                exact_3d_requested_mode, prior_attempts,
                 page_rotation
               )
               stats[:pipeline_performance][:text3d_record_ms] =
@@ -3777,7 +3837,9 @@ module BlueCollarSystems
                 stats, model, representation_parent, path, page_num,
                 text_items, media_box, svg_page_box, page_rotation, opts,
                 import_start, page_y_offset, svg_document,
-                transition_proofs
+                transition_proofs, exact_3d_requested_mode,
+                (exact_3d_requested_mode == :text ?
+                  flat_text_fallbacks : nil)
               )
             end
           end

@@ -51,7 +51,7 @@ class TextRepresentationDistinctionTest < Minitest::Test
   end
 
   def test_text_ladder_preserves_request_before_adjacent_fallbacks
-    assert_equal [:text, :labels, :text3d, :glyphs, :geometry, :raster],
+    assert_equal [:text, :text3d, :glyphs, :geometry, :raster],
                  Fidelity.ladder_for(:text)
     assert_equal [:labels, :text3d, :glyphs, :geometry, :raster],
                  Fidelity.ladder_for(:labels)
@@ -92,13 +92,13 @@ class TextRepresentationDistinctionTest < Minitest::Test
     end
   end
 
-  def test_text_to_labels_requires_exact_observed_host_capability_proof
+  def test_text_to_exact_text3d_requires_observed_host_capability_proof
     proof = Fidelity.flat_editable_text_impossibility_proof(source_item)
     controller = Fidelity::FallbackController.new(:text, source_item.source_span_id)
 
     controller.advance!(proof)
 
-    assert_equal :labels, controller.current_mode
+    assert_equal :text3d, controller.current_mode
     assert_equal :text, proof[:requested_mode]
     assert_equal Digest::SHA256.hexdigest('WELD'),
                  proof[:evidence][:source_text_sha256]
@@ -130,9 +130,9 @@ class TextRepresentationDistinctionTest < Minitest::Test
     assert_raises(Fidelity::ContractError) { controller.advance!(proof) }
   end
 
-  def test_text_controller_refuses_nonadjacent_capability_transition
+  def test_text_controller_refuses_unverifiable_label_transition
     proof = Fidelity.flat_editable_text_impossibility_proof(source_item)
-    proof[:to_mode] = :text3d
+    proof[:to_mode] = :labels
     controller = Fidelity::FallbackController.new(:text, source_item.source_span_id)
 
     assert_raises(Fidelity::ContractError) { controller.advance!(proof) }
@@ -146,7 +146,7 @@ class TextRepresentationDistinctionTest < Minitest::Test
       File.join('.cursor', 'rules', 'text-mode-fidelity.mdc')
     ]
     ladders = [
-      'Text → Labels → 3D Text → Glyphs → Geometry → item Raster',
+      'Text → 3D Text → Glyphs → Geometry → item Raster',
       'Labels → 3D Text → Glyphs → Geometry → item Raster',
       '3D Text → Glyphs → Geometry → item Raster',
       'Glyphs → Geometry → item Raster',
