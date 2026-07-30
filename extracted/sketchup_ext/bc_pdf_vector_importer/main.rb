@@ -334,15 +334,30 @@ module BlueCollarSystems
       )
       controller.advance!(proof)
       evidence = proof[:evidence]
-      unless RepresentationFidelity.normalize_mode(attempt[:requested_mode]) == :text &&
-             attempt[:source_text_sha256].to_s.downcase ==
-               evidence[:source_text_sha256].to_s.downcase &&
-             RepresentationFidelity.canonical_json(attempt[:source_bbox_pdf]) ==
-               RepresentationFidelity.canonical_json(
-                 evidence[:source_bbox_pdf]
-               )
+      mode_ok = RepresentationFidelity.normalize_mode(attempt[:requested_mode]) == :text
+      sha_ok = attempt[:source_text_sha256].to_s.downcase ==
+               evidence[:source_text_sha256].to_s.downcase
+      attempt_bbox = Array(attempt[:source_bbox_pdf])
+      evidence_bbox = Array(evidence[:source_bbox_pdf])
+      bbox_ok = attempt_bbox.length == 4 && evidence_bbox.length == 4 &&
+                (0...4).all? do |idx|
+                  RepresentationFidelity.close?(
+                    attempt_bbox[idx], evidence_bbox[idx], 1.0e-6
+                  )
+                end
+      unless mode_ok && sha_ok && bbox_ok
+        details = {
+          :attempt_sha => attempt[:source_text_sha256].to_s,
+          :evidence_sha => evidence[:source_text_sha256].to_s,
+          :attempt_bbox => attempt_bbox,
+          :evidence_bbox => evidence_bbox,
+          :mode_ok => mode_ok,
+          :sha_ok => sha_ok,
+          :bbox_ok => bbox_ok
+        }
         raise RepresentationFidelity::ContractError,
-              "#{source_id}: flat Text proof conflicts with source attempt"
+              "#{source_id}: flat Text proof conflicts with source attempt: " \
+              "#{details.inspect}"
       end
       history = attempt[:attempt_history]
       unless history.is_a?(Array)

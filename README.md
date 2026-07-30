@@ -3,11 +3,18 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.112-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.113-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
-Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support. Core vector import uses the built-in Ruby parser. Windows release RBZ files ship a free zero-ceremony Poppler runtime for higher-fidelity text/raster/SVG paths. MuPDF remains an optional free alternate; Ghostscript remains optional for non-embedded font repair.
+Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
+
+### Recent fixes (v3.7.113)
+
+- **3D Text performance**: glyph contour point culling and spatial-bucket duplicate detection dramatically reduce mesh complexity for large drawings (e.g. 1015 PDF).
+- **Flat Text / Labels stacked dimensions**: stacked vertical dimension numerals are no longer split into sub-items in flat Text mode, fixing source-span contract conflicts and improving alignment/rotation handling.
+
+Core vector import uses the built-in Ruby parser. Windows release RBZ files ship a free zero-ceremony Poppler runtime for higher-fidelity text/raster/SVG paths. MuPDF remains an optional free alternate; Ghostscript remains optional for non-embedded font repair.
 
 ---
 

@@ -662,7 +662,13 @@ module BlueCollarSystems
             place_mesh_text(
               entities, item, origin_x, origin_y, layer, @requested_text_mode
             )
-          elsif stacked_vertical_dimension_labels?(item)
+          elsif @requested_text_mode != :text &&
+                stacked_vertical_dimension_labels?(item)
+            # Stacked vertical dimension numeral splitting creates sub-items
+            # that share the parent source_span_id. That is safe for native
+            # Labels and 3D Text, but flat Text mode binds one proof per
+            # source_span_id and therefore requires the whole span as a single
+            # native Text entity.
             place_stacked_vertical_dimension_labels(
               entities, item, origin_x, origin_y, layer
             )
