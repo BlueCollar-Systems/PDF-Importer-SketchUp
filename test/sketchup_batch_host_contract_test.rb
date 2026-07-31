@@ -160,6 +160,49 @@ class SketchupBatchHostContractTest < Minitest::Test
     )
   end
 
+  def test_pure_terminal_page_raster_detection_requires_one_page_image_per_page
+    load_runner_library
+    session = SketchupBatchImport::RealHostSession.new
+    records = [1, 2].map do |page|
+      {
+        :page => page,
+        :delivered_mode => :raster,
+        :delivery_scope => :page_raster,
+        :real_raster_verified => true,
+        :resulting_entity_ids => [100 + page]
+      }
+    end
+    stats = {
+      :selected_pages => [1, 2],
+      :raster_delivery_records => records,
+      :terminal_text_delivery_records => records.map(&:dup),
+      :page_text_delivery_records => [],
+      :source_glyph_physical_deliveries => [],
+      :text => 0
+    }
+
+    assert session.send(:pure_terminal_page_raster?, stats, [1, 2])
+
+    duplicate = Marshal.load(Marshal.dump(stats))
+    duplicate[:raster_delivery_records] << records.first.dup
+    refute session.send(:pure_terminal_page_raster?, duplicate, [1, 2])
+
+    item = Marshal.load(Marshal.dump(stats))
+    item[:raster_delivery_records][0][:delivery_scope] = :item_raster
+    refute session.send(:pure_terminal_page_raster?, item, [1, 2])
+
+    text = Marshal.load(Marshal.dump(stats))
+    text[:page_text_delivery_records] << { :page => 1 }
+    refute session.send(:pure_terminal_page_raster?, text, [1, 2])
+  end
+
+  def test_pure_raster_batch_path_defers_texture_proof_until_final_reopen
+    assert_includes source, ':texture_proof => !pure_terminal_page_raster'
+    assert_includes source, "'host_heal_required' => host_heal_required"
+    assert_includes source, 'verify_lightweight_reopen_continuity!('
+    assert_includes source, 'stats, reopened_owned_manifest, requested_mode, job[:pages]'
+  end
+
   def test_real_session_uses_public_import_config_mode_factory
     load_runner_library
     value = Struct.new(:raw) do

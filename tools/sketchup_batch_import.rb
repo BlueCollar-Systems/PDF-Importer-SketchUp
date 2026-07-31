@@ -93,12 +93,14 @@ module SketchupBatchImport
       SketchupBatchImport.write_progress!(
         job, binding, 'post_import_evidence_snapshot_started'
       )
+      pure_terminal_page_raster = pure_terminal_page_raster?(stats, job[:pages])
       begin
         GC.start
       rescue StandardError
       end
       live_after_manifest = SketchupHostEvidence.snapshot_entities(
-        @model.active_entities, :compact => true
+        @model.active_entities, :compact => true,
+        :texture_proof => !pure_terminal_page_raster
       )
       SketchupBatchImport.write_progress!(
         job, binding, 'post_import_evidence_snapshot_completed'
@@ -108,9 +110,11 @@ module SketchupBatchImport
       )
       raise 'no recursively owned imported host entities found' if
         owned_manifest.empty?
-      SketchupHostEvidence.verify_delivery_evidence!(
-        stats, owned_manifest, requested_mode, job[:pages]
-      )
+      unless pure_terminal_page_raster
+        SketchupHostEvidence.verify_delivery_evidence!(
+          stats, owned_manifest, requested_mode, job[:pages]
+        )
+      end
       source_delivery_manifest = owned_manifest
 
       import_session_id = stats[:import_session_id].to_s.strip
@@ -121,33 +125,42 @@ module SketchupBatchImport
         'objects' => Array(stats[:source_provenance_objects])
       }
 
-      # SketchUp 2017 heals nested page edges on the first save/load
-      # (~tens of edges). Continuity must compare the healed model to a
-      # second reopen — not the pre-heal in-memory snapshot.
-      SketchupBatchImport.write_progress!(
-        job, binding, 'host_heal_stabilize_started'
-      )
-      stabilize_model = reopen_model!(job[:model_path])
-      begin
-        GC.start
-      rescue StandardError
+      # SketchUp 2017 heals nested vector/solid-text edges on the first
+      # save/load. A terminal page-raster model has no such nested geometry;
+      # defer its only TextureWriter proof to the authoritative final reopen.
+      host_heal_required = !pure_terminal_page_raster
+      if host_heal_required
+        SketchupBatchImport.write_progress!(
+          job, binding, 'host_heal_stabilize_started'
+        )
+        stabilize_model = reopen_model!(job[:model_path])
+        begin
+          GC.start
+        rescue StandardError
+        end
+        after_manifest = SketchupHostEvidence.snapshot_entities(
+          stabilize_model.active_entities, :compact => true
+        )
+        stabilized_owned_manifest = SketchupHostEvidence.owned_manifest(
+          before_manifest, after_manifest
+        )
+        raise 'no recursively owned imported host entities found after heal' if
+          stabilized_owned_manifest.empty?
+        SketchupHostEvidence.verify_host_heal_preservation!(
+          source_delivery_manifest, stabilized_owned_manifest
+        )
+        raise 'stabilized model save failed' unless
+          stabilize_model.save(job[:model_path])
+        SketchupBatchImport.write_progress!(
+          job, binding, 'host_heal_stabilize_completed'
+        )
+      else
+        after_manifest = live_after_manifest
+        stabilized_owned_manifest = source_delivery_manifest
+        SketchupBatchImport.write_progress!(
+          job, binding, 'host_heal_not_required_for_terminal_page_raster'
+        )
       end
-      after_manifest = SketchupHostEvidence.snapshot_entities(
-        stabilize_model.active_entities, :compact => true
-      )
-      stabilized_owned_manifest = SketchupHostEvidence.owned_manifest(
-        before_manifest, after_manifest
-      )
-      raise 'no recursively owned imported host entities found after heal' if
-        stabilized_owned_manifest.empty?
-      SketchupHostEvidence.verify_host_heal_preservation!(
-        source_delivery_manifest, stabilized_owned_manifest
-      )
-      raise 'stabilized model save failed' unless
-        stabilize_model.save(job[:model_path])
-      SketchupBatchImport.write_progress!(
-        job, binding, 'host_heal_stabilize_completed'
-      )
 
       report_source = stats[:import_report_path]
       report_copy = File.join(job[:output_dir], 'import_report.json')
@@ -184,6 +197,7 @@ module SketchupBatchImport
         'stabilized_owned_entities' => stabilized_owned_manifest,
         'post_import_entities' => after_manifest,
         'post_import_entities_pre_heal' => live_after_manifest,
+        'host_heal_required' => host_heal_required,
         'host_heal_preservation_verified' => true
       )
       SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
@@ -204,9 +218,23 @@ module SketchupBatchImport
         job, binding, 'reopen_evidence_snapshot_completed'
       )
       begin
-        SketchupHostEvidence.verify_reopen_continuity!(
-          after_manifest, reopened_manifest
-        )
+        if pure_terminal_page_raster
+          SketchupHostEvidence.verify_lightweight_reopen_continuity!(
+            after_manifest, reopened_manifest
+          )
+          reopened_owned_manifest = SketchupHostEvidence.owned_manifest(
+            before_manifest, reopened_manifest
+          )
+          raise 'no recursively owned imported host entities found after reopen' if
+            reopened_owned_manifest.empty?
+          SketchupHostEvidence.verify_delivery_evidence!(
+            stats, reopened_owned_manifest, requested_mode, job[:pages]
+          )
+        else
+          SketchupHostEvidence.verify_reopen_continuity!(
+            after_manifest, reopened_manifest
+          )
+        end
       rescue SketchupHostEvidence::EvidenceError => error
         # Persist both sides so a reopen RED can be diagnosed without
         # another full import (previous runs lost the reopened snapshot).
@@ -218,6 +246,8 @@ module SketchupBatchImport
       end
       manifest_payload['reopened_entities'] = reopened_manifest
       manifest_payload['reopen_persistent_id_verified'] = true
+      manifest_payload['final_texture_proof_verified'] =
+        pure_terminal_page_raster
       SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
       SketchupBatchImport.write_progress!(job, binding, 'reopen_verified')
 
@@ -254,8 +284,10 @@ module SketchupBatchImport
         'import_report_sha256' => Digest::SHA256.file(report_copy).hexdigest,
         'entity_manifest_path' => manifest_path,
         'entity_manifest_sha256' => Digest::SHA256.file(manifest_path).hexdigest,
+        'host_heal_required' => host_heal_required,
         'host_heal_preservation_verified' => true,
         'reopen_persistent_id_verified' => true,
+        'final_texture_proof_verified' => pure_terminal_page_raster,
         'text_entities' => stats[:text].to_i,
         'text_renderers' => Array(stats[:text_renderers]),
         'text_source_span_ids' => Array(stats[:text_source_span_ids]),
@@ -423,6 +455,35 @@ module SketchupBatchImport
     def effective_requested_mode(job)
       return :raster if job[:import_mode].to_s == 'raster'
       job[:text_mode]
+    end
+
+    def pure_terminal_page_raster?(stats, requested_pages)
+      return false unless stats.is_a?(Hash) && stats[:text].to_i == 0
+      return false unless Array(stats[:page_text_delivery_records]).empty? &&
+                          Array(stats[:source_glyph_physical_deliveries]).empty?
+
+      selected = Array(stats[:selected_pages]).map(&:to_i).select { |page| page > 0 }
+      selected = Array(requested_pages).map(&:to_i).select { |page| page > 0 } if
+        selected.empty?
+      selected = selected.uniq.sort
+      return false if selected.empty?
+
+      raster_records = Array(stats[:raster_delivery_records])
+      terminal_records = Array(stats[:terminal_text_delivery_records])
+      return false unless raster_records.length == selected.length &&
+                          terminal_records.length == selected.length
+
+      [raster_records, terminal_records].all? do |records|
+        pages = records.map do |record|
+          return false unless record.is_a?(Hash) &&
+                              record[:delivered_mode].to_s == 'raster' &&
+                              record[:delivery_scope].to_s == 'page_raster' &&
+                              record[:real_raster_verified] == true &&
+                              Array(record[:resulting_entity_ids]).length == 1
+          record[:page].to_i
+        end
+        pages.sort == selected && pages.uniq.length == pages.length
+      end
     end
 
     def import_options(importer, job, binding = nil)

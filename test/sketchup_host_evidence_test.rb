@@ -191,12 +191,14 @@ class SketchupHostEvidenceTest < Minitest::Test
   end
 
   class FakeImage < FakeEntity
-    attr_reader :width, :height
+    attr_reader :width, :height, :pixelwidth, :pixelheight
 
     def initialize(entity_id, options = {})
       super(entity_id, 'Image', options)
       @width = options.fetch(:width, 8.5)
       @height = options.fetch(:height, 11.0)
+      @pixelwidth = options.fetch(:pixelwidth, 2)
+      @pixelheight = options.fetch(:pixelheight, 1)
       @attributes = options.fetch(:attributes, {})
     end
 
@@ -329,6 +331,9 @@ class SketchupHostEvidenceTest < Minitest::Test
       assert_equal expected_sha, content['host_visual_pixel_sha256']
       assert_equal 2, content['host_pixel_width']
       assert_equal 1, content['host_pixel_height']
+      assert_equal 0, content['host_texture_proof_temp_bytes']
+      assert_operator content['host_texture_write_ms'], :>=, 0.0
+      assert_operator content['host_texture_pixel_proof_ms'], :>=, 0.0
 
       writer.source_path = second_path
       reopened = with_texture_writer(writer) do
@@ -336,6 +341,52 @@ class SketchupHostEvidenceTest < Minitest::Test
       end
       error = assert_raises(StandardError) do
         SketchupHostEvidence.verify_reopen_continuity!(saved, reopened)
+      end
+      assert_match(/content/i, error.message)
+    end
+  end
+
+  def test_lightweight_image_snapshot_reads_host_dimensions_without_texture_export
+    pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+    visual_sha = Digest::SHA256.hexdigest(pixels.flatten.pack('C*'))
+    image = raster_image_with_visual_sha(visual_sha)
+
+    rows = SketchupHostEvidence.snapshot_entities(
+      [image], :compact => true, :texture_proof => false
+    )
+    content = rows.first['content_evidence']
+
+    assert_equal 2, content['host_pixel_width']
+    assert_equal 1, content['host_pixel_height']
+    assert_equal false, content['host_texture_export_verified']
+    assert_nil content['host_visual_pixel_sha256']
+    assert_equal 0, content['host_texture_proof_temp_bytes']
+  end
+
+  def test_lightweight_reopen_continuity_accepts_only_texture_proof_enrichment
+    Dir.mktmpdir('bc_lightweight_reopen_') do |directory|
+      png_path = File.join(directory, 'source.png')
+      pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+      write_rgba_png(png_path, 2, 1, pixels)
+      visual_sha = Digest::SHA256.hexdigest(pixels.flatten.pack('C*'))
+      image = raster_image_with_visual_sha(visual_sha)
+      lightweight = SketchupHostEvidence.snapshot_entities(
+        [image], :compact => true, :texture_proof => false
+      )
+      physical = with_texture_writer(FakeTextureWriter.new(png_path)) do
+        SketchupHostEvidence.snapshot_entities([image], :compact => true)
+      end
+
+      assert SketchupHostEvidence.verify_lightweight_reopen_continuity!(
+        lightweight, physical
+      )
+
+      changed = Marshal.load(Marshal.dump(physical))
+      changed[0]['content_evidence']['display_width'] = 99.0
+      error = assert_raises(StandardError) do
+        SketchupHostEvidence.verify_lightweight_reopen_continuity!(
+          lightweight, changed
+        )
       end
       assert_match(/content/i, error.message)
     end

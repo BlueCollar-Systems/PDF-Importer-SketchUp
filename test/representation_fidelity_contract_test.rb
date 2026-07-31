@@ -1833,6 +1833,42 @@ class RepresentationFidelityContractTest < Minitest::Test
     File.open(path, 'wb') { |file| file.write(bytes) }
   end
 
+  def write_filtered_rgba_png(path, width, rows)
+    previous = Array.new(width * 4, 0)
+    filtered = rows.each_with_index.map do |pixels, filter|
+      raw = pixels.flatten
+      encoded = raw.each_with_index.map do |value, index|
+        left = index >= 4 ? raw[index - 4] : 0
+        up = previous[index]
+        upper_left = index >= 4 ? previous[index - 4] : 0
+        predictor = case filter
+                    when 0 then 0
+                    when 1 then left
+                    when 2 then up
+                    when 3 then (left + up) / 2
+                    when 4
+                      estimate = left + up - upper_left
+                      distances = [
+                        (estimate - left).abs,
+                        (estimate - up).abs,
+                        (estimate - upper_left).abs
+                      ]
+                      distances[0] <= distances[1] &&
+                        distances[0] <= distances[2] ? left :
+                        (distances[1] <= distances[2] ? up : upper_left)
+                    end
+        (value - predictor) & 0xff
+      end
+      previous = raw
+      [filter].pack('C') + encoded.pack('C*')
+    end.join
+    bytes = binary_string("\x89PNG\r\n\x1a\n")
+    bytes << png_chunk('IHDR', [width, rows.length, 8, 6, 0, 0, 0].pack('N2C5'))
+    bytes << png_chunk('IDAT', Zlib::Deflate.deflate(filtered))
+    bytes << png_chunk('IEND', binary_string(''))
+    File.open(path, 'wb') { |file| file.write(bytes) }
+  end
+
   def write_rgb_png(path, width, height, pixels)
     rows = (0...height).map do |y|
       binary_string("\x00") + pixels.slice(y * width, width).flatten.pack('C*')
@@ -1928,6 +1964,127 @@ class RepresentationFidelityContractTest < Minitest::Test
   ensure
     [page, native_raw, ruby_raw].each do |path|
       File.delete(path) if path && File.exist?(path)
+    end
+  end
+
+  def test_ruby_pixel_inspection_preserves_canonical_visual_hash_without_raw_output
+    Dir.mktmpdir('bc_png_inspect_ruby_') do |directory|
+      page = File.join(directory, 'page.png')
+      pixels = [
+        [255, 255, 255, 0], [10, 20, 30, 255], [80, 40, 20, 128],
+        [0, 0, 0, 0], [200, 100, 50, 64], [1, 2, 3, 254]
+      ]
+      write_rgba_png(page, 3, 2, pixels)
+
+      inspected = IMP::PngCropper.inspect_pixels!(page, true, nil)
+
+      assert_equal [3, 2], [inspected[:pixel_width], inspected[:pixel_height]]
+      assert_equal '2cfbfdd3130ecc89f5825831d9b276d942436e0738e5c431572b9e0162ab98f0',
+                   inspected[:visual_pixel_sha256]
+      assert_equal true, inspected[:transparent_pixel_present]
+      assert_equal true, inspected[:visible_pixel_present]
+      assert_equal :ruby_zlib_stream, inspected[:decoder_backend]
+      assert_equal 0, inspected[:temp_bytes_written]
+      refute inspected.key?(:raw_path)
+      assert_equal ['page.png'], Dir.children(directory).sort
+    end
+  end
+
+  def test_native_pixel_inspection_matches_ruby_without_raw_output
+    skip 'bundled native decoder executes only on Windows' unless
+      RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+    Dir.mktmpdir('bc_png_inspect_native_') do |directory|
+      page = File.join(directory, 'page.png')
+      pixels = [
+        [255, 255, 255, 0], [10, 20, 30, 255], [80, 40, 20, 128],
+        [0, 0, 0, 0], [200, 100, 50, 64], [1, 2, 3, 254]
+      ]
+      write_rgba_png(page, 3, 2, pixels)
+      helper = IMP::PngCropper.native_decoder_path
+
+      assert File.file?(helper), "bundled native decoder missing: #{helper}"
+      native = IMP::PngCropper.inspect_pixels!(page, true, helper)
+      ruby = IMP::PngCropper.inspect_pixels!(page, true, nil)
+
+      assert_equal ruby[:visual_pixel_sha256], native[:visual_pixel_sha256]
+      assert_equal ruby[:transparent_pixel_present],
+                   native[:transparent_pixel_present]
+      assert_equal ruby[:visible_pixel_present], native[:visible_pixel_present]
+      assert_equal [3, 2], [native[:pixel_width], native[:pixel_height]]
+      assert_equal :native_zlib_stream, native[:decoder_backend]
+      assert_equal 0, native[:temp_bytes_written]
+      refute native.key?(:raw_path)
+      assert_equal ['page.png'], Dir.children(directory).sort
+    end
+  end
+
+  def test_native_pixel_inspection_reports_actual_rgb_alpha_state
+    skip 'native decoder gate requires Windows' unless
+      RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+    Dir.mktmpdir('bc_png_inspect_rgb_native_') do |directory|
+      page = File.join(directory, 'page.png')
+      pixels = [[255, 255, 255], [10, 20, 30], [80, 40, 20], [1, 2, 3]]
+      write_rgb_png(page, 2, 2, pixels)
+      helper = IMP::PngCropper.native_decoder_path
+
+      native = IMP::PngCropper.inspect_pixels!(page, false, helper)
+      ruby = IMP::PngCropper.inspect_pixels!(page, false, nil)
+
+      assert_equal false, native[:alpha_channel_verified]
+      assert_equal ruby[:alpha_channel_verified],
+                   native[:alpha_channel_verified]
+      assert_equal ruby[:visual_pixel_sha256], native[:visual_pixel_sha256]
+      assert_equal [], Dir.children(directory) - ['page.png']
+    end
+  end
+
+  def test_native_pixel_inspection_matches_ruby_for_every_png_row_filter
+    skip 'native decoder gate requires Windows' unless
+      RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+    Dir.mktmpdir('bc_png_inspect_filters_') do |directory|
+      page = File.join(directory, 'page.png')
+      rows = (0..4).map do |row|
+        (0...3).map do |column|
+          [
+            row * 31 + column * 7,
+            row * 17 + column * 19,
+            row * 11 + column * 23,
+            255 - row * 29 - column * 13
+          ]
+        end
+      end
+      write_filtered_rgba_png(page, 3, rows)
+      helper = IMP::PngCropper.native_decoder_path
+
+      native = IMP::PngCropper.inspect_pixels!(page, true, helper)
+      ruby = IMP::PngCropper.inspect_pixels!(page, true, nil)
+
+      assert_equal ruby[:visual_pixel_sha256], native[:visual_pixel_sha256]
+      assert_equal ruby[:transparent_pixel_present],
+                   native[:transparent_pixel_present]
+      assert_equal ruby[:visible_pixel_present], native[:visible_pixel_present]
+      assert_equal :native_zlib_stream, native[:decoder_backend]
+      assert_equal 0, native[:temp_bytes_written]
+    end
+  end
+
+  def test_pixel_inspection_rejects_corrupt_png_crc_fail_closed
+    Dir.mktmpdir('bc_png_inspect_bad_crc_') do |directory|
+      page = File.join(directory, 'page.png')
+      write_rgba_png(page, 2, 1, [[255, 0, 0, 255], [0, 255, 0, 255]])
+      bytes = File.binread(page)
+      bytes.setbyte(bytes.bytesize - 5, bytes.getbyte(bytes.bytesize - 5) ^ 0xff)
+      File.binwrite(page, bytes)
+
+      helpers = [nil]
+      helpers << IMP::PngCropper.native_decoder_path if
+        RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+      helpers.each do |helper|
+        assert_raises(IMP::RepresentationFidelity::ContractError) do
+          IMP::PngCropper.inspect_pixels!(page, true, helper)
+        end
+      end
+      assert_equal ['page.png'], Dir.children(directory).sort
     end
   end
 
@@ -2089,9 +2246,36 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal Digest::SHA256.hexdigest(pixels.flatten.pack('C*')),
                  proof[:visual_pixel_sha256]
     assert_equal true, proof[:visual_pixel_binding_verified]
+    assert_equal 0, proof[:pixel_proof_temp_bytes]
+    assert_operator proof[:pixel_proof_ms], :>=, 0.0
+    assert_includes [:native_zlib_stream, :ruby_zlib_stream],
+                    proof[:pixel_proof_decoder_backend]
   ensure
     File.delete(png) if png && File.exist?(png)
     File.delete(pdf) if pdf && File.exist?(pdf)
+  end
+
+  def test_raster_phase_metrics_accumulate_into_pipeline_report_counters
+    stats = {}
+    first = {
+      :render_ms => 10.25, :verify_ms => 3.5, :add_image_ms => 2.0,
+      :cleanup_ms => 0.25, :total_ms => 16.0, :png_temp_bytes => 512,
+      :pixel_proof_ms => 2.75, :pixel_proof_temp_bytes => 0
+    }
+    second = first.merge(:render_ms => 5.0, :png_temp_bytes => 256)
+
+    IMP.record_raster_performance!(stats, first)
+    IMP.record_raster_performance!(stats, second)
+
+    performance = stats[:pipeline_performance]
+    assert_equal 15.25, performance[:raster_render_ms]
+    assert_equal 7.0, performance[:raster_verify_ms]
+    assert_equal 4.0, performance[:raster_add_image_ms]
+    assert_equal 0.5, performance[:raster_cleanup_ms]
+    assert_equal 32.0, performance[:raster_total_ms]
+    assert_equal 768, performance[:raster_png_temp_bytes]
+    assert_equal 5.5, performance[:raster_pixel_proof_ms]
+    assert_equal 0, performance[:raster_pixel_proof_temp_bytes]
   end
 
   def test_owned_temp_cleanup_failure_is_authoritative

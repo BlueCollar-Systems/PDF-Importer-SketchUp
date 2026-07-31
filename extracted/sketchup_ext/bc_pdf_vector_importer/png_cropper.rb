@@ -16,6 +16,7 @@ module BlueCollarSystems
       SIGNATURE = "\x89PNG\r\n\x1a\n".dup
       SIGNATURE.force_encoding(Encoding::BINARY) if
         SIGNATURE.respond_to?(:force_encoding)
+      INFLATE_INPUT_SLICE_BYTES = 4096
 
       module_function
 
@@ -49,6 +50,95 @@ module BlueCollarSystems
           native_failure
         prepared
       end
+
+      # Decode and hash a complete PNG without materializing a random-access
+      # RGBA file. Full-page Raster and saved-host texture verification only
+      # need physical pixels, dimensions, visibility, and the canonical digest;
+      # item Raster cropping continues to use prepare_rgba! above.
+      def inspect_pixels!(png_path, require_alpha = true,
+                          native_helper = :default)
+        helper = native_helper == :default ? native_decoder_path : native_helper
+        native_failure = nil
+        if helper && File.file?(helper.to_s)
+          begin
+            return inspect_pixels_native!(
+              png_path, helper, require_alpha
+            )
+          rescue RepresentationFidelity::ContractError => error
+            native_failure = error.message
+          rescue StandardError => error
+            native_failure = "native PNG inspection failed: #{error.message}"
+          end
+        end
+
+        inspected = inspect_pixels_ruby!(png_path, require_alpha)
+        inspected[:decoder_backend] = :ruby_zlib_stream
+        inspected[:native_decoder_fallback_reason] = native_failure if
+          native_failure
+        inspected
+      end
+
+      def inspect_pixels_native!(png_path, helper_path, require_alpha = true)
+        source = File.expand_path(png_path.to_s)
+        raise_contract('PNG source is missing') unless File.file?(source)
+        helper = File.expand_path(helper_path.to_s)
+        raise_contract('native PNG decoder is unavailable') unless
+          File.file?(helper)
+
+        command = [helper, source, '--inspect-only']
+        command << '--allow-rgb' unless require_alpha
+        stdout, stderr, status = Open3.capture3(*command)
+        unless status.success?
+          detail = stderr.to_s.strip
+          detail = stdout.to_s.strip if detail.empty?
+          detail = "exit #{status.exitstatus}" if detail.empty?
+          raise_contract("native PNG inspector failed: #{detail}")
+        end
+        result = begin
+          JSON.parse(stdout.to_s)
+        rescue JSON::ParserError => error
+          raise_contract("native PNG inspector returned invalid JSON: #{error.message}")
+        end
+        inspected = inspected_result!(source, result)
+        inspected[:decoder_backend] = :native_zlib_stream
+        inspected
+      rescue RepresentationFidelity::ContractError
+        raise
+      rescue StandardError => error
+        raise_contract("native PNG inspection failed: #{error.message}")
+      end
+      private_class_method :inspect_pixels_native!
+
+      def inspected_result!(source, result)
+        width = Integer(result['pixel_width'])
+        height = Integer(result['pixel_height'])
+        row_bytes = Integer(result['row_bytes'])
+        visual_sha = result['visual_pixel_sha256'].to_s.downcase
+        unless width > 0 && height > 0 && row_bytes == width * 4 &&
+               visual_sha =~ /\A[0-9a-f]{64}\z/
+          raise_contract('PNG pixel inspection contract is invalid')
+        end
+        {
+          :png_path => source,
+          :pixel_width => width,
+          :pixel_height => height,
+          :row_bytes => row_bytes,
+          :alpha_channel_verified =>
+            result['alpha_channel_verified'] == true,
+          :transparent_pixel_present =>
+            result['transparent_pixel_present'] == true,
+          :visible_pixel_present => result['visible_pixel_present'] == true,
+          :visual_pixel_sha256 => visual_sha,
+          :content_sha256 => Digest::SHA256.file(source).hexdigest,
+          :content_byte_size => File.size(source).to_i,
+          :temp_bytes_written => 0
+        }
+      rescue RepresentationFidelity::ContractError
+        raise
+      rescue StandardError => error
+        raise_contract("PNG pixel inspection contract is invalid: #{error.message}")
+      end
+      private_class_method :inspected_result!
 
       def prepare_rgba_native!(png_path, raw_path, helper_path,
                                require_alpha = true)
@@ -89,7 +179,8 @@ module BlueCollarSystems
           :pixel_width => width,
           :pixel_height => height,
           :row_bytes => row_bytes,
-          :alpha_channel_verified => true,
+          :alpha_channel_verified =>
+            result['alpha_channel_verified'] == true,
           :transparent_pixel_present =>
             result['transparent_pixel_present'] == true,
           :visible_pixel_present => result['visible_pixel_present'] == true,
@@ -151,8 +242,7 @@ module BlueCollarSystems
               when 'IDAT'
                 raise_contract('PNG IDAT precedes IHDR') unless state[:row_bytes]
                 inflater ||= Zlib::Inflate.new
-                state[:pending] << inflater.inflate(data)
-                consume_scanlines!(state, output)
+                inflate_png_data!(inflater, data, state, output)
               when 'IEND'
                 if inflater
                   state[:pending] << inflater.finish
@@ -195,6 +285,90 @@ module BlueCollarSystems
         end
       end
       private_class_method :prepare_rgba_ruby!
+
+      def inspect_pixels_ruby!(png_path, require_alpha = true)
+        source = File.expand_path(png_path.to_s)
+        raise_contract('PNG source is missing') unless File.file?(source)
+        state = {
+          :width => nil, :height => nil, :row_bytes => nil,
+          :bytes_per_pixel => nil, :color_type => nil,
+          :rows => 0, :previous => nil, :pending => binary_string,
+          :transparent => false, :visible => false,
+          :visual_digest => Digest::SHA256.new
+        }
+        inflater = nil
+        seen_iend = false
+        File.open(source, 'rb') do |input|
+          raise_contract('PNG signature is invalid') unless
+            input.read(8) == SIGNATURE
+          loop do
+            length_bytes = input.read(4)
+            break if length_bytes.nil? || length_bytes.empty?
+            raise_contract('PNG chunk length is truncated') unless
+              length_bytes.bytesize == 4
+            length = length_bytes.unpack('N')[0]
+            raise_contract('PNG chunk is unreasonably large') if
+              length < 0 || length > 268_435_456
+            type = input.read(4)
+            data = input.read(length)
+            crc_bytes = input.read(4)
+            unless type && type.bytesize == 4 && data &&
+                   data.bytesize == length && crc_bytes &&
+                   crc_bytes.bytesize == 4
+              raise_contract('PNG chunk is truncated')
+            end
+            expected_crc = crc_bytes.unpack('N')[0]
+            actual_crc = Zlib.crc32(type + data)
+            raise_contract("PNG #{type} CRC is invalid") unless
+              expected_crc == actual_crc
+
+            case type
+            when 'IHDR'
+              read_ihdr!(state, data, require_alpha)
+            when 'IDAT'
+              raise_contract('PNG IDAT precedes IHDR') unless state[:row_bytes]
+              inflater ||= Zlib::Inflate.new
+              inflate_png_data!(inflater, data, state, nil)
+            when 'IEND'
+              if inflater
+                state[:pending] << inflater.finish
+                consume_scanlines!(state, nil)
+              end
+              seen_iend = true
+              break
+            end
+          end
+        end
+        unless seen_iend && state[:width] && state[:height] &&
+               state[:rows] == state[:height] && state[:pending].empty?
+          raise_contract('PNG scanline stream is incomplete or oversized')
+        end
+        {
+          :png_path => source,
+          :pixel_width => state[:width],
+          :pixel_height => state[:height],
+          :row_bytes => state[:width] * 4,
+          :alpha_channel_verified => state[:color_type] == 6,
+          :transparent_pixel_present => state[:transparent],
+          :visible_pixel_present => state[:visible],
+          :visual_pixel_sha256 => state[:visual_digest].hexdigest,
+          :content_sha256 => Digest::SHA256.file(source).hexdigest,
+          :content_byte_size => File.size(source).to_i,
+          :temp_bytes_written => 0,
+          :decoder_backend => :ruby_zlib_stream
+        }
+      rescue RepresentationFidelity::ContractError
+        raise
+      rescue StandardError => error
+        raise_contract("PNG pixel inspection failed: #{error.message}")
+      ensure
+        begin
+          inflater.close if inflater
+        rescue StandardError
+          # zlib resources are best-effort after the authoritative result.
+        end
+      end
+      private_class_method :inspect_pixels_ruby!
 
       def crop_rgba!(prepared, pixel_crop, output_path)
         unless prepared.is_a?(Hash) && File.file?(prepared[:raw_path].to_s)
@@ -301,6 +475,17 @@ module BlueCollarSystems
       end
       private_class_method :read_ihdr!
 
+      def inflate_png_data!(inflater, data, state, output)
+        offset = 0
+        while offset < data.bytesize
+          chunk = data.byteslice(offset, INFLATE_INPUT_SLICE_BYTES)
+          state[:pending] << inflater.inflate(chunk)
+          consume_scanlines!(state, output)
+          offset += chunk.bytesize
+        end
+      end
+      private_class_method :inflate_png_data!
+
       def consume_scanlines!(state, output)
         packet_size = state[:row_bytes] + 1
         pending_offset = 0
@@ -320,7 +505,7 @@ module BlueCollarSystems
             alpha_index += 4
           end
           state[:visual_digest].update(canonical_visual_row(rgba))
-          output.write(rgba)
+          output.write(rgba) if output
           state[:previous] = row
           state[:rows] += 1
         end

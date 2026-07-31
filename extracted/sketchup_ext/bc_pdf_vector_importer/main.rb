@@ -2945,6 +2945,30 @@ module BlueCollarSystems
       stats[:pipeline_performance][key] = (prior + elapsed_ms.to_f).round(3)
     end
 
+    def self.record_raster_performance!(stats, performance)
+      metrics = performance || {}
+      {
+        :render_ms => :raster_render_ms,
+        :verify_ms => :raster_verify_ms,
+        :add_image_ms => :raster_add_image_ms,
+        :cleanup_ms => :raster_cleanup_ms,
+        :total_ms => :raster_total_ms,
+        :pixel_proof_ms => :raster_pixel_proof_ms
+      }.each do |source_key, destination_key|
+        record_pipeline_timing!(stats, destination_key, metrics[source_key])
+      end
+
+      stats[:pipeline_performance] ||= {}
+      {
+        :png_temp_bytes => :raster_png_temp_bytes,
+        :pixel_proof_temp_bytes => :raster_pixel_proof_temp_bytes
+      }.each do |source_key, destination_key|
+        prior = stats[:pipeline_performance][destination_key].to_i
+        stats[:pipeline_performance][destination_key] =
+          prior + metrics[source_key].to_i
+      end
+    end
+
     def self.run_forced_raster_pipeline(model, path, opts)
       dpi = opts[:raster_dpi] || 300
       Logger.info('Pipeline', "Explicit Raster mode at #{dpi} DPI")
@@ -3021,6 +3045,7 @@ module BlueCollarSystems
           model, path, page_num, media_box, opts, import_start,
           running_y_offset, render_box, page_rotation
         )
+        record_raster_performance!(stats, raster[:performance])
         artifact_evidence = raster[:artifact_evidence]
         record = {
           :page => page_num,
@@ -3372,6 +3397,7 @@ module BlueCollarSystems
             model, path, page_num, media_box, opts, import_start,
             page_y_offset, svg_page_box, page_rotation
           )
+          record_raster_performance!(stats, raster[:performance])
           artifact = raster[:artifact_evidence]
           record = {
             :page => page_num,
@@ -3644,6 +3670,7 @@ module BlueCollarSystems
               model, path, page_num, media_box, opts, import_start,
               page_y_offset, svg_page_box, page_rotation
             )
+            record_raster_performance!(stats, raster[:performance])
             stats[:pages] += 1
             stats[:xobjects] += xobj.form_xobjects.length
             stats[:mode_used] = :raster
@@ -4681,22 +4708,19 @@ module BlueCollarSystems
         # that boundary, decode the exact PNG as pixels as well; a valid header
         # and self-authored attributes are not proof of visible raster content.
         if source_pdf_binding.is_a?(Hash)
-          pixel_temp_dir = Dir.mktmpdir('bc_raster_pixel_proof_')
-          pixel_raw_path = File.join(pixel_temp_dir, 'pixels.rgba')
-          begin
-            prepared_pixels = PngCropper.prepare_rgba!(
-              png_path, pixel_raw_path, false
-            )
-            pixel_binding = {
-              :visual_pixel_sha256 =>
-                prepared_pixels[:visual_pixel_sha256].to_s.downcase,
-              :visual_pixel_binding_verified => true
-            }
-          ensure
-            cleanup_owned_temp_artifacts!(
-              [pixel_raw_path], [pixel_temp_dir]
-            ) if pixel_temp_dir
-          end
+          pixel_proof_started = Time.now
+          inspected_pixels = PngCropper.inspect_pixels!(png_path, false)
+          pixel_binding = {
+            :visual_pixel_sha256 =>
+              inspected_pixels[:visual_pixel_sha256].to_s.downcase,
+            :visual_pixel_binding_verified => true,
+            :pixel_proof_ms =>
+              ((Time.now - pixel_proof_started) * 1000.0).round(3),
+            :pixel_proof_temp_bytes =>
+              inspected_pixels[:temp_bytes_written].to_i,
+            :pixel_proof_decoder_backend =>
+              inspected_pixels[:decoder_backend]
+          }
         end
       end
 
@@ -5285,6 +5309,12 @@ module BlueCollarSystems
                                    import_start, y_offset = 0.0,
                                    render_box = nil, page_rotation = 0,
                                    target_entities = nil, z_offset = 0.0)
+      raster_started = Time.now
+      performance = {
+        :render_ms => 0.0, :verify_ms => 0.0, :add_image_ms => 0.0,
+        :cleanup_ms => 0.0, :total_ms => 0.0, :png_temp_bytes => 0,
+        :pixel_proof_ms => 0.0, :pixel_proof_temp_bytes => 0
+      }
       img = nil
       exe = safe_find_pdftocairo
       return false unless exe
@@ -5331,12 +5361,14 @@ module BlueCollarSystems
           pdf_path, png_path.sub(/\.png$/, '')
         ]
         source_binding = begin_source_pdf_render_binding!(opts, pdf_path)
+        render_started = Time.now
         run = CommandRunner.run(
           args,
           timeout_s: 180,
           context: "Raster.pdftocairo"
         )
         verify_source_pdf_render_binding!(source_binding)
+        performance[:render_ms] += (Time.now - render_started) * 1000.0
         validation = PopplerResultValidator.validate(
           run,
           :executable => exe,
@@ -5366,10 +5398,12 @@ module BlueCollarSystems
         candidate = candidates.find { |path| File.file?(path) }
         next unless candidate
         begin
+          verify_started = Time.now
           proof = verify_raster_artifact!(
             candidate, page_num, media_box, variant[:render_box],
             page_rotation, args, pdf_path, source_binding
           )
+          performance[:verify_ms] += (Time.now - verify_started) * 1000.0
           actual_png = candidate
           actual_box = variant[:render_box]
           artifact_evidence = proof
@@ -5390,6 +5424,11 @@ module BlueCollarSystems
         end
       end
       return false unless actual_png && artifact_evidence && actual_box
+      performance[:png_temp_bytes] = File.size(actual_png).to_i
+      performance[:pixel_proof_ms] =
+        artifact_evidence[:pixel_proof_ms].to_f
+      performance[:pixel_proof_temp_bytes] =
+        artifact_evidence[:pixel_proof_temp_bytes].to_i
 
       scale = opts[:scale] || 1.0
       placement = raster_placement_geometry(
@@ -5400,9 +5439,12 @@ module BlueCollarSystems
        )
        begin
          entities = target_entities || model.active_entities
+         add_image_started = Time.now
          img = entities.add_image(
           actual_png, pt, placement[:width], placement[:height]
         )
+        performance[:add_image_ms] +=
+          (Time.now - add_image_started) * 1000.0
         return false unless img
         layer = model.layers['PDF Import'] || model.layers.add('PDF Import')
         begin
@@ -5453,9 +5495,18 @@ module BlueCollarSystems
           :entity => img,
           :artifact_evidence => artifact_evidence,
           :placement => placement,
-          :command => successful_args
+          :command => successful_args,
+          :performance => performance
         }
+        cleanup_started = Time.now
         cleanup_owned_temp_artifacts!(candidates, [owned_page_dir])
+        performance[:cleanup_ms] +=
+          (Time.now - cleanup_started) * 1000.0
+        performance[:total_ms] = (Time.now - raster_started) * 1000.0
+        performance.keys.each do |key|
+          performance[key] = performance[key].round(3) if
+            performance[key].is_a?(Float)
+        end
         owned_page_dir = nil
         candidates = []
         delivery

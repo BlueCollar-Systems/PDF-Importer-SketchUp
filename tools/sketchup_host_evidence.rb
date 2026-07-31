@@ -137,7 +137,9 @@ module SketchupHostEvidence
     context = {
       :definition_child_results => {},
       :definition_child_payloads => {},
-      :canonical_json_cache => {}
+      :canonical_json_cache => {},
+      :texture_proof => !(options.is_a?(Hash) &&
+                           options[:texture_proof] == false)
     }
     rows = []
     Array(entities.to_a).each_with_index do |entity, index|
@@ -191,6 +193,43 @@ module SketchupHostEvidence
     end
     verify_persistent_rows!(saved, reopened)
   end
+
+  def self.verify_lightweight_reopen_continuity!(saved_manifest,
+                                                  reopened_manifest)
+    normalized = normalize_texture_proof_for_lightweight(reopened_manifest)
+    verify_reopen_continuity!(saved_manifest, normalized)
+  end
+
+  def self.normalize_texture_proof_for_lightweight(value)
+    if value.is_a?(Array)
+      return value.map { |entry| normalize_texture_proof_for_lightweight(entry) }
+    end
+    return value unless value.is_a?(Hash)
+
+    normalized = {}
+    value.each do |key, entry|
+      normalized[key] = normalize_texture_proof_for_lightweight(entry)
+    end
+    if normalized.key?('host_texture_export_verified') ||
+       normalized.key?(:host_texture_export_verified)
+      texture_proof_defaults = {
+        'host_texture_export_verified' => false,
+        'host_visual_pixel_sha256' => nil,
+        'host_texture_export_byte_size' => nil,
+        'host_texture_load_ms' => 0.0,
+        'host_texture_write_ms' => 0.0,
+        'host_texture_pixel_proof_ms' => 0.0,
+        'host_texture_proof_temp_bytes' => 0,
+        'host_texture_pixel_proof_decoder_backend' => nil
+      }
+      texture_proof_defaults.each do |key, default|
+        target = normalized.key?(key) ? key : key.to_sym
+        normalized[target] = default
+      end
+    end
+    normalized
+  end
+  private_class_method :normalize_texture_proof_for_lightweight
 
   # SketchUp 2017 can normalize a compact solid-text geometry partition on
   # its first save/load. Accept only that digest normalization: every
@@ -604,7 +643,8 @@ module SketchupHostEvidence
     context = {
       :definition_child_results => {},
       :definition_child_payloads => {},
-      :canonical_json_cache => {}
+      :canonical_json_cache => {},
+      :texture_proof => true
     }
     snapshot_entity_with_physical_tree(
       entity, ancestors, false, false, context
@@ -658,7 +698,7 @@ module SketchupHostEvidence
       'bounds' => physical_tree_bounds(physical_tree),
       'transformation' => physical_tree_transformation(physical_tree),
       'representation_evidence' => representation,
-      'content_evidence' => host_content_evidence(entity, typename),
+      'content_evidence' => host_content_evidence(entity, typename, context),
       'geometry_evidence' => physical['geometry_evidence'],
       'style_evidence' => physical['style_evidence'],
       'children' => child_rows
@@ -849,14 +889,17 @@ module SketchupHostEvidence
     end
     directory = Dir.mktmpdir('bc_host_texture_proof_')
     png_path = File.join(directory, 'texture.png')
-    raw_path = File.join(directory, 'texture.rgba')
     writer = Sketchup.create_texture_writer
     raise EvidenceError, 'SketchUp TextureWriter creation failed' unless writer
+    load_started = Time.now
     texture_id = writer.load(entity)
+    load_ms = (Time.now - load_started) * 1000.0
     unless texture_id.is_a?(Integer) && texture_id > 0
       raise EvidenceError, 'SketchUp TextureWriter did not load the image'
     end
+    write_started = Time.now
     status = writer.write(entity, png_path)
+    write_ms = (Time.now - write_started) * 1000.0
     unless status.is_a?(Integer) && status == 0
       raise EvidenceError,
             "SketchUp TextureWriter export failed with status #{status.inspect}"
@@ -865,19 +908,28 @@ module SketchupHostEvidence
       raise EvidenceError,
             'SketchUp TextureWriter reported success without an output file'
     end
-    prepared = BlueCollarSystems::PDFVectorImporter::PngCropper.prepare_rgba!(
-      png_path, raw_path, false
+    proof_started = Time.now
+    inspected = BlueCollarSystems::PDFVectorImporter::PngCropper.inspect_pixels!(
+      png_path, false
     )
-    visual_sha = prepared[:visual_pixel_sha256].to_s.downcase
+    proof_ms = (Time.now - proof_started) * 1000.0
+    visual_sha = inspected[:visual_pixel_sha256].to_s.downcase
     unless visual_sha =~ /\A[0-9a-f]{64}\z/
       raise EvidenceError, 'host texture visual pixel digest is invalid'
     end
     {
       'host_texture_export_verified' => true,
       'host_visual_pixel_sha256' => visual_sha,
-      'host_pixel_width' => prepared[:pixel_width].to_i,
-      'host_pixel_height' => prepared[:pixel_height].to_i,
-      'host_texture_export_byte_size' => File.size(png_path).to_i
+      'host_pixel_width' => inspected[:pixel_width].to_i,
+      'host_pixel_height' => inspected[:pixel_height].to_i,
+      'host_texture_export_byte_size' => File.size(png_path).to_i,
+      'host_texture_load_ms' => load_ms.round(3),
+      'host_texture_write_ms' => write_ms.round(3),
+      'host_texture_pixel_proof_ms' => proof_ms.round(3),
+      'host_texture_proof_temp_bytes' =>
+        inspected[:temp_bytes_written].to_i,
+      'host_texture_pixel_proof_decoder_backend' =>
+        inspected[:decoder_backend].to_s
     }
   rescue EvidenceError
     raise
@@ -885,7 +937,7 @@ module SketchupHostEvidence
     raise EvidenceError, "host texture pixel evidence failed: #{error.message}"
   ensure
     cleanup_failures = []
-    [raw_path, png_path].compact.each do |path|
+    [png_path].compact.each do |path|
       begin
         File.delete(path) if File.file?(path)
       rescue StandardError => error
@@ -906,7 +958,7 @@ module SketchupHostEvidence
   end
   private_class_method :texture_pixel_evidence
 
-  def self.image_content_evidence(entity, typename)
+  def self.image_content_evidence(entity, typename, texture_proof = true)
     return nil unless image_typename?(typename)
     width = entity.respond_to?(:width) ? entity.width.to_f : 0.0
     height = entity.respond_to?(:height) ? entity.height.to_f : 0.0
@@ -957,13 +1009,39 @@ module SketchupHostEvidence
       'source_span_id' => attributes['source_span_id']
     }
     claimed_visual_sha = attributes['raster_visual_pixel_sha256'].to_s.strip
-    evidence.merge!(texture_pixel_evidence(entity)) unless
-      claimed_visual_sha.empty?
+    unless claimed_visual_sha.empty?
+      if texture_proof
+        evidence.merge!(texture_pixel_evidence(entity))
+      else
+        evidence.merge!(lightweight_texture_evidence(entity))
+      end
+    end
     evidence
   rescue StandardError => error
     raise EvidenceError, "host image content evidence failed: #{error.message}"
   end
   private_class_method :image_content_evidence
+
+  def self.lightweight_texture_evidence(entity)
+    pixel_width = entity.respond_to?(:pixelwidth) ? entity.pixelwidth.to_i : 0
+    pixel_height = entity.respond_to?(:pixelheight) ? entity.pixelheight.to_i : 0
+    unless pixel_width > 0 && pixel_height > 0
+      raise EvidenceError, 'host image pixel dimensions are unavailable'
+    end
+    {
+      'host_texture_export_verified' => false,
+      'host_visual_pixel_sha256' => nil,
+      'host_pixel_width' => pixel_width,
+      'host_pixel_height' => pixel_height,
+      'host_texture_export_byte_size' => nil,
+      'host_texture_load_ms' => 0.0,
+      'host_texture_write_ms' => 0.0,
+      'host_texture_pixel_proof_ms' => 0.0,
+      'host_texture_proof_temp_bytes' => 0,
+      'host_texture_pixel_proof_decoder_backend' => nil
+    }
+  end
+  private_class_method :lightweight_texture_evidence
 
   def self.native_text_content_evidence(entity, typename)
     return nil unless typename.to_s == 'Text'
@@ -986,8 +1064,9 @@ module SketchupHostEvidence
   end
   private_class_method :native_text_content_evidence
 
-  def self.host_content_evidence(entity, typename)
-    image = image_content_evidence(entity, typename)
+  def self.host_content_evidence(entity, typename, context = nil)
+    texture_proof = !context.is_a?(Hash) || context[:texture_proof] != false
+    image = image_content_evidence(entity, typename, texture_proof)
     return image if image
     native_text_content_evidence(entity, typename)
   end
