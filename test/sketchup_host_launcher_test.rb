@@ -472,6 +472,106 @@ class SketchupHostLauncherTest < Minitest::Test
     end
   end
 
+  def test_non_full_page_raster_modes_keep_strict_reopen_continuity
+    Dir.mktmpdir('su-non-terminal-raster-manifest') do |directory|
+      pdf = File.join(directory, 'input.pdf')
+      File.binwrite(pdf, "%PDF-1.4\n%%EOF\n")
+      digest = Digest::SHA256.file(pdf).hexdigest
+      binding = { 'job_id' => 'job-strict', 'job_sha256' => 'a' * 64 }
+      lightweight = terminal_raster_manifest_row(false)
+      physical = terminal_raster_manifest_row(true)
+      base_result = terminal_raster_result(binding, pdf, digest)
+      base_manifest = terminal_raster_manifest(
+        binding, pdf, digest, lightweight, physical
+      )
+      cases = [
+        ['vector strategy', 'vector', 'raster'],
+        ['hybrid item Raster', 'hybrid', 'raster'],
+        ['Geometry', 'vector', 'geometry'],
+        ['Text', 'vector', 'text'],
+        ['3D Text', 'vector', 'text3d']
+      ]
+      original = SketchupHostEvidence.method(:verify_delivery_evidence!)
+      SketchupHostEvidence.define_singleton_method(
+        :verify_delivery_evidence!
+      ) { |_stats, _rows, _mode, _pages| true }
+
+      cases.each do |label, import_mode, text_mode|
+        job = {
+          :import_mode => import_mode, :text_mode => text_mode, :pages => [1],
+          :immutable_pdf_path => pdf
+        }
+        result = Marshal.load(Marshal.dump(base_result))
+        manifest = Marshal.load(Marshal.dump(base_manifest))
+        manifest['requested_text_mode'] = text_mode
+        result['requested_text_mode'] = text_mode
+
+        error = assert_raises(StandardError, label) do
+          SketchupHostLauncher.verify_terminal_manifest!(
+            manifest, result, job, binding, digest, 'raster-session'
+          )
+        end
+        assert_match(/content evidence/i, error.message, label)
+      end
+    ensure
+      SketchupHostEvidence.define_singleton_method(
+        :verify_delivery_evidence!, original
+      ) if original
+    end
+  end
+
+  def test_full_page_raster_flags_do_not_replace_production_proof
+    Dir.mktmpdir('su-unproven-terminal-raster-manifest') do |directory|
+      pdf = File.join(directory, 'input.pdf')
+      File.binwrite(pdf, "%PDF-1.4\n%%EOF\n")
+      digest = Digest::SHA256.file(pdf).hexdigest
+      binding = { 'job_id' => 'job-unproven', 'job_sha256' => 'a' * 64 }
+      job = {
+        :import_mode => 'raster', :text_mode => 'text3d', :pages => [1],
+        :immutable_pdf_path => pdf
+      }
+      lightweight = terminal_raster_manifest_row(false)
+      physical = terminal_raster_manifest_row(true)
+      base_result = terminal_raster_result(binding, pdf, digest)
+      base_manifest = terminal_raster_manifest(
+        binding, pdf, digest, lightweight, physical
+      )
+      cases = [
+        ['missing delivery ledger', lambda do |manifest, result|
+          result['raster_delivery_records'] = []
+        end],
+        ['wrong full-page source basis', lambda do |_manifest, result|
+          result['raster_delivery_records'][0]['delivery_basis'] =
+            'verified_zero_canonical_text'
+        end],
+        ['missing reopened ownership', lambda do |manifest, _result|
+          manifest['reopened_owned_entities'] = []
+        end]
+      ]
+      original = SketchupHostEvidence.method(:verify_delivery_evidence!)
+      SketchupHostEvidence.define_singleton_method(
+        :verify_delivery_evidence!
+      ) { |_stats, _rows, _mode, _pages| true }
+
+      cases.each do |label, mutate|
+        result = Marshal.load(Marshal.dump(base_result))
+        manifest = Marshal.load(Marshal.dump(base_manifest))
+        mutate.call(manifest, result)
+
+        error = assert_raises(StandardError, label) do
+          SketchupHostLauncher.verify_terminal_manifest!(
+            manifest, result, job, binding, digest, 'raster-session'
+          )
+        end
+        assert_match(/content evidence/i, error.message, label)
+      end
+    ensure
+      SketchupHostEvidence.define_singleton_method(
+        :verify_delivery_evidence!, original
+      ) if original
+    end
+  end
+
   def test_restore_failure_changes_apparent_success_to_error
     Dir.mktmpdir('su-launch') do |dir|
       job_path, result_path, _pdf = write_job(dir)
@@ -586,11 +686,45 @@ class SketchupHostLauncherTest < Minitest::Test
   end
 
   def terminal_raster_result(binding, pdf, digest)
+    page_record = {
+      'page' => 1,
+      'source_span_ids' => [],
+      'requested_mode' => 'raster',
+      'delivered_mode' => 'raster',
+      'created_entity_type' => 'raster_image',
+      'delivery_scope' => 'page_raster',
+      'delivery_basis' => 'explicit_full_page_raster',
+      'full_page_raster_request' => true,
+      'semantic_text_evaluated' => false,
+      'real_raster_verified' => true,
+      'visual_fidelity_verified' => true,
+      'cleanup_outcome' => 'not_required',
+      'explicit_request' => true,
+      'degraded' => false,
+      'artifact_evidence' => {},
+      'resulting_entity_ids' => ['persistent_id:7080']
+    }
     binding.merge(
       'reopen_persistent_id_verified' => true,
       'host_heal_preservation_verified' => true,
       'host_heal_required' => false,
       'final_texture_proof_verified' => true,
+      'requested_text_mode' => 'raster',
+      'delivery_summary_mode' => 'raster',
+      'text_entities' => 0,
+      'selected_pages' => [1],
+      'text_source_span_ids' => [],
+      'text_attempts' => [],
+      'page_text_delivery_records' => [],
+      'source_glyph_physical_deliveries' => [],
+      'raster_fallback_used' => false,
+      'fallback_transitions' => [],
+      'page_representation_fallbacks' => [],
+      'inline_image_page_raster_fallbacks' => [],
+      'empty_page_source_inspections' => [],
+      'raster_delivery_records' => [Marshal.load(Marshal.dump(page_record))],
+      'terminal_text_delivery_records' =>
+        [Marshal.load(Marshal.dump(page_record))],
       'original_pdf_path' => pdf,
       'original_pdf_sha256' => digest,
       'immutable_pdf_path' => pdf,

@@ -686,6 +686,70 @@ module SketchupHostLauncher
     true
   end
 
+  def proven_pure_terminal_page_raster?(manifest, result, job)
+    return false unless manifest.is_a?(Hash) && result.is_a?(Hash) &&
+                        job[:import_mode].to_s == 'raster' &&
+                        effective_requested_mode(job).to_s == 'raster' &&
+                        manifest['host_heal_required'] == false &&
+                        manifest['final_texture_proof_verified'] == true &&
+                        result['requested_text_mode'].to_s == 'raster' &&
+                        result['delivery_summary_mode'].to_s == 'raster' &&
+                        result['text_entities'].is_a?(Integer) &&
+                        result['text_entities'] == 0 &&
+                        result['raster_fallback_used'] == false
+
+    empty_ledgers = [
+      'text_source_span_ids', 'text_attempts',
+      'page_text_delivery_records', 'source_glyph_physical_deliveries',
+      'fallback_transitions', 'page_representation_fallbacks',
+      'inline_image_page_raster_fallbacks', 'empty_page_source_inspections'
+    ]
+    return false unless empty_ledgers.all? do |name|
+      result[name].is_a?(Array) && result[name].empty?
+    end
+
+    selected = Array(job[:pages]).map(&:to_i).select { |page| page > 0 }.
+      uniq.sort
+    reported = result['selected_pages']
+    return false unless !selected.empty? && reported.is_a?(Array) &&
+                        reported.map(&:to_i).uniq.sort == selected
+    return false unless manifest['reopened_owned_entities'].is_a?(Array) &&
+                        !manifest['reopened_owned_entities'].empty?
+
+    raster_records = result['raster_delivery_records']
+    terminal_records = result['terminal_text_delivery_records']
+    return false unless raster_records.is_a?(Array) &&
+                        terminal_records.is_a?(Array) &&
+                        raster_records.length == selected.length &&
+                        terminal_records.length == selected.length
+
+    [raster_records, terminal_records].all? do |records|
+      pages = records.map do |record|
+        return false unless record.is_a?(Hash) &&
+                            record['source_span_ids'].is_a?(Array) &&
+                            record['source_span_ids'].empty? &&
+                            record['requested_mode'].to_s == 'raster' &&
+                            record['delivered_mode'].to_s == 'raster' &&
+                            record['created_entity_type'].to_s == 'raster_image' &&
+                            record['delivery_scope'].to_s == 'page_raster' &&
+                            record['delivery_basis'].to_s ==
+                              'explicit_full_page_raster' &&
+                            record['full_page_raster_request'] == true &&
+                            record['semantic_text_evaluated'] == false &&
+                            record['real_raster_verified'] == true &&
+                            record['visual_fidelity_verified'] == true &&
+                            record['cleanup_outcome'].to_s == 'not_required' &&
+                            record['explicit_request'] == true &&
+                            record['degraded'] == false &&
+                            record['artifact_evidence'].is_a?(Hash) &&
+                            record['resulting_entity_ids'].is_a?(Array) &&
+                            record['resulting_entity_ids'].length == 1
+        record['page'].to_i
+      end
+      pages.uniq.sort == selected
+    end
+  end
+
   def verify_terminal_manifest!(manifest, result, job, binding,
                                 immutable_sha256, session_id)
     require_equal!(manifest['job_id'], binding['job_id'], 'manifest job ID')
@@ -730,23 +794,14 @@ module SketchupHostLauncher
     SketchupHostEvidence.verify_host_heal_preservation!(
       owned, stabilized_owned
     )
-    pure_terminal_page_raster =
-      manifest['host_heal_required'] == false &&
-      manifest['final_texture_proof_verified'] == true
-    if pure_terminal_page_raster
-      SketchupHostEvidence.verify_lightweight_reopen_continuity!(
-        post_import, reopened
-      )
-    else
-      SketchupHostEvidence.verify_reopen_continuity!(post_import, reopened)
-    end
-
     evidence = result.dup
     provenance = result['source_provenance']
     unless provenance.is_a?(Hash) && provenance['objects'].is_a?(Array)
       raise LaunchError, 'result full source provenance is missing'
     end
     evidence['source_provenance_objects'] = provenance['objects']
+    pure_terminal_page_raster =
+      proven_pure_terminal_page_raster?(manifest, result, job)
     delivery_manifest = if pure_terminal_page_raster
                           manifest['reopened_owned_entities']
                         else
@@ -755,9 +810,19 @@ module SketchupHostLauncher
     if !delivery_manifest.is_a?(Array) || delivery_manifest.empty?
       raise LaunchError, 'terminal owned delivery evidence is missing'
     end
-    SketchupHostEvidence.verify_delivery_evidence!(
-      evidence, delivery_manifest, effective_requested_mode(job), job[:pages]
-    )
+    if pure_terminal_page_raster
+      SketchupHostEvidence.verify_delivery_evidence!(
+        evidence, delivery_manifest, effective_requested_mode(job), job[:pages]
+      )
+      SketchupHostEvidence.verify_lightweight_reopen_continuity!(
+        post_import, reopened
+      )
+    else
+      SketchupHostEvidence.verify_reopen_continuity!(post_import, reopened)
+      SketchupHostEvidence.verify_delivery_evidence!(
+        evidence, delivery_manifest, effective_requested_mode(job), job[:pages]
+      )
+    end
     true
   end
 

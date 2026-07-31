@@ -3,13 +3,13 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.122-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.123-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.122)
+### Recent fixes (v3.7.123)
 
 - **Stable Raster host evidence with external timing telemetry**: TextureWriter phase timings are reported outside persistent content identity, so identical saved/reopened pixels cannot fail strict host-heal continuity merely because an export took a different number of milliseconds. Pure terminal page-Raster controller verification now recognizes only the explicit no-heal/final-texture-proof state, compares its lightweight pre-reopen snapshot to the authoritative physical reopen, and revalidates delivery against the reopened owned images; every other model retains strict heal/reopen validation.
 - **Full-page Raster proof without giant raw files**: production PNG verification and saved-model TextureWriter evidence now decode and hash one scanline at a time, write zero temporary RGBA bytes, and retain the exact premultiplied visual digest, dimensions, placement, and source binding. Pure page-Raster QA saves once and performs one authoritative final reopen/texture proof; geometry and text models keep the existing host-heal path. Per-phase render, verify, placement, cleanup, and temporary-byte counters make future slowdowns visible.
