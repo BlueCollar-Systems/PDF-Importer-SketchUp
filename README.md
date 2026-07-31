@@ -3,13 +3,15 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.124-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.125-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.124)
+### Recent fixes (v3.7.125)
+
+- **Byte-reproducible release packages**: RBZ members now use fixed archive metadata and canonical LF Ruby source bytes, so Windows and GitHub checkouts produce the same artifact instead of leaking filesystem timestamps or CRLF/LF differences into a release.
 
 - **Host-proven Raster telemetry**: terminal page-Raster delivery now retains the renderer's measured render, pixel-proof, placement, cleanup, total-time, and temporary-byte evidence through the verification boundary. Release acceptance therefore fails closed if production work cannot be measured and no longer reports a successful real render as zero time.
 - **Stable Raster host evidence with external timing telemetry**: TextureWriter phase timings are reported outside persistent content identity, so identical saved/reopened pixels cannot fail strict host-heal continuity merely because an export took a different number of milliseconds. Pure terminal page-Raster controller verification now recognizes only the explicit no-heal/final-texture-proof state, compares its lightweight pre-reopen snapshot to the authoritative physical reopen, and revalidates delivery against the reopened owned images; every other model retains strict heal/reopen validation.

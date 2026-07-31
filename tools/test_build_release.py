@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -65,6 +66,35 @@ def _write_runtime(support: Path) -> None:
 
 
 class BuildReleaseTest(unittest.TestCase):
+    def test_member_is_identical_for_crlf_lf_and_different_mtimes(self):
+        """A platform checkout must not change the published RBZ bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crlf = root / "crlf.rb"
+            lf = root / "lf.rb"
+            crlf.write_bytes(b"puts 'stable'\r\n")
+            lf.write_bytes(b"puts 'stable'\n")
+            os.utime(crlf, (1_600_000_000, 1_600_000_000))
+            os.utime(lf, (1_700_000_000, 1_700_000_000))
+            archives = []
+            for index, source in enumerate((crlf, lf)):
+                archive = root / f"release-{index}.rbz"
+                with zipfile.ZipFile(
+                    archive, "w", compression=zipfile.ZIP_DEFLATED
+                ) as output:
+                    br._write_deterministic_member(
+                        output, source, "bc_pdf_vector_importer/sample.rb"
+                    )
+                archives.append(archive)
+
+            self.assertEqual(archives[0].read_bytes(), archives[1].read_bytes())
+            with zipfile.ZipFile(archives[0]) as built:
+                member = built.getinfo("bc_pdf_vector_importer/sample.rb")
+                self.assertEqual(member.date_time, (1980, 1, 1, 0, 0, 0))
+                self.assertEqual(built.read(member), b"puts 'stable'\n")
+                self.assertEqual(member.create_system, 3)
+                self.assertEqual(member.external_attr, 0o100644 << 16)
+
     def test_release_build_includes_library_runtime_and_rejects_legacy_bin(self):
         original_ext_root = br.EXT_ROOT
         original_loader = br.LOADER_FILE

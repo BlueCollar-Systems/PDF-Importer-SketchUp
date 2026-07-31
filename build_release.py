@@ -71,6 +71,27 @@ REQUIRED_DATA = (
     "share/poppler/cidToUnicode/Adobe-Japan1",
     "share/poppler/cidToUnicode/Adobe-Korea1",
 )
+DETERMINISTIC_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+DETERMINISTIC_FILE_MODE = 0o100644
+
+
+def _write_deterministic_member(
+    archive: zipfile.ZipFile,
+    source: Path,
+    archive_name: str,
+) -> None:
+    """Write one byte-stable member, canonicalizing Ruby source to LF."""
+    data = source.read_bytes()
+    if source.suffix.casefold() == ".rb":
+        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    info = zipfile.ZipInfo(
+        archive_name.replace("\\", "/"),
+        date_time=DETERMINISTIC_ZIP_TIMESTAMP,
+    )
+    info.create_system = 3
+    info.external_attr = DETERMINISTIC_FILE_MODE << 16
+    info.compress_type = zipfile.ZIP_DEFLATED
+    archive.writestr(info, data)
 
 
 def _should_exclude(rel: Path) -> bool:
@@ -224,7 +245,7 @@ def build(
     with zipfile.ZipFile(rbz_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         # Root loader file
         if LOADER_FILE.exists():
-            zf.write(LOADER_FILE, LOADER_FILE.name)
+            _write_deterministic_member(zf, LOADER_FILE, LOADER_FILE.name)
             file_count += 1
 
         # Support folder (includes approved Poppler runtime)
@@ -239,7 +260,7 @@ def build(
                 raise RuntimeError(
                     f"Refusing to archive legacy bin/ member: {rel.as_posix()}"
                 )
-            zf.write(abs_path, str(rel))
+            _write_deterministic_member(zf, abs_path, rel.as_posix())
             file_count += 1
 
     print(f"Built: {rbz_path}")
