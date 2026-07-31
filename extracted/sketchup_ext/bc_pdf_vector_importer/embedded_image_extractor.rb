@@ -42,13 +42,14 @@ module BlueCollarSystems
         :placement_error
       )
 
-      attr_reader :assets
+      attr_reader :assets, :inline_image_count
 
       def initialize(pdf_parser, output_dir = nil)
         @pdf = pdf_parser
         @output_dir = output_dir
         @assets = []
         @sequence = 0
+        @inline_image_count = 0
         @soft_mask_cache = {}
         @color_space_cache = {}
       end
@@ -56,6 +57,7 @@ module BlueCollarSystems
       def extract_page(page_num, output_dir = @output_dir, write_files = true)
         @assets = []
         @sequence = 0
+        @inline_image_count = 0
         @soft_mask_cache.clear
 
         raw = @pdf.page_data(page_num)
@@ -1021,6 +1023,7 @@ module BlueCollarSystems
           end
           word = stream[i...j]
           if word == 'BI'
+            @inline_image_count += 1
             id_pos = stream.index(/\sID[\s\n\r]/, j)
             if id_pos
               ei_pos = stream.index(/[\s\n\r]EI(?=[\s\n\r\/\[<])/, id_pos + 3)

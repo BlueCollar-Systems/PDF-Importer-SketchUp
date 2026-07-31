@@ -143,6 +143,26 @@ class SketchupHostJobTest < Minitest::Test
     end
   end
 
+  def test_controlled_job_preserves_and_validates_source_tree_sha256
+    load_job_tool
+    Dir.mktmpdir('su-host-job-source-tree') do |dir|
+      digest = 'c' * 64
+      _pdf, job_path = write_json_job(
+        dir, 'source_tree_sha256' => digest
+      )
+
+      assert_equal digest, SketchupHostJob.load(job_path)[:source_tree_sha256]
+
+      _pdf, invalid_path = write_json_job(
+        dir, 'source_tree_sha256' => 'not-a-digest'
+      )
+      error = assert_raises(ArgumentError) do
+        SketchupHostJob.load(invalid_path)
+      end
+      assert_match(/source tree SHA256/i, error.message)
+    end
+  end
+
   private
 
   def assert_invalid_pages(value)

@@ -178,11 +178,28 @@ class AllModesPlacementContractTest < Minitest::Test
     assert_match(/Array\(text_items\)\.each do \|source_item\|/, main)
     assert_match(/FallbackController\.new\(\s*requested_text_mode, source_id/m, main)
     assert_match(/SvgItemRepresentationRenderer\.render_svg/, main)
+    assert_match(/create_text_representation_container!/, main)
+    assert_match(/representation_container\.entities/, main)
     assert_match(/build_flat_geometry!/, renderer)
     assert_match(/build_glyph_groups!/, renderer)
+    assert_match(/build_glyph_components!/, renderer)
     assert_match(/entity_type\(entity\) == 'Edge'/, renderer)
-    assert_match(/entity_type\(glyph\) == 'Group'/, renderer)
+    assert_match(
+      /\['Group', 'ComponentInstance'\]\.include\?\(entity_type\(glyph\)\)/,
+      renderer
+    )
     assert_match(/assign_identity!\(\s*edge, source_id, mode/m, renderer)
     assert_match(/assign_identity!\(\s*glyph, source_id, :glyphs/m, renderer)
+    assert_match(/assign_identity!\(\s*instance, source_id, :glyphs/m, renderer)
+  end
+
+  def test_png_page_decoder_does_not_shift_the_full_buffer_per_scanline
+    cropper = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'png_cropper.rb'),
+      encoding: 'UTF-8'
+    )
+
+    refute_match(/state\[:pending\]\.slice!\(0,\s*packet_size\)/, cropper)
+    assert_match(/pending_offset/, cropper)
   end
 end

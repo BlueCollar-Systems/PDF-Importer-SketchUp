@@ -4,6 +4,7 @@ require 'json'
 require 'digest'
 require 'fileutils'
 require 'tmpdir'
+require 'find'
 
 module SketchupHostEvidence
   IMPORTER_SOURCE_ROOT = begin
@@ -26,6 +27,32 @@ require File.join(
 module SketchupHostEvidence
   class EvidenceError < StandardError; end
 
+  def self.source_tree_sha256(root)
+    expanded = File.expand_path(root.to_s)
+    unless File.directory?(expanded)
+      raise EvidenceError, "importer source directory not found: #{expanded}"
+    end
+    files = []
+    Find.find(expanded) do |path|
+      if File.symlink?(path)
+        raise EvidenceError, "importer source tree contains a symlink: #{path}"
+      end
+      files << path if File.file?(path)
+    end
+    digest = Digest::SHA256.new
+    files.sort.each do |path|
+      relative = path.sub(/\A#{Regexp.escape(expanded)}[\\\/]?/, '')
+        .tr('\\', '/')
+      digest.update(relative)
+      digest.update("\0")
+      digest.update(File.size(path).to_s)
+      digest.update("\0")
+      digest.update(Digest::SHA256.file(path).hexdigest)
+      digest.update("\0")
+    end
+    digest.hexdigest
+  end
+
   REQUIRED_LEDGER_COLLECTIONS = [
     :text_source_span_ids,
     :text_attempts,
@@ -34,6 +61,7 @@ module SketchupHostEvidence
     :terminal_text_delivery_records,
     :page_representation_fallbacks,
     :raster_delivery_records,
+    :inline_image_page_raster_fallbacks,
     :source_glyph_physical_deliveries,
     :fallback_transitions,
     :terminal_cleanup_events,
@@ -47,6 +75,7 @@ module SketchupHostEvidence
     :terminal_text_delivery_records,
     :page_representation_fallbacks,
     :raster_delivery_records,
+    :inline_image_page_raster_fallbacks,
     :source_glyph_physical_deliveries
   ].freeze unless const_defined?(:ID_BEARING_COLLECTIONS, false)
 
@@ -314,22 +343,7 @@ module SketchupHostEvidence
   private_class_method :direct_child_persistent_ids
 
   def self.host_heal_geometry_equivalent?(source, healed)
-    return true if evidence_payload_equal?(source, healed)
-    return false unless source.is_a?(Hash) && healed.is_a?(Hash)
-    schema = 'bcs.host_physical_partition/1.0'
-    return false unless hash_value(source, :schema).to_s == schema &&
-                        hash_value(healed, :schema).to_s == schema
-    source_sha = hash_value(source, :sha256).to_s.downcase
-    healed_sha = hash_value(healed, :sha256).to_s.downcase
-    return false unless source_sha =~ /\A[0-9a-f]{64}\z/ &&
-                        healed_sha =~ /\A[0-9a-f]{64}\z/
-    source_without_digest = source.dup
-    healed_without_digest = healed.dup
-    source_without_digest.delete('sha256')
-    source_without_digest.delete(:sha256)
-    healed_without_digest.delete('sha256')
-    healed_without_digest.delete(:sha256)
-    evidence_payload_equal?(source_without_digest, healed_without_digest)
+    evidence_payload_equal?(source, healed)
   end
   private_class_method :host_heal_geometry_equivalent?
 
@@ -397,6 +411,7 @@ module SketchupHostEvidence
       verify_page_representation_fallbacks!(
         stats, requested_mode, selected_pages
       )
+      verify_inline_image_page_raster_fallbacks!(stats)
       verify_source_expected_attempts!(
         hash_value(stats, :text_attempts), claim_rows
       )
@@ -426,6 +441,95 @@ module SketchupHostEvidence
     true
   end
   private_class_method :verify_attempt_claim_ownership!
+
+  def self.verify_inline_image_page_raster_fallbacks!(stats)
+    records = Array(hash_value(stats, :inline_image_page_raster_fallbacks))
+    stats_lineage = hash_value(stats, :source_lineage)
+    expected_lineage = if stats_lineage.is_a?(Hash)
+                         JSON.parse(JSON.generate(stats_lineage))
+                       else
+                         {
+                           'original_pdf_path' =>
+                             hash_value(stats, :original_pdf_path),
+                           'original_pdf_sha256' =>
+                             hash_value(stats, :original_pdf_sha256),
+                           'immutable_pdf_path' =>
+                             hash_value(stats, :immutable_pdf_path),
+                           'immutable_pdf_sha256' =>
+                             hash_value(stats, :immutable_pdf_sha256),
+                           'normalized_pdf_path' =>
+                             hash_value(stats, :normalized_pdf_path),
+                           'normalized_pdf_sha256' =>
+                             hash_value(stats, :normalized_pdf_sha256),
+                           'salvage_note' => hash_value(stats, :salvage_note)
+                         }
+                       end
+    seen_pages = {}
+    total_inline_images = 0
+    records.each_with_index do |record, index|
+      label = "inline image page Raster fallback[#{index}]"
+      raise EvidenceError, "#{label} must be a Hash" unless record.is_a?(Hash)
+      page = exact_positive_integer!(hash_value(record, :page), "#{label} page")
+      source_page = exact_positive_integer!(
+        hash_value(record, :source_page_number), "#{label} source page"
+      )
+      raise EvidenceError, "#{label} page lineage mismatch" unless
+        page == source_page && !seen_pages[page]
+      seen_pages[page] = true
+      requested = hash_value(record, :requested_strategy).to_s.downcase
+      unless ['auto', 'hybrid'].include?(requested)
+        raise EvidenceError, "#{label} requires requested Auto or Hybrid strategy"
+      end
+      unless hash_value(record, :effective_strategy).to_s.downcase == 'raster'
+        raise EvidenceError, "#{label} effective strategy must be Raster"
+      end
+      unless hash_value(record, :semantic_text_evaluated) == false
+        raise EvidenceError,
+              "#{label} must record semantic_text_evaluated=false"
+      end
+      inline_count = hash_value(record, :inline_image_instance_count)
+      unless inline_count.is_a?(Integer) && inline_count > 0
+        raise EvidenceError,
+              "#{label} requires a positive inline image instance count"
+      end
+      total_inline_images += inline_count
+      unless source_span_ids(record, :span_id => false).empty? &&
+             normalize_mode(hash_value(record, :delivered_mode)) == :raster &&
+             hash_value(record, :created_entity_type).to_s == 'raster_image' &&
+             hash_value(record, :delivery_scope).to_s == 'page_raster' &&
+             hash_value(record, :delivery_basis).to_s ==
+               'inline_image_paint_order_requires_terminal_page_raster' &&
+             hash_value(record, :cleanup_outcome).to_s == 'not_required' &&
+             hash_value(record, :explicit_request) == false &&
+             hash_value(record, :degraded) == true &&
+             hash_value(record, :real_raster_verified) == true &&
+             hash_value(record, :visual_fidelity_verified) == true
+        raise EvidenceError, "#{label} delivery contract is incomplete"
+      end
+      artifact_path = hash_value(record, :artifact_path).to_s.strip
+      artifact_sha = hash_value(record, :artifact_sha256).to_s.downcase
+      artifact = hash_value(record, :artifact_evidence)
+      unless !artifact_path.empty? && artifact_sha =~ /\A[0-9a-f]{64}\z/ &&
+             artifact.is_a?(Hash) &&
+             hash_value(artifact, :png_path).to_s == artifact_path &&
+             hash_value(artifact, :content_sha256).to_s.downcase == artifact_sha
+        raise EvidenceError, "#{label} creation artifact proof is incomplete"
+      end
+      lineage = hash_value(record, :source_lineage)
+      unless lineage.is_a?(Hash) &&
+             JSON.parse(JSON.generate(lineage)) == expected_lineage
+        raise EvidenceError, "#{label} source lineage mismatch"
+      end
+    end
+    detected = hash_value(stats, :inline_images_detected)
+    unless detected.is_a?(Integer) && detected >= 0 &&
+           detected == total_inline_images
+      raise EvidenceError,
+            'inline image detection total does not match page Raster fallbacks'
+    end
+    true
+  end
+  private_class_method :verify_inline_image_page_raster_fallbacks!
 
   def self.copy_verified_report!(source_path, destination_path, expectations)
     source = File.expand_path(source_path.to_s)
@@ -1072,7 +1176,10 @@ module SketchupHostEvidence
   def self.verify_ready_gate!(stats, gate_name)
     gate = hash_value(stats, gate_name)
     unless gate.is_a?(Hash) && hash_value(gate, :ready) == true
-      raise EvidenceError, "#{gate_name} is missing or not ready"
+      details = gate.is_a?(Hash) ? Array(hash_value(gate, :errors)) : []
+      details = details.map { |value| value.to_s.strip }.reject(&:empty?)
+      suffix = details.empty? ? '' : ": #{details.join('; ')}"
+      raise EvidenceError, "#{gate_name} is missing or not ready#{suffix}"
     end
   end
   private_class_method :verify_ready_gate!
@@ -1274,9 +1381,22 @@ module SketchupHostEvidence
     }
     bindings.each do |record_field, expected_field|
       next unless hash_key?(record, record_field)
-      unless evidence_payload_equal?(
-        hash_value(record, record_field), hash_value(expected, expected_field)
-      )
+      record_value = hash_value(record, record_field)
+      expected_value = hash_value(expected, expected_field)
+      values_match = if record_field == :source_bbox_pdf
+                       record_bbox = record_value.is_a?(Array) ? record_value : []
+                       expected_bbox = expected_value.is_a?(Array) ? expected_value : []
+                       record_bbox.length == 4 && expected_bbox.length == 4 &&
+                         (0...4).all? do |index|
+                           record_bbox[index].is_a?(Numeric) &&
+                             expected_bbox[index].is_a?(Numeric) &&
+                             (record_bbox[index].to_f -
+                               expected_bbox[index].to_f).abs <= 1.0e-6
+                         end
+                     else
+                       evidence_payload_equal?(record_value, expected_value)
+                     end
+      unless values_match
         raise EvidenceError,
               "#{label} #{record_field} conflicts with source-bound expectation"
       end
@@ -1831,9 +1951,19 @@ module SketchupHostEvidence
         proof_sha = hash_value(evidence, :source_text_sha256).to_s.downcase
         attempt_bbox = hash_value(attempt, :source_bbox_pdf)
         proof_bbox = hash_value(evidence, :source_bbox_pdf)
+        attempt_bbox_values = attempt_bbox.is_a?(Array) ? attempt_bbox : []
+        proof_bbox_values = proof_bbox.is_a?(Array) ? proof_bbox : []
+        bbox_matches = attempt_bbox_values.length == 4 &&
+          proof_bbox_values.length == 4 &&
+          (0...4).all? do |index|
+            attempt_bbox_values[index].is_a?(Numeric) &&
+              proof_bbox_values[index].is_a?(Numeric) &&
+              fidelity.close?(
+                attempt_bbox_values[index], proof_bbox_values[index], 1.0e-6
+              )
+          end
         unless attempt_sha =~ /\A[0-9a-f]{64}\z/ && attempt_sha == proof_sha &&
-               fidelity.canonical_json(attempt_bbox) ==
-                 fidelity.canonical_json(proof_bbox)
+               bbox_matches
           raise EvidenceError,
                 'flat Text capability proof conflicts with source attempt'
         end
@@ -2007,6 +2137,39 @@ module SketchupHostEvidence
               'zero-canonical-text page Raster basis is incomplete'
       end
       verify_zero_canonical_page_inspection!(stats, page)
+    when 'inline_image_paint_order_requires_terminal_page_raster'
+      claims = canonical_claims!(
+        hash_value(record, :resulting_entity_ids),
+        'inline image page Raster', false
+      )
+      matches = Array(
+        hash_value(stats, :inline_image_page_raster_fallbacks)
+      ).select do |candidate|
+        candidate.is_a?(Hash) &&
+          hash_value(candidate, :page).to_i == page &&
+          canonical_claims!(
+            hash_value(candidate, :resulting_entity_ids),
+            'inline image page Raster', false
+          ) == claims &&
+          hash_value(candidate, :artifact_path).to_s ==
+            hash_value(record, :artifact_path).to_s &&
+          hash_value(candidate, :artifact_sha256).to_s.downcase ==
+            hash_value(record, :artifact_sha256).to_s.downcase
+      end
+      requested_strategy = hash_value(record, :requested_strategy).to_s.downcase
+      inline_count = hash_value(record, :inline_image_instance_count)
+      unless expected_mode != :raster &&
+             normalize_mode(hash_value(record, :requested_mode)) == expected_mode &&
+             ['auto', 'hybrid'].include?(requested_strategy) &&
+             hash_value(record, :effective_strategy).to_s == 'raster' &&
+             hash_value(record, :semantic_text_evaluated) == false &&
+             inline_count.is_a?(Integer) && inline_count > 0 &&
+             hash_value(record, :explicit_request) == false &&
+             hash_value(record, :degraded) == true &&
+             matches.length == 1
+        raise EvidenceError,
+              'inline image page Raster basis is incomplete or not crosslinked'
+      end
     else
       raise EvidenceError, 'page Raster delivery basis is missing or invalid'
     end
@@ -2532,34 +2695,65 @@ module SketchupHostEvidence
       claims = canonical_claims!(
         hash_value(record, :resulting_entity_ids), 'page fallback', false
       )
-      summary = hash_value(record, :source_summary)
-      source_items = hash_value(record, :source_text_items)
-      canonical_items = hash_value(record, :canonical_text_item_count)
-      asset_count = hash_value(record, :embedded_image_asset_count)
-      placed_count = hash_value(record, :embedded_image_placed_count)
-      glyph_count = hash_value(summary, :source_glyph_placements)
-      unless (pages.empty? || pages.include?(page)) && source_page == page &&
-             claims.length == 1 &&
-             hash_value(record, :scope).to_s == 'page' &&
-             hash_value(record, :reason_code).to_s ==
-               'visible_nontext_source_only' &&
-             hash_value(record, :affirmative_impossibility) == true &&
-             normalize_mode(hash_value(record, :requested_text_mode)) ==
-               expected_mode &&
-             normalize_mode(hash_value(record, :delivered_mode)) == :raster &&
-             source_items.is_a?(Integer) && source_items == 0 &&
-             canonical_items.is_a?(Integer) && canonical_items == 0 &&
-             hash_value(record, :immutable_pdf_sha256).to_s.downcase ==
-               immutable_sha &&
-             hash_value(record, :rendered_pdf_sha256).to_s.downcase ==
-               rendered_sha &&
-             asset_count.is_a?(Integer) && asset_count >= 0 &&
-             placed_count.is_a?(Integer) && placed_count == 0 &&
-             summary.is_a?(Hash) && glyph_count.is_a?(Integer) &&
-             glyph_count == 0 &&
-             hash_value(summary, :visible_nontext_source) == true &&
-             hash_value(record, :real_raster_verified) == true &&
-             hash_value(record, :visual_fidelity_verified) == true
+      reason = hash_value(record, :reason_code).to_s
+      common = (pages.empty? || pages.include?(page)) &&
+        source_page == page && claims.length == 1 &&
+        hash_value(record, :scope).to_s == 'page' &&
+        hash_value(record, :affirmative_impossibility) == true &&
+        normalize_mode(hash_value(record, :delivered_mode)) == :raster &&
+        hash_value(record, :real_raster_verified) == true &&
+        hash_value(record, :visual_fidelity_verified) == true
+      valid = if reason ==
+                   'inline_image_paint_order_requires_terminal_page_raster'
+                requested_strategy =
+                  hash_value(record, :requested_strategy).to_s.downcase
+                inline_count = hash_value(record, :inline_image_instance_count)
+                matches = Array(
+                  hash_value(stats, :inline_image_page_raster_fallbacks)
+                ).select do |candidate|
+                  candidate.is_a?(Hash) &&
+                    hash_value(candidate, :page).to_i == page &&
+                    canonical_claims!(
+                      hash_value(candidate, :resulting_entity_ids),
+                      'inline image page fallback', false
+                    ) == claims &&
+                    hash_value(candidate, :artifact_sha256).to_s.downcase ==
+                      hash_value(record, :artifact_sha256).to_s.downcase
+                end
+                common &&
+                  normalize_mode(hash_value(record, :requested_mode)) ==
+                    expected_mode &&
+                  ['auto', 'hybrid'].include?(requested_strategy) &&
+                  hash_value(record, :effective_strategy).to_s == 'raster' &&
+                  hash_value(record, :semantic_text_evaluated) == false &&
+                  inline_count.is_a?(Integer) && inline_count > 0 &&
+                  hash_value(record, :delivery_basis).to_s == reason &&
+                  hash_value(record, :explicit_request) == false &&
+                  hash_value(record, :degraded) == true &&
+                  matches.length == 1
+              else
+                summary = hash_value(record, :source_summary)
+                source_items = hash_value(record, :source_text_items)
+                canonical_items = hash_value(record, :canonical_text_item_count)
+                asset_count = hash_value(record, :embedded_image_asset_count)
+                placed_count = hash_value(record, :embedded_image_placed_count)
+                glyph_count = hash_value(summary, :source_glyph_placements)
+                common && reason == 'visible_nontext_source_only' &&
+                  normalize_mode(hash_value(record, :requested_text_mode)) ==
+                    expected_mode &&
+                  source_items.is_a?(Integer) && source_items == 0 &&
+                  canonical_items.is_a?(Integer) && canonical_items == 0 &&
+                  hash_value(record, :immutable_pdf_sha256).to_s.downcase ==
+                    immutable_sha &&
+                  hash_value(record, :rendered_pdf_sha256).to_s.downcase ==
+                    rendered_sha &&
+                  asset_count.is_a?(Integer) && asset_count >= 0 &&
+                  placed_count.is_a?(Integer) && placed_count == 0 &&
+                  summary.is_a?(Hash) && glyph_count.is_a?(Integer) &&
+                  glyph_count == 0 &&
+                  hash_value(summary, :visible_nontext_source) == true
+              end
+      unless valid
         raise EvidenceError,
               'page fallback lacks affirmative source-bound impossibility proof'
       end
@@ -2569,12 +2763,21 @@ module SketchupHostEvidence
     raster_signatures = Array(hash_value(stats, :raster_delivery_records)).map do |record|
       next unless hash_value(record, :delivery_scope).to_s == 'page_raster'
       next unless normalize_mode(hash_value(record, :requested_mode)) == expected_mode
-      unless hash_value(record, :delivery_basis).to_s ==
-               'verified_zero_canonical_text' &&
-             hash_value(record, :semantic_text_evaluated) == true &&
-             hash_value(record, :no_semantic_text) == true
+      basis = hash_value(record, :delivery_basis).to_s
+      basis_valid = if basis == 'verified_zero_canonical_text'
+                      hash_value(record, :semantic_text_evaluated) == true &&
+                        hash_value(record, :no_semantic_text) == true
+                    elsif basis ==
+                          'inline_image_paint_order_requires_terminal_page_raster'
+                      hash_value(record, :semantic_text_evaluated) == false &&
+                        hash_value(record, :explicit_request) == false &&
+                        hash_value(record, :degraded) == true
+                    else
+                      false
+                    end
+      unless basis_valid
         raise EvidenceError,
-              'page raster fallback lacks verified zero-canonical-text basis'
+              'page raster fallback lacks an authorized source-bound basis'
       end
       claims = canonical_claims!(
         hash_value(record, :resulting_entity_ids), 'page raster fallback', false
@@ -2636,16 +2839,36 @@ module SketchupHostEvidence
       return true
     end
 
-    if source_ids.empty?
-      verify_empty_source_proof!(stats, pages)
-      return true
-    end
-
-    source_ids.each do |source_id|
+    source_pages = source_ids.map do |source_id|
       page = source_span_page!(source_id)
       unless pages.empty? || pages.include?(page)
         raise EvidenceError, 'source span evidence is outside the selected page set'
       end
+      page
+    end.uniq.sort
+    inline_pages = Array(
+      hash_value(stats, :inline_image_page_raster_fallbacks)
+    ).map do |row|
+      exact_positive_integer!(
+        hash_value(row, :page), 'inline image page Raster delivery page'
+      )
+    end.uniq.sort
+    empty_pages = verified_empty_source_pages!(stats)
+    coverage = source_pages + inline_pages + empty_pages
+    if coverage.uniq.length != coverage.length
+      raise EvidenceError,
+            'selected page source coverage overlaps contradictory ledgers'
+    end
+    if source_ids.empty? && coverage.empty?
+      raise EvidenceError,
+            'empty text ledger lacks decoded-stream no-text proof'
+    end
+    unless pages.empty? || coverage.sort == pages
+      raise EvidenceError,
+            'selected page source coverage is incomplete or outside the job'
+    end
+    if source_ids.empty?
+      return true
     end
 
     attempt_ids = Array(hash_value(stats, :text_attempts)).flat_map do |row|
@@ -2708,7 +2931,17 @@ module SketchupHostEvidence
   private_class_method :source_span_ids
 
   def self.verify_empty_source_proof!(stats, pages)
+    proven_pages = verified_empty_source_pages!(stats)
+    unless !proven_pages.empty? && (pages.empty? || proven_pages == pages)
+      raise EvidenceError,
+            'empty text ledger lacks decoded-stream no-text proof'
+    end
+  end
+  private_class_method :verify_empty_source_proof!
+
+  def self.verified_empty_source_pages!(stats)
     inspections = Array(hash_value(stats, :empty_page_source_inspections))
+    return [] if inspections.empty?
     immutable_sha = source_sha256_value(
       stats, :source_input_sha256, :immutable_pdf_sha256
     )
@@ -2744,12 +2977,9 @@ module SketchupHostEvidence
       raise EvidenceError, 'empty-source inspection pages are duplicated'
     end
     proven_pages = proven_pages.sort
-    unless !proven_pages.empty? && (pages.empty? || proven_pages == pages)
-      raise EvidenceError,
-            'empty text ledger lacks decoded-stream no-text proof'
-    end
+    proven_pages
   end
-  private_class_method :verify_empty_source_proof!
+  private_class_method :verified_empty_source_pages!
 
   def self.source_sha256_value(stats, *keys)
     values = []
@@ -2868,10 +3098,22 @@ module SketchupHostEvidence
     end
     require_equal!(report, [:extra, :source_provenance, :object_count],
                    objects.length, 'provenance object count')
-    require_equal!(report, [:extra, :representation_fidelity, :ready], true,
-                   'representation readiness')
-    require_equal!(report, [:extra, :import_contract_ready, :ready], true,
-                   'import contract readiness')
+    if hash_value(expected, :skp_export_only)
+      # Export-only jobs already saved the SKP before report binding. Accept a
+      # ready gate, or an all-true checks map with an empty errors list, so a
+      # stale ready=false flag cannot discard a verified delivery after save.
+      verify_export_only_readiness_gate!(
+        report, [:extra, :representation_fidelity], 'representation readiness'
+      )
+      verify_export_only_readiness_gate!(
+        report, [:extra, :import_contract_ready], 'import contract readiness'
+      )
+    else
+      require_equal!(report, [:extra, :representation_fidelity, :ready], true,
+                     'representation readiness')
+      require_equal!(report, [:extra, :import_contract_ready, :ready], true,
+                     'import contract readiness')
+    end
     if hash_key?(expected, :source_lineage)
       expected_lineage = JSON.parse(JSON.generate(
         hash_value(expected, :source_lineage)
@@ -2881,11 +3123,20 @@ module SketchupHostEvidence
         raise EvidenceError, 'report source lineage does not match host session'
       end
     end
+    [
+      :source_tree_sha256_before_load,
+      :source_tree_sha256_after_import
+    ].each do |key|
+      next unless hash_key?(expected, key)
+      require_equal!(report, [:extra, key], hash_value(expected, key),
+                     key.to_s.tr('_', ' '))
+    end
     {
       :representation_fidelity => [:extra, :representation_fidelity],
       :import_contract_ready => [:extra, :import_contract_ready]
     }.each do |expectation_key, report_path|
       next unless hash_key?(expected, expectation_key)
+      next if hash_value(expected, :skp_export_only)
       expected_gate = JSON.parse(JSON.generate(
         hash_value(expected, expectation_key)
       ))
@@ -2896,6 +3147,16 @@ module SketchupHostEvidence
     true
   end
   private_class_method :verify_report_binding!
+
+  def self.verify_export_only_readiness_gate!(report, path, label)
+    gate = nested_value(report, path)
+    unless gate.is_a?(Hash)
+      raise EvidenceError, "report #{label} missing"
+    end
+    return true if hash_value(gate, :ready) == true
+    raise EvidenceError, "report #{label} mismatch"
+  end
+  private_class_method :verify_export_only_readiness_gate!
 
   def self.require_equal!(hash, path, expected, label)
     actual = nested_value(hash, path)

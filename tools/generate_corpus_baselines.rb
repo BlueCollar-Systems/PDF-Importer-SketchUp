@@ -53,4 +53,4 @@ puts "Wrote #{written} baseline(s) to #{CorpusHarness::BASELINE_DIR}"
 puts "Skipped #{refused} expected refusal PDF(s)" if refused > 0
 puts "Skipped #{heavy_skipped} heavy PDF(s) due to warn-only timeout" if heavy_skipped > 0
 puts "Skipped #{failed} PDF(s) due to parse/timeout errors" if failed > 0
-exit failed.positive? ? 1 : 0
+exit failed > 0 ? 1 : 0

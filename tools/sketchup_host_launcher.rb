@@ -5,6 +5,7 @@ require 'json'
 require 'digest'
 require 'fileutils'
 require 'securerandom'
+require 'rbconfig'
 require File.expand_path('sketchup_host_job', __dir__)
 require File.expand_path('sketchup_host_evidence', __dir__)
 
@@ -130,6 +131,15 @@ module SketchupHostLauncher
   end
 
   class ProcessBackend
+    def initialize(options = {})
+      @command_runner = options[:command_runner] || SystemCommandRunner.new
+      @windows = if options.key?(:windows)
+                   options[:windows] == true
+                 else
+                   RbConfig::CONFIG['host_os'].to_s =~ /mswin|mingw|cygwin/i
+                 end
+    end
+
     def spawn(environment, command)
       Process.spawn(environment, *command)
     end
@@ -147,9 +157,19 @@ module SketchupHostLauncher
     end
 
     def kill(pid)
-      Process.kill('KILL', pid)
+      process_id = Integer(pid)
+      raise LaunchError, 'process ID must be positive' unless process_id > 0
+      if @windows
+        command = ['taskkill.exe', '/PID', process_id.to_s, '/T', '/F']
+        unless @command_runner.run(command)
+          raise LaunchError,
+                "failed to terminate SketchUp process tree #{process_id}"
+        end
+      else
+        Process.kill('KILL', process_id)
+      end
       begin
-        Process.waitpid(pid)
+        Process.waitpid(process_id)
       rescue Errno::ECHILD
         # Already reaped.
       end
@@ -243,6 +263,11 @@ module SketchupHostLauncher
 
   module_function
 
+  def effective_requested_mode(job)
+    return 'raster' if job[:import_mode].to_s == 'raster'
+    job[:text_mode].to_s
+  end
+
   def run(job_path, options = {})
     path = File.expand_path(job_path.to_s)
     raise LaunchError, 'one JSON job path is required' unless
@@ -251,6 +276,21 @@ module SketchupHostLauncher
     executable = options[:sketchup_exe].to_s.strip
     executable = ENV['SKETCHUP_EXE'].to_s.strip if executable.empty?
     raise LaunchError, 'SKETCHUP_EXE is required' if executable.empty?
+    source_root = options[:source_root].to_s.strip
+    source_root = ENV['BC_SKETCHUP_IMPORTER_SOURCE_ROOT'].to_s.strip if
+      source_root.empty?
+    source_root = SketchupHostEvidence::IMPORTER_SOURCE_ROOT if
+      source_root.empty?
+    source_root = File.expand_path(source_root)
+    source_tree_sha256 = SketchupHostEvidence.source_tree_sha256(source_root)
+    recorded_source_tree = original_job[:source_tree_sha256]
+    if recorded_source_tree && recorded_source_tree != source_tree_sha256
+      raise LaunchError,
+            'job source tree SHA256 does not match the selected importer source'
+    end
+    original_job = original_job.merge(
+      :source_tree_sha256 => source_tree_sha256
+    )
 
     backend = options[:backend] || ProcessBackend.new
     clock = options[:clock] || SystemClock.new
@@ -283,9 +323,6 @@ module SketchupHostLauncher
       guard.suppress!
       guard_active = true
       verify_source_unchanged_before_spawn!(snapshot)
-      source_root = options[:source_root].to_s.strip
-      source_root = ENV['BC_SKETCHUP_IMPORTER_SOURCE_ROOT'].to_s.strip if
-        source_root.empty?
       environment = controlled_environment(binding, source_root)
       runner = File.expand_path('sketchup_batch_import.rb', __dir__)
       command = [
@@ -322,7 +359,11 @@ module SketchupHostLauncher
             result = candidate
           else
             begin
-              verify_terminal_result!(candidate, job, binding)
+              if job[:skp_export_only]
+                verify_skp_export_result!(candidate, job, binding)
+              else
+                verify_terminal_result!(candidate, job, binding)
+              end
               result = candidate
             rescue StandardError => evidence_error
               result = error_result(
@@ -416,12 +457,14 @@ module SketchupHostLauncher
       'text_mode' => original_job[:text_mode].to_s,
       'import_mode' => original_job[:import_mode],
       'pages' => original_job[:pages] == :all ? 'all' : original_job[:pages],
+      'skp_export_only' => original_job[:skp_export_only] == true,
       'original_job_path' => File.expand_path(original_job_path),
       'original_job_sha256' => Digest::SHA256.file(original_job_path).hexdigest,
       'original_pdf_path' => source,
       'original_pdf_sha256' => source_sha256,
       'immutable_pdf_path' => immutable_path,
-      'immutable_pdf_sha256' => source_sha256
+      'immutable_pdf_sha256' => source_sha256,
+      'source_tree_sha256' => original_job[:source_tree_sha256]
     }
     controlled_path = File.join(run_dir, 'job.json')
     atomic_write_json(controlled_path, payload)
@@ -458,6 +501,32 @@ module SketchupHostLauncher
     environment
   end
 
+  def verify_skp_export_result!(result, job, binding)
+    require_equal!(result['job_id'], binding['job_id'], 'result job ID')
+    require_equal!(result['job_sha256'], binding['job_sha256'], 'result job SHA256')
+    require_equal!(result['status'], 'OK', 'result status')
+    require_equal!(result['skp_export_only'], true, 'SKP export-only marker')
+    require_equal!(result['requested_text_mode'], effective_requested_mode(job),
+                   'requested representation mode')
+    verify_source_tree_binding!(result, job)
+    require_path_equal!(result['model_path'], job[:model_path],
+                        'saved model path')
+    model_path = verified_artifact!(result['model_path'], nil, 'saved model')
+    require_sha256!(result['model_sha256'], 'saved model SHA256')
+    require_equal!(Digest::SHA256.file(model_path).hexdigest,
+                   result['model_sha256'], 'saved model SHA256')
+    require_path_equal!(result['import_report_path'],
+                        File.join(job[:output_dir], 'import_report.json'),
+                        'import report path')
+    report_path = verified_artifact!(
+      result['import_report_path'], result['import_report_sha256'],
+      'import report'
+    )
+    report = JSON.parse(File.read(report_path, :encoding => 'UTF-8'))
+    verify_source_tree_report_binding!(report, job)
+    true
+  end
+
   def verify_terminal_result!(result, job, binding)
     require_equal!(result['job_id'], binding['job_id'], 'result job ID')
     require_equal!(result['job_sha256'], binding['job_sha256'], 'result job SHA256')
@@ -468,8 +537,9 @@ module SketchupHostLauncher
     SketchupHostEvidence.verify_source_locations!(
       result['source_root'], result['source_locations']
     )
-    require_equal!(result['requested_text_mode'], job[:text_mode].to_s,
+    require_equal!(result['requested_text_mode'], effective_requested_mode(job),
                    'requested representation mode')
+    verify_source_tree_binding!(result, job)
     require_equal!(result['worktree_metadata_version'],
                    result['loaded_importer_version'], 'loaded importer version')
     require_su2017_host_identity!(result)
@@ -543,6 +613,17 @@ module SketchupHostLauncher
     true
   end
 
+  def verify_source_tree_binding!(result, job)
+    expected = job[:source_tree_sha256]
+    return true if expected.nil?
+    require_sha256!(expected, 'job source tree SHA256')
+    require_equal!(result['source_tree_sha256_before_load'], expected,
+                   'source tree SHA256 before load')
+    require_equal!(result['source_tree_sha256_after_import'], expected,
+                   'source tree SHA256 after import')
+    true
+  end
+
   def verify_terminal_report!(report, result, job, immutable_sha256, session_id)
     require_equal!(report['schema'], result['report_schema'], 'report schema')
     require_equal!(report_value(report, 'host', 'app'), 'sketchup',
@@ -558,7 +639,7 @@ module SketchupHostLauncher
     require_equal!(report_value(report, 'input', 'sha256'), immutable_sha256,
                    'report source SHA256')
     require_equal!(report_value(report, 'extra', 'requested_text_mode'),
-                   job[:text_mode].to_s, 'report requested mode')
+                   effective_requested_mode(job), 'report requested mode')
     require_equal!(report_value(report, 'extra', 'import_session_id'),
                    session_id, 'report import session')
     require_equal!(report_value(report, 'extra', 'representation_fidelity', 'ready'),
@@ -568,6 +649,7 @@ module SketchupHostLauncher
     lineage = report_value(report, 'extra', 'source_lineage')
     expected = terminal_lineage(result)
     require_equal!(lineage, expected, 'report source lineage')
+    verify_source_tree_report_binding!(report, job)
     provenance = report_value(report, 'extra', 'source_provenance')
     unless provenance.is_a?(Hash) && provenance['objects'].is_a?(Array)
       raise LaunchError, 'report full source provenance is missing'
@@ -609,7 +691,7 @@ module SketchupHostLauncher
     require_equal!(manifest['job_id'], binding['job_id'], 'manifest job ID')
     require_equal!(manifest['job_sha256'], binding['job_sha256'],
                    'manifest job SHA256')
-    require_equal!(manifest['requested_text_mode'], job[:text_mode].to_s,
+    require_equal!(manifest['requested_text_mode'], effective_requested_mode(job),
                    'manifest requested mode')
     require_path_equal!(manifest['source_pdf_path'], job[:immutable_pdf_path],
                         'manifest source PDF')
@@ -625,6 +707,7 @@ module SketchupHostLauncher
                    'result host-heal preservation proof')
     require_equal!(manifest['source_lineage'], terminal_lineage(result),
                    'manifest source lineage')
+    verify_source_tree_manifest_binding!(manifest, job)
     owned = manifest['same_session_entities']
     stabilized_owned = manifest['stabilized_owned_entities']
     post_import = manifest['post_import_entities']
@@ -649,8 +732,30 @@ module SketchupHostLauncher
     end
     evidence['source_provenance_objects'] = provenance['objects']
     SketchupHostEvidence.verify_delivery_evidence!(
-      evidence, owned, job[:text_mode], job[:pages]
+      evidence, owned, effective_requested_mode(job), job[:pages]
     )
+    true
+  end
+
+  def verify_source_tree_report_binding!(report, job)
+    expected = job[:source_tree_sha256]
+    return true if expected.nil?
+    require_equal!(report_value(
+      report, 'extra', 'source_tree_sha256_before_load'
+    ), expected, 'report source tree SHA256 before load')
+    require_equal!(report_value(
+      report, 'extra', 'source_tree_sha256_after_import'
+    ), expected, 'report source tree SHA256 after import')
+    true
+  end
+
+  def verify_source_tree_manifest_binding!(manifest, job)
+    expected = job[:source_tree_sha256]
+    return true if expected.nil?
+    require_equal!(manifest['source_tree_sha256_before_load'], expected,
+                   'manifest source tree SHA256 before load')
+    require_equal!(manifest['source_tree_sha256_after_import'], expected,
+                   'manifest source tree SHA256 after import')
     true
   end
 

@@ -118,6 +118,9 @@ class SketchupBatchHostContractTest < Minitest::Test
                     'opts[:force_raster] = full_page_raster'
     assert_includes source,
                     'opts[:import_text] = !full_page_raster'
+    assert_includes source, ':progress_callback => lambda'
+    assert_includes source,
+                    "SketchupBatchImport.write_progress!("
     assert_includes source, 'requested_mode = effective_requested_mode(job)'
     assert_includes source,
                     "'requested_text_mode' => requested_mode.to_s"
@@ -205,6 +208,10 @@ class SketchupBatchHostContractTest < Minitest::Test
     assert_includes source,
                     "'source_glyph_physical_deliveries' =>"
     assert_includes source,
+                    "'inline_image_page_raster_fallbacks' =>"
+    assert_includes source,
+                    "'inline_images_detected' => stats[:inline_images_detected].to_i"
+    assert_includes source,
                     "'text_renderers' => Array(stats[:text_renderers])"
     assert_includes source,
                     "'raster_fallback_used' => stats[:raster_fallback_used] == true"
@@ -232,11 +239,62 @@ class SketchupBatchHostContractTest < Minitest::Test
                  'baseline, pre-heal, stabilized, and reopen must use compact physical partitions'
   end
 
+  def test_runner_hashes_the_source_tree_before_load_and_after_import
+    before = source.index('source_tree_sha256_before_load =')
+    plugin_load = source.index("load File.join(plugin_root")
+    pipeline = source.index('stats = importer.run_pipeline(')
+    after = source.index('source_tree_sha256_after_import =')
+
+    refute_nil before
+    refute_nil plugin_load
+    refute_nil pipeline
+    refute_nil after
+    assert_operator before, :<, plugin_load
+    assert_operator pipeline, :<, after
+    assert_includes source,
+                    "'source_tree_sha256_before_load' =>"
+    assert_includes source,
+                    "'source_tree_sha256_after_import' =>"
+    assert_includes source, ':source_tree_sha256_before_load =>'
+    assert_includes source, ':source_tree_sha256_after_import =>'
+  end
+
   def test_pipeline_binds_report_to_immutable_input_and_records_salvage_lineage
     assert_includes importer_source, 'source_input_path = path'
     assert_includes importer_source, 'record_source_lineage!('
     assert_includes importer_source,
                     'finalize_import_diagnostics!(source_input_path, opts, stats)'
+    assert_includes importer_source,
+                    'progress_callback: opts[:progress_callback]'
+  end
+
+  def test_pipeline_reports_and_times_every_post_build_phase
+    assert_includes importer_source, 'report_pipeline_progress('
+    %w[
+      post_build_commit_started
+      post_build_commit_completed
+      post_commit_cleanup_started
+      post_commit_cleanup_completed
+      entity_diff_started
+      entity_diff_completed
+      view_fit_started
+      view_fit_completed
+      diagnostics_started
+      diagnostics_completed
+      post_build_completed
+    ].each do |phase|
+      assert_includes importer_source, "'#{phase}'"
+    end
+    %w[
+      commit_ms
+      post_commit_cleanup_ms
+      entity_diff_ms
+      view_fit_ms
+      diagnostics_ms
+      post_build_ms
+    ].each do |metric|
+      assert_includes importer_source, "[:#{metric}]"
+    end
   end
 
 

@@ -22,6 +22,11 @@ module SketchupBatchImport
       verify_plugins_disabled!
       install_modal_guard!
       plugin_root = SketchupBatchImport.plugin_root
+      source_tree_sha256_before_load =
+        SketchupHostEvidence.source_tree_sha256(plugin_root)
+      verify_source_tree_sha256!(
+        job, source_tree_sha256_before_load, 'before importer load'
+      )
       load File.join(plugin_root, 'bc_pdf_vector_importer', 'main.rb')
       importer = BlueCollarSystems::PDFVectorImporter
       expected_root = File.expand_path(plugin_root)
@@ -52,16 +57,46 @@ module SketchupBatchImport
         job, binding, 'baseline_evidence_snapshot_completed'
       )
       SketchupBatchImport.write_progress!(job, binding, 'import_started')
-      stats = importer.run_pipeline(
-        @model, job[:pdf_path], import_options(importer, job)
-      )
+      pipeline_options = import_options(importer, job, binding)
+      stats = importer.run_pipeline(@model, job[:pdf_path], pipeline_options)
       raise 'run_pipeline returned nil' unless stats.is_a?(Hash)
+      source_tree_sha256_after_import =
+        SketchupHostEvidence.source_tree_sha256(plugin_root)
+      verify_source_tree_sha256!(
+        job, source_tree_sha256_after_import, 'after import'
+      )
+      stats[:source_tree_sha256_before_load] =
+        source_tree_sha256_before_load
+      stats[:source_tree_sha256_after_import] =
+        source_tree_sha256_after_import
+      refresh_import_report!(importer, job, pipeline_options, stats)
       source_lineage = verified_source_lineage!(stats, job)
       SketchupBatchImport.write_progress!(job, binding, 'import_completed')
+
+      # Save before the heavy compact entity walk. SketchUp 2017 can
+      # native-crash during post-import snapshot on large solid-text models;
+      # an early SKP still lets PDF↔model inspection proceed.
+      SketchupBatchImport.write_progress!(job, binding, 'model_save_started')
+      raise 'model save failed' unless @model.save(job[:model_path])
+      raise 'saved model missing' unless File.file?(job[:model_path])
+      SketchupBatchImport.write_progress!(job, binding, 'model_saved')
+
+      if job[:skp_export_only]
+        return finish_skp_export_only!(
+          job, binding, importer, stats, source_lineage,
+          worktree_version, loaded_version, expected_root, source_locations,
+          host_identity, requested_mode, source_tree_sha256_before_load,
+          source_tree_sha256_after_import
+        )
+      end
 
       SketchupBatchImport.write_progress!(
         job, binding, 'post_import_evidence_snapshot_started'
       )
+      begin
+        GC.start
+      rescue StandardError
+      end
       live_after_manifest = SketchupHostEvidence.snapshot_entities(
         @model.active_entities, :compact => true
       )
@@ -85,11 +120,6 @@ module SketchupBatchImport
         'import_session_id' => import_session_id,
         'objects' => Array(stats[:source_provenance_objects])
       }
-
-      SketchupBatchImport.write_progress!(job, binding, 'model_save_started')
-      raise 'model save failed' unless @model.save(job[:model_path])
-      raise 'saved model missing' unless File.file?(job[:model_path])
-      SketchupBatchImport.write_progress!(job, binding, 'model_saved')
 
       # SketchUp 2017 heals nested page edges on the first save/load
       # (~tens of edges). Continuity must compare the healed model to a
@@ -135,7 +165,9 @@ module SketchupBatchImport
           Array(stats[:source_provenance_objects]),
         :representation_fidelity => stats[:representation_fidelity],
         :import_contract_ready => stats[:import_contract_ready],
-        :source_lineage => source_lineage
+        :source_lineage => source_lineage,
+        :source_tree_sha256_before_load => source_tree_sha256_before_load,
+        :source_tree_sha256_after_import => source_tree_sha256_after_import
       )
 
       manifest_path = File.join(job[:output_dir], 'entity_manifest.json')
@@ -144,6 +176,8 @@ module SketchupBatchImport
         'source_pdf_path' => job[:pdf_path],
         'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
         'source_lineage' => source_lineage,
+        'source_tree_sha256_before_load' => source_tree_sha256_before_load,
+        'source_tree_sha256_after_import' => source_tree_sha256_after_import,
         'import_session_id' => import_session_id,
         'source_provenance' => provenance,
         'same_session_entities' => source_delivery_manifest,
@@ -199,6 +233,8 @@ module SketchupBatchImport
         'host_version' => Sketchup.version.to_s,
         'ruby_gate_identity' => host_identity,
         'requested_text_mode' => requested_mode.to_s,
+        'source_tree_sha256_before_load' => source_tree_sha256_before_load,
+        'source_tree_sha256_after_import' => source_tree_sha256_after_import,
         'source_pdf_path' => job[:pdf_path],
         'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
         'original_pdf_path' => job[:original_pdf_path],
@@ -235,6 +271,9 @@ module SketchupBatchImport
         'page_representation_fallbacks' =>
           Array(stats[:page_representation_fallbacks]),
         'raster_delivery_records' => Array(stats[:raster_delivery_records]),
+        'inline_image_page_raster_fallbacks' =>
+          Array(stats[:inline_image_page_raster_fallbacks]),
+        'inline_images_detected' => stats[:inline_images_detected].to_i,
         'empty_page_source_inspections' =>
           Array(stats[:empty_page_source_inspections]),
         'source_glyph_physical_deliveries' =>
@@ -324,6 +363,30 @@ module SketchupBatchImport
       version
     end
 
+    def verify_source_tree_sha256!(job, actual, phase)
+      expected = job[:source_tree_sha256]
+      unless expected.to_s =~ /\A[0-9a-f]{64}\z/
+        raise 'controlled host job source tree SHA256 is missing'
+      end
+      unless actual == expected
+        raise "importer source tree SHA256 mismatch #{phase}"
+      end
+      true
+    end
+
+    def refresh_import_report!(importer, job, pipeline_options, stats)
+      path = stats[:import_report_path].to_s
+      raise 'production import report path is missing' if path.empty?
+      report = importer::QAReport.build_from_stats(
+        job[:pdf_path], pipeline_options, stats
+      )
+      written = importer::QAReport.write_json(report, path)
+      raise 'source-tree-bound import report write failed' unless
+        written && File.file?(written)
+      stats[:import_report_path] = written
+      written
+    end
+
     def importer_source_locations(importer)
       {
         'run_pipeline' => importer.method(:run_pipeline).source_location,
@@ -362,7 +425,7 @@ module SketchupBatchImport
       job[:text_mode]
     end
 
-    def import_options(importer, job)
+    def import_options(importer, job, binding = nil)
       mode_name = job[:import_mode].to_s.capitalize
       opts = importer::ImportConfig.from_mode(mode_name).to_opts
       opts[:pages] = job[:pages]
@@ -382,6 +445,15 @@ module SketchupBatchImport
         :immutable_pdf_path => job[:immutable_pdf_path],
         :immutable_pdf_sha256 => job[:immutable_pdf_sha256]
       }
+      if binding
+        opts.merge!(
+          :progress_callback => lambda do |phase, detail|
+            SketchupBatchImport.write_progress!(
+              job, binding, "pipeline_#{phase}", detail
+            )
+          end
+        )
+      end
       opts
     end
 
@@ -407,6 +479,74 @@ module SketchupBatchImport
     def same_path?(left, right)
       File.expand_path(left.to_s).tr('\\', '/').downcase ==
         File.expand_path(right.to_s).tr('\\', '/').downcase
+    end
+
+    def finish_skp_export_only!(job, binding, importer, stats, source_lineage,
+                                worktree_version, loaded_version, expected_root,
+                                source_locations, host_identity, requested_mode,
+                                source_tree_sha256_before_load,
+                                source_tree_sha256_after_import)
+      import_session_id = stats[:import_session_id].to_s.strip
+      raise 'pipeline import_session_id is missing' if import_session_id.empty?
+      report_source = stats[:import_report_path]
+      report_copy = File.join(job[:output_dir], 'import_report.json')
+      SketchupHostEvidence.copy_verified_report!(
+        report_source,
+        report_copy,
+        :pdf_path => job[:pdf_path],
+        :requested_mode => requested_mode,
+        :schema => importer::QAReport::SCHEMA,
+        :worktree_version => worktree_version,
+        :loaded_version => loaded_version,
+        :host_version => Sketchup.version.to_s,
+        :import_session_id => import_session_id,
+        :source_provenance_objects =>
+          Array(stats[:source_provenance_objects]),
+        :representation_fidelity => stats[:representation_fidelity],
+        :import_contract_ready => stats[:import_contract_ready],
+        :source_lineage => source_lineage,
+        :source_tree_sha256_before_load => source_tree_sha256_before_load,
+        :source_tree_sha256_after_import => source_tree_sha256_after_import,
+        :skp_export_only => true
+      )
+      SketchupBatchImport.write_progress!(job, binding, 'skp_export_completed')
+      {
+        'skp_export_only' => true,
+        'plugins_disabled_verified' => true,
+        'source_root_verified' => true,
+        'source_root' => expected_root,
+        'source_locations' => source_locations,
+        'pipeline_source_location' => source_locations['run_pipeline'],
+        'worktree_metadata_version' => worktree_version,
+        'loaded_importer_version' => loaded_version,
+        'report_schema' => importer::QAReport::SCHEMA,
+        'host_version' => Sketchup.version.to_s,
+        'ruby_gate_identity' => host_identity,
+        'requested_text_mode' => requested_mode.to_s,
+        'source_tree_sha256_before_load' => source_tree_sha256_before_load,
+        'source_tree_sha256_after_import' => source_tree_sha256_after_import,
+        'source_pdf_path' => job[:pdf_path],
+        'source_pdf_sha256' => Digest::SHA256.file(job[:pdf_path]).hexdigest,
+        'original_pdf_path' => job[:original_pdf_path],
+        'original_pdf_sha256' => job[:original_pdf_sha256],
+        'immutable_pdf_path' => job[:immutable_pdf_path],
+        'immutable_pdf_sha256' => job[:immutable_pdf_sha256],
+        'normalized_pdf_path' => source_lineage['normalized_pdf_path'],
+        'normalized_pdf_sha256' => source_lineage['normalized_pdf_sha256'],
+        'salvage_note' => source_lineage['salvage_note'],
+        'delivery_summary_mode' => stats[:text_mode].to_s,
+        'pages' => stats[:pages].to_i,
+        'selected_pages' => Array(stats[:selected_pages]).map(&:to_i),
+        'import_session_id' => import_session_id,
+        'model_path' => job[:model_path],
+        'model_sha256' => Digest::SHA256.file(job[:model_path]).hexdigest,
+        'import_report_path' => report_copy,
+        'import_report_sha256' => Digest::SHA256.file(report_copy).hexdigest,
+        'text_entities' => stats[:text].to_i,
+        'text_renderers' => Array(stats[:text_renderers]),
+        'representation_fidelity' => stats[:representation_fidelity],
+        'import_contract_ready' => stats[:import_contract_ready]
+      }
     end
 
     def reopen_model!(model_path)

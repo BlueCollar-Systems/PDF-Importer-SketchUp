@@ -53,6 +53,13 @@ module SketchupHostJob
     unless original_sha256 =~ /\A[0-9a-f]{64}\z/
       raise ArgumentError, 'original PDF SHA256 is invalid'
     end
+    source_tree_sha256 = raw['source_tree_sha256']
+    unless source_tree_sha256.nil?
+      source_tree_sha256 = source_tree_sha256.to_s.downcase
+      unless source_tree_sha256 =~ /\A[0-9a-f]{64}\z/
+        raise ArgumentError, 'source tree SHA256 is invalid'
+      end
+    end
     raise ArgumentError, "unsupported text_mode: #{text_mode}" unless TEXT_MODES.include?(text_mode)
     raise ArgumentError, "unsupported import_mode: #{import_mode}" unless IMPORT_MODES.include?(import_mode)
     base = File.basename(pdf_path, File.extname(pdf_path))
@@ -64,10 +71,12 @@ module SketchupHostJob
       :original_pdf_sha256 => original_sha256,
       :immutable_pdf_path => immutable_pdf_path,
       :immutable_pdf_sha256 => immutable_sha256,
+      :source_tree_sha256 => source_tree_sha256,
       :output_dir => output_dir,
       :text_mode => text_mode,
       :import_mode => import_mode,
       :pages => pages,
+      :skp_export_only => raw['skp_export_only'] == true,
       :model_path => File.join(output_dir, "#{base}-#{text_mode}.skp"),
       :result_path => File.join(output_dir, 'host_acceptance.json'),
       :progress_path => File.join(output_dir, 'host_progress.json')

@@ -31,6 +31,9 @@ def _write_runtime(support: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
     for name in ("pdftocairo.exe", "pdftotext.exe", "pdffonts.exe"):
         (bin_dir / name).write_bytes(b"MZ helper")
+    native_dir = support / "native"
+    native_dir.mkdir(parents=True, exist_ok=True)
+    (native_dir / "png_rgba_decoder.exe").write_bytes(b"MZ native helper")
     for name in ("Adobe-GB1", "Adobe-CNS1", "Adobe-Japan1", "Adobe-Korea1"):
         (data / name).write_bytes(b"cmap")
     (support / "Library" / "THIRD_PARTY_NOTICES.txt").write_text(
@@ -100,6 +103,9 @@ class BuildReleaseTest(unittest.TestCase):
                     "bc_pdf_vector_importer/Library/bin/pdftocairo.exe", names
                 )
                 self.assertIn(
+                    "bc_pdf_vector_importer/native/png_rgba_decoder.exe", names
+                )
+                self.assertIn(
                     "bc_pdf_vector_importer/share/poppler/cidToUnicode/Adobe-GB1",
                     names,
                 )
@@ -121,6 +127,24 @@ class BuildReleaseTest(unittest.TestCase):
                             require_helpers=True,
                             require_poppler_smoke=False,
                         )
+
+                legacy.unlink()
+                legacy.parent.rmdir()
+                private_pdf = support / "AWSWeldSymbolchart.pdf"
+                private_pdf.write_bytes(b"private corpus fixture")
+                with mock.patch.object(br.subprocess, "run"), mock.patch.object(
+                    br, "_run_poppler_smoke"
+                ), mock.patch.object(
+                    br.runtime_manifest, "validate_existing_manifest"
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "private corpus artifact"
+                    ):
+                        br.build(
+                            root / "out3",
+                            require_helpers=True,
+                            require_poppler_smoke=False,
+                        )
         finally:
             br.EXT_ROOT = original_ext_root
             br.LOADER_FILE = original_loader
@@ -139,8 +163,32 @@ class BuildReleaseTest(unittest.TestCase):
         self.assertIn(
             "bc_pdf_vector_importer/Library/bin/pdftocairo.exe", workflow
         )
+        self.assertIn(
+            "bc_pdf_vector_importer/native/png_rgba_decoder.exe", workflow
+        )
         self.assertNotIn(
             "Source-only RBZ contains forbidden runtime payload", workflow
+        )
+
+    def test_windows_release_executes_native_decoder_equivalence_before_build(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
+            encoding="utf-8"
+        )
+        windows_job = workflow.split("  source-only-build-windows:", 1)[1].split(
+            "\n  release:", 1
+        )[0]
+        decoder_gate = (
+            "ruby test/representation_fidelity_contract_test.rb --name "
+            "\"/native_(rgba_decoder_is_byte_and_visual_hash_equivalent_to_ruby|"
+            "decoder_accelerates_opaque_rgb_page_verification)/\""
+        )
+
+        self.assertIn("uses: ruby/setup-ruby@v1", windows_job)
+        self.assertIn(decoder_gate, windows_job)
+        self.assertLess(
+            windows_job.index(decoder_gate),
+            windows_job.index("python build_release.py"),
+            "native decoder equivalence must execute before packaging",
         )
 
     def test_release_docs_describe_bundled_helpers(self):

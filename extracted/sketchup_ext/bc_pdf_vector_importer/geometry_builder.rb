@@ -17,6 +17,8 @@ module BlueCollarSystems
       CLOSE_TOL = 1e-6
       GEOMETRY_STAGING_PATH_THRESHOLD = 500
       GEOMETRY_STAGING_CHUNK_PATHS = 250
+      SMALL_FACE_DIRECT_MAX_EXTENT = 0.002
+      SMALL_FACE_CONSTRUCTION_SCALE = 1000.0
 
       attr_reader :page_group, :text_group, :text_delivery_failures,
                   :text_attempts
@@ -57,6 +59,7 @@ module BlueCollarSystems
         @provenance_bucket = opts[:provenance_bucket]
         @provenance_bucket = [] unless @provenance_bucket.is_a?(Array)
         @import_session_id = opts[:import_session_id].to_s
+        @progress_callback = opts[:progress_callback]
 
         @edge_count = 0
         @face_count = 0
@@ -74,6 +77,7 @@ module BlueCollarSystems
         @text_delivery_failures = []
         @text_attempts = []
         @geometry_staging = disabled_geometry_staging
+        @deferred_small_face_batches = {}
       end
 
       def build
@@ -104,6 +108,11 @@ module BlueCollarSystems
 
         # ── Vector geometry ──
         heavy_page = @paths.length >= GEOMETRY_STAGING_PATH_THRESHOLD
+        emit_progress(
+          :geometry_started,
+          :path_count => @paths.length,
+          :heavy_page => heavy_page
+        )
         configure_geometry_staging!(heavy_page)
         path_yield_every = heavy_page ? 100 : 0
         @paths.each_with_index do |path, path_idx|
@@ -158,7 +167,14 @@ module BlueCollarSystems
             draw_dest = staged_geometry_target(dest, path_idx)
 
             # Arc reconstruction on the polyline
-            if @detect_arcs && dash_spec.nil? && su_points.length >= 5
+            # A filled PDF contour is authoritative as one exact sampled
+            # boundary. Replacing part of it with fitted SketchUp arcs before
+            # add_face makes the live edge loop disagree with the face points;
+            # SketchUp 2017 then rejects many valid planar fills. Preserve the
+            # exact source boundary for fills and reserve editable arc fitting
+            # for unfilled stroke geometry.
+            if @detect_arcs && !should_fill && dash_spec.nil? &&
+               su_points.length >= 5
               draw_with_arc_detection(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color)
             else
               draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed)
@@ -169,8 +185,20 @@ module BlueCollarSystems
           end
         end
         finalize_geometry_staging!
+        flush_deferred_small_faces!
+        emit_progress(
+          :geometry_completed,
+          :path_count => @paths.length,
+          :edges => @edge_count,
+          :faces => @face_count
+        )
 
         # ── Text objects ──
+        emit_progress(
+          :text_started,
+          :text_item_count => @text_items.length,
+          :requested_text_mode => @requested_text_mode
+        )
         if @import_text && !@text_items.empty?
           prepare_bom_table_context(@text_items)
           text_group = nil
@@ -182,15 +210,39 @@ module BlueCollarSystems
           end
           text_target = text_group ? text_group.entities : target
 
-          @text_items.each do |item|
+          @text_items.each_with_index do |item, text_index|
+            source_span_id = if item.respond_to?(:source_span_id)
+                               item.source_span_id.to_s
+                             else
+                               ''
+                             end
+            progress_detail = {
+              :text_index => text_index,
+              :text_item_count => @text_items.length,
+              :source_span_id => source_span_id,
+              :source_text_sha256 => Digest::SHA256.hexdigest(item.text.to_s)
+            }
+            emit_progress(:text_item_started, progress_detail)
             item_layer = if @layer_manager && @layer_manager.match_pdf_layers
                            resolve_layer(item.respond_to?(:layer_name) ? item.layer_name : nil)
                          else
                            text_fallback_layer
                          end
             place_text(text_target, item, page_origin_x, page_origin_y, page_height, item_layer)
+            emit_progress(:text_item_completed, progress_detail)
           end
         end
+        emit_progress(
+          :text_completed,
+          :text_item_count => @text_items.length,
+          :text_objects => @text_count
+        )
+        emit_progress(
+          :build_completed,
+          :edges => @edge_count,
+          :faces => @face_count,
+          :text_objects => @text_count
+        )
 
         {
           edges: @edge_count,
@@ -212,11 +264,25 @@ module BlueCollarSystems
 
       private
 
+      def emit_progress(phase, detail = {})
+        callback = @progress_callback
+        return false unless callback.respond_to?(:call)
+        callback.call(phase, detail)
+        true
+      rescue StandardError => e
+        Logger.warn(
+          'GeometryBuilder',
+          "progress callback #{phase} failed: #{e.message}"
+        )
+        false
+      end
+
       def disabled_geometry_staging
         {
           :enabled => false,
           :groups => [],
           :parents => {},
+          :stable_targets => {},
           :batch_count => 0,
           :explode_count => 0,
           :exploded_entity_count => 0,
@@ -256,6 +322,7 @@ module BlueCollarSystems
           }
           staging[:parents][key] = slot
           staging[:groups] << group
+          staging[:stable_targets][group.entities.object_id] = parent_entities
           staging[:batch_count] += 1
           new_path = true
         end
@@ -281,6 +348,7 @@ module BlueCollarSystems
         end
         staging[:groups] = []
         staging[:parents] = {}
+        staging[:stable_targets] = {}
         true
       end
 
@@ -630,25 +698,161 @@ module BlueCollarSystems
       end
 
       def draw_face(entities, points, layer, fill_rgb = nil)
-        return if points.length < 3
+        return false if points.length < 3
         clean = build_face_loop(points)
-        return unless clean
+        return false unless clean
+        if face_loop_max_extent(clean) < SMALL_FACE_DIRECT_MAX_EXTENT
+          return draw_scaled_face_instance(entities, clean, layer, fill_rgb)
+        end
         begin
           face = entities.add_face(clean)
           if face
-            # Keep imported sheet faces consistently front-facing in top view.
-            face.reverse! if face.normal.z < 0
-            set_layer(face, layer)
-            if fill_rgb && fill_rgb.is_a?(Array) && fill_rgb.length >= 3
-              mat = get_or_create_material(fill_rgb)
-              face.material = mat
-              face.back_material = mat
-            end
+            style_face(face, layer, fill_rgb)
             @face_count += 1
+            return true
           end
+          false
         rescue StandardError => e
+          if e.message.to_s.include?('Points are not planar') &&
+             face_loop_max_extent(clean) < 0.01
+            begin
+              return true if draw_scaled_face_instance(
+                entities, clean, layer, fill_rgb
+              )
+            rescue StandardError
+              # Report the original host rejection below; it is the most
+              # actionable error if the exact scaled construction also fails.
+            end
+          end
           Logger.warn("GeometryBuilder", "draw_face failed: #{e.message}")
+          false
         end
+      end
+
+      def face_loop_max_extent(points)
+        xs = points.map { |point| point.x.to_f }
+        ys = points.map { |point| point.y.to_f }
+        [(xs.max - xs.min).abs, (ys.max - ys.min).abs].max
+      end
+
+      def draw_scaled_face_instance(entities, points, layer, fill_rgb)
+        unless entities.respond_to?(:add_instance) &&
+               @model.respond_to?(:definitions) &&
+               @model.definitions.respond_to?(:add) &&
+               defined?(Geom::Transformation)
+          raise 'host cannot create exact sub-tolerance fill geometry'
+        end
+        stable_entities =
+          @geometry_staging[:stable_targets][entities.object_id] || entities
+        key = small_face_batch_key(stable_entities, layer, fill_rgb)
+        batch = @deferred_small_face_batches[key]
+        unless batch
+          batch = {
+            :entities => stable_entities,
+            :layer => layer,
+            :fill_rgb => Array(fill_rgb),
+            :loops => []
+          }
+          @deferred_small_face_batches[key] = batch
+        end
+        batch[:loops] << points.map do |point|
+          [point.x.to_f, point.y.to_f, point.z.to_f]
+        end
+        @face_count += 1
+        true
+      end
+
+      # SketchUp 2017 rejects valid filled contours below its native face
+      # tolerance. Building each contour at a safe scale and retaining one
+      # inverse-scaled component instance is exact, but hundreds of tiny
+      # instances can destabilize the legacy host. Batch all contours that
+      # share one destination and style into a single definition/instance.
+      def flush_deferred_small_faces!
+        batches = @deferred_small_face_batches.values
+        @deferred_small_face_batches = {}
+        batches.each { |batch| draw_scaled_face_batch(batch) }
+        true
+      end
+
+      def draw_scaled_face_batch(batch)
+        entities = batch[:entities]
+        loops = Array(batch[:loops])
+        raise 'sub-tolerance fill batch has no contours' if loops.empty?
+        origin_values = loops.first.first
+        raise 'sub-tolerance fill batch has no origin' unless origin_values
+        origin = Geom::Point3d.new(
+          origin_values[0], origin_values[1], origin_values[2]
+        )
+        definition = nil
+        begin
+          factor = SMALL_FACE_CONSTRUCTION_SCALE
+          definition = @model.definitions.add(
+            "PDF Micro Fill Batch #{small_face_batch_digest(batch)[0, 12]}"
+          )
+          loops.each do |points|
+            large = points.map do |point|
+              Geom::Point3d.new(
+                (point[0] - origin_values[0]) * factor,
+                (point[1] - origin_values[1]) * factor,
+                (point[2] - origin_values[2]) * factor
+              )
+            end
+            face = definition.entities.add_face(large)
+            raise 'scaled sub-tolerance construction returned no face' unless face
+            style_face(face, batch[:layer], batch[:fill_rgb])
+          end
+          inverse_factor = 1.0 / factor
+          transformation =
+            Geom::Transformation.translation(origin) *
+            Geom::Transformation.scaling(
+              inverse_factor, inverse_factor, inverse_factor
+            )
+          instance = entities.add_instance(definition, transformation)
+          raise 'host returned no sub-tolerance fill instance' unless instance
+          set_layer(instance, batch[:layer])
+          true
+        rescue StandardError
+          begin
+            if definition && @model.definitions.respond_to?(:remove)
+              @model.definitions.remove(definition)
+            end
+          rescue StandardError
+          end
+          raise
+        end
+      end
+
+      def small_face_batch_key(entities, layer, fill_rgb)
+        color = Array(fill_rgb).map do |value|
+          format('%.9f', value.to_f)
+        end.join(',')
+        layer_name = if layer.respond_to?(:name)
+                       layer.name.to_s
+                     else
+                       layer.to_s
+                     end
+        [entities.object_id, layer_name, color].join('|')
+      end
+
+      def small_face_batch_digest(batch)
+        geometry = Array(batch[:loops]).map do |points|
+          points.map do |point|
+            point.map { |value| format('%.12f', value.to_f) }.join(',')
+          end.join(';')
+        end.join('|')
+        Digest::SHA256.hexdigest(geometry)
+      end
+
+      def style_face(face, layer, fill_rgb)
+        # Keep imported sheet faces consistently front-facing in top view.
+        face.reverse! if face.normal.z < 0
+        set_layer(face, layer)
+        if fill_rgb && fill_rgb.is_a?(Array) && fill_rgb.length >= 3
+          material = get_or_create_material(fill_rgb)
+          face.material = material
+          face.back_material = material
+        end
+        face
       end
 
       # ---------------------------------------------------------------
@@ -1184,6 +1388,7 @@ module BlueCollarSystems
           }
         }
       end
+
 
       def text_fit_tolerance(target_width, target_height)
         largest = [target_width.to_f.abs, target_height.to_f.abs, 1.0].max
@@ -2537,7 +2742,8 @@ module BlueCollarSystems
       def rotated_bbox_text_origin_pdf(item, bx0, by0, bx1, by1, fs, angle, baseline_offset_pts = nil)
         bw = (bx1 - bx0).abs
         bh = (by1 - by0).abs
-        run_w = label_run_width_pts(item.text, fs, bw, bh)
+        run_w = nil
+        run_w = label_run_width_pts(item.text, fs, bw, bh) if run_w.nil? || run_w <= 0.0
         rad = angle.to_f * Math::PI / 180.0
         dir_x = Math.cos(rad)
         dir_y = Math.sin(rad)

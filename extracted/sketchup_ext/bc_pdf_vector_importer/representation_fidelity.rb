@@ -18,6 +18,24 @@ module BlueCollarSystems
       FLAT_TEXT_HOST_API_FACT =
         'Sketchup::Entities#add_text exposes Sketchup::Text annotations/labels; ' \
         'no distinct flat editable model Text constructor is exposed'.freeze
+
+      # Cross-product contract vocabulary. SketchUp's established runtime
+      # symbol remains :text3d behind the adapter below so existing UI and host
+      # behavior do not change.
+      CANONICAL_MODES = %w[
+        text labels 3d_text glyphs geometry raster
+      ].freeze
+      SKETCHUP_RUNTIME_MODES = {
+        'text' => :text,
+        'labels' => :labels,
+        '3d_text' => :text3d,
+        'glyphs' => :glyphs,
+        'geometry' => :geometry,
+        'raster' => :raster
+      }.freeze
+      DEPRECATED_SKETCHUP_BOUNDARY_ALIASES = {
+        'text3d' => '3d_text'
+      }.freeze
       MODES = [:text, :labels, :text3d, :glyphs, :geometry, :raster].freeze
       LADDERS = {
         # Closest structural representation first; the final rung is always a
@@ -192,20 +210,39 @@ module BlueCollarSystems
 
       module_function
 
-      def normalize_mode(value)
+      def canonical_mode(value)
         case value.to_s.strip.downcase
-        when 'text', 'flat_text', 'editable_text' then :text
-        when 'labels', 'label', 'add_text' then :labels
-        when 'text3d', '3d_text', '3d text', 'add_3d_text' then :text3d
-        when 'glyphs', 'glyph', 'glyph_outline' then :glyphs
-        when 'geometry', 'outlines', 'outline', 'page_path_geometry' then :geometry
-        when 'raster', 'image' then :raster
+        when 'text', 'flat_text', 'editable_text' then 'text'
+        when 'labels', 'label', 'add_text' then 'labels'
+        when '3d_text', '3d text', 'add_3d_text' then '3d_text'
+        when 'glyphs', 'glyph', 'glyph_outline' then 'glyphs'
+        when 'geometry', 'outlines', 'outline', 'page_path_geometry' then 'geometry'
+        when 'raster', 'image' then 'raster'
         else nil
         end
       end
 
+      # SketchUp historically exposed `text3d`. Keep it only at this host
+      # boundary and translate immediately to the canonical `3d_text` contract.
+      def normalize_sketchup_boundary_mode(value)
+        raw = value.to_s.strip.downcase
+        raw = DEPRECATED_SKETCHUP_BOUNDARY_ALIASES[raw] || raw
+        SKETCHUP_RUNTIME_MODES[canonical_mode(raw)]
+      end
+
+      # Backward-compatible runtime entry point used throughout the SketchUp
+      # implementation. Public/cross-product serialization uses canonical_mode.
+      def normalize_mode(value)
+        normalize_sketchup_boundary_mode(value)
+      end
+
       def ladder_for(value)
         LADDERS[normalize_mode(value)] || []
+      end
+
+      def canonical_ladder_for(value)
+        runtime_to_canonical = SKETCHUP_RUNTIME_MODES.invert
+        ladder_for(value).map { |mode| runtime_to_canonical[mode] }
       end
 
       def proof_binding(value)
@@ -852,9 +889,16 @@ module BlueCollarSystems
                                   canonical_json_cache = nil,
                                   write_canonical_cache = false)
         type = entity_type(entity)
+        # A ComponentInstance's verified definition geometry plus its exact
+        # 16-value transformation determines the same world bounds. Asking
+        # SketchUp to recalculate those bounds for every repeated glyph walks
+        # the shared solid again and adds no independent evidence. Claim-root
+        # group bounds are still read and checked against source extents.
+        bounds = type == 'ComponentInstance' ?
+          nil : entity_bounds_payload(entity)
         payload = {
           :type => type,
-          :bounds => entity_bounds_payload(entity),
+          :bounds => bounds,
           :transformation => entity_transformation_payload(entity)
         }
         if type == 'Edge'

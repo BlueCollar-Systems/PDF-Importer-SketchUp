@@ -144,6 +144,20 @@ class FakeTransparentSoftMaskPDF < FakeImagePDF
 end
 
 class EmbeddedImageExtractorTest < Minitest::Test
+  def test_counts_inline_images_without_treating_inline_bytes_as_operators
+    stream = "q 2 0 0 3 11 13 cm BI /W 1 /H 1 /BPC 8 /CS /RGB ID " \
+             "abcEIx-not-an-operator\x00payload\nEI Q\n" \
+             "q BI /W 1 /H 1 /BPC 8 /CS /G ID z\nEI Q"
+    pdf = FakeImagePDF.new(stream, {}, {})
+    extractor = BlueCollarSystems::PDFVectorImporter::EmbeddedImageExtractor
+      .new(pdf, nil)
+
+    assets = extractor.extract_page(1, nil, false)
+
+    assert_empty assets
+    assert_equal 2, extractor.inline_image_count
+  end
+
   def test_supported_sketchup_image_extensions
     klass = BlueCollarSystems::PDFVectorImporter::EmbeddedImageExtractor
     assert klass.supported_sketchup_image?('page_1_img.png')
@@ -240,7 +254,8 @@ class EmbeddedImageExtractorTest < Minitest::Test
       assert_equal 1, assets.length
       asset = assets.first
       assert_equal '.png', File.extname(asset.file_path)
-      assert_equal "\x89PNG\r\n\x1a\n".b, File.binread(asset.file_path, 8)
+      png_signature = "\x89PNG\r\n\x1a\n".force_encoding(Encoding::BINARY)
+      assert_equal png_signature, File.binread(asset.file_path, 8)
 
       decoded = File.join(dir, 'decoded.rgba')
       prepared = BlueCollarSystems::PDFVectorImporter::PngCropper

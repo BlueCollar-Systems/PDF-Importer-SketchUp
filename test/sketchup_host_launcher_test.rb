@@ -114,6 +114,15 @@ class SketchupHostLauncherTest < Minitest::Test
     load File.join(REPO_ROOT, 'tools', 'sketchup_host_launcher.rb')
   end
 
+  def test_raster_strategy_owns_the_effective_requested_representation
+    assert_equal 'raster', SketchupHostLauncher.effective_requested_mode(
+      :import_mode => 'raster', :text_mode => 'text3d'
+    )
+    assert_equal 'text3d', SketchupHostLauncher.effective_requested_mode(
+      :import_mode => 'hybrid', :text_mode => 'text3d'
+    )
+  end
+
   def test_plugin_guard_restores_exact_prior_type_and_raw_value
     prior = {
       'value_exists' => true,
@@ -170,7 +179,8 @@ class SketchupHostLauncherTest < Minitest::Test
         end
         assert File.file?(paid_plugin), 'normal paid plugin must remain untouched'
         assert_equal '1', environment['BC_PDF_IMPORTER_BATCH_NONINTERACTIVE']
-        refute environment.key?('BC_SKETCHUP_IMPORTER_SOURCE_ROOT')
+        assert_equal File.join(REPO_ROOT, 'extracted', 'sketchup_ext'),
+                     environment['BC_SKETCHUP_IMPORTER_SOURCE_ROOT']
         assert_equal 1, backend.spawned_command.count { |arg| arg == '-RubyStartupArg' }
         refute_equal job_path, backend.spawned_command.last
         refute_includes backend.spawned_command, paid_plugin
@@ -191,7 +201,7 @@ class SketchupHostLauncherTest < Minitest::Test
     )
   end
 
-  def test_timeout_restores_preference_writes_error_and_kills_only_child
+  def test_timeout_restores_preference_writes_error_and_kills_process_tree
     Dir.mktmpdir('su-launch') do |dir|
       job_path, result_path, _pdf = write_job(dir)
       guard = FakePluginStateGuard.new
@@ -222,6 +232,18 @@ class SketchupHostLauncherTest < Minitest::Test
       assert_equal [:suppress, :restore], guard.calls
       assert_equal result, JSON.parse(File.read(result_path))
     end
+  end
+
+  def test_windows_process_backend_uses_exact_pid_descendant_tree_termination
+    runner = FakeCommandRunner.new([true])
+    backend = SketchupHostLauncher::ProcessBackend.new(
+      :windows => true, :command_runner => runner
+    )
+
+    assert backend.kill(4242)
+    assert_equal [
+      ['taskkill.exe', '/PID', '4242', '/T', '/F']
+    ], runner.commands
   end
 
   def test_default_timeout_allows_large_verified_model_persistence
@@ -369,6 +391,40 @@ class SketchupHostLauncherTest < Minitest::Test
     end
   end
 
+  def test_controlled_job_preserves_source_tree_digest_and_verifier_rejects_drift
+    Dir.mktmpdir('su-launch-source-tree') do |dir|
+      job_path, _result_path, _pdf = write_job(dir)
+      raw = JSON.parse(File.read(job_path))
+      expected = 'c' * 64
+      raw['source_tree_sha256'] = expected
+      File.write(job_path, JSON.generate(raw))
+      original_job = SketchupHostJob.load(job_path)
+      snapshot = SketchupHostLauncher.prepare_controlled_job!(
+        job_path, original_job, 'source-tree-job'
+      )
+      controlled = SketchupHostJob.load(snapshot.fetch('job_path'))
+
+      assert_equal expected, controlled[:source_tree_sha256]
+      assert SketchupHostLauncher.verify_source_tree_binding!(
+        {
+          'source_tree_sha256_before_load' => expected,
+          'source_tree_sha256_after_import' => expected
+        },
+        controlled
+      )
+      error = assert_raises(StandardError) do
+        SketchupHostLauncher.verify_source_tree_binding!(
+          {
+            'source_tree_sha256_before_load' => expected,
+            'source_tree_sha256_after_import' => 'd' * 64
+          },
+          controlled
+        )
+      end
+      assert_match(/source tree/i, error.message)
+    end
+  end
+
   def test_restore_failure_changes_apparent_success_to_error
     Dir.mktmpdir('su-launch') do |dir|
       job_path, result_path, _pdf = write_job(dir)
@@ -464,6 +520,7 @@ class SketchupHostLauncherTest < Minitest::Test
     return unless binding['status'] == 'STARTED'
     job_path = process.spawned_command.last
     job = JSON.parse(File.read(job_path))
+    source_tree_sha256 = job['source_tree_sha256']
     pdf = File.expand_path(job['pdf_path'])
     output = File.expand_path(job['output_dir'])
     digest = Digest::SHA256.file(pdf).hexdigest
@@ -494,6 +551,8 @@ class SketchupHostLauncherTest < Minitest::Test
       'report_meta' => { 'host' => 'sketchup', 'semver' => '3.7.98' },
       'extra' => {
         'requested_text_mode' => 'labels',
+        'source_tree_sha256_before_load' => source_tree_sha256,
+        'source_tree_sha256_after_import' => source_tree_sha256,
         'import_session_id' => 'session-1',
         'source_lineage' => lineage,
         'source_provenance' => {
@@ -535,6 +594,8 @@ class SketchupHostLauncherTest < Minitest::Test
       'source_pdf_path' => pdf,
       'source_pdf_sha256' => digest,
       'source_lineage' => lineage,
+      'source_tree_sha256_before_load' => source_tree_sha256,
+      'source_tree_sha256_after_import' => source_tree_sha256,
       'import_session_id' => 'session-1',
       'same_session_entities' => same_session_entities,
       'stabilized_owned_entities' => stabilized_owned_entities,
@@ -561,6 +622,8 @@ class SketchupHostLauncherTest < Minitest::Test
         'target' => 'sketchup-2017-ruby-2.2.4-p230', 'verified' => true
       },
       'requested_text_mode' => 'labels',
+      'source_tree_sha256_before_load' => source_tree_sha256,
+      'source_tree_sha256_after_import' => source_tree_sha256,
       'source_pdf_path' => pdf,
       'source_pdf_sha256' => digest,
       'original_pdf_path' => original_path,
@@ -621,6 +684,8 @@ class SketchupHostLauncherTest < Minitest::Test
       'fallback_transitions' => [],
       'page_representation_fallbacks' => [],
       'raster_delivery_records' => [],
+      'inline_image_page_raster_fallbacks' => [],
+      'inline_images_detected' => 0,
       'empty_page_source_inspections' => [],
       'source_glyph_physical_deliveries' => [],
       'representation_fidelity' => { 'ready' => true },

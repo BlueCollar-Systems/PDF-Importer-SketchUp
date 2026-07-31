@@ -49,6 +49,12 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Set up Ruby for native decoder verification
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+      - name: Execute native PNG decoder smoke and byte-equivalence gate
+        run: ruby test/representation_fidelity_contract_test.rb --name "/native_(rgba_decoder_is_byte_and_visual_hash_equivalent_to_ruby|decoder_accelerates_opaque_rgb_page_verification)/"
       - name: Zero-ceremony release contract tests
         run: |
           python tools/test_build_release.py -v
@@ -234,6 +240,7 @@ jobs:
               "bc_pdf_vector_importer/Library/bin/pdftocairo.exe",
               "bc_pdf_vector_importer/Library/bin/pdftotext.exe",
               "bc_pdf_vector_importer/Library/bin/pdffonts.exe",
+              "bc_pdf_vector_importer/native/png_rgba_decoder.exe",
               "bc_pdf_vector_importer/share/poppler/cidToUnicode/Adobe-GB1",
           }
           missing_runtime = sorted(required_runtime - names)

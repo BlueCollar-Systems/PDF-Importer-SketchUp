@@ -2,6 +2,8 @@
 
 require 'zlib'
 require 'digest'
+require 'json'
+require 'open3'
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 
 module BlueCollarSystems
@@ -17,7 +19,95 @@ module BlueCollarSystems
 
       module_function
 
-      def prepare_rgba!(png_path, raw_path, require_alpha = true)
+      def native_decoder_path
+        File.join(
+          File.dirname(__FILE__), 'native', 'png_rgba_decoder.exe'
+        )
+      end
+
+      def prepare_rgba!(png_path, raw_path, require_alpha = true,
+                        native_helper = :default)
+        helper = native_helper == :default ? native_decoder_path : native_helper
+        native_failure = nil
+        if helper && File.file?(helper.to_s)
+          begin
+            return prepare_rgba_native!(
+              png_path, raw_path, helper, require_alpha
+            )
+          rescue RepresentationFidelity::ContractError => error
+            native_failure = error.message
+            delete_file(raw_path)
+          rescue StandardError => error
+            native_failure = "native RGBA preparation failed: #{error.message}"
+            delete_file(raw_path)
+          end
+        end
+
+        prepared = prepare_rgba_ruby!(png_path, raw_path, require_alpha)
+        prepared[:decoder_backend] = :ruby_zlib
+        prepared[:native_decoder_fallback_reason] = native_failure if
+          native_failure
+        prepared
+      end
+
+      def prepare_rgba_native!(png_path, raw_path, helper_path,
+                               require_alpha = true)
+        source = File.expand_path(png_path.to_s)
+        raw = File.expand_path(raw_path.to_s)
+        raise_contract('PNG source is missing') unless File.file?(source)
+        helper = File.expand_path(helper_path.to_s)
+        raise_contract('native PNG decoder is unavailable') unless
+          File.file?(helper)
+
+        command = [helper, source, raw]
+        command << '--allow-rgb' unless require_alpha
+        stdout, stderr, status = Open3.capture3(*command)
+        unless status.success?
+          detail = stderr.to_s.strip
+          detail = stdout.to_s.strip if detail.empty?
+          detail = "exit #{status.exitstatus}" if detail.empty?
+          raise_contract("native PNG decoder failed: #{detail}")
+        end
+        begin
+          result = JSON.parse(stdout.to_s)
+        rescue JSON::ParserError => error
+          raise_contract("native PNG decoder returned invalid JSON: #{error.message}")
+        end
+        width = Integer(result['pixel_width'])
+        height = Integer(result['pixel_height'])
+        row_bytes = Integer(result['row_bytes'])
+        expected_size = width * height * 4
+        visual_sha = result['visual_pixel_sha256'].to_s.downcase
+        unless width > 0 && height > 0 && row_bytes == width * 4 &&
+               File.file?(raw) && File.size(raw) == expected_size &&
+               visual_sha =~ /\A[0-9a-f]{64}\z/
+          raise_contract('native PNG decoder output contract is invalid')
+        end
+        {
+          :png_path => source,
+          :raw_path => raw,
+          :pixel_width => width,
+          :pixel_height => height,
+          :row_bytes => row_bytes,
+          :alpha_channel_verified => true,
+          :transparent_pixel_present =>
+            result['transparent_pixel_present'] == true,
+          :visible_pixel_present => result['visible_pixel_present'] == true,
+          :visual_pixel_sha256 => visual_sha,
+          :content_sha256 => Digest::SHA256.file(source).hexdigest,
+          :content_byte_size => File.size(source).to_i,
+          :decoder_backend => :native_libpng
+        }
+      rescue RepresentationFidelity::ContractError
+        delete_file(raw)
+        raise
+      rescue StandardError => error
+        delete_file(raw)
+        raise_contract("native PNG RGBA preparation failed: #{error.message}")
+      end
+      private_class_method :prepare_rgba_native!
+
+      def prepare_rgba_ruby!(png_path, raw_path, require_alpha = true)
         source = File.expand_path(png_path.to_s)
         raw = File.expand_path(raw_path.to_s)
         raise_contract('PNG source is missing') unless File.file?(source)
@@ -104,6 +194,7 @@ module BlueCollarSystems
           # zlib resources are best-effort after the authoritative result.
         end
       end
+      private_class_method :prepare_rgba_ruby!
 
       def crop_rgba!(prepared, pixel_crop, output_path)
         unless prepared.is_a?(Hash) && File.file?(prepared[:raw_path].to_s)
@@ -212,9 +303,11 @@ module BlueCollarSystems
 
       def consume_scanlines!(state, output)
         packet_size = state[:row_bytes] + 1
-        while state[:pending].bytesize >= packet_size &&
+        pending_offset = 0
+        while state[:pending].bytesize - pending_offset >= packet_size &&
               state[:rows] < state[:height]
-          packet = state[:pending].slice!(0, packet_size)
+          packet = state[:pending].byteslice(pending_offset, packet_size)
+          pending_offset += packet_size
           filter = packet.getbyte(0)
           row = packet.byteslice(1, state[:row_bytes]).dup
           unfilter!(row, state[:previous], filter, state[:bytes_per_pixel])
@@ -230,6 +323,16 @@ module BlueCollarSystems
           output.write(rgba)
           state[:previous] = row
           state[:rows] += 1
+        end
+        if pending_offset > 0
+          remaining = state[:pending].bytesize - pending_offset
+          state[:pending] = if remaining > 0
+                              state[:pending].byteslice(
+                                pending_offset, remaining
+                              ).dup
+                            else
+                              binary_string
+                            end
         end
       end
       private_class_method :consume_scanlines!

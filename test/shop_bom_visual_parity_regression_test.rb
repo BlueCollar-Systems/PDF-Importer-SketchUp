@@ -124,7 +124,7 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
     texts = items.map { |it| it.text.to_s.strip }
     assert_operator items.length, :>=, 250, 'expected dense shop-drawing text coverage'
     BOM_HEADERS.each do |hdr|
-      assert texts.any? { |t| t.casecmp?(hdr) }, "missing BOM header #{hdr}"
+      assert texts.any? { |t| t.casecmp(hdr).zero? }, "missing BOM header #{hdr}"
     end
     row_count = texts.count { |t| t =~ BOM_SAMPLE_RE }
     assert_operator row_count, :>=, 25, 'expected BOM table row/header sample strings'
@@ -135,7 +135,7 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
     ents = simulate_placement(use_3d_text: false)
     placed = ents.labels.map { |e| e[:text].to_s.strip }
     BOM_HEADERS.each do |hdr|
-      assert placed.any? { |t| t.casecmp?(hdr) }, "Labels mode missing #{hdr}"
+      assert placed.any? { |t| t.casecmp(hdr).zero? }, "Labels mode missing #{hdr}"
     end
     assert_operator ents.labels.length, :>=, 250, 'Labels mode should place most extracted strings'
   end
@@ -145,11 +145,13 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
     ents = simulate_placement(use_3d_text: true)
     placed = ents.mesh.map { |e| e[:text].to_s.strip }
     BOM_HEADERS.each do |hdr|
-      assert placed.any? { |t| t.casecmp?(hdr) }, "3D Text mode missing #{hdr}"
+      assert placed.any? { |t| t.casecmp(hdr).zero? }, "3D Text mode missing #{hdr}"
     end
     tiny = ents.mesh.count { |e| e[:height].to_f < 0.02 }
     assert_equal 0, tiny, '3D Text must not shrink to microscopic heights'
-    header = BOM_HEADERS.map { |hdr| ents.mesh.find { |e| e[:text].to_s.strip.casecmp?(hdr) } }.compact.first
+    header = BOM_HEADERS.map do |hdr|
+      ents.mesh.find { |e| e[:text].to_s.strip.casecmp(hdr).zero? }
+    end.compact.first
     assert header, '3D Text missing BOM header mesh'
     assert_operator header[:height], :>=, 0.08,
                     "BOM header 3D height too small (#{header[:height].round(4)} in)"

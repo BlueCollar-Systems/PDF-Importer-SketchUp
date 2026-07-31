@@ -30,11 +30,19 @@ module Geom
   end unless const_defined?(:Point3d)
 
   class Transformation
-    attr_reader :scale, :origin, :translation
-    def initialize(scale, origin = nil, translation = nil)
-      @scale = scale.to_f
-      @origin = origin
-      @translation = translation
+    attr_reader :scale, :origin, :translation, :matrix
+    def initialize(value, origin = nil, translation = nil)
+      if value.is_a?(Array) && value.length == 16
+        @matrix = value.map { |entry| entry.to_f }
+        @scale = 1.0
+        @origin = nil
+        @translation = @matrix.values_at(12, 13, 14)
+      else
+        @matrix = nil
+        @scale = value.to_f
+        @origin = origin
+        @translation = translation
+      end
     end
     def self.scaling(*args)
       return new(args[0]) if args.length == 1
@@ -42,6 +50,23 @@ module Geom
     end
     def self.translation(values)
       new(1.0, nil, Array(values).map { |value| value.to_f })
+    end
+
+    def transform_point(point)
+      return Geom::Point3d.new(
+        point.x.to_f + Array(@translation).fetch(0, 0.0),
+        point.y.to_f + Array(@translation).fetch(1, 0.0),
+        point.z.to_f + Array(@translation).fetch(2, 0.0)
+      ) unless @matrix
+
+      x = point.x.to_f
+      y = point.y.to_f
+      z = point.z.to_f
+      Geom::Point3d.new(
+        (x * @matrix[0]) + (y * @matrix[4]) + (z * @matrix[8]) + @matrix[12],
+        (x * @matrix[1]) + (y * @matrix[5]) + (z * @matrix[9]) + @matrix[13],
+        (x * @matrix[2]) + (y * @matrix[6]) + (z * @matrix[10]) + @matrix[14]
+      )
     end
   end unless const_defined?(:Transformation)
 end
@@ -319,7 +344,16 @@ class Svg3DInstance
     @definition.entities.to_a.each do |entity|
       next unless entity.respond_to?(:bounds)
       box = entity.bounds
-      points << translated_point(box.min) << translated_point(box.max)
+      low = box.min
+      high = box.max
+      [
+        [low.x, low.y, low.z], [low.x, low.y, high.z],
+        [low.x, high.y, low.z], [low.x, high.y, high.z],
+        [high.x, low.y, low.z], [high.x, low.y, high.z],
+        [high.x, high.y, low.z], [high.x, high.y, high.z]
+      ].each do |x, y, z|
+        points << transformed_point(Geom::Point3d.new(x, y, z))
+      end
     end
     raise 'empty component instance bounds' if points.empty?
     Svg3DBounds.new(points)
@@ -331,13 +365,17 @@ class Svg3DInstance
 
   private
 
-  def translated_point(point)
-    values = Array(@transformation.translation)
-    Geom::Point3d.new(
-      point.x.to_f + values.fetch(0, 0.0),
-      point.y.to_f + values.fetch(1, 0.0),
-      point.z.to_f + values.fetch(2, 0.0)
-    )
+  def transformed_point(point)
+    if @transformation.respond_to?(:transform_point)
+      @transformation.transform_point(point)
+    else
+      values = Array(@transformation.translation)
+      Geom::Point3d.new(
+        point.x.to_f + values.fetch(0, 0.0),
+        point.y.to_f + values.fetch(1, 0.0),
+        point.z.to_f + values.fetch(2, 0.0)
+      )
+    end
   end
 end
 
@@ -429,6 +467,15 @@ class SvgText3DRendererTest < Minitest::Test
       'd="M 0 0 L 10 0 L 10 -10 L 0 -10 Z"/></g></defs><g>' \
       '<use href="#glyph-0-0" x="10" y="80"/>' \
       '<use href="#glyph-0-0" x="70" y="20"/></g></svg>'
+  end
+
+  def square_svg_with_affine_reuse
+    '<svg xmlns="http://www.w3.org/2000/svg" width="100pt" height="100pt" ' \
+      'viewBox="0 0 100 100"><defs><g id="glyph-0-0"><path ' \
+      'd="M 0 0 L 10 0 L 10 -10 L 0 -10 Z"/></g></defs><g>' \
+      '<use href="#glyph-0-0" x="10" y="80"/>' \
+      '<use href="#glyph-0-0" x="70" y="20" ' \
+      'transform="matrix(0,1,-1,0,0,0)"/></g></svg>'
   end
 
   def square_svg_with_host_tolerance_edge
@@ -612,7 +659,50 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal 2, instances.length
   end
 
-  def test_exact_cache_key_ignores_translation_but_separates_affine_and_depth
+  def test_affine_placements_reuse_one_exact_solid_without_changing_world_bounds
+    model = Svg3DModel.new(:with_definitions => true)
+    entities = Svg3DEntities.new(:model => model)
+    wide = Svg3DSpan.new(
+      'AA', 'pdftotext', 'text_span:1:0',
+      0.0, 0.0, 100.0, 100.0
+    )
+    synthetic_match = {
+      :matched_items => [wide],
+      :placement_matches => [
+        { :source_span_id => wide.source_span_id, :placement_index => 0 },
+        { :source_span_id => wide.source_span_id, :placement_index => 1 }
+      ],
+      :unmatched_source_runs => [],
+      :unmatched_placements => [],
+      :coverage_failures => [],
+      :source_ink_matches => [],
+      :runs_matched => 1,
+      :runs_unmatched => 0,
+      :placements_unmatched => 0
+    }
+
+    result = BlueCollarSystems::PDFVectorImporter::CairoGlyphSource.stub(
+      :match_spans, synthetic_match
+    ) do
+      RENDERER.render_svg(
+        entities, square_svg_with_affine_reuse,
+        MEDIA_BOX, [wide], :depth => 0.05
+      )
+    end
+
+    assert result[:ok], result[:failures].inspect
+    assert_equal 1, result[:solid_cache][:definition_builds],
+                 'one glyph outline must not be rebuilt for each affine placement'
+    assert_equal 2, result[:solid_cache][:instance_placements]
+    delivered = result[:span_results][0]
+    assert_in_delta 10.0 / 72.0, delivered[:bounds][:min_x], 1.0e-9
+    assert_in_delta 20.0 / 72.0, delivered[:bounds][:min_y], 1.0e-9
+    assert_in_delta 80.0 / 72.0, delivered[:bounds][:max_x], 1.0e-9
+    assert_in_delta 80.0 / 72.0, delivered[:bounds][:max_y], 1.0e-9
+    assert_in_delta 0.05, delivered[:bounds][:max_z], 1.0e-9
+  end
+
+  def test_exact_cache_key_ignores_translation_and_affine_but_separates_depth
     entries = BlueCollarSystems::PDFVectorImporter::CairoGlyphSource.
       model_space_loops(
         square_svg_with_unjoined_source_glyph, MEDIA_BOX
@@ -629,8 +719,8 @@ class SvgText3DRendererTest < Minitest::Test
       model_space_loops(
         square_svg('matrix(0,1,-1,0,20,-10)'), MEDIA_BOX
       )[0]
-    refute_equal cache.key_for(entries[0]), cache.key_for(rotated),
-                 'different affine source solids must not alias'
+    assert_equal cache.key_for(entries[0]), cache.key_for(rotated),
+                 'affine placement belongs on the instance, not its solid definition'
 
     other_depth = BlueCollarSystems::PDFVectorImporter::Svg3DTextSolidCache.new(
       model, 0.025

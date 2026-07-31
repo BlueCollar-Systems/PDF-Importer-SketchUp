@@ -885,6 +885,73 @@ class QAReportTest < Minitest::Test
     assert_equal false, false_proof[:ready]
   end
 
+  def test_inline_image_terminal_page_raster_is_a_valid_source_bound_delivery
+    source_sha = 'a' * 64
+    artifact_sha = 'b' * 64
+    lineage = {
+      original_pdf_path: 'C:/owner.pdf', original_pdf_sha256: source_sha,
+      immutable_pdf_path: 'C:/snapshot.pdf',
+      immutable_pdf_sha256: source_sha,
+      normalized_pdf_path: 'C:/snapshot.pdf',
+      normalized_pdf_sha256: source_sha, salvage_note: nil
+    }
+    artifact = {
+      page_number: 1, png_path: 'C:/page-1.png',
+      content_sha256: artifact_sha
+    }
+    record = {
+      page: 1, source_page_number: 1, source_span_ids: [],
+      requested_strategy: :auto, effective_strategy: :raster,
+      semantic_text_evaluated: false, inline_image_instance_count: 2,
+      requested_mode: :labels, delivered_mode: :raster,
+      resulting_entity_ids: ['persistent_id:91'],
+      created_entity_type: 'raster_image', delivery_scope: :page_raster,
+      delivery_basis: :inline_image_paint_order_requires_terminal_page_raster,
+      cleanup_outcome: :not_required, explicit_request: false,
+      degraded: true, real_raster_verified: true,
+      visual_fidelity_verified: true, artifact_path: 'C:/page-1.png',
+      artifact_sha256: artifact_sha, artifact_evidence: artifact,
+      source_lineage: lineage
+    }
+    stats = {
+      pages: 1, selected_pages: [1], primitives: 0, edges: 0, text: 0,
+      layers: [], source_input_sha256: source_sha,
+      normalized_input_sha256: source_sha, source_lineage: lineage,
+      text_source_span_ids: [], text_attempts: [],
+      source_provenance_objects: [], page_text_delivery_records: [],
+      terminal_text_delivery_records: [record.dup],
+      raster_delivery_records: [record.dup],
+      inline_image_page_raster_fallbacks: [record.dup],
+      page_representation_fallbacks: [record.merge(
+        scope: :page,
+        reason_code: :inline_image_paint_order_requires_terminal_page_raster,
+        affirmative_impossibility: true
+      )],
+      fallback_transitions: [], raster_fallback_used: true,
+      inline_images_detected: 2,
+      text_renderers: [{
+        page: 1, requested_mode: :labels, delivered_mode: :raster,
+        degraded: true, real_raster_verified: true,
+        resulting_entity_ids: ['persistent_id:91']
+      }]
+    }
+
+    fidelity = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'inline.pdf', { import_mode: 'auto', text_mode: :labels, pages: [1] },
+      stats
+    )[:extra][:representation_fidelity]
+    assert_equal true, fidelity[:ready], fidelity[:errors].join(', ')
+
+    stats[:inline_image_page_raster_fallbacks][0][
+      :inline_image_instance_count
+    ] = 0
+    rejected = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'inline.pdf', { import_mode: 'auto', text_mode: :labels, pages: [1] },
+      stats
+    )[:extra][:representation_fidelity]
+    assert_equal false, rejected[:ready]
+  end
+
   def test_image_only_page_fallback_and_physical_glyph_delivery_are_loud
     stats = {
       pages: 1, primitives: 0, edges: 0, text: 1, layers: [],

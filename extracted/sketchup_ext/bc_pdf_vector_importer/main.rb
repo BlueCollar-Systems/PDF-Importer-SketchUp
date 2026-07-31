@@ -133,6 +133,55 @@ module BlueCollarSystems
       Logger.warn(source, "abort_operation failed: #{e.message}")
     end
 
+    def self.abort_open_operation!(model, operation_open, source)
+      safe_abort_operation(model, source) if operation_open
+      false
+    end
+
+    def self.report_pipeline_progress(opts, phase, detail = nil)
+      return false unless opts.is_a?(Hash)
+      callback = opts[:progress_callback]
+      return false unless callback.respond_to?(:call)
+      callback.call(phase.to_s, detail)
+      true
+    rescue StandardError => e
+      Logger.warn('Pipeline', "progress callback failed: #{e.message}")
+      false
+    end
+
+    # Keep exact per-span representation bookkeeping out of the ordinary page
+    # geometry collection. RepresentationFidelity snapshots the collection it
+    # receives for every source span; using the page group's entities therefore
+    # rescanned every imported edge and face once per span. A dedicated
+    # page-owned container preserves coordinates and ownership while making
+    # those snapshots proportional to delivered text representations only.
+    def self.create_text_representation_container!(parent_entities, page_num,
+                                                   mode, layer)
+      unless parent_entities && parent_entities.respond_to?(:add_group)
+        raise RepresentationFidelity::ContractError,
+              "Page #{page_num}: text representation container unavailable"
+      end
+
+      container = parent_entities.add_group
+      unless container && container.respond_to?(:entities)
+        raise RepresentationFidelity::ContractError,
+              "Page #{page_num}: text representation container creation failed"
+      end
+
+      normalized_mode = normalize_text_renderer_mode(mode)
+      label = normalized_mode == :glyphs ? 'Glyphs' : 'Geometry'
+      container.name = "PDF #{label} Text Page #{page_num}" \
+        if container.respond_to?(:name=)
+      container.layer = layer if layer && container.respond_to?(:layer=)
+      if container.respond_to?(:set_attribute)
+        dict = 'BC_PDF_Importer'
+        container.set_attribute(dict, 'representation_container', true)
+        container.set_attribute(dict, 'page_number', page_num.to_i)
+        container.set_attribute(dict, 'representation', normalized_mode.to_s)
+      end
+      container
+    end
+
     def self.safe_find_pdftocairo
       SvgTextRenderer.find_pdftocairo
     rescue StandardError => e
@@ -484,6 +533,24 @@ module BlueCollarSystems
       }
       history << completed
       requested = RepresentationFidelity.normalize_mode(requested_mode)
+      source_sha = Digest::SHA256.hexdigest(item.text.to_s)
+      expected_sha = RepresentationFidelity.contract_hash_value(
+        result[:expected_evidence], :source_text_sha256
+      ).to_s.downcase
+      unless expected_sha == source_sha
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: item vector source text binding conflicts with delivery"
+      end
+      source_bbox = RepresentationFidelity.strict_source_bbox_pdf(item)
+      evidence_bbox = canonical_terminal_text_bbox(
+        RepresentationFidelity.contract_hash_value(
+          result[:expected_evidence], :source_bbox_pdf
+        ), 'item vector delivery'
+      )
+      unless evidence_bbox && source_bbox == evidence_bbox
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: item vector source bbox binding conflicts with delivery"
+      end
       attempt = {
         :source_span_id => source_id,
         :requested_mode => requested,
@@ -501,7 +568,8 @@ module BlueCollarSystems
         :physical_geometry_verified => true,
         :physical_style_verified => true,
         :transform_verified => true,
-        :source_text_sha256 => result[:expected_evidence][:source_text_sha256],
+        :source_text_sha256 => source_sha,
+        :source_bbox_pdf => source_bbox,
         :source_anchor => result[:expected_evidence][:source_anchor],
         :source_rotation_radians =>
           result[:expected_evidence][:source_rotation_radians],
@@ -600,6 +668,8 @@ module BlueCollarSystems
       history << completed
       requested = RepresentationFidelity.normalize_mode(requested_mode)
       explicit_request = requested == :raster
+      source_sha = Digest::SHA256.hexdigest(item.text.to_s)
+      source_bbox = RepresentationFidelity.strict_source_bbox_pdf(item)
       attempt = {
         :source_span_id => source_id,
         :requested_mode => requested,
@@ -611,6 +681,8 @@ module BlueCollarSystems
         :entity_type_verified => true,
         :explicit_request => explicit_request,
         :degraded => !explicit_request,
+        :source_text_sha256 => source_sha,
+        :source_bbox_pdf => source_bbox,
         :artifact_evidence => artifact,
         :attempt_history => history
       }
@@ -663,7 +735,9 @@ module BlueCollarSystems
       requested_mode, controller, history, media_box, render_box,
       page_rotation, opts, import_start, y_offset, svg_document,
       text_layer = nil, peer_items = [],
-      precomputed_match = nil, precomputed_peer_boxes = nil
+      precomputed_match = nil, precomputed_peer_boxes = nil,
+      precomputed_placed = nil, precomputed_pens = nil,
+      glyph_component_cache = nil, precomputed_peer_owners = nil
     )
       source_id = RepresentationFidelity.source_span_id(item)
       context = svg_source_context(svg_document, page_num, {})
@@ -676,9 +750,15 @@ module BlueCollarSystems
           :y_offset => 0.0,
           :layer => text_layer,
           :peer_items => peer_items,
-          :source_context => context,
-          :precomputed_match => precomputed_match,
-          :precomputed_peer_boxes => precomputed_peer_boxes
+           :source_context => context,
+           :precomputed_match => precomputed_match,
+           :precomputed_peer_boxes => precomputed_peer_boxes,
+           :precomputed_placed => precomputed_placed,
+           :precomputed_pens => precomputed_pens,
+           :precomputed_peer_owners => precomputed_peer_owners,
+           :model => model,
+           :glyph_component_cache => glyph_component_cache,
+           :progress_callback => opts[:progress_callback]
         )
         unless result.is_a?(Hash) && Array(result[:failures]).empty?
           raise RepresentationFidelity::ContractError,
@@ -781,7 +861,11 @@ module BlueCollarSystems
         ]
       end
 
-      [match, peer_boxes]
+      peer_owners =
+        SvgItemRepresentationRenderer.build_placement_peer_owners(
+          pens, peer_boxes
+        )
+      [match, peer_boxes, placed, pens, peer_owners]
     end
 
     def self.item_raster_crop_geometry(item, media_box, page_rotation, dpi,
@@ -862,10 +946,12 @@ module BlueCollarSystems
         proofs_by_id[source_id] = proof
       end
 
-      precomputed_match, precomputed_peer_boxes =
+      precomputed_match, precomputed_peer_boxes,
+        precomputed_placed, precomputed_pens =
         prepare_item_page_match_and_peer_boxes(
           svg_document[:svg], media_box, text_items, opts, render_box, 0.0
         )
+      glyph_component_cache = {}
 
       proofs_by_id.each do |source_id, initial_proof|
         item = items_by_id[source_id]
@@ -895,7 +981,8 @@ module BlueCollarSystems
           Array(text_items).reject do |peer|
             RepresentationFidelity.source_span_id(peer) == source_id
           end,
-          precomputed_match, precomputed_peer_boxes
+          precomputed_match, precomputed_peer_boxes,
+          precomputed_placed, precomputed_pens, glyph_component_cache
         )
       end
       true
@@ -1008,10 +1095,12 @@ module BlueCollarSystems
       end
 
       label_peer_items = Array(all_page_text_items || text_items)
-      precomputed_match, precomputed_peer_boxes =
+      precomputed_match, precomputed_peer_boxes,
+        precomputed_placed, precomputed_pens =
         prepare_item_page_match_and_peer_boxes(
           svg_document[:svg], media_box, label_peer_items, opts, render_box, 0.0
         )
+      glyph_component_cache = {}
 
       undelivered = failed_items.reject do |item|
         delivered_ids.include?(RepresentationFidelity.source_span_id(item))
@@ -1038,7 +1127,8 @@ module BlueCollarSystems
           Array(all_page_text_items || text_items).reject do |peer|
             RepresentationFidelity.source_span_id(peer) == source_id
           end,
-          precomputed_match, precomputed_peer_boxes
+          precomputed_match, precomputed_peer_boxes,
+          precomputed_placed, precomputed_pens, glyph_component_cache
         )
       end
       true
@@ -1046,16 +1136,24 @@ module BlueCollarSystems
 
     def self.verified_raster_entity!(model, pdf_path, page_num, media_box, opts,
                                      import_start, y_offset, render_box,
-                                     page_rotation = 0)
+                                     page_rotation = 0, target_entities = nil,
+                                     z_offset = 0.0)
       parent = nil
       before = nil
       delivery = nil
-      parent = model.active_entities
+      parent = target_entities || model.active_entities
       before = RepresentationFidelity.snapshot(parent)
-      delivery = import_page_as_raster(
-        model, pdf_path, page_num, media_box, opts, import_start, y_offset,
-        render_box, page_rotation
-      )
+      delivery = if target_entities || z_offset.to_f != 0.0
+        import_page_as_raster(
+          model, pdf_path, page_num, media_box, opts, import_start, y_offset,
+          render_box, page_rotation, parent, z_offset
+        )
+      else
+        import_page_as_raster(
+          model, pdf_path, page_num, media_box, opts, import_start, y_offset,
+          render_box, page_rotation
+        )
+      end
       unless delivery.is_a?(Hash) && delivery[:entity] &&
              delivery[:artifact_evidence].is_a?(Hash)
         raise RepresentationFidelity::ContractError,
@@ -1126,6 +1224,22 @@ module BlueCollarSystems
       raise e if e.is_a?(RepresentationFidelity::ContractError)
       raise RepresentationFidelity::ContractError,
             "terminal raster verification failed: #{e.message}"
+    end
+
+    # Inline-image paint order cannot be reconstructed by putting an opaque
+    # full-page render behind native entities: that duplicates every vector and
+    # text mark and reverses arbitrary source paint order. Auto and Hybrid may
+    # therefore choose one verified terminal page image. Explicit Vector fails
+    # closed because silently changing that requested strategy is not allowed.
+    def self.inline_image_page_delivery_decision(inline_image_count, opts)
+      return :none unless inline_image_count.to_i > 0
+      return :none if opts[:extract_embedded_images] == false
+      return :none if opts[:force_raster] == true
+
+      import_mode = opts[:import_mode].to_s.downcase
+      import_mode = 'auto' if import_mode.empty?
+      return :verified_page_raster if ['auto', 'hybrid'].include?(import_mode)
+      :reject_vector
     end
 
     def self.verified_item_raster_entity!(model, target_entities, pdf_path,
@@ -2151,44 +2265,74 @@ module BlueCollarSystems
       end
       return text_items if hints.empty?
 
+      hints_by_text = {}
+      semantic_whitespace = []
+      hints.each do |hint|
+        text_key = normalize_text_key(hint.text)
+        if text_key.empty?
+          if hint.respond_to?(:source_decode_complete) &&
+             hint.source_decode_complete == true
+            semantic_whitespace << hint
+          end
+          next
+        end
+        hx, hy = text_item_anchor_for_angle(hint)
+        hints_by_text[text_key] ||= []
+        hints_by_text[text_key] << [hint, hx, hy]
+      end
+
       merged = text_items.map do |item|
         next item unless item && item.text
 
-        hint = nearest_text_angle_hint(item, hints)
+        text_key = normalize_text_key(item.text)
+        candidates = text_key.empty? ? nil : hints_by_text[text_key]
+        hint = nearest_indexed_text_angle_hint(item, candidates)
         hint ? clone_text_item_with_hints(item, hint) : item
       end
       # pdftotext bbox output has no word element for a whitespace-only source
       # span. Keep those internal semantic spans so downstream delivery either
       # creates the requested representation or records an explicit failure.
-      semantic_whitespace = hints.select do |hint|
-        normalize_text_key(hint.text).empty?
-      end.select do |hint|
-        hint.respond_to?(:source_decode_complete) &&
-          hint.source_decode_complete == true
-      end
       merged + semantic_whitespace
     rescue StandardError => e
       Logger.warn("Pipeline", "apply internal text angle hints failed: #{e.message}")
       text_items
     end
 
-    def self.nearest_text_angle_hint(item, hints)
-      text = normalize_text_key(item.text)
-      return nil if text.empty?
+    def self.nearest_indexed_text_angle_hint(item, candidates)
+      return nil if Array(candidates).empty?
       ix, iy = text_item_anchor_for_angle(item)
       fs = [item.font_size.to_f, 1.0].max
       threshold = [fs * 2.5, 24.0].max
+      threshold_squared = threshold * threshold
       best = nil
 
-      hints.each do |hint|
-        next unless normalize_text_key(hint.text) == text
-        hx, hy = text_item_anchor_for_angle(hint)
-        dist = Math.sqrt(((hx - ix) ** 2) + ((hy - iy) ** 2))
-        next if dist > threshold
-        best = [dist, hint] if best.nil? || dist < best[0]
+      Array(candidates).each do |candidate|
+        hint = candidate[0]
+        hx = candidate[1].to_f
+        hy = candidate[2].to_f
+        dx = hx - ix
+        dy = hy - iy
+        distance_squared = (dx * dx) + (dy * dy)
+        next if distance_squared > threshold_squared
+        if best.nil? || distance_squared < best[0]
+          best = [distance_squared, hint]
+        end
       end
 
       best ? best[1] : nil
+    rescue StandardError
+      nil
+    end
+
+    def self.nearest_text_angle_hint(item, hints)
+      text = normalize_text_key(item.text)
+      return nil if text.empty?
+      candidates = Array(hints).map do |hint|
+        next unless normalize_text_key(hint.text) == text
+        hx, hy = text_item_anchor_for_angle(hint)
+        [hint, hx, hy]
+      end.compact
+      nearest_indexed_text_angle_hint(item, candidates)
     rescue StandardError
       nil
     end
@@ -2780,13 +2924,25 @@ module BlueCollarSystems
       ImportHealth.record!(stats, path)
       stats[:import_contract_ready]
     rescue StandardError => e
+      diagnostic_error = "diagnostics_error:#{e.class}:#{e.message}"
+      stats[:representation_fidelity] = {
+        :ready => false,
+        :checks => { :diagnostics_generated => false },
+        :errors => [diagnostic_error]
+      }
       stats[:import_contract_ready] = {
         :ready => false,
         :checks => { :diagnostics_generated => false },
-        :errors => ["diagnostics_error:#{e.class}:#{e.message}"]
+        :errors => [diagnostic_error]
       }
       Logger.error('Pipeline', "import diagnostics failed: #{e.message}", e)
       stats[:import_contract_ready]
+    end
+
+    def self.record_pipeline_timing!(stats, key, elapsed_ms)
+      stats[:pipeline_performance] ||= {}
+      prior = stats[:pipeline_performance][key].to_f
+      stats[:pipeline_performance][key] = (prior + elapsed_ms.to_f).round(3)
     end
 
     def self.run_forced_raster_pipeline(model, path, opts)
@@ -2834,7 +2990,10 @@ module BlueCollarSystems
         :empty_page_source_inspections => [],
         :representation_ownership_group_forced_pages => [],
         :source_glyph_physical_deliveries => [],
-        :raster_delivery_records => [], :raster_fallback_used => false
+        :raster_delivery_records => [],
+        :inline_image_page_raster_fallbacks => [],
+        :inline_images_detected => 0,
+        :raster_fallback_used => false
       }
       record_source_lineage!(stats, path, path, nil, opts)
 
@@ -2945,6 +3104,7 @@ module BlueCollarSystems
       Logger.reset
       config = RecognitionConfig.default
       source_input_path = path
+      operation_open = false
 
       # ── Explicit Raster request: deliver verified images for every selected
       # page. This is a requested representation, not a fallback. ──
@@ -3010,6 +3170,7 @@ module BlueCollarSystems
       # Using model.entities misses imports done while editing groups/components.
       pre_import_entities = model.active_entities.to_a
       model.start_operation("Import PDF Vectors", true)
+      operation_open = true
 
       # Reset ID counter once at the start of a multi-page import
       IDGen.reset
@@ -3049,16 +3210,25 @@ module BlueCollarSystems
                  empty_page_source_inspections: [],
                  representation_ownership_group_forced_pages: [],
                  source_glyph_physical_deliveries: [],
-                 raster_delivery_records: [],
-                 raster_fallback_used: false }
+                raster_delivery_records: [],
+                inline_images_detected: 0,
+                inline_image_page_raster_fallbacks: [],
+                raster_fallback_used: false }
       record_source_lineage!(
         stats, source_input_path, path, salvage_note, opts
       )
 
       image_extractor = nil
-      if opts[:extract_embedded_images] != false && opts[:import_mode].to_s != 'vector'
+      inline_image_scanner = nil
+      if opts[:extract_embedded_images] != false
+        write_embedded_image_assets = opts[:import_mode].to_s != 'vector'
+        if write_embedded_image_assets
         stats[:embedded_image_dir] = embedded_image_output_dir(path, opts, stats[:import_session_id])
         image_extractor = EmbeddedImageExtractor.new(parser, stats[:embedded_image_dir])
+          inline_image_scanner = image_extractor
+        else
+          inline_image_scanner = EmbeddedImageExtractor.new(parser, nil)
+        end
       end
 
       page_fit_bounds = Geom::BoundingBox.new
@@ -3070,12 +3240,17 @@ module BlueCollarSystems
 
       pages.each_with_index do |page_num, idx|
        begin
+        page_started = Time.now
         pct = pages.length > 1 ? " (#{((idx.to_f / pages.length) * 100).round}%)" : ""
         elapsed = (Time.now - import_start).round(1)
 
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num}/#{parser.page_count} — Parsing... [#{elapsed}s]"
 
+        page_data_started = Time.now
         raw = parser.page_data(page_num)
+        record_pipeline_timing!(
+          stats, :page_data_ms, (Time.now - page_data_started) * 1000.0
+        )
         unless raw
           raise RepresentationFidelity::ContractError,
                 "Page #{page_num}: parser returned no page data; requested " \
@@ -3106,9 +3281,14 @@ module BlueCollarSystems
         end
 
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Reading paths... [#{elapsed}s]"
+        content_parse_started = Time.now
         ocg_map = parser.page_ocg_map(page_num)
         cs = ContentStreamParser.new(streams, parser, ocg_map)
         paths = cs.parse
+        record_pipeline_timing!(
+          stats, :content_stream_parse_ms,
+          (Time.now - content_parse_started) * 1000.0
+        )
         force_import_fills_for_page = false
 
         # Diagnostic only. Content-density heuristics may never substitute a
@@ -3127,6 +3307,7 @@ module BlueCollarSystems
                       "Page #{page_num}: preserving the requested vector/text representation; no heuristic raster substitution was made.")
         end
 
+        xobject_started = Time.now
         xobj = XObjectParser.new(parser)
         xobj.scan_page(page_num)
         xobj.count_references(streams)
@@ -3136,10 +3317,31 @@ module BlueCollarSystems
           Logger.info("Pipeline",
             "Page #{page_num}: merged #{xobj_paths.length} transformed XObject path group(s).")
         end
+        record_pipeline_timing!(
+          stats, :xobject_expand_ms, (Time.now - xobject_started) * 1000.0
+        )
 
         embedded_assets = []
+        inline_image_count = 0
+        embedded_scan_started = Time.now
+        if inline_image_scanner
+          scanned_assets = inline_image_scanner.extract_page(
+            page_num,
+            image_extractor ? stats[:embedded_image_dir] : nil,
+            !image_extractor.nil?
+          )
+          embedded_assets = scanned_assets if image_extractor
+          inline_image_count = inline_image_scanner.inline_image_count.to_i
+          stats[:inline_images_detected] += inline_image_count
+          if inline_image_count > 0
+            Logger.info(
+              'InlineImages',
+              "Page #{page_num}: detected #{inline_image_count} inline image " \
+              'placement(s); selecting a paint-order-safe page delivery.'
+            )
+          end
+        end
         if image_extractor
-          embedded_assets = image_extractor.extract_page(page_num)
           unless embedded_assets.empty?
             stats[:embedded_images] += embedded_assets.length
             stats[:embedded_image_paths].concat(embedded_assets.map { |asset| asset.file_path }.compact)
@@ -3149,10 +3351,104 @@ module BlueCollarSystems
             )
           end
         end
+        record_pipeline_timing!(
+          stats, :embedded_image_scan_ms,
+          (Time.now - embedded_scan_started) * 1000.0
+        )
+
+        inline_delivery = inline_image_page_delivery_decision(
+          inline_image_count, opts
+        )
+        if inline_delivery == :reject_vector
+          raise RepresentationFidelity::ContractError,
+                "Page #{page_num}: #{inline_image_count} inline image " \
+                'placement(s) cannot be composited in exact PDF paint order ' \
+                'as native Vector entities. Choose Auto, Hybrid, or Raster; ' \
+                'no duplicated or misordered page ink was created.'
+        elsif inline_delivery == :verified_page_raster
+          requested_strategy = opts[:import_mode].to_s.downcase
+          requested_strategy = 'auto' if requested_strategy.empty?
+          raster = verified_raster_entity!(
+            model, path, page_num, media_box, opts, import_start,
+            page_y_offset, svg_page_box, page_rotation
+          )
+          artifact = raster[:artifact_evidence]
+          record = {
+            :page => page_num,
+            :source_page_number => page_num,
+            :requested_strategy => requested_strategy.to_sym,
+            :effective_strategy => :raster,
+            :semantic_text_evaluated => false,
+            :resulting_entity_ids => [raster[:entity_id]],
+            :artifact_path => artifact[:png_path],
+            :artifact_sha256 => artifact[:content_sha256],
+            :source_lineage => stats[:source_lineage].dup,
+            :inline_image_instance_count => inline_image_count,
+            :source_span_ids => [],
+            :requested_mode => requested_text_mode,
+            :delivered_mode => :raster,
+            :created_entity_type => 'raster_image',
+            :delivery_scope => :page_raster,
+            :delivery_basis =>
+              :inline_image_paint_order_requires_terminal_page_raster,
+            :cleanup_outcome => :not_required,
+            :explicit_request => false,
+            :degraded => true,
+            :real_raster_verified => true,
+            :visual_fidelity_verified => true,
+            :artifact_evidence => artifact
+          }
+          stats[:inline_image_page_raster_fallbacks] << record.dup
+          stats[:page_representation_fallbacks] << record.merge(
+            :scope => :page,
+            :reason_code =>
+              :inline_image_paint_order_requires_terminal_page_raster,
+            :affirmative_impossibility => true
+          )
+          stats[:terminal_text_delivery_records] << record.dup
+          stats[:raster_delivery_records] << record.dup
+          stats[:raster_fallback_used] = true
+          stats[:mode_used] = :raster
+          stats[:pages] += 1
+          stats[:xobjects] += xobj.form_xobjects.length
+          record_text_renderer(
+            stats, page_num,
+            :renderer => :pdftocairo_real_raster,
+            :mode => :raster,
+            :requested_mode => requested_text_mode,
+            :delivered_mode => :raster,
+            :degraded => true,
+            :reason =>
+              'inline image paint order requires one terminal page image',
+            :count => 1,
+            :resulting_entity_ids => [raster[:entity_id]],
+            :real_raster_verified => true,
+            :artifact_evidence => artifact
+          )
+          add_page_fit_bounds(
+            page_fit_bounds, media_box, stack_box, opts[:scale],
+            page_y_offset, page_rotation
+          )
+          running_y_offset += page_stack_step(
+            curr_page_height_in, page_arrangement, page_gap_ratio
+          )
+          Logger.info(
+            'InlineImages',
+            "Page #{page_num}: delivered one verified page Raster for " \
+            "#{inline_image_count} inline image placement(s); native page " \
+            'entities were intentionally not built, so source ink is neither ' \
+            'duplicated nor reordered.'
+          )
+          record_pipeline_timing!(
+            stats, :page_total_ms, (Time.now - page_started) * 1000.0
+          )
+          next
+        end
 
         stream_bytes = streams.inject(0) { |sum, s| sum + s.length }
         text_items = []
         if opts[:import_text]
+          text_extract_started = Time.now
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Extracting text... [#{(Time.now - import_start).round(1)}s]"
           strict_text_fidelity = !!opts[:strict_text_fidelity]
           text3d_mode = (requested_text_mode == :text3d)
@@ -3248,6 +3544,9 @@ module BlueCollarSystems
             raw_text = raw_text.to_s.strip
             stats[:model_3d_texts] << raw_text unless raw_text.empty?
           end
+          record_pipeline_timing!(
+            stats, :text_extract_ms, (Time.now - text_extract_started) * 1000.0
+          )
         end
 
         if requested_text_mode == :text && !Array(text_items).empty?
@@ -3431,6 +3730,7 @@ module BlueCollarSystems
 
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — #{paths.length} paths, #{text_items.length} text items... [#{(Time.now - import_start).round(1)}s]"
 
+        prebuild_analysis_started = Time.now
         page_data = PrimitiveExtractor.extract(paths, text_items, media_box, page_num,
           scale: opts[:scale], bezier_segments: opts[:bezier_segments],
           page_rotation: page_rotation)
@@ -3560,7 +3860,12 @@ module BlueCollarSystems
           y_offset: page_y_offset,
           page_rotation: page_rotation,
           provenance_bucket: provenance_opts[:provenance_bucket],
-          import_session_id: provenance_opts[:import_session_id])
+          import_session_id: provenance_opts[:import_session_id],
+           progress_callback: opts[:progress_callback])
+        record_pipeline_timing!(
+          stats, :prebuild_analysis_ms,
+          (Time.now - prebuild_analysis_started) * 1000.0
+        )
         builder_started = Time.now
         result = builder.build
         builder_elapsed_ms = ((Time.now - builder_started) * 1000.0).round(3)
@@ -3702,12 +4007,17 @@ module BlueCollarSystems
           use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
             (a.to_f - b.to_f).abs > 0.01
           end
+          svg_source_started = Time.now
           svg_document = source_svg_document ||
             CairoGlyphSource.render_page_svg(
               path, page_num,
               :failure_info => svg_failure,
               :use_cropbox => use_cropbox == true
             )
+          record_pipeline_timing!(
+            stats, :svg_source_render_ms,
+            (Time.now - svg_source_started) * 1000.0
+          )
           unless svg_document && svg_document[:svg].to_s.length > 0
             reason = svg_failure[:reason].to_s
             reason = 'svg_3d_text_renderer_failed' if reason.empty?
@@ -3896,10 +4206,53 @@ module BlueCollarSystems
             raise RepresentationFidelity::ContractError,
                   "Page #{page_num}: item source inspection failed: #{reason}"
           end
-          representation_parent = builder.page_group ?
+          page_representation_parent = builder.page_group ?
             builder.page_group.entities : model.active_entities
-          Array(text_items).each do |source_item|
+          representation_container = create_text_representation_container!(
+            page_representation_parent, page_num, requested_text_mode, text_layer
+          )
+          representation_parent = representation_container.entities
+          report_pipeline_progress(
+            opts, 'svg_item_container_created',
+            "page=#{page_num}; mode=#{requested_text_mode}"
+          )
+          report_pipeline_progress(opts, 'svg_item_inventory_started')
+          inventory_started = Time.now
+          precomputed_match, precomputed_peer_boxes,
+            precomputed_placed, precomputed_pens,
+            precomputed_peer_owners =
+            prepare_item_page_match_and_peer_boxes(
+              svg_document[:svg], media_box, text_items, opts,
+              svg_page_box, 0.0
+            )
+          stats[:pipeline_performance][:item_page_inventory_ms] =
+            ((Time.now - inventory_started) * 1000.0).round(3)
+          report_pipeline_progress(
+            opts, 'svg_item_inventory_completed',
+            "inventory_ms=" \
+              "#{stats[:pipeline_performance][:item_page_inventory_ms]}; " \
+              "placements=#{Array(precomputed_placed).length}; " \
+              "items=#{Array(text_items).length}"
+          )
+
+          report_pipeline_progress(
+            opts, 'svg_item_delivery_started',
+            "items=#{Array(text_items).length}; mode=#{requested_text_mode}"
+          )
+          delivery_started = Time.now
+          glyph_component_cache = {}
+          Array(text_items).each_with_index do |source_item, item_index|
             source_id = RepresentationFidelity.source_span_id(source_item)
+            detailed_checkpoint = item_index < 10 ||
+              ((item_index + 1) % 25).zero?
+            item_delivery_started = Time.now
+            if detailed_checkpoint
+              report_pipeline_progress(
+                opts, 'svg_item_delivery_item_started',
+                "index=#{item_index + 1}; source_id=#{source_id}; " \
+                  "mode=#{requested_text_mode}"
+              )
+            end
             controller = RepresentationFidelity::FallbackController.new(
               requested_text_mode, source_id
             )
@@ -3907,9 +4260,40 @@ module BlueCollarSystems
               stats, model, representation_parent, path, page_num,
               source_item, requested_text_mode, controller, [], media_box,
               svg_page_box, page_rotation, opts, import_start, page_y_offset,
-              svg_document, text_layer, text_items
+              svg_document, text_layer, text_items,
+              precomputed_match, precomputed_peer_boxes,
+              precomputed_placed, precomputed_pens, glyph_component_cache,
+              precomputed_peer_owners
             )
+            completed_items = item_index + 1
+            if detailed_checkpoint
+              report_pipeline_progress(
+                opts, 'svg_item_delivery_item_completed',
+                "index=#{completed_items}; source_id=#{source_id}; " \
+                  "elapsed_ms=" \
+                  "#{((Time.now - item_delivery_started) * 1000.0).round(3)}; " \
+                  "mode=#{requested_text_mode}"
+              )
+            end
+            if completed_items == Array(text_items).length ||
+               (completed_items % 50).zero?
+              report_pipeline_progress(
+                opts, 'svg_item_delivery_progress',
+                "completed=#{completed_items}; " \
+                  "total=#{Array(text_items).length}; " \
+                  "mode=#{requested_text_mode}"
+              )
+            end
           end
+          stats[:pipeline_performance][:item_delivery_ms] =
+            ((Time.now - delivery_started) * 1000.0).round(3)
+          stats[:pipeline_performance][:glyph_component_definition_count] =
+            glyph_component_cache.length
+          report_pipeline_progress(
+            opts, 'svg_item_delivery_completed',
+            "delivery_ms=#{stats[:pipeline_performance][:item_delivery_ms]}; " \
+              "items=#{Array(text_items).length}; mode=#{requested_text_mode}"
+          )
           stats[:text_mode] = requested_text_mode
         end
 
@@ -3958,17 +4342,24 @@ module BlueCollarSystems
 
         # Advance the running page stack only after a successful import.
         running_y_offset += page_stack_step(curr_page_height_in, page_arrangement, page_gap_ratio)
+        record_pipeline_timing!(
+          stats, :page_total_ms, (Time.now - page_started) * 1000.0
+        )
 
       rescue RepresentationFidelity::ContractError => e
         Logger.error(
           'Pipeline',
           "Page #{page_num} ownership/identity proof failed: #{e.message}", e
         )
-        safe_abort_operation(model, 'Pipeline')
+        operation_open = abort_open_operation!(
+          model, operation_open, 'Pipeline'
+        )
         raise e
       rescue StandardError => e
         Logger.error("Pipeline", "Page #{page_num} failed: #{e.message}", e)
-        safe_abort_operation(model, 'Pipeline')
+        operation_open = abort_open_operation!(
+          model, operation_open, 'Pipeline'
+        )
         raise e
       end
       end
@@ -3977,15 +4368,25 @@ module BlueCollarSystems
         stats[:model_3d] = Model3DExtruder.extrude_imported(model, pre_import_entities, opts)
       end
 
+      stats[:pipeline_performance] ||= {}
+      post_build_started = Time.now
+      report_pipeline_progress(opts, 'post_build_commit_started')
       verified_commit_started = Time.now
       cleanup_item_raster_page_cache!(opts)
       verify_cached_source_pdf_bindings!(opts)
       model.commit_operation
+      operation_open = false
       stats[:pipeline_performance][:commit_ms] =
         ((Time.now - verified_commit_started) * 1000.0).round(3)
       stats[:pipeline_performance][:commit_includes_source_binding_verification] =
         true
+      report_pipeline_progress(
+        opts, 'post_build_commit_completed',
+        "commit_ms=#{stats[:pipeline_performance][:commit_ms]}"
+      )
 
+      report_pipeline_progress(opts, 'post_commit_cleanup_started')
+      post_commit_cleanup_started = Time.now
       layer_mgr.register_imported_names!
       stats[:layers] = layer_mgr.imported_names
       stats[:layer_warning] = layer_mgr.warning
@@ -3996,21 +4397,60 @@ module BlueCollarSystems
       rescue StandardError => e
         Logger.warn("Pipeline", "parser.release failed: #{e.message}")
       end
+      stats[:pipeline_performance][:post_commit_cleanup_ms] =
+        ((Time.now - post_commit_cleanup_started) * 1000.0).round(3)
+      report_pipeline_progress(
+        opts, 'post_commit_cleanup_completed',
+        "post_commit_cleanup_ms=" \
+          "#{stats[:pipeline_performance][:post_commit_cleanup_ms]}"
+      )
 
       elapsed = (Time.now - import_start).round(1)
       stats[:elapsed_seconds] = elapsed
 
       # ── Auto fit view to newly imported geometry (not model-wide extents) ──
+      report_pipeline_progress(opts, 'entity_diff_started')
+      entity_diff_started = Time.now
       imported_entities = []
       begin
         imported_entities = model.active_entities.to_a - pre_import_entities
       rescue StandardError
         imported_entities = []
       end
+      stats[:pipeline_performance][:entity_diff_ms] =
+        ((Time.now - entity_diff_started) * 1000.0).round(3)
+      report_pipeline_progress(
+        opts, 'entity_diff_completed',
+        "entity_diff_ms=#{stats[:pipeline_performance][:entity_diff_ms]}; " \
+          "entities=#{imported_entities.length}"
+      )
+
+      report_pipeline_progress(opts, 'view_fit_started')
+      view_fit_started = Time.now
       apply_top_view_fit(model, page_fit_bounds, imported_entities)
+      stats[:pipeline_performance][:view_fit_ms] =
+        ((Time.now - view_fit_started) * 1000.0).round(3)
+      report_pipeline_progress(
+        opts, 'view_fit_completed',
+        "view_fit_ms=#{stats[:pipeline_performance][:view_fit_ms]}"
+      )
 
       stats[:log_path] = Logger.log_path
+      report_pipeline_progress(opts, 'diagnostics_started')
+      diagnostics_started = Time.now
       finalize_import_diagnostics!(source_input_path, opts, stats)
+      stats[:pipeline_performance][:diagnostics_ms] =
+        ((Time.now - diagnostics_started) * 1000.0).round(3)
+      report_pipeline_progress(
+        opts, 'diagnostics_completed',
+        "diagnostics_ms=#{stats[:pipeline_performance][:diagnostics_ms]}"
+      )
+      stats[:pipeline_performance][:post_build_ms] =
+        ((Time.now - post_build_started) * 1000.0).round(3)
+      report_pipeline_progress(
+        opts, 'post_build_completed',
+        "post_build_ms=#{stats[:pipeline_performance][:post_build_ms]}"
+      )
       Sketchup.status_text = if import_contract_ready?(stats)
         "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text " \
           "items — #{elapsed}s"
@@ -4019,6 +4459,10 @@ module BlueCollarSystems
           "#{stats[:edges]} edges, #{stats[:text]} text items"
       end
       stats
+    rescue StandardError => e
+      operation_open =
+        abort_open_operation!(model, operation_open, 'Pipeline')
+      raise e
     ensure
       cleanup_item_raster_page_cache!(opts) if
         defined?(opts) && opts.is_a?(Hash)
@@ -4839,7 +5283,8 @@ module BlueCollarSystems
 
     def self.import_page_as_raster(model, pdf_path, page_num, media_box, opts,
                                    import_start, y_offset = 0.0,
-                                   render_box = nil, page_rotation = 0)
+                                   render_box = nil, page_rotation = 0,
+                                   target_entities = nil, z_offset = 0.0)
       img = nil
       exe = safe_find_pdftocairo
       return false unless exe
@@ -4950,9 +5395,12 @@ module BlueCollarSystems
       placement = raster_placement_geometry(
         media_box, actual_box, page_rotation, scale, y_offset
       )
-      pt = Geom::Point3d.new(placement[:x], placement[:y], 0)
-      begin
-        img = model.active_entities.add_image(
+       pt = Geom::Point3d.new(
+         placement[:x], placement[:y], z_offset.to_f
+       )
+       begin
+         entities = target_entities || model.active_entities
+         img = entities.add_image(
           actual_png, pt, placement[:width], placement[:height]
         )
         return false unless img

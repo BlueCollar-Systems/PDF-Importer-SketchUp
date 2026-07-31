@@ -23,6 +23,14 @@ module Geom
       Math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
     end
   end unless const_defined?(:Point3d)
+
+  class Transformation
+    attr_reader :matrix
+
+    def initialize(values)
+      @matrix = Array(values).map(&:to_f)
+    end
+  end unless const_defined?(:Transformation)
 end
 
 require 'bc_pdf_vector_importer/text_parser'
@@ -41,8 +49,39 @@ class ItemVectorBounds
   end
 end
 
+class SvgItemRepresentationPointNormalizationTest < Minitest::Test
+  Renderer =
+    BlueCollarSystems::PDFVectorImporter::SvgItemRepresentationRenderer
+
+  def test_exact_collinear_interior_vertex_is_removed_before_host_edge_creation
+    points = [
+      Geom::Point3d.new(0, 0, 0),
+      Geom::Point3d.new(1, 0, 0),
+      Geom::Point3d.new(2, 0, 0),
+      Geom::Point3d.new(2, 1, 0)
+    ]
+
+    normalized = Renderer.normalized_points(points)
+
+    assert_equal [[0.0, 0.0], [2.0, 0.0], [2.0, 1.0]],
+                 normalized.map { |point| [point.x, point.y] }
+  end
+
+  def test_near_collinear_curve_vertex_is_preserved
+    points = [
+      Geom::Point3d.new(0, 0, 0),
+      Geom::Point3d.new(1, 0.00001, 0),
+      Geom::Point3d.new(2, 0, 0)
+    ]
+
+    normalized = Renderer.normalized_points(points)
+
+    assert_equal 3, normalized.length
+  end
+end
+
 class ItemVectorEdge
-  attr_reader :persistent_id, :attributes
+  attr_reader :persistent_id, :attributes, :points
 
   def initialize(id, first, last)
     @persistent_id = id
@@ -56,6 +95,71 @@ class ItemVectorEdge
 
   def set_attribute(dictionary, key, value)
     @attributes[[dictionary, key]] = value
+  end
+end
+
+class ItemVectorDefinition
+  attr_reader :name, :entities
+
+  def initialize(name, counter)
+    @name = name
+    @entities = ItemVectorEntities.new(self, {}, counter)
+  end
+end
+
+class ItemVectorDefinitions
+  attr_reader :items
+
+  def initialize(counter)
+    @counter = counter
+    @items = []
+  end
+
+  def add(name)
+    definition = ItemVectorDefinition.new(name, @counter)
+    @items << definition
+    definition
+  end
+end
+
+class ItemVectorModel
+  attr_reader :definitions
+
+  def initialize(counter = [100])
+    @definitions = ItemVectorDefinitions.new(counter)
+  end
+end
+
+class ItemVectorComponentInstance
+  attr_accessor :layer
+  attr_reader :persistent_id, :definition, :transformation, :attributes
+
+  def initialize(id, definition, transformation)
+    @persistent_id = id
+    @definition = definition
+    @transformation = transformation
+    @attributes = {}
+  end
+
+  def typename; 'ComponentInstance'; end
+  def hidden?; false; end
+
+  def set_attribute(dictionary, key, value)
+    @attributes[[dictionary, key]] = value
+  end
+
+  def bounds
+    matrix = transformation.matrix
+    points = definition.entities.to_a.inject([]) do |all, edge|
+      all + Array(edge.points)
+    end.map do |point|
+      Geom::Point3d.new(
+        (point.x * matrix[0]) + (point.y * matrix[4]) + matrix[12],
+        (point.x * matrix[1]) + (point.y * matrix[5]) + matrix[13],
+        (point.z * matrix[10]) + matrix[14]
+      )
+    end
+    ItemVectorBounds.new(points)
   end
 end
 
@@ -111,6 +215,14 @@ class ItemVectorEntities
       end
     end
     created
+  end
+
+  def add_instance(definition, transformation)
+    instance = ItemVectorComponentInstance.new(
+      next_id, definition, transformation
+    )
+    @items << instance
+    instance
   end
 
   def erase_entities(*entities)
@@ -388,6 +500,125 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     end
 
     assert_match(/final bounds differ from source outlines/i, error.message)
+  end
+
+  def test_precomputed_page_inventory_avoids_reparsing_svg_per_item
+    svg = square_svg
+    source = item
+    opts = {
+      :scale => 1.0,
+      :svg_page_box => MEDIA_BOX,
+      :source_context => source_context
+    }
+    placed = IMP::CairoGlyphSource.model_space_loops(svg, MEDIA_BOX, opts)
+    pens = Array(placed).map do |entry|
+      {
+        :x => Array(entry[:pen_pdf])[0],
+        :y => Array(entry[:pen_pdf])[1],
+        :placement_index => entry[:placement_index]
+      }
+    end
+    match = IMP::CairoGlyphSource.match_spans(pens, [source], MEDIA_BOX)
+    entities = ItemVectorEntities.new
+
+    result = IMP::CairoGlyphSource.stub(
+      :model_space_loops,
+      lambda { |_svg, _media_box, _opts| raise 'full SVG reparsed' }
+    ) do
+      RENDERER.render_svg(
+        entities, svg, MEDIA_BOX, source, :glyphs,
+        opts.merge(
+          :precomputed_placed => placed,
+          :precomputed_pens => pens,
+          :precomputed_match => match
+        )
+      )
+    end
+
+    assert_equal true, result[:ok]
+    assert_equal [0], result[:placement_indices]
+  end
+
+  def test_page_peer_owner_index_preserves_exact_overlap_checks
+    pens = [
+      { :x => 10.0, :y => 20.0, :placement_index => 0 },
+      { :x => 70.0, :y => 20.0, :placement_index => 1 }
+    ]
+    peer_boxes = {
+      'text_span:1:0' => [9.0, 19.0, 22.0, 32.0],
+      'text_span:1:1' => [9.5, 19.5, 11.0, 21.0],
+      'text_span:1:2' => [69.0, 19.0, 82.0, 32.0]
+    }
+
+    owners = RENDERER.build_placement_peer_owners(pens, peer_boxes)
+
+    assert_equal ['text_span:1:0', 'text_span:1:1'], owners[0].sort
+    assert_equal ['text_span:1:2'], owners[1]
+  end
+
+  def test_precomputed_peer_owners_reject_overlap_without_rescanning_peers
+    source = item('text_span:1:0')
+    placed = IMP::CairoGlyphSource.model_space_loops(
+      square_svg, MEDIA_BOX, :scale => 1.0, :svg_page_box => MEDIA_BOX
+    )
+    pens = Array(placed).map do |entry|
+      {
+        :x => Array(entry[:pen_pdf])[0],
+        :y => Array(entry[:pen_pdf])[1],
+        :placement_index => entry[:placement_index]
+      }
+    end
+    match = IMP::CairoGlyphSource.match_spans(pens, [source], MEDIA_BOX)
+    entities = ItemVectorEntities.new
+
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, source, :glyphs,
+      :source_context => source_context,
+      :precomputed_placed => placed,
+      :precomputed_pens => pens,
+      :precomputed_match => match,
+      :precomputed_peer_owners => {
+        0 => ['text_span:1:0', 'text_span:1:1']
+      }
+    )
+
+    refute result[:ok]
+    assert_equal [0], result[:transition_proof][:evidence][
+      :peer_ambiguous_placement_indices
+    ]
+    assert_empty entities.to_a
+  end
+
+  def test_glyph_component_cache_reuses_one_exact_definition
+    entities = ItemVectorEntities.new
+    model = ItemVectorModel.new
+    cache = {}
+    opts = {
+      :scale => 1.0,
+      :svg_page_box => MEDIA_BOX,
+      :source_context => source_context,
+      :model => model,
+      :glyph_component_cache => cache
+    }
+
+    first = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, item, :glyphs, opts
+    )
+    second = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, item, :glyphs, opts
+    )
+
+    assert_equal true, first[:ok]
+    assert_equal true, second[:ok]
+    assert_equal 1, model.definitions.items.length
+    assert_equal 1, cache.length
+    [first, second].each do |result|
+      glyph = result[:group].entities.to_a.first
+      assert_equal 'ComponentInstance', glyph.typename
+      assert_equal 'glyphs', glyph.attributes[
+        ['BC_PDF_Importer', 'representation']
+      ]
+    end
   end
 
   def test_incomplete_page_inventory_is_a_hard_stop_not_a_fallback_proof

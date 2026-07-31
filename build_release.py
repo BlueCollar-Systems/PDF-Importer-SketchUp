@@ -45,8 +45,26 @@ EXCLUDE_DIRS  = {".git", ".github", "test", "__pycache__", ".ruff_cache"}
 EXCLUDE_FILES = {"build_release.py", ".gitignore", ".gitattributes"}
 EXCLUDE_SUFFIXES = {".bak", ".swp", ".pyo", ".pyc"}
 
+# Private validation inputs and their generated CAD/model evidence must never
+# enter a release payload. This is deliberately fail-closed: an unexpected
+# candidate aborts the build instead of being silently omitted.
+PRIVATE_ARTIFACT_SUFFIXES = {
+    ".pdf", ".dxf", ".dwg", ".skp", ".fcstd", ".fcstd1",
+    ".blend", ".blend1",
+}
+PRIVATE_ARCHIVE_SUFFIXES = {
+    ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".rbz",
+}
+PRIVATE_NAME_FRAGMENTS = {
+    "tx_alvord", "scombined", "attachment-c-drawings",
+    "awsweldsymbolchart", "welding-symbol-chart", "cmj report",
+    "alvord", "plant_list", "zoning-map", " - rev 0",
+    "pdf with embedded images", "pdf_vector_importer_master_bundle",
+}
+
 SMOKE_SCRIPT = REPO_ROOT / "tools" / "smoke_poppler_helpers.py"
 REQUIRED_HELPERS = ("pdftocairo.exe", "pdftotext.exe", "pdffonts.exe")
+REQUIRED_FIRST_PARTY_HELPERS = ("native/png_rgba_decoder.exe",)
 REQUIRED_DATA = (
     "share/poppler/cidToUnicode/Adobe-GB1",
     "share/poppler/cidToUnicode/Adobe-CNS1",
@@ -83,6 +101,42 @@ def _read_version() -> str:
         if m:
             return m.group(1).strip()
     return "0.0.0"
+
+
+def _require_no_private_artifacts() -> None:
+    violations: list[str] = []
+    for path in sorted(SUPPORT_DIR.rglob("*")):
+        rel = path.relative_to(SUPPORT_DIR)
+        normalized = rel.as_posix().casefold()
+        parts = [part.casefold() for part in rel.parts]
+        if any(
+            part == "imported evidence"
+            or part.startswith("pdftest")
+            or "test-corpus" in part
+            or part.endswith("_assets")
+            for part in parts
+        ):
+            violations.append(rel.as_posix())
+            continue
+        if not path.is_file():
+            continue
+        suffix = path.suffix.casefold()
+        if (
+            suffix in PRIVATE_ARTIFACT_SUFFIXES
+            or suffix in PRIVATE_ARCHIVE_SUFFIXES
+            or "import_report" in path.name.casefold()
+            or any(fragment in normalized for fragment in PRIVATE_NAME_FRAGMENTS)
+        ):
+            violations.append(rel.as_posix())
+    if violations:
+        preview = ", ".join(violations[:10])
+        remainder = len(violations) - 10
+        if remainder > 0:
+            preview += f", ... (+{remainder} more)"
+        raise RuntimeError(
+            "Release blocked: private corpus artifact or generated counterpart "
+            f"found under the shippable extension tree: {preview}"
+        )
 
 
 def _run_poppler_smoke(*, required: bool = False) -> None:
@@ -123,6 +177,10 @@ def _require_bundled_runtime() -> None:
         path = SUPPORT_DIR / "Library" / "bin" / name
         if not path.is_file():
             raise RuntimeError(f"Missing bundled Poppler helper: {path}")
+    for rel in REQUIRED_FIRST_PARTY_HELPERS:
+        path = SUPPORT_DIR / Path(*rel.split("/"))
+        if not path.is_file():
+            raise RuntimeError(f"Missing bundled first-party helper: {path}")
     for rel in REQUIRED_DATA:
         path = SUPPORT_DIR / Path(*rel.split("/"))
         if not path.is_file():
@@ -140,6 +198,7 @@ def build(
     rbz_path = out_dir / rbz_name
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    _require_no_private_artifacts()
     subprocess.run(
         [
             sys.executable,

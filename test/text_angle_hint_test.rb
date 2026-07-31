@@ -133,6 +133,75 @@ overlap_merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_
 assert_true(overlap_merged.length == 2 && overlap_merged[1].text == ' ',
             'a completely decoded whitespace operand must survive even when its anchor overlaps visible ink')
 
+# Dense shop drawings repeat short strings such as dimensions and bolt counts.
+# Matching must stay indexed by normalized text instead of normalizing and
+# scanning every internal hint for every external item.
+mod = BlueCollarSystems::PDFVectorImporter
+singleton = class << mod; self; end
+singleton.send(
+  :alias_method,
+  :__text_angle_hint_test_original_normalize_text_key,
+  :normalize_text_key
+)
+normalize_calls = 0
+singleton.send(:define_method, :normalize_text_key) do |value|
+  normalize_calls += 1
+  __text_angle_hint_test_original_normalize_text_key(value)
+end
+begin
+  dense_external = []
+  dense_internal = []
+  120.times do |index|
+    x = index.to_f * 10.0
+    dense_external << ti.new(
+      'BOLT', x, 100.0, 6.0, 0.0, 'pdftotext', nil,
+      x, 96.0, x + 8.0, 104.0, nil
+    )
+    dense_internal << ti.new(
+      'BOLT', x + 1.0, 100.0, 6.0, index.even? ? 0.0 : 90.0,
+      'F1', 6.0, nil, nil, nil, nil, nil
+    )
+  end
+  dense_merged = mod.apply_internal_text_angle_hints(
+    dense_external, dense_internal
+  )
+  assert_true(
+    dense_merged.length == dense_external.length,
+    'indexed angle-hint matching must preserve the dense source inventory'
+  )
+  assert_near(
+    dense_merged[119].x, dense_internal[119].x, 0.01,
+    'indexed angle-hint matching must still select the nearest repeated string'
+  )
+  assert_true(
+    normalize_calls < 1000,
+    "dense angle-hint matching normalized text #{normalize_calls} times; " \
+      'expected a bounded indexed pass'
+  )
+ensure
+  singleton.send(
+    :alias_method,
+    :normalize_text_key,
+    :__text_angle_hint_test_original_normalize_text_key
+  )
+  singleton.send(
+    :remove_method,
+    :__text_angle_hint_test_original_normalize_text_key
+  )
+end
+
+timing_stats = {}
+BlueCollarSystems::PDFVectorImporter.record_pipeline_timing!(
+  timing_stats, :page_parse_ms, 12.5
+)
+BlueCollarSystems::PDFVectorImporter.record_pipeline_timing!(
+  timing_stats, :page_parse_ms, 7.5
+)
+assert_near(
+  timing_stats[:pipeline_performance][:page_parse_ms], 20.0, 0.001,
+  'pipeline phase timings must accumulate across pages'
+)
+
 puts
 if $failures.empty?
   puts "PASS: #{$pass_count} assertions"

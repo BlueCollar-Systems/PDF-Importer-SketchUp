@@ -50,7 +50,10 @@ module BlueCollarSystems
         cached = @records[key]
         if cached
           @metrics[:cache_hits] += 1
-          return cached.merge(:origin => prepared[:origin])
+          return cached.merge(
+            :origin => prepared[:origin],
+            :instance_transformation => prepared[:instance_transformation]
+          )
         end
 
         @metrics[:cache_misses] += 1
@@ -77,7 +80,10 @@ module BlueCollarSystems
           @records[key] = record
           @metrics[:definition_builds] += 1
           @metrics[:unique_cache_keys] = @records.length
-          record.merge(:origin => prepared[:origin])
+          record.merge(
+            :origin => prepared[:origin],
+            :instance_transformation => prepared[:instance_transformation]
+          )
         rescue StandardError
           @records.delete(key)
           if definition
@@ -97,10 +103,19 @@ module BlueCollarSystems
         end
         definition = record.is_a?(Hash) ? record[:definition] : nil
         origin = record.is_a?(Hash) ? record[:origin] : nil
-        unless definition && origin.is_a?(Array) && origin.length >= 3
+        instance_transformation =
+          record.is_a?(Hash) ? record[:instance_transformation] : nil
+        unless definition &&
+               ((origin.is_a?(Array) && origin.length >= 3) ||
+                (instance_transformation.is_a?(Array) &&
+                 instance_transformation.length == 16))
           raise 'exact glyph cache record is incomplete'
         end
-        transform = Geom::Transformation.translation(origin)
+        transform = if instance_transformation.is_a?(Array)
+                      Geom::Transformation.new(instance_transformation)
+                    else
+                      Geom::Transformation.translation(origin)
+                    end
         instance = target_entities.add_instance(definition, transform)
         raise 'host rejected exact glyph component instance' unless instance
         @metrics[:instance_placements] += 1
@@ -149,6 +164,30 @@ module BlueCollarSystems
         end
           raise 'exact glyph cache entry has invalid source loops'
         end
+        definition_source = Array(entry[:cache_definition_loops])
+        instance_transformation =
+          Array(entry[:cache_instance_transformation])
+        if !definition_source.empty? && instance_transformation.length == 16
+          definition_loops = copy_loops(definition_source)
+          transformation = instance_transformation.each_with_index.map do |value, index|
+            finite_number!(value, "glyph instance transformation #{index}")
+          end
+          verify_affine_reconstruction!(
+            source_loops, definition_loops, transformation
+          )
+          localized = entry.dup
+          localized[:loops] = definition_loops
+          localized[:cache_affine_factored] = true
+          localized.delete(:cache_definition_loops)
+          localized.delete(:cache_instance_transformation)
+          localized.delete(:cache_local_loops)
+          localized.delete(:cache_origin)
+          return {
+            :entry => localized,
+            :origin => nil,
+            :instance_transformation => transformation
+          }
+        end
         local_source = Array(entry[:cache_local_loops])
         explicit_origin = Array(entry[:cache_origin])
         if !local_source.empty? && explicit_origin.length >= 3
@@ -161,7 +200,11 @@ module BlueCollarSystems
           localized[:loops] = localized_loops
           localized.delete(:cache_local_loops)
           localized.delete(:cache_origin)
-          return { :entry => localized, :origin => origin }
+          return {
+            :entry => localized,
+            :origin => origin,
+            :instance_transformation => nil
+          }
         end
 
         min_x = source_points.map { |point| finite_number!(point.x, 'glyph X') }.min
@@ -185,7 +228,11 @@ module BlueCollarSystems
         end
         localized = entry.dup
         localized[:loops] = localized_loops
-        { :entry => localized, :origin => origin }
+        {
+          :entry => localized,
+          :origin => origin,
+          :instance_transformation => nil
+        }
       end
 
       def copy_loops(loops)
@@ -238,13 +285,59 @@ module BlueCollarSystems
         true
       end
 
+      def verify_affine_reconstruction!(world_loops, definition_loops,
+                                        transformation)
+        unless world_loops.length == definition_loops.length
+          raise 'exact glyph cache definition/world loop inventories differ'
+        end
+        world_loops.each_with_index do |world_loop, loop_index|
+          definition_loop = definition_loops[loop_index]
+          unless Array(world_loop).length == Array(definition_loop).length
+            raise 'exact glyph cache definition/world vertex inventories differ'
+          end
+          Array(world_loop).each_with_index do |world_point, point_index|
+            definition_point = definition_loop[point_index]
+            x = definition_point.x.to_f
+            y = definition_point.y.to_f
+            z = definition_point.respond_to?(:z) ?
+              definition_point.z.to_f : 0.0
+            expected = [
+              (x * transformation[0]) + (y * transformation[4]) +
+                (z * transformation[8]) + transformation[12],
+              (x * transformation[1]) + (y * transformation[5]) +
+                (z * transformation[9]) + transformation[13],
+              (x * transformation[2]) + (y * transformation[6]) +
+                (z * transformation[10]) + transformation[14]
+            ]
+            actual = [
+              finite_number!(world_point.x, 'world glyph X'),
+              finite_number!(world_point.y, 'world glyph Y'),
+              finite_number!(
+                world_point.respond_to?(:z) ? world_point.z : 0.0,
+                'world glyph Z'
+              )
+            ]
+            next if actual.each_with_index.all? do |value, index|
+              (value - expected[index]).abs <= 1.0e-12
+            end
+            raise "exact glyph cache affine reconstruction differs at " \
+              "loop #{loop_index} vertex #{point_index}"
+          end
+        end
+        true
+      end
+
       def key_for_prepared(prepared)
         entry = prepared[:entry]
         matrix = Array(entry[:svg_matrix])
-        linear = [
-          matrix.fetch(0, 1.0), matrix.fetch(1, 0.0),
-          matrix.fetch(2, 0.0), matrix.fetch(3, 1.0)
-        ]
+        linear = if entry[:cache_affine_factored] == true
+                   ['instance_affine']
+                 else
+                   [
+                     matrix.fetch(0, 1.0), matrix.fetch(1, 0.0),
+                     matrix.fetch(2, 0.0), matrix.fetch(3, 1.0)
+                   ]
+                 end
         colors = Array(entry[:fill_rgb])
         opacity = entry[:fill_opacity]
         opacity = 1.0 if opacity.nil?

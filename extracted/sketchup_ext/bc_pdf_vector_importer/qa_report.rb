@@ -296,6 +296,12 @@ module BlueCollarSystems
           ).map { |value| value.to_i },
           import_session_id: (stats[:import_session_id] ||
                               stats['import_session_id']).to_s,
+          source_tree_sha256_before_load:
+            (stats[:source_tree_sha256_before_load] ||
+             stats['source_tree_sha256_before_load']),
+          source_tree_sha256_after_import:
+            (stats[:source_tree_sha256_after_import] ||
+             stats['source_tree_sha256_after_import']),
           source_lineage: begin
             lineage = stats[:source_lineage] || stats['source_lineage']
             lineage.is_a?(Hash) ? normalize_json(lineage) : nil
@@ -311,6 +317,10 @@ module BlueCollarSystems
           fallback_transitions: Array(stats[:fallback_transitions]).map { |entry| normalize_json(entry) },
           terminal_text_delivery_records: Array(stats[:terminal_text_delivery_records]).map { |entry| normalize_json(entry) },
           raster_delivery_records: Array(stats[:raster_delivery_records]).map { |entry| normalize_json(entry) },
+          inline_image_page_raster_fallbacks:
+            Array(stats[:inline_image_page_raster_fallbacks]).map do |entry|
+              normalize_json(entry)
+            end,
           terminal_cleanup_events: Array(stats[:terminal_cleanup_events]).map { |entry| normalize_json(entry) },
           page_representation_fallbacks: Array(stats[:page_representation_fallbacks]).map { |entry| normalize_json(entry) },
           empty_page_source_inspections: Array(stats[:empty_page_source_inspections]).map { |entry| normalize_json(entry) },
@@ -828,9 +838,93 @@ module BlueCollarSystems
             telemetry_value(entry, :no_semantic_text) == true &&
             canonical_count.is_a?(Integer) && canonical_count == 0 &&
             fidelity_zero_canonical_inspection_valid?(stats, page_number)
+        when 'inline_image_paint_order_requires_terminal_page_raster'
+          fidelity_inline_page_raster_valid?(
+            stats, entry, requested_mode, page_number
+          )
         else
           false
         end
+      end
+
+      def fidelity_inline_page_raster_valid?(stats, entry, requested_mode,
+                                              page_number)
+        return false if requested_mode == :raster
+        requested_strategy = telemetry_value(entry, :requested_strategy).
+          to_s.downcase
+        inline_count = telemetry_value(entry, :inline_image_instance_count)
+        ids = RepresentationFidelity.positive_entity_ids(
+          telemetry_value(entry, :resulting_entity_ids)
+        )
+        artifact_path = telemetry_value(entry, :artifact_path).to_s
+        artifact_sha = telemetry_value(entry, :artifact_sha256).to_s.downcase
+        artifact = telemetry_value(entry, :artifact_evidence)
+        valid = ['auto', 'hybrid'].include?(requested_strategy) &&
+          telemetry_value(entry, :effective_strategy).to_s == 'raster' &&
+          telemetry_value(entry, :semantic_text_evaluated) == false &&
+          inline_count.is_a?(Integer) && inline_count > 0 &&
+          RepresentationFidelity.normalize_mode(
+            telemetry_value(entry, :requested_mode)
+          ) == requested_mode &&
+          RepresentationFidelity.normalize_mode(
+            telemetry_value(entry, :delivered_mode)
+          ) == :raster &&
+          telemetry_value(entry, :source_page_number).to_i == page_number &&
+          telemetry_value(entry, :source_span_ids) == [] &&
+          telemetry_value(entry, :created_entity_type).to_s == 'raster_image' &&
+          telemetry_value(entry, :delivery_scope).to_s == 'page_raster' &&
+          telemetry_value(entry, :cleanup_outcome).to_s == 'not_required' &&
+          telemetry_value(entry, :explicit_request) == false &&
+          telemetry_value(entry, :degraded) == true &&
+          ids && ids.length == 1 &&
+          artifact_path.length > 0 && artifact_sha =~ /\A[0-9a-f]{64}\z/ &&
+          artifact.is_a?(Hash) &&
+          telemetry_value(artifact, :png_path).to_s == artifact_path &&
+          telemetry_value(artifact, :content_sha256).to_s.downcase == artifact_sha
+        return false unless valid
+
+        matches = Array(
+          telemetry_value(stats, :inline_image_page_raster_fallbacks)
+        ).select do |record|
+          record.is_a?(Hash) &&
+            telemetry_value(record, :page).to_i == page_number &&
+            RepresentationFidelity.positive_entity_ids(
+              telemetry_value(record, :resulting_entity_ids)
+            ) == ids &&
+            telemetry_value(record, :artifact_path).to_s == artifact_path &&
+            telemetry_value(record, :artifact_sha256).to_s.downcase == artifact_sha &&
+            telemetry_value(record, :inline_image_instance_count) ==
+              inline_count &&
+            telemetry_value(record, :semantic_text_evaluated) == false &&
+            telemetry_value(record, :requested_strategy).to_s.downcase ==
+              requested_strategy &&
+            telemetry_value(record, :delivery_basis).to_s ==
+              'inline_image_paint_order_requires_terminal_page_raster' &&
+            telemetry_value(record, :source_lineage) ==
+              telemetry_value(entry, :source_lineage)
+        end
+        matches.length == 1 &&
+          telemetry_value(entry, :source_lineage) ==
+            telemetry_value(stats, :source_lineage)
+      end
+
+      def fidelity_inline_image_ledger_valid?(stats)
+        records = Array(
+          telemetry_value(stats, :inline_image_page_raster_fallbacks)
+        )
+        return true unless telemetry_key?(stats, :inline_images_detected) ||
+                           !records.empty?
+        detected = telemetry_value(stats, :inline_images_detected)
+        return false unless detected.is_a?(Integer) && detected >= 0
+        counts = records.map do |record|
+          return false unless record.is_a?(Hash)
+          count = telemetry_value(record, :inline_image_instance_count)
+          return false unless count.is_a?(Integer) && count > 0
+          count
+        end
+        pages = records.map { |record| telemetry_value(record, :page).to_i }
+        pages.all? { |page| page > 0 } && pages.uniq.length == pages.length &&
+          counts.inject(0) { |sum, count| sum + count } == detected
       end
 
       def validate_representation_fidelity(stats, opts = {})
@@ -867,6 +961,8 @@ module BlueCollarSystems
           stats['source_glyph_physical_deliveries']
         )
         errors = []
+        errors << 'inline_image_page_raster_ledger_invalid' unless
+          fidelity_inline_image_ledger_valid?(stats)
         requested_mode = fidelity_requested_mode(stats, opts)
         expected_mode = fidelity_expected_mode(opts)
         selected_pages = fidelity_selected_pages(stats, opts, errors)
@@ -1487,12 +1583,26 @@ module BlueCollarSystems
                     evidence, :source_text_sha256
                   ).to_s.downcase
                   proof_bbox = telemetry_value(evidence, :source_bbox_pdf)
+                  attempt_bbox_values = attempt_bbox.is_a?(Array) ? attempt_bbox : []
+                  proof_bbox_values = proof_bbox.is_a?(Array) ? proof_bbox : []
+                  bbox_matches = attempt_bbox_values.length == 4 &&
+                    proof_bbox_values.length == 4 &&
+                    (0...4).all? do |index|
+                      attempt_bbox_values[index].is_a?(Numeric) &&
+                        proof_bbox_values[index].is_a?(Numeric) &&
+                        RepresentationFidelity.close?(
+                          attempt_bbox_values[index], proof_bbox_values[index],
+                          1.0e-6
+                        )
+                    end
                   unless attempt_sha =~ /\A[0-9a-f]{64}\z/ &&
                          attempt_sha == proof_sha &&
-                         RepresentationFidelity.canonical_json(attempt_bbox) ==
-                           RepresentationFidelity.canonical_json(proof_bbox)
+                         bbox_matches
                     raise RepresentationFidelity::ContractError,
-                          'flat Text proof conflicts with source attempt'
+                          'flat Text proof conflicts with source attempt: ' \
+                          "sha_match=#{attempt_sha == proof_sha}; " \
+                          "attempt_bbox=#{attempt_bbox.inspect}; " \
+                          "proof_bbox=#{proof_bbox.inspect}"
                   end
                 end
                 attempt_transition_signatures << transition_signature(proof)

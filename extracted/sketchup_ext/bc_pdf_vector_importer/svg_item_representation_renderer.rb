@@ -3,12 +3,16 @@
 
 require File.join(File.dirname(__FILE__), 'cairo_glyph_source')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
+require 'digest'
 
 module BlueCollarSystems
   module PDFVectorImporter
     module SvgItemRepresentationRenderer
       SIZE_TOLERANCE_INCHES = 0.001
+      COLLINEAR_DISTANCE_TOLERANCE_INCHES = 1.0e-9
       SUPPORTED_MODES = [:glyphs, :geometry].freeze
+      PEER_OWNER_GRID_SIZE_PT = 32.0
+      PEER_OWNER_MAX_CELLS_PER_BOX = 4096
 
       def self.render_svg(entities, svg, media_box, item, requested_mode,
                           opts = {})
@@ -29,27 +33,55 @@ module BlueCollarSystems
         end
 
         group = nil
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_snapshot_started',
+          "source_id=#{source_id}; mode=#{mode}"
+        )
         before = RepresentationFidelity.snapshot(entities)
-        placed = CairoGlyphSource.model_space_loops(svg, media_box, opts)
-        pens = Array(placed).map do |entry|
-          {
-            :x => Array(entry[:pen_pdf])[0],
-            :y => Array(entry[:pen_pdf])[1],
-            :placement_index => entry[:placement_index]
-          }
-        end
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_snapshot_completed',
+          "source_id=#{source_id}; mode=#{mode}"
+        )
+        placed = if opts.key?(:precomputed_placed) &&
+                    opts[:precomputed_placed].is_a?(Array)
+                   opts[:precomputed_placed]
+                 else
+                   CairoGlyphSource.model_space_loops(svg, media_box, opts)
+                 end
+        pens = if opts.key?(:precomputed_pens) &&
+                  opts[:precomputed_pens].is_a?(Array)
+                 opts[:precomputed_pens]
+               else
+                 Array(placed).map do |entry|
+                   {
+                     :x => Array(entry[:pen_pdf])[0],
+                     :y => Array(entry[:pen_pdf])[1],
+                     :placement_index => entry[:placement_index]
+                   }
+                 end
+               end
         match = if opts[:precomputed_match].is_a?(Hash)
                   opts[:precomputed_match]
                 else
                   CairoGlyphSource.match_spans(pens, [item], media_box)
-                end
+                 end
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_selection_started',
+          "source_id=#{source_id}; mode=#{mode}"
+        )
         selection = select_item_placements(
           source_id, mode, match, pens, media_box, opts[:peer_items],
-          opts[:precomputed_peer_boxes]
+          opts[:precomputed_peer_boxes], opts[:precomputed_peer_owners]
         )
         indices = selection[:indices]
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_selection_join_started',
+          "source_id=#{source_id}; placements=#{Array(indices).length}; mode=#{mode}"
+        )
+        index_lookup = {}
+        Array(indices).each { |index| index_lookup[index.to_i] = true }
         entries = Array(placed).select do |entry|
-          indices.include?(entry[:placement_index].to_i)
+          index_lookup[entry[:placement_index].to_i] == true
         end
 
         if indices.empty?
@@ -61,13 +93,33 @@ module BlueCollarSystems
                 "#{source_id}: item vector placement identities could not be " \
                 'joined back to every exact source outline'
         end
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_validation_started',
+          "source_id=#{source_id}; placements=#{entries.length}; mode=#{mode}"
+        )
         validate_entries!(source_id, entries)
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_selection_completed',
+          "source_id=#{source_id}; placements=#{entries.length}; mode=#{mode}"
+        )
 
         group = create_owned_group!(entities, source_id, mode, opts[:layer],
                                     indices)
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_build_started',
+          "source_id=#{source_id}; placements=#{entries.length}; mode=#{mode}"
+        )
         build = mode == :glyphs ?
-          build_glyph_groups!(group, entries, source_id, opts[:layer]) :
+          build_glyph_groups!(
+            group, entries, source_id, opts[:layer],
+            opts[:model], opts[:glyph_component_cache],
+            opts[:progress_callback]
+          ) :
           build_flat_geometry!(group, entries, source_id, opts[:layer])
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_build_completed',
+          "source_id=#{source_id}; edges=#{build[:edge_count]}; mode=#{mode}"
+        )
         after = RepresentationFidelity.snapshot(entities)
         created = RepresentationFidelity.created_between(before, after)
         created_ids = RepresentationFidelity.stable_ids(created)
@@ -79,8 +131,16 @@ module BlueCollarSystems
 
         expected = CairoGlyphSource.loops_extent(entries)
         verify_bounds!(group, expected, source_id)
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_bounds_verified',
+          "source_id=#{source_id}; mode=#{mode}"
+        )
         verify_structure!(group, mode, entries.length, build[:edge_count],
                           source_id)
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_structure_verified',
+          "source_id=#{source_id}; mode=#{mode}"
+        )
         verify_visible_tree!(group, source_id)
         physical = physical_entities(group, mode)
         physical_ids = RepresentationFidelity.stable_ids(physical)
@@ -88,11 +148,20 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError,
                 "#{source_id}: item vector representation has no physical entities"
         end
+        emit_progress_callback(
+          opts[:progress_callback], 'svg_item_physical_verified',
+          "source_id=#{source_id}; physical=#{physical_ids.length}; mode=#{mode}"
+        )
 
         {
           :ok => true,
-          :renderer => mode == :glyphs ? :svg_item_glyph_groups :
-            :svg_item_flat_geometry,
+          :renderer => if mode == :glyphs
+                         build[:glyph_component_instances].to_i > 0 ?
+                           :svg_item_glyph_components :
+                           :svg_item_glyph_groups
+                       else
+                         :svg_item_flat_geometry
+                       end,
           :mode => mode,
           :source_span_id => source_id,
           :source_item => item,
@@ -107,6 +176,12 @@ module BlueCollarSystems
           :source_extent => expected.map { |value| value.to_f },
           :edge_count => build[:edge_count],
           :glyph_group_count => build[:glyph_group_count],
+          :glyph_component_definition_builds =>
+            build[:glyph_component_definition_builds].to_i,
+          :glyph_component_cache_hits =>
+            build[:glyph_component_cache_hits].to_i,
+          :glyph_component_instances =>
+            build[:glyph_component_instances].to_i,
           :identity_verified => true,
           :placement_verified => true,
           :rotation_verified => entries.all? do |entry|
@@ -215,9 +290,13 @@ module BlueCollarSystems
           :expected_bounds => expected_box,
           :expected_transformation => transform
         )
-        renderer = result[:mode] == :glyphs ?
-          'svg_item_glyph_group_renderer' :
-          'svg_item_flat_geometry_renderer'
+        renderer = if result[:mode] == :glyphs
+                     result[:renderer].to_s == 'svg_item_glyph_components' ?
+                       'svg_item_glyph_component_renderer' :
+                       'svg_item_glyph_group_renderer'
+                   else
+                     'svg_item_flat_geometry_renderer'
+                   end
         RepresentationFidelity.attach_source_evidence!(
           [group], expected, renderer
         )
@@ -234,10 +313,10 @@ module BlueCollarSystems
                                  reason = nil)
         binding = RepresentationFidelity.proof_binding(source_id)
         to_mode = mode == :glyphs ? :geometry : :raster
-        renderer = mode == :glyphs ? 'svg_item_glyph_group_renderer' :
+        renderer = mode == :glyphs ? 'svg_item_glyph_component_renderer' :
           'svg_item_flat_geometry_renderer'
         contract = mode == :glyphs ?
-          'one owned physical glyph group per exact source placement' :
+          'one independently selectable owned physical glyph per exact source placement' :
           'one owned flat raw-edge set for the exact source item'
         if reason.nil?
           reason = Array(placed).empty? ? :source_vector_geometry_absent :
@@ -293,16 +372,69 @@ module BlueCollarSystems
       # combined source outline as raw paths when every renderer placement in
       # the source bbox belongs unambiguously to this item. Peer overlap rejects
       # the entire candidate set instead of duplicating another text artifact.
+      def self.build_placement_peer_owners(pens, peer_boxes)
+        grid_size = PEER_OWNER_GRID_SIZE_PT
+        grid = {}
+        broad_boxes = []
+
+        Array(peer_boxes).each do |peer_id, raw_box|
+          box = Array(raw_box)
+          next unless box.length >= 4
+          x0, x1 = [box[0].to_f, box[2].to_f].minmax
+          y0, y1 = [box[1].to_f, box[3].to_f].minmax
+          normalized = [x0, y0, x1, y1]
+          min_cell_x = (x0 / grid_size).floor
+          max_cell_x = (x1 / grid_size).floor
+          min_cell_y = (y0 / grid_size).floor
+          max_cell_y = (y1 / grid_size).floor
+          cell_count = (max_cell_x - min_cell_x + 1) *
+                       (max_cell_y - min_cell_y + 1)
+          record = [peer_id.to_s, normalized]
+          if cell_count > PEER_OWNER_MAX_CELLS_PER_BOX
+            broad_boxes << record
+            next
+          end
+          (min_cell_x..max_cell_x).each do |cell_x|
+            (min_cell_y..max_cell_y).each do |cell_y|
+              key = [cell_x, cell_y]
+              grid[key] ||= []
+              grid[key] << record
+            end
+          end
+        end
+
+        owners_by_placement = {}
+        Array(pens).each do |pen|
+          x = pen[:x].to_f
+          y = pen[:y].to_f
+          key = [(x / grid_size).floor, (y / grid_size).floor]
+          owners = Array(grid[key]) + broad_boxes
+          matching = owners.inject([]) do |values, record|
+            peer_id, box = record
+            if x >= box[0] && x <= box[2] && y >= box[1] && y <= box[3]
+              values << peer_id unless values.include?(peer_id)
+            end
+            values
+          end
+          next if matching.empty?
+          placement_index = pen[:placement_index].to_i
+          existing = Array(owners_by_placement[placement_index])
+          owners_by_placement[placement_index] = (existing + matching).uniq.sort
+        end
+        owners_by_placement
+      end
+
       def self.select_item_placements(source_id, mode, match, pens, media_box,
                                       peer_items,
-                                      precomputed_peer_boxes = nil)
+                                      precomputed_peer_boxes = nil,
+                                      precomputed_peer_owners = nil)
         exact = Array(match[:placement_matches]).select do |record|
           record[:source_span_id].to_s == source_id
         end.map { |record| record[:placement_index].to_i }.uniq.sort
         unless exact.empty?
           ambiguous = ambiguous_peer_placements(
             exact, pens, media_box, source_id, peer_items,
-            precomputed_peer_boxes
+            precomputed_peer_boxes, precomputed_peer_owners
           )
           return {
             :indices => ambiguous.empty? ? exact : [],
@@ -323,7 +455,7 @@ module BlueCollarSystems
         end.uniq.sort
         ambiguous = ambiguous_peer_placements(
           candidates, pens, media_box, source_id, peer_items,
-          precomputed_peer_boxes
+          precomputed_peer_boxes, precomputed_peer_owners
         )
         {
           :indices => ambiguous.empty? ? candidates : [],
@@ -335,9 +467,19 @@ module BlueCollarSystems
 
       def self.ambiguous_peer_placements(candidate_indices, pens, media_box,
                                          source_id, peer_items,
-                                         precomputed_peer_boxes = nil)
+                                         precomputed_peer_boxes = nil,
+                                         precomputed_peer_owners = nil)
         candidates = Array(candidate_indices)
         return [] if candidates.empty?
+        if precomputed_peer_owners.is_a?(Hash)
+          return candidates.select do |index|
+            owners = precomputed_peer_owners[index.to_i] ||
+              precomputed_peer_owners[index.to_s]
+            Array(owners).any? do |peer_id|
+              peer_id.to_s != source_id.to_s
+            end
+          end.map { |index| index.to_i }.uniq.sort
+        end
         peer_boxes = if precomputed_peer_boxes.is_a?(Hash)
                        precomputed_peer_boxes.reject do |peer_id, _box|
                          peer_id.to_s == source_id.to_s
@@ -466,12 +608,21 @@ module BlueCollarSystems
         { :edge_count => edges.length, :glyph_group_count => 0 }
       end
 
-      def self.build_glyph_groups!(group, entries, source_id, layer)
+      def self.build_glyph_groups!(group, entries, source_id, layer,
+                                   model = nil, component_cache = nil,
+                                   progress_callback = nil)
         child = group.respond_to?(:entities) ? group.entities : nil
         unless child && child.respond_to?(:add_group)
           raise RepresentationFidelity::ContractError,
                 'owned Glyphs group cannot create physical glyph groups'
         end
+        if component_cache_available?(child, model, component_cache)
+          return build_glyph_components!(
+            child, entries, source_id, layer, model, component_cache,
+            progress_callback
+          )
+        end
+
         edge_count = 0
         glyph_count = 0
         Array(entries).each do |entry|
@@ -493,7 +644,159 @@ module BlueCollarSystems
           edge_count += edges.length
           glyph_count += 1
         end
-        { :edge_count => edge_count, :glyph_group_count => glyph_count }
+        {
+          :edge_count => edge_count,
+          :glyph_group_count => glyph_count,
+          :glyph_component_definition_builds => 0,
+          :glyph_component_cache_hits => 0,
+          :glyph_component_instances => 0
+        }
+      end
+
+      def self.component_cache_available?(entities, model, component_cache)
+        component_cache.is_a?(Hash) &&
+          model && model.respond_to?(:definitions) &&
+          model.definitions.respond_to?(:add) &&
+          entities.respond_to?(:add_instance) &&
+          defined?(Geom::Transformation)
+      rescue StandardError
+        false
+      end
+
+      def self.build_glyph_components!(entities, entries, source_id, layer,
+                                       model, component_cache,
+                                       progress_callback = nil)
+        edge_count = 0
+        instance_count = 0
+        definition_builds = 0
+        cache_hits = 0
+        Array(entries).each_with_index do |entry, entry_index|
+          key = glyph_definition_cache_key(entry)
+          cached = component_cache[key]
+          definition = cached.is_a?(Hash) ? cached[:definition] : nil
+          definition_edge_count = cached.is_a?(Hash) ?
+            cached[:edge_count].to_i : 0
+          emit_progress_callback(
+            progress_callback, 'svg_item_component_started',
+            "source_id=#{source_id}; placement=#{entry_index + 1}/" \
+              "#{Array(entries).length}; glyph=#{entry[:glyph_id]}; " \
+              "cache_hit=#{!definition.nil?}"
+          )
+          if definition
+            cache_hits += 1
+          else
+            definition = model.definitions.add(
+              "BC PDF Glyph #{entry[:glyph_id]} #{key[0, 12]}"
+            )
+            unless definition && definition.respond_to?(:entities)
+              raise RepresentationFidelity::ContractError,
+                    'Glyphs component definition was not created'
+            end
+            definition_edges = add_definition_edges!(
+              definition.entities, entry, layer
+            )
+            definition_edge_count = definition_edges.length
+            component_cache[key] = {
+              :definition => definition,
+              :edge_count => definition_edge_count
+            }
+            definition_builds += 1
+          end
+          edge_count += definition_edge_count
+
+          matrix = Array(entry[:cache_instance_transformation])
+          unless matrix.length == 16
+            raise RepresentationFidelity::ContractError,
+                  "#{source_id}: Glyphs component transform is unavailable"
+          end
+          instance = entities.add_instance(
+            definition, Geom::Transformation.new(matrix)
+          )
+          unless instance
+            raise RepresentationFidelity::ContractError,
+                  "#{source_id}: Glyphs component instance was not created"
+          end
+          instance.layer = layer if layer && instance.respond_to?(:layer=)
+          assign_identity!(
+            instance, source_id, :glyphs, entry[:glyph_id],
+            [entry[:placement_index]]
+          )
+          instance_count += 1
+          emit_progress_callback(
+            progress_callback, 'svg_item_component_completed',
+            "source_id=#{source_id}; placement=#{entry_index + 1}/" \
+              "#{Array(entries).length}; glyph=#{entry[:glyph_id]}"
+          )
+        end
+        {
+          :edge_count => edge_count,
+          :glyph_group_count => instance_count,
+          :glyph_component_definition_builds => definition_builds,
+          :glyph_component_cache_hits => cache_hits,
+          :glyph_component_instances => instance_count
+        }
+      end
+
+      def self.glyph_definition_cache_key(entry)
+        loops = Array(entry[:cache_definition_loops])
+        serialized = loops.map do |loop_points|
+          normalized_points(loop_points).map do |point|
+            format('%.9f,%.9f,%.9f',
+                   point.x.to_f, point.y.to_f, point.z.to_f)
+          end.join(';')
+        end.join('|')
+        unless !entry[:glyph_id].to_s.empty? && !serialized.empty?
+          raise RepresentationFidelity::ContractError,
+                'Glyphs canonical component geometry is unavailable'
+        end
+        Digest::SHA256.hexdigest(
+          "#{entry[:glyph_id]}\0#{serialized}"
+        )
+      end
+
+      def self.add_definition_edges!(entities, entry, layer)
+        unless entities && entities.respond_to?(:add_edges)
+          raise RepresentationFidelity::ContractError,
+                'Glyphs component definition cannot create source edges'
+        end
+        created = []
+        expected = 0
+        Array(entry[:cache_definition_loops]).each do |loop_points|
+          points = normalized_points(loop_points)
+          next if points.length < 2
+          expected += points.length - 1
+          edges = Array(entities.add_edges(points))
+          edges.each do |edge|
+            edge.layer = layer if layer && edge.respond_to?(:layer=)
+            assign_shared_glyph_identity!(edge, entry[:glyph_id])
+          end
+          created.concat(edges)
+        end
+        unless expected > 0 && created.length == expected
+          raise RepresentationFidelity::ContractError,
+                'Glyphs component definition edge count is incomplete'
+        end
+        created
+      end
+
+      def self.assign_shared_glyph_identity!(entity, glyph_id)
+        return true unless entity.respond_to?(:set_attribute)
+        dictionary = 'BC_PDF_Importer'
+        entity.set_attribute(dictionary, 'source_kind', 'shared_glyph_outline')
+        entity.set_attribute(dictionary, 'representation', 'glyphs')
+        entity.set_attribute(
+          dictionary, 'renderer', 'svg_item_glyph_component_renderer'
+        )
+        entity.set_attribute(dictionary, 'source_glyph_id', glyph_id.to_s)
+        true
+      end
+
+      def self.emit_progress_callback(callback, phase, detail = nil)
+        return false unless callback.respond_to?(:call)
+        callback.call(phase.to_s, detail)
+        true
+      rescue StandardError
+        false
       end
 
       def self.add_entry_edges!(entities, entry, source_id, mode, layer)
@@ -534,9 +837,71 @@ module BlueCollarSystems
             points << point
           end
         end
-        points
+        simplify_collinear_points(points)
       rescue StandardError
         []
+      end
+
+      # SketchUp 2017 merges exact collinear edge pairs during its first save.
+      # Remove only mathematically redundant intermediate vertices up front so
+      # source evidence describes the same visually exact geometry that persists
+      # after save/reopen. Near-collinear curve samples remain untouched.
+      def self.simplify_collinear_points(points)
+        values = Array(points).dup
+        return values if values.length < 3
+        closed = values.length > 3 &&
+          values[0].distance(values[-1]).to_f <= SIZE_TOLERANCE_INCHES
+        values = values[0...-1] if closed
+        minimum = closed ? 3 : 2
+        loop do
+          break if values.length <= minimum
+          removable = nil
+          candidates = closed ? (0...values.length) : (1...(values.length - 1))
+          candidates.each do |index|
+            previous = values[(index - 1) % values.length]
+            current = values[index]
+            following = values[(index + 1) % values.length]
+            if collinear_intermediate_point?(previous, current, following)
+              removable = index
+              break
+            end
+          end
+          break unless removable
+          values.delete_at(removable)
+        end
+        values << values[0] if closed && !values.empty?
+        values
+      end
+
+      def self.collinear_intermediate_point?(first, middle, last)
+        ac = [
+          last.x.to_f - first.x.to_f,
+          last.y.to_f - first.y.to_f,
+          last.respond_to?(:z) ? last.z.to_f - first.z.to_f : 0.0
+        ]
+        ab = [
+          middle.x.to_f - first.x.to_f,
+          middle.y.to_f - first.y.to_f,
+          middle.respond_to?(:z) ? middle.z.to_f - first.z.to_f : 0.0
+        ]
+        ac_squared = ac.inject(0.0) { |sum, value| sum + (value * value) }
+        return false unless ac_squared > 0.0
+        cross = [
+          (ab[1] * ac[2]) - (ab[2] * ac[1]),
+          (ab[2] * ac[0]) - (ab[0] * ac[2]),
+          (ab[0] * ac[1]) - (ab[1] * ac[0])
+        ]
+        cross_squared = cross.inject(0.0) do |sum, value|
+          sum + (value * value)
+        end
+        distance = Math.sqrt(cross_squared / ac_squared)
+        return false if distance > COLLINEAR_DISTANCE_TOLERANCE_INCHES
+        projection = ab.each_with_index.inject(0.0) do |sum, (value, index)|
+          sum + (value * ac[index])
+        end
+        projection > 0.0 && projection < ac_squared
+      rescue StandardError
+        false
       end
 
       def self.assign_identity!(entity, source_id, mode, glyph_id, indices)
@@ -547,8 +912,13 @@ module BlueCollarSystems
         entity.set_attribute(dictionary, 'representation', mode.to_s)
         entity.set_attribute(
           dictionary, 'renderer',
-          mode == :glyphs ? 'svg_item_glyph_group_renderer' :
+          if mode == :glyphs
+            entity_type(entity) == 'ComponentInstance' ?
+              'svg_item_glyph_component_renderer' :
+              'svg_item_glyph_group_renderer'
+          else
             'svg_item_flat_geometry_renderer'
+          end
         )
         entity.set_attribute(dictionary, 'source_glyph_id', glyph_id.to_s) if
           glyph_id
@@ -574,7 +944,7 @@ module BlueCollarSystems
           end
         elsif mode == :glyphs
           valid = members.length == expected_glyphs.to_i && members.all? do |glyph|
-            entity_type(glyph) == 'Group' &&
+            ['Group', 'ComponentInstance'].include?(entity_type(glyph)) &&
               !entity_members(glyph).empty? &&
               entity_members(glyph).all? do |entity|
                 entity_type(entity) == 'Edge'
@@ -582,7 +952,7 @@ module BlueCollarSystems
           end
           unless valid
             raise RepresentationFidelity::ContractError,
-                  "#{source_id}: Glyphs are not distinct physical glyph groups"
+                  "#{source_id}: Glyphs are not distinct physical glyph units"
           end
         else
           raise RepresentationFidelity::ContractError,
@@ -664,14 +1034,23 @@ module BlueCollarSystems
           entity_members(group)
         else
           glyphs = entity_members(group)
-          glyphs + glyphs.inject([]) do |all, glyph|
-            all + entity_members(glyph)
+          glyphs.inject([]) do |all, glyph|
+            if entity_type(glyph) == 'ComponentInstance'
+              all + [glyph]
+            else
+              all + [glyph] + entity_members(glyph)
+            end
           end
         end
       end
 
       def self.entity_members(entity)
         collection = entity.respond_to?(:entities) ? entity.entities : nil
+        if !collection && entity.respond_to?(:definition)
+          definition = entity.definition
+          collection = definition.entities if
+            definition && definition.respond_to?(:entities)
+        end
         return [] unless collection && collection.respond_to?(:to_a)
         Array(collection.to_a)
       rescue StandardError

@@ -423,6 +423,31 @@ class RepresentationFidelityContractTest < Minitest::Test
                  IMP.normalize_text_renderer_mode('Labels')
   end
 
+  def test_cross_product_vocabulary_is_canonical_with_explicit_sketchup_alias
+    fidelity = IMP::RepresentationFidelity
+    assert_equal 'constant',
+                 defined?(IMP::RepresentationFidelity::CANONICAL_MODES)
+    assert_respond_to fidelity, :canonical_mode
+    assert_respond_to fidelity, :normalize_sketchup_boundary_mode
+    assert_respond_to fidelity, :canonical_ladder_for
+
+    expected_modes = %w[text labels 3d_text glyphs geometry raster]
+    assert_equal expected_modes, fidelity::CANONICAL_MODES
+    refute_includes fidelity::CANONICAL_MODES, 'text3d'
+    assert_equal '3d_text', fidelity.canonical_mode('3d_text')
+    assert_nil fidelity.canonical_mode('text3d'),
+               'deprecated SketchUp spelling must not be canonical'
+    assert_equal :text3d,
+                 fidelity.normalize_sketchup_boundary_mode('text3d')
+    assert_equal :text3d,
+                 fidelity.normalize_sketchup_boundary_mode('3d_text')
+    assert_equal %w[3d_text glyphs geometry raster],
+                 fidelity.canonical_ladder_for('3d_text')
+    assert_equal [:text3d, :glyphs, :geometry, :raster],
+                 fidelity.ladder_for('text3d'),
+                 'deprecated boundary alias must not change the host ladder'
+  end
+
   def test_explicit_item_raster_is_requested_delivery_not_fallback
     source = item('RASTER', 0.0, 24.0, 10.0)
     artifact = {
@@ -470,6 +495,10 @@ class RepresentationFidelityContractTest < Minitest::Test
     renderer = stats[:text_renderers].first
     assert_equal :raster, attempt[:requested_mode]
     assert_equal :raster, attempt[:delivered_mode]
+    assert_equal Digest::SHA256.hexdigest(source.text),
+                 attempt[:source_text_sha256]
+    assert_equal IMP::RepresentationFidelity.strict_source_bbox_pdf(source),
+                 attempt[:source_bbox_pdf]
     assert_equal :raster, record[:requested_mode]
     assert_equal :raster, record[:delivered_mode]
     assert_equal false, stats[:raster_fallback_used]
@@ -571,6 +600,61 @@ class RepresentationFidelityContractTest < Minitest::Test
 
     assert_raises(IMP::RepresentationFidelity::ContractError) do
       IMP.bind_flat_text_capability_attempt!(attempt, proof)
+    end
+  end
+
+  def test_text_fallback_vector_attempt_preserves_exact_source_binding
+    source = item('VECTOR FALLBACK', -37.0, 31.0, 12.0)
+    source_id = source.source_span_id
+    source_bbox = IMP::RepresentationFidelity.strict_source_bbox_pdf(source)
+    source_sha = Digest::SHA256.hexdigest(source.text)
+    proof = IMP.prepare_flat_text_fallback_controllers!([source]).
+      fetch(source_id).fetch(:proof)
+    history = [IMP.failed_item_rung_from_transition(proof)]
+    expected = {
+      source_span_id: source_id,
+      source_text_sha256: source_sha,
+      source_bbox_pdf: source_bbox,
+      source_anchor: [1.0, 2.0, 0.0],
+      source_rotation_radians: -37.0 * Math::PI / 180.0,
+      expected_width: 31.0 / 72.0,
+      expected_height: 12.0 / 72.0,
+      expected_depth: 0.0,
+      physical_style_sha256: 'a' * 64,
+      physical_geometry_sha256: 'b' * 64,
+      expected_transformation: { kind: 'source_glyph_geometry' }
+    }
+    result = {
+      mode: :geometry, source_span_id: source_id,
+      visual_fidelity_verified: true, identity_verified: true,
+      placement_verified: true, rotation_verified: true,
+      size_verified: true, entity_type_verified: true,
+      visibility_verified: true, content_verified: true,
+      physical_geometry_verified: true, physical_style_verified: true,
+      transform_verified: true, expected_evidence: expected,
+      group_entity_id: 'persistent_id:650',
+      physical_entity_ids: ['persistent_id:651'],
+      renderer: :svg_source_geometry, edge_count: 4
+    }
+    stats = {}
+
+    IMP.record_item_vector_delivery!(
+      stats, 1, source, :text, result, history, [proof]
+    )
+
+    attempt = stats.fetch(:text_attempts).fetch(0)
+    assert_equal source_sha, attempt[:source_text_sha256]
+    assert_equal source_bbox, attempt[:source_bbox_pdf]
+    assert_equal [:text, :geometry],
+                 attempt[:attempt_history].map { |entry| entry[:mode] }
+
+    mismatched = Marshal.load(Marshal.dump(result))
+    mismatched[:expected_evidence][:source_text_sha256] = 'c' * 64
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.record_item_vector_delivery!(
+        {}, 1, source, :text, mismatched,
+        [IMP.failed_item_rung_from_transition(proof)], [proof]
+      )
     end
   end
 
@@ -1220,10 +1304,12 @@ class RepresentationFidelityContractTest < Minitest::Test
       encoding: 'UTF-8'
     )
     assert_match(
-      /build_glyph_groups!\(group, entries, source_id, opts\[:layer\]\)/,
+      /build_glyph_groups!\(\s*group, entries, source_id, opts\[:layer\],/m,
       renderer,
-      'Glyphs must use independently owned source-bound physical groups'
+      'Glyphs must retain an independently owned source-bound parent'
     )
+    assert_match(/build_glyph_components!/, renderer,
+                 'repeated exact glyphs must use cached physical components')
     assert_match(/SvgItemRepresentationRenderer\.render_svg/, main)
   end
 
@@ -1473,6 +1559,35 @@ class RepresentationFidelityContractTest < Minitest::Test
                  main)
   end
 
+  def test_open_import_operation_is_aborted_once_on_post_build_failure
+    model = Class.new do
+      attr_reader :abort_count
+
+      def initialize
+        @abort_count = 0
+      end
+
+      def abort_operation
+        @abort_count += 1
+      end
+    end.new
+
+    assert_equal false, IMP.abort_open_operation!(model, true, 'Pipeline')
+    assert_equal 1, model.abort_count
+    assert_equal false, IMP.abort_open_operation!(model, false, 'Pipeline')
+    assert_equal 1, model.abort_count
+
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+      :encoding => 'UTF-8'
+    )
+    assert_match(
+      /rescue\s+StandardError\s*=>\s*e\s+operation_open\s*=\s*
+       abort_open_operation!\(model,\s*operation_open,\s*'Pipeline'\)\s+raise\s+e/x,
+      main
+    )
+  end
+
   def test_detected_svg_text_without_source_spans_stops_explicitly
     assert IMP.enforce_detected_svg_text_delivery!(
       1, :glyphs, { detected_svg_placements: 0 }, []
@@ -1583,6 +1698,8 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_match(/artifact_evidence/, body)
     assert_match(/delivery_basis\s*=>\s*:explicit_full_page_raster/, body)
     assert_match(/semantic_text_evaluated\s*=>\s*false/, body)
+    assert_match(/inline_image_page_raster_fallbacks\s*=>\s*\[\]/, body)
+    assert_match(/inline_images_detected\s*=>\s*0/, body)
     refute_match(/no_semantic_text\s*=>\s*true/, body)
     refute_match(/page_num\s*=\s*1|pages\.first/, body)
   end
@@ -1694,26 +1811,41 @@ class RepresentationFidelityContractTest < Minitest::Test
   end
 
   def write_png_header(path, width, height, signature = true)
-    bytes = signature ? "\x89PNG\r\n\x1a\n".b : 'NOTAPNG!'.b
+    bytes = signature ? binary_string("\x89PNG\r\n\x1a\n") : binary_string('NOTAPNG!')
     bytes << [13].pack('N') << 'IHDR' << [width, height].pack('N2')
-    bytes << "\x08\x06\x00\x00\x00".b
+    bytes << binary_string("\x08\x06\x00\x00\x00")
     File.open(path, 'wb') { |file| file.write(bytes) }
   end
 
   def png_chunk(type, data)
-    payload = type.to_s.b + data.to_s.b
+    payload = binary_string(type.to_s) + binary_string(data.to_s)
     [data.bytesize].pack('N') + payload + [Zlib.crc32(payload)].pack('N')
   end
 
   def write_rgba_png(path, width, height, pixels)
     rows = (0...height).map do |y|
-      "\x00".b + pixels.slice(y * width, width).flatten.pack('C*')
+      binary_string("\x00") + pixels.slice(y * width, width).flatten.pack('C*')
     end.join
-    bytes = "\x89PNG\r\n\x1a\n".b
+    bytes = binary_string("\x89PNG\r\n\x1a\n")
     bytes << png_chunk('IHDR', [width, height, 8, 6, 0, 0, 0].pack('N2C5'))
     bytes << png_chunk('IDAT', Zlib::Deflate.deflate(rows))
-    bytes << png_chunk('IEND', ''.b)
+    bytes << png_chunk('IEND', binary_string(''))
     File.open(path, 'wb') { |file| file.write(bytes) }
+  end
+
+  def write_rgb_png(path, width, height, pixels)
+    rows = (0...height).map do |y|
+      binary_string("\x00") + pixels.slice(y * width, width).flatten.pack('C*')
+    end.join
+    bytes = binary_string("\x89PNG\r\n\x1a\n")
+    bytes << png_chunk('IHDR', [width, height, 8, 2, 0, 0, 0].pack('N2C5'))
+    bytes << png_chunk('IDAT', Zlib::Deflate.deflate(rows))
+    bytes << png_chunk('IEND', binary_string(''))
+    File.open(path, 'wb') { |file| file.write(bytes) }
+  end
+
+  def binary_string(value)
+    value.dup.force_encoding(Encoding::BINARY)
   end
 
   def test_rgba_page_crop_preserves_visible_pixels_and_transparent_background
@@ -1740,6 +1872,61 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal true, cropped[:transparent_pixel_present]
   ensure
     [page, crop, raw, crop_raw].each do |path|
+      File.delete(path) if path && File.exist?(path)
+    end
+  end
+
+  def test_native_rgba_decoder_is_byte_and_visual_hash_equivalent_to_ruby
+    skip 'bundled native decoder executes only on Windows' unless
+      RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+    page = File.join(Dir.tmpdir, "bc_rgba_native_#{Process.pid}.png")
+    native_raw = File.join(Dir.tmpdir, "bc_rgba_native_#{Process.pid}.rgba")
+    ruby_raw = File.join(Dir.tmpdir, "bc_rgba_ruby_#{Process.pid}.rgba")
+    pixels = [
+      [255, 255, 255, 0], [10, 20, 30, 255], [80, 40, 20, 128],
+      [0, 0, 0, 0], [200, 100, 50, 64], [1, 2, 3, 254]
+    ]
+    write_rgba_png(page, 3, 2, pixels)
+    helper = IMP::PngCropper.native_decoder_path
+
+    assert File.file?(helper), "bundled native decoder missing: #{helper}"
+    native = IMP::PngCropper.prepare_rgba!(page, native_raw, true, helper)
+    ruby = IMP::PngCropper.prepare_rgba!(page, ruby_raw, true, nil)
+
+    assert_equal File.binread(ruby_raw), File.binread(native_raw)
+    assert_equal ruby[:visual_pixel_sha256], native[:visual_pixel_sha256]
+    assert_equal ruby[:transparent_pixel_present],
+                 native[:transparent_pixel_present]
+    assert_equal ruby[:visible_pixel_present], native[:visible_pixel_present]
+    assert_equal :native_libpng, native[:decoder_backend]
+    assert_equal :ruby_zlib, ruby[:decoder_backend]
+  ensure
+    [page, native_raw, ruby_raw].each do |path|
+      File.delete(path) if path && File.exist?(path)
+    end
+  end
+
+  def test_native_decoder_accelerates_opaque_rgb_page_verification
+    skip 'bundled native decoder executes only on Windows' unless
+      RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+    page = File.join(Dir.tmpdir, "bc_rgb_native_#{Process.pid}.png")
+    native_raw = File.join(Dir.tmpdir, "bc_rgb_native_#{Process.pid}.rgba")
+    ruby_raw = File.join(Dir.tmpdir, "bc_rgb_ruby_#{Process.pid}.rgba")
+    pixels = [[255, 255, 255], [10, 20, 30], [80, 40, 20], [1, 2, 3]]
+    write_rgb_png(page, 2, 2, pixels)
+    helper = IMP::PngCropper.native_decoder_path
+
+    assert File.file?(helper), "bundled native decoder missing: #{helper}"
+    native = IMP::PngCropper.prepare_rgba!(page, native_raw, false, helper)
+    ruby = IMP::PngCropper.prepare_rgba!(page, ruby_raw, false, nil)
+
+    assert_equal File.binread(ruby_raw), File.binread(native_raw)
+    assert_equal ruby[:visual_pixel_sha256], native[:visual_pixel_sha256]
+    assert_equal false, native[:transparent_pixel_present]
+    assert_equal true, native[:visible_pixel_present]
+    assert_equal :native_libpng, native[:decoder_backend]
+  ensure
+    [page, native_raw, ruby_raw].each do |path|
       File.delete(path) if path && File.exist?(path)
     end
   end
@@ -2910,5 +3097,42 @@ class RepresentationFidelityContractTest < Minitest::Test
     refute IMP.svg_renderer_required_for_page?(:labels, true, [item], true)
     refute IMP.svg_renderer_required_for_page?(:raster, true, [item], true)
     refute IMP.svg_renderer_required_for_page?(:text3d, false, [item], true)
+  end
+
+  def test_inline_images_use_one_terminal_page_delivery_without_duplicate_ink
+    assert_equal :verified_page_raster,
+                 IMP.inline_image_page_delivery_decision(1, {
+                   :extract_embedded_images => true,
+                   :force_raster => false,
+                   :import_mode => 'auto'
+                 })
+    assert_equal :verified_page_raster,
+                 IMP.inline_image_page_delivery_decision(1, {
+                   :extract_embedded_images => true,
+                   :force_raster => false,
+                   :import_mode => 'hybrid'
+                 })
+    assert_equal :reject_vector,
+                 IMP.inline_image_page_delivery_decision(1, {
+                   :extract_embedded_images => true,
+                   :force_raster => false,
+                   :import_mode => 'vector'
+                 })
+    assert_equal :none, IMP.inline_image_page_delivery_decision(0, {})
+    assert_equal :none, IMP.inline_image_page_delivery_decision(10, {
+      :extract_embedded_images => false
+    })
+    assert_equal :none, IMP.inline_image_page_delivery_decision(10, {
+      :force_raster => true
+    })
+
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+      :encoding => 'UTF-8'
+    )
+    assert_match(/inline_image_count/, main)
+    assert_match(/inline_image_page_raster_fallbacks/, main)
+    refute_match(/verified_inline_image_backdrop!/, main)
+    refute_match(/inline_image_backdrop/, main)
   end
 end
