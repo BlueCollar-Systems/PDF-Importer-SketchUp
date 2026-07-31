@@ -1782,6 +1782,16 @@ class RepresentationFidelityContractTest < Minitest::Test
       image = entities.add_test_entity(2.0, 3.0, 'Image')
       {
         entity: image,
+        performance: {
+          render_ms: 125.5,
+          verify_ms: 8.25,
+          add_image_ms: 2.0,
+          cleanup_ms: 1.5,
+          total_ms: 137.25,
+          pixel_proof_ms: 7.75,
+          png_temp_bytes: 4096,
+          pixel_proof_temp_bytes: 0
+        },
         artifact_evidence: {
           png_signature_verified: true, page_binding_verified: true,
           box_binding_verified: true, aspect_verified: true,
@@ -1804,6 +1814,9 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal ['persistent_id:101'], proof[:created_entity_ids]
     assert_equal true, proof[:real_raster_verified]
     assert_equal true, proof[:visual_fidelity_verified]
+    assert_equal 125.5, proof[:performance][:render_ms]
+    assert_equal 137.25, proof[:performance][:total_ms]
+    assert_equal 4096, proof[:performance][:png_temp_bytes]
     assert_in_delta 2.0, proof[:bounds][:width], 1e-12
     assert_in_delta 3.0, proof[:bounds][:height], 1e-12
   ensure

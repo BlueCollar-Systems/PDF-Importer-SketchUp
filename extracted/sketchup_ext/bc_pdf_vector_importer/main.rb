@@ -1155,9 +1155,10 @@ module BlueCollarSystems
         )
       end
       unless delivery.is_a?(Hash) && delivery[:entity] &&
-             delivery[:artifact_evidence].is_a?(Hash)
+             delivery[:artifact_evidence].is_a?(Hash) &&
+             delivery[:performance].is_a?(Hash)
         raise RepresentationFidelity::ContractError,
-              'terminal raster lacks verified PNG/page/box evidence'
+              'terminal raster lacks verified PNG/page/box/performance evidence'
       end
       image = delivery[:entity]
       artifact = delivery[:artifact_evidence]
@@ -1204,6 +1205,7 @@ module BlueCollarSystems
         :created_entity_ids => created_ids,
         :bounds => bounds,
         :artifact_evidence => artifact,
+        :performance => delivery[:performance].dup,
         :visual_fidelity_verified => true,
         :real_raster_verified => true
       }
