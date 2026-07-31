@@ -441,6 +441,8 @@ class SketchupHostLauncherTest < Minitest::Test
       manifest = terminal_raster_manifest(
         binding, pdf, digest, lightweight, physical
       )
+      original = nil
+      begin
       original = SketchupHostEvidence.method(:verify_delivery_evidence!)
       verified_delivery_rows = nil
       SketchupHostEvidence.define_singleton_method(
@@ -471,6 +473,7 @@ class SketchupHostLauncherTest < Minitest::Test
       ) if original
     end
   end
+  end
 
   def test_non_full_page_raster_modes_keep_strict_reopen_continuity
     Dir.mktmpdir('su-non-terminal-raster-manifest') do |directory|
@@ -491,6 +494,8 @@ class SketchupHostLauncherTest < Minitest::Test
         ['Text', 'vector', 'text'],
         ['3D Text', 'vector', 'text3d']
       ]
+      original = nil
+      begin
       original = SketchupHostEvidence.method(:verify_delivery_evidence!)
       SketchupHostEvidence.define_singleton_method(
         :verify_delivery_evidence!
@@ -518,6 +523,7 @@ class SketchupHostLauncherTest < Minitest::Test
         :verify_delivery_evidence!, original
       ) if original
     end
+  end
   end
 
   def test_full_page_raster_flags_do_not_replace_production_proof
@@ -548,6 +554,8 @@ class SketchupHostLauncherTest < Minitest::Test
           manifest['reopened_owned_entities'] = []
         end]
       ]
+      original = nil
+      begin
       original = SketchupHostEvidence.method(:verify_delivery_evidence!)
       SketchupHostEvidence.define_singleton_method(
         :verify_delivery_evidence!
@@ -570,6 +578,7 @@ class SketchupHostLauncherTest < Minitest::Test
         :verify_delivery_evidence!, original
       ) if original
     end
+  end
   end
 
   def test_restore_failure_changes_apparent_success_to_error
