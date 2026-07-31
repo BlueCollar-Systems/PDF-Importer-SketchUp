@@ -425,6 +425,53 @@ class SketchupHostLauncherTest < Minitest::Test
     end
   end
 
+  def test_terminal_manifest_accepts_only_proven_pure_raster_lightweight_reopen
+    Dir.mktmpdir('su-terminal-raster-manifest') do |directory|
+      pdf = File.join(directory, 'input.pdf')
+      File.binwrite(pdf, "%PDF-1.4\n%%EOF\n")
+      digest = Digest::SHA256.file(pdf).hexdigest
+      binding = { 'job_id' => 'job-raster', 'job_sha256' => 'a' * 64 }
+      job = {
+        :import_mode => 'raster', :text_mode => 'text3d', :pages => [1],
+        :immutable_pdf_path => pdf
+      }
+      lightweight = terminal_raster_manifest_row(false)
+      physical = terminal_raster_manifest_row(true)
+      result = terminal_raster_result(binding, pdf, digest)
+      manifest = terminal_raster_manifest(
+        binding, pdf, digest, lightweight, physical
+      )
+      original = SketchupHostEvidence.method(:verify_delivery_evidence!)
+      verified_delivery_rows = nil
+      SketchupHostEvidence.define_singleton_method(
+        :verify_delivery_evidence!
+      ) do |_stats, rows, _mode, _pages|
+        verified_delivery_rows = rows
+        true
+      end
+
+      assert SketchupHostLauncher.verify_terminal_manifest!(
+        manifest, result, job, binding, digest, 'raster-session'
+      )
+      assert_equal true,
+                   verified_delivery_rows[0]['content_evidence'][
+                     'host_texture_export_verified'
+                   ]
+
+      manifest['final_texture_proof_verified'] = false
+      result['final_texture_proof_verified'] = false
+      assert_raises(StandardError) do
+        SketchupHostLauncher.verify_terminal_manifest!(
+          manifest, result, job, binding, digest, 'raster-session'
+        )
+      end
+    ensure
+      SketchupHostEvidence.define_singleton_method(
+        :verify_delivery_evidence!, original
+      ) if original
+    end
+  end
+
   def test_restore_failure_changes_apparent_success_to_error
     Dir.mktmpdir('su-launch') do |dir|
       job_path, result_path, _pdf = write_job(dir)
@@ -503,6 +550,85 @@ class SketchupHostLauncherTest < Minitest::Test
   end
 
   private
+
+  def terminal_raster_manifest_row(physical)
+    content = {
+      'image_like' => true,
+      'display_width' => 8.5,
+      'display_height' => 11.0,
+      'raster_visual_pixel_sha256' => 'b' * 64,
+      'host_texture_export_verified' => physical,
+      'host_visual_pixel_sha256' => physical ? 'b' * 64 : nil,
+      'host_pixel_width' => 100,
+      'host_pixel_height' => 200,
+      'host_texture_export_byte_size' => physical ? 1234 : nil,
+      'host_texture_load_ms' => physical ? 4.0 : 0.0,
+      'host_texture_write_ms' => physical ? 5.0 : 0.0,
+      'host_texture_pixel_proof_ms' => physical ? 6.0 : 0.0,
+      'host_texture_proof_temp_bytes' => 0,
+      'host_texture_pixel_proof_decoder_backend' =>
+        physical ? 'native_zlib_stream' : nil
+    }
+    [{
+      'entity_id' => 80,
+      'persistent_id' => 7080,
+      'typename' => 'Image',
+      'valid' => true,
+      'deleted' => false,
+      'bounds' => nil,
+      'transformation' => nil,
+      'representation_evidence' => nil,
+      'content_evidence' => content,
+      'geometry_evidence' => nil,
+      'style_evidence' => nil,
+      'children' => []
+    }]
+  end
+
+  def terminal_raster_result(binding, pdf, digest)
+    binding.merge(
+      'reopen_persistent_id_verified' => true,
+      'host_heal_preservation_verified' => true,
+      'host_heal_required' => false,
+      'final_texture_proof_verified' => true,
+      'original_pdf_path' => pdf,
+      'original_pdf_sha256' => digest,
+      'immutable_pdf_path' => pdf,
+      'immutable_pdf_sha256' => digest,
+      'normalized_pdf_path' => pdf,
+      'normalized_pdf_sha256' => digest,
+      'salvage_note' => nil,
+      'source_provenance' => { 'objects' => [] }
+    )
+  end
+
+  def terminal_raster_manifest(binding, pdf, digest, lightweight, physical)
+    lineage = {
+      'original_pdf_path' => pdf,
+      'original_pdf_sha256' => digest,
+      'immutable_pdf_path' => pdf,
+      'immutable_pdf_sha256' => digest,
+      'normalized_pdf_path' => pdf,
+      'normalized_pdf_sha256' => digest,
+      'salvage_note' => nil
+    }
+    binding.merge(
+      'requested_text_mode' => 'raster',
+      'source_pdf_path' => pdf,
+      'source_pdf_sha256' => digest,
+      'import_session_id' => 'raster-session',
+      'reopen_persistent_id_verified' => true,
+      'host_heal_preservation_verified' => true,
+      'host_heal_required' => false,
+      'final_texture_proof_verified' => true,
+      'source_lineage' => lineage,
+      'same_session_entities' => Marshal.load(Marshal.dump(lightweight)),
+      'stabilized_owned_entities' => Marshal.load(Marshal.dump(lightweight)),
+      'post_import_entities' => Marshal.load(Marshal.dump(lightweight)),
+      'reopened_entities' => Marshal.load(Marshal.dump(physical)),
+      'reopened_owned_entities' => Marshal.load(Marshal.dump(physical))
+    )
+  end
 
   def run_launcher(job_path, backend, guard)
     SketchupHostLauncher.run(

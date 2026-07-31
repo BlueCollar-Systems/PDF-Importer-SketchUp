@@ -97,6 +97,11 @@ module SketchupHostEvidence
   ].freeze unless const_defined?(:AFFIRMATIVE_FALLBACK_REASONS, false)
   IMAGE_TYPENAMES = ['image', 'rasterimage', 'imageentity'].freeze unless
     const_defined?(:IMAGE_TYPENAMES, false)
+  VOLATILE_CONTENT_EVIDENCE_KEYS = [
+    'host_texture_load_ms',
+    'host_texture_write_ms',
+    'host_texture_pixel_proof_ms'
+  ].freeze unless const_defined?(:VOLATILE_CONTENT_EVIDENCE_KEYS, false)
   CREATED_ENTITY_MODES = {
     'native_label' => :labels,
     'native_3d_text' => :text3d,
@@ -134,12 +139,19 @@ module SketchupHostEvidence
       raise EvidenceError, 'host entity collection cannot be enumerated'
     end
     compact = options.is_a?(Hash) && options[:compact] == true
+    performance_telemetry = options.is_a?(Hash) ?
+      options[:performance_telemetry] : nil
+    unless performance_telemetry.nil? || performance_telemetry.is_a?(Hash)
+      raise EvidenceError, 'snapshot performance telemetry must be a Hash'
+    end
+    initialize_performance_telemetry!(performance_telemetry)
     context = {
       :definition_child_results => {},
       :definition_child_payloads => {},
       :canonical_json_cache => {},
       :texture_proof => !(options.is_a?(Hash) &&
-                           options[:texture_proof] == false)
+                           options[:texture_proof] == false),
+      :performance_telemetry => performance_telemetry
     }
     rows = []
     Array(entities.to_a).each_with_index do |entity, index|
@@ -163,6 +175,19 @@ module SketchupHostEvidence
   rescue StandardError => error
     raise EvidenceError, "host entity snapshot failed: #{error.message}"
   end
+
+  def self.initialize_performance_telemetry!(telemetry)
+    return unless telemetry.is_a?(Hash)
+    {
+      'host_texture_proof_count' => 0,
+      'host_texture_load_ms' => 0.0,
+      'host_texture_write_ms' => 0.0,
+      'host_texture_pixel_proof_ms' => 0.0
+    }.each do |key, default|
+      telemetry[key] = default unless telemetry.key?(key)
+    end
+  end
+  private_class_method :initialize_performance_telemetry!
 
   def self.manifest_entity_ids(manifest)
     manifest_identity_sets(manifest)['entity_id']
@@ -216,9 +241,6 @@ module SketchupHostEvidence
         'host_texture_export_verified' => false,
         'host_visual_pixel_sha256' => nil,
         'host_texture_export_byte_size' => nil,
-        'host_texture_load_ms' => 0.0,
-        'host_texture_write_ms' => 0.0,
-        'host_texture_pixel_proof_ms' => 0.0,
         'host_texture_proof_temp_bytes' => 0,
         'host_texture_pixel_proof_decoder_backend' => nil
       }
@@ -262,9 +284,16 @@ module SketchupHostEvidence
         :content_evidence => 'content evidence',
         :style_evidence => 'style evidence'
       }.each do |field, label|
-        unless evidence_payload_equal?(
-          hash_value(row, field), hash_value(other, field)
-        )
+        equivalent = if field == :content_evidence
+                       stable_content_evidence_equal?(
+                         hash_value(row, field), hash_value(other, field)
+                       )
+                     else
+                       evidence_payload_equal?(
+                         hash_value(row, field), hash_value(other, field)
+                       )
+                     end
+        unless equivalent
           raise EvidenceError,
                 "host heal #{label} mismatch for persistent_id:#{persistent_id}"
         end
@@ -333,8 +362,8 @@ module SketchupHostEvidence
               "reopened representation identity mismatch for persistent_id:#{persistent_id}"
       end
       unless evidence_payload_equal?(
-        hash_value(row, :content_evidence),
-        hash_value(other, :content_evidence)
+        stable_content_evidence(hash_value(row, :content_evidence)),
+        stable_content_evidence(hash_value(other, :content_evidence))
       )
         raise EvidenceError,
               "reopened content evidence mismatch for persistent_id:#{persistent_id}"
@@ -882,7 +911,7 @@ module SketchupHostEvidence
   # Export the texture through the real host API and decode the resulting PNG.
   # This is deliberately independent of importer-written attributes: those
   # attributes describe the claim, while these pixels prove what SketchUp owns.
-  def self.texture_pixel_evidence(entity)
+  def self.texture_pixel_evidence(entity, performance_telemetry = nil)
     unless defined?(Sketchup) &&
            Sketchup.respond_to?(:create_texture_writer)
       raise EvidenceError, 'SketchUp TextureWriter is unavailable'
@@ -917,20 +946,21 @@ module SketchupHostEvidence
     unless visual_sha =~ /\A[0-9a-f]{64}\z/
       raise EvidenceError, 'host texture visual pixel digest is invalid'
     end
-    {
+    evidence = {
       'host_texture_export_verified' => true,
       'host_visual_pixel_sha256' => visual_sha,
       'host_pixel_width' => inspected[:pixel_width].to_i,
       'host_pixel_height' => inspected[:pixel_height].to_i,
       'host_texture_export_byte_size' => File.size(png_path).to_i,
-      'host_texture_load_ms' => load_ms.round(3),
-      'host_texture_write_ms' => write_ms.round(3),
-      'host_texture_pixel_proof_ms' => proof_ms.round(3),
       'host_texture_proof_temp_bytes' =>
         inspected[:temp_bytes_written].to_i,
       'host_texture_pixel_proof_decoder_backend' =>
         inspected[:decoder_backend].to_s
     }
+    record_texture_proof_performance!(
+      performance_telemetry, load_ms, write_ms, proof_ms
+    )
+    evidence
   rescue EvidenceError
     raise
   rescue StandardError => error
@@ -958,7 +988,23 @@ module SketchupHostEvidence
   end
   private_class_method :texture_pixel_evidence
 
-  def self.image_content_evidence(entity, typename, texture_proof = true)
+  def self.record_texture_proof_performance!(telemetry, load_ms, write_ms,
+                                             proof_ms)
+    return unless telemetry.is_a?(Hash)
+    telemetry['host_texture_proof_count'] =
+      telemetry['host_texture_proof_count'].to_i + 1
+    {
+      'host_texture_load_ms' => load_ms,
+      'host_texture_write_ms' => write_ms,
+      'host_texture_pixel_proof_ms' => proof_ms
+    }.each do |key, value|
+      telemetry[key] = (telemetry[key].to_f + value.to_f).round(3)
+    end
+  end
+  private_class_method :record_texture_proof_performance!
+
+  def self.image_content_evidence(entity, typename, texture_proof = true,
+                                  performance_telemetry = nil)
     return nil unless image_typename?(typename)
     width = entity.respond_to?(:width) ? entity.width.to_f : 0.0
     height = entity.respond_to?(:height) ? entity.height.to_f : 0.0
@@ -1011,7 +1057,9 @@ module SketchupHostEvidence
     claimed_visual_sha = attributes['raster_visual_pixel_sha256'].to_s.strip
     unless claimed_visual_sha.empty?
       if texture_proof
-        evidence.merge!(texture_pixel_evidence(entity))
+        evidence.merge!(
+          texture_pixel_evidence(entity, performance_telemetry)
+        )
       else
         evidence.merge!(lightweight_texture_evidence(entity))
       end
@@ -1034,9 +1082,6 @@ module SketchupHostEvidence
       'host_pixel_width' => pixel_width,
       'host_pixel_height' => pixel_height,
       'host_texture_export_byte_size' => nil,
-      'host_texture_load_ms' => 0.0,
-      'host_texture_write_ms' => 0.0,
-      'host_texture_pixel_proof_ms' => 0.0,
       'host_texture_proof_temp_bytes' => 0,
       'host_texture_pixel_proof_decoder_backend' => nil
     }
@@ -1066,7 +1111,11 @@ module SketchupHostEvidence
 
   def self.host_content_evidence(entity, typename, context = nil)
     texture_proof = !context.is_a?(Hash) || context[:texture_proof] != false
-    image = image_content_evidence(entity, typename, texture_proof)
+    performance_telemetry = context.is_a?(Hash) ?
+      context[:performance_telemetry] : nil
+    image = image_content_evidence(
+      entity, typename, texture_proof, performance_telemetry
+    )
     return image if image
     native_text_content_evidence(entity, typename)
   end
@@ -1243,6 +1292,28 @@ module SketchupHostEvidence
     left == right
   end
   private_class_method :evidence_payload_equal?
+
+  def self.stable_content_evidence_equal?(left, right)
+    evidence_payload_equal?(
+      stable_content_evidence(left), stable_content_evidence(right)
+    )
+  end
+  private_class_method :stable_content_evidence_equal?
+
+  def self.stable_content_evidence(value)
+    if value.is_a?(Array)
+      return value.map { |entry| stable_content_evidence(entry) }
+    end
+    return value unless value.is_a?(Hash)
+
+    stable = {}
+    value.each do |key, entry|
+      next if VOLATILE_CONTENT_EVIDENCE_KEYS.include?(key.to_s)
+      stable[key] = stable_content_evidence(entry)
+    end
+    stable
+  end
+  private_class_method :stable_content_evidence
 
   def self.visit_manifest(rows, &block)
     Array(rows).each do |row|

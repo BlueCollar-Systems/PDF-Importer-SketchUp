@@ -720,10 +720,26 @@ module SketchupHostLauncher
     end
     require_equal!(manifest['host_heal_preservation_verified'], true,
                    'manifest host-heal preservation proof')
+    require_equal!(manifest['host_heal_required'], result['host_heal_required'],
+                   'terminal host-heal requirement')
+    require_equal!(
+      manifest['final_texture_proof_verified'],
+      result['final_texture_proof_verified'],
+      'terminal final texture proof'
+    )
     SketchupHostEvidence.verify_host_heal_preservation!(
       owned, stabilized_owned
     )
-    SketchupHostEvidence.verify_reopen_continuity!(post_import, reopened)
+    pure_terminal_page_raster =
+      manifest['host_heal_required'] == false &&
+      manifest['final_texture_proof_verified'] == true
+    if pure_terminal_page_raster
+      SketchupHostEvidence.verify_lightweight_reopen_continuity!(
+        post_import, reopened
+      )
+    else
+      SketchupHostEvidence.verify_reopen_continuity!(post_import, reopened)
+    end
 
     evidence = result.dup
     provenance = result['source_provenance']
@@ -731,8 +747,16 @@ module SketchupHostLauncher
       raise LaunchError, 'result full source provenance is missing'
     end
     evidence['source_provenance_objects'] = provenance['objects']
+    delivery_manifest = if pure_terminal_page_raster
+                          manifest['reopened_owned_entities']
+                        else
+                          owned
+                        end
+    if !delivery_manifest.is_a?(Array) || delivery_manifest.empty?
+      raise LaunchError, 'terminal owned delivery evidence is missing'
+    end
     SketchupHostEvidence.verify_delivery_evidence!(
-      evidence, owned, effective_requested_mode(job), job[:pages]
+      evidence, delivery_manifest, effective_requested_mode(job), job[:pages]
     )
     true
   end

@@ -98,9 +98,11 @@ module SketchupBatchImport
         GC.start
       rescue StandardError
       end
+      post_import_evidence_performance = {}
       live_after_manifest = SketchupHostEvidence.snapshot_entities(
         @model.active_entities, :compact => true,
-        :texture_proof => !pure_terminal_page_raster
+        :texture_proof => !pure_terminal_page_raster,
+        :performance_telemetry => post_import_evidence_performance
       )
       SketchupBatchImport.write_progress!(
         job, binding, 'post_import_evidence_snapshot_completed'
@@ -129,6 +131,7 @@ module SketchupBatchImport
       # save/load. A terminal page-raster model has no such nested geometry;
       # defer its only TextureWriter proof to the authoritative final reopen.
       host_heal_required = !pure_terminal_page_raster
+      host_heal_evidence_performance = nil
       if host_heal_required
         SketchupBatchImport.write_progress!(
           job, binding, 'host_heal_stabilize_started'
@@ -138,8 +141,10 @@ module SketchupBatchImport
           GC.start
         rescue StandardError
         end
+        host_heal_evidence_performance = {}
         after_manifest = SketchupHostEvidence.snapshot_entities(
-          stabilize_model.active_entities, :compact => true
+          stabilize_model.active_entities, :compact => true,
+          :performance_telemetry => host_heal_evidence_performance
         )
         stabilized_owned_manifest = SketchupHostEvidence.owned_manifest(
           before_manifest, after_manifest
@@ -184,6 +189,11 @@ module SketchupBatchImport
       )
 
       manifest_path = File.join(job[:output_dir], 'entity_manifest.json')
+      evidence_performance = {
+        'post_import_snapshot' => post_import_evidence_performance,
+        'host_heal_snapshot' => host_heal_evidence_performance,
+        'reopen_snapshot' => nil
+      }
       manifest_payload = binding.merge(
         'requested_text_mode' => requested_mode.to_s,
         'source_pdf_path' => job[:pdf_path],
@@ -197,6 +207,7 @@ module SketchupBatchImport
         'stabilized_owned_entities' => stabilized_owned_manifest,
         'post_import_entities' => after_manifest,
         'post_import_entities_pre_heal' => live_after_manifest,
+        'evidence_performance' => evidence_performance,
         'host_heal_required' => host_heal_required,
         'host_heal_preservation_verified' => true
       )
@@ -211,9 +222,13 @@ module SketchupBatchImport
         GC.start
       rescue StandardError
       end
+      reopen_evidence_performance = {}
       reopened_manifest = SketchupHostEvidence.snapshot_entities(
-        reopened_model.active_entities, :compact => true
+        reopened_model.active_entities, :compact => true,
+        :performance_telemetry => reopen_evidence_performance
       )
+      evidence_performance['reopen_snapshot'] =
+        reopen_evidence_performance
       SketchupBatchImport.write_progress!(
         job, binding, 'reopen_evidence_snapshot_completed'
       )
@@ -245,6 +260,8 @@ module SketchupBatchImport
         raise
       end
       manifest_payload['reopened_entities'] = reopened_manifest
+      manifest_payload['reopened_owned_entities'] = reopened_owned_manifest if
+        pure_terminal_page_raster
       manifest_payload['reopen_persistent_id_verified'] = true
       manifest_payload['final_texture_proof_verified'] =
         pure_terminal_page_raster
@@ -284,6 +301,7 @@ module SketchupBatchImport
         'import_report_sha256' => Digest::SHA256.file(report_copy).hexdigest,
         'entity_manifest_path' => manifest_path,
         'entity_manifest_sha256' => Digest::SHA256.file(manifest_path).hexdigest,
+        'evidence_performance' => evidence_performance,
         'host_heal_required' => host_heal_required,
         'host_heal_preservation_verified' => true,
         'reopen_persistent_id_verified' => true,

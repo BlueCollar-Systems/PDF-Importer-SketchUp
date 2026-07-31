@@ -3,14 +3,15 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.121-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.122-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.121)
+### Recent fixes (v3.7.122)
 
+- **Stable Raster host evidence with external timing telemetry**: TextureWriter phase timings are reported outside persistent content identity, so identical saved/reopened pixels cannot fail strict host-heal continuity merely because an export took a different number of milliseconds. Pure terminal page-Raster controller verification now recognizes only the explicit no-heal/final-texture-proof state, compares its lightweight pre-reopen snapshot to the authoritative physical reopen, and revalidates delivery against the reopened owned images; every other model retains strict heal/reopen validation.
 - **Full-page Raster proof without giant raw files**: production PNG verification and saved-model TextureWriter evidence now decode and hash one scanline at a time, write zero temporary RGBA bytes, and retain the exact premultiplied visual digest, dimensions, placement, and source binding. Pure page-Raster QA saves once and performs one authoritative final reopen/texture proof; geometry and text models keep the existing host-heal path. Per-phase render, verify, placement, cleanup, and temporary-byte counters make future slowdowns visible.
 - **Dense text performance without placement shortcuts**: repeated text-angle hints are indexed by normalized source text and then resolved by exact nearest-position matching. Exact 3D Text reuses one source definition across translation, rotation, scale, reflection, or shear only when the underlying outline is genuinely identical; physical evidence verifies each shared definition and every instance transform without asking SketchUp to recalculate redundant per-instance bounds.
 - **Filled-vector accuracy and legacy-host stability**: filled PDF contours retain their exact sampled source boundary when SketchUp creates the face. Arc reconstruction remains available for unfilled strokes, but can no longer replace part of a fill boundary and cause valid planar faces to disappear. Fills below SketchUp 2017's native face-construction tolerance are batched by destination and style, built as exact faces at safe local scale, and retained through a small number of inverse-scaled component instances. This preserves every world-space contour while avoiding hundreds of microscopic host instances.

@@ -311,6 +311,35 @@ class SketchupHostEvidenceTest < Minitest::Test
     })
   end
 
+  def timed_texture_manifest(load_ms, write_ms, proof_ms)
+    [{
+      'entity_id' => 70,
+      'persistent_id' => 7070,
+      'typename' => 'Image',
+      'valid' => true,
+      'deleted' => false,
+      'bounds' => nil,
+      'transformation' => nil,
+      'representation_evidence' => nil,
+      'content_evidence' => {
+        'image_like' => true,
+        'host_texture_export_verified' => true,
+        'host_visual_pixel_sha256' => 'a' * 64,
+        'host_pixel_width' => 2,
+        'host_pixel_height' => 1,
+        'host_texture_export_byte_size' => 100,
+        'host_texture_load_ms' => load_ms,
+        'host_texture_write_ms' => write_ms,
+        'host_texture_pixel_proof_ms' => proof_ms,
+        'host_texture_proof_temp_bytes' => 0,
+        'host_texture_pixel_proof_decoder_backend' => 'native_zlib_stream'
+      },
+      'geometry_evidence' => nil,
+      'style_evidence' => nil,
+      'children' => []
+    }]
+  end
+
   def test_texture_writer_pixels_are_physical_and_survive_reopen_verification
     Dir.mktmpdir('bc_texture_writer_test_') do |directory|
       first_path = File.join(directory, 'first.png')
@@ -332,8 +361,6 @@ class SketchupHostEvidenceTest < Minitest::Test
       assert_equal 2, content['host_pixel_width']
       assert_equal 1, content['host_pixel_height']
       assert_equal 0, content['host_texture_proof_temp_bytes']
-      assert_operator content['host_texture_write_ms'], :>=, 0.0
-      assert_operator content['host_texture_pixel_proof_ms'], :>=, 0.0
 
       writer.source_path = second_path
       reopened = with_texture_writer(writer) do
@@ -389,6 +416,59 @@ class SketchupHostEvidenceTest < Minitest::Test
         )
       end
       assert_match(/content/i, error.message)
+    end
+  end
+
+  def test_reopen_continuity_ignores_only_host_texture_timing_variance
+    saved = timed_texture_manifest(1.0, 2.0, 3.0)
+    reopened = timed_texture_manifest(11.0, 12.0, 13.0)
+    reopened[0]['entity_id'] = 99
+
+    assert SketchupHostEvidence.verify_reopen_continuity!(saved, reopened)
+
+    changed = Marshal.load(Marshal.dump(reopened))
+    changed[0]['content_evidence']['host_visual_pixel_sha256'] = 'c' * 64
+    assert_raises(SketchupHostEvidence::EvidenceError) do
+      SketchupHostEvidence.verify_reopen_continuity!(saved, changed)
+    end
+  end
+
+  def test_host_heal_continuity_ignores_only_host_texture_timing_variance
+    source = timed_texture_manifest(1.0, 2.0, 3.0)
+    healed = timed_texture_manifest(21.0, 22.0, 23.0)
+
+    assert SketchupHostEvidence.verify_host_heal_preservation!(source, healed)
+
+    changed = Marshal.load(Marshal.dump(healed))
+    changed[0]['content_evidence']['host_pixel_width'] = 3
+    assert_raises(SketchupHostEvidence::EvidenceError) do
+      SketchupHostEvidence.verify_host_heal_preservation!(source, changed)
+    end
+  end
+
+  def test_texture_proof_timings_are_external_snapshot_telemetry
+    Dir.mktmpdir('bc_texture_timing_telemetry_') do |directory|
+      png_path = File.join(directory, 'source.png')
+      pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+      write_rgba_png(png_path, 2, 1, pixels)
+      visual_sha = Digest::SHA256.hexdigest(pixels.flatten.pack('C*'))
+      image = raster_image_with_visual_sha(visual_sha)
+      telemetry = {}
+
+      rows = with_texture_writer(FakeTextureWriter.new(png_path)) do
+        SketchupHostEvidence.snapshot_entities(
+          [image], :compact => true, :performance_telemetry => telemetry
+        )
+      end
+      content = rows.first['content_evidence']
+
+      refute content.key?('host_texture_load_ms')
+      refute content.key?('host_texture_write_ms')
+      refute content.key?('host_texture_pixel_proof_ms')
+      assert_equal 1, telemetry['host_texture_proof_count']
+      assert_operator telemetry['host_texture_load_ms'], :>=, 0.0
+      assert_operator telemetry['host_texture_write_ms'], :>=, 0.0
+      assert_operator telemetry['host_texture_pixel_proof_ms'], :>=, 0.0
     end
   end
 
