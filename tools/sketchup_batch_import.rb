@@ -93,7 +93,7 @@ module SketchupBatchImport
       SketchupBatchImport.write_progress!(
         job, binding, 'post_import_evidence_snapshot_started'
       )
-      pure_terminal_page_raster = pure_terminal_page_raster?(stats, job[:pages])
+      pure_terminal_page_raster = pure_terminal_page_raster?(stats, job)
       begin
         GC.start
       rescue StandardError
@@ -475,32 +475,61 @@ module SketchupBatchImport
       job[:text_mode]
     end
 
-    def pure_terminal_page_raster?(stats, requested_pages)
-      return false unless stats.is_a?(Hash) && stats[:text].to_i == 0
-      return false unless Array(stats[:page_text_delivery_records]).empty? &&
-                          Array(stats[:source_glyph_physical_deliveries]).empty?
+    def pure_terminal_page_raster?(stats, job)
+      return false unless stats.is_a?(Hash) && job.is_a?(Hash) &&
+                          job[:import_mode].to_s == 'raster' &&
+                          effective_requested_mode(job).to_s == 'raster' &&
+                          stats[:text_mode].to_s == 'raster' &&
+                          stats[:text].is_a?(Integer) && stats[:text] == 0 &&
+                          stats[:raster_fallback_used] == false
 
-      selected = Array(stats[:selected_pages]).map(&:to_i).select { |page| page > 0 }
-      selected = Array(requested_pages).map(&:to_i).select { |page| page > 0 } if
-        selected.empty?
-      selected = selected.uniq.sort
-      return false if selected.empty?
+      empty_ledgers = [
+        :text_source_span_ids, :text_attempts,
+        :page_text_delivery_records, :source_glyph_physical_deliveries,
+        :fallback_transitions, :page_representation_fallbacks,
+        :inline_image_page_raster_fallbacks, :empty_page_source_inspections
+      ]
+      return false unless empty_ledgers.all? do |name|
+        stats[name].is_a?(Array) && stats[name].empty?
+      end
 
-      raster_records = Array(stats[:raster_delivery_records])
-      terminal_records = Array(stats[:terminal_text_delivery_records])
-      return false unless raster_records.length == selected.length &&
+      selected = Array(job[:pages]).map(&:to_i).select { |page| page > 0 }.
+        uniq.sort
+      reported = stats[:selected_pages]
+      return false unless !selected.empty? && reported.is_a?(Array) &&
+                          reported.map(&:to_i).uniq.sort == selected
+
+      raster_records = stats[:raster_delivery_records]
+      terminal_records = stats[:terminal_text_delivery_records]
+      return false unless raster_records.is_a?(Array) &&
+                          terminal_records.is_a?(Array) &&
+                          raster_records.length == selected.length &&
                           terminal_records.length == selected.length
 
       [raster_records, terminal_records].all? do |records|
         pages = records.map do |record|
           return false unless record.is_a?(Hash) &&
+                              record[:source_span_ids].is_a?(Array) &&
+                              record[:source_span_ids].empty? &&
+                              record[:requested_mode].to_s == 'raster' &&
                               record[:delivered_mode].to_s == 'raster' &&
+                              record[:created_entity_type].to_s == 'raster_image' &&
                               record[:delivery_scope].to_s == 'page_raster' &&
+                              record[:delivery_basis].to_s ==
+                                'explicit_full_page_raster' &&
+                              record[:full_page_raster_request] == true &&
+                              record[:semantic_text_evaluated] == false &&
                               record[:real_raster_verified] == true &&
-                              Array(record[:resulting_entity_ids]).length == 1
+                              record[:visual_fidelity_verified] == true &&
+                              record[:cleanup_outcome].to_s == 'not_required' &&
+                              record[:explicit_request] == true &&
+                              record[:degraded] == false &&
+                              record[:artifact_evidence].is_a?(Hash) &&
+                              record[:resulting_entity_ids].is_a?(Array) &&
+                              record[:resulting_entity_ids].length == 1
           record[:page].to_i
         end
-        pages.sort == selected && pages.uniq.length == pages.length
+        pages.uniq.sort == selected
       end
     end
 

@@ -160,40 +160,94 @@ class SketchupBatchHostContractTest < Minitest::Test
     )
   end
 
-  def test_pure_terminal_page_raster_detection_requires_one_page_image_per_page
+  def test_pure_terminal_page_raster_accepts_only_exact_explicit_raster_contract
     load_runner_library
     session = SketchupBatchImport::RealHostSession.new
-    records = [1, 2].map do |page|
-      {
-        :page => page,
-        :delivered_mode => :raster,
-        :delivery_scope => :page_raster,
-        :real_raster_verified => true,
-        :resulting_entity_ids => [100 + page]
-      }
-    end
-    stats = {
-      :selected_pages => [1, 2],
-      :raster_delivery_records => records,
-      :terminal_text_delivery_records => records.map(&:dup),
-      :page_text_delivery_records => [],
-      :source_glyph_physical_deliveries => [],
-      :text => 0
+    stats = pure_terminal_raster_stats([1, 2])
+    raster_job = {
+      :import_mode => 'raster', :text_mode => :text3d, :pages => [1, 2]
     }
 
-    assert session.send(:pure_terminal_page_raster?, stats, [1, 2])
+    assert session.send(:pure_terminal_page_raster?, stats, raster_job)
+  end
 
-    duplicate = Marshal.load(Marshal.dump(stats))
-    duplicate[:raster_delivery_records] << records.first.dup
-    refute session.send(:pure_terminal_page_raster?, duplicate, [1, 2])
+  def test_pure_terminal_page_raster_rejects_non_explicit_and_non_raster_modes
+    load_runner_library
+    session = SketchupBatchImport::RealHostSession.new
+    stats = pure_terminal_raster_stats([1])
+    cases = [
+      ['auto labels', { :import_mode => 'auto', :text_mode => :labels,
+                        :pages => [1] }],
+      ['vector raster text strategy', { :import_mode => 'vector',
+                                        :text_mode => :raster, :pages => [1] }]
+    ]
 
-    item = Marshal.load(Marshal.dump(stats))
-    item[:raster_delivery_records][0][:delivery_scope] = :item_raster
-    refute session.send(:pure_terminal_page_raster?, item, [1, 2])
+    cases.each do |label, job|
+      refute session.send(:pure_terminal_page_raster?, stats, job), label
+    end
+  end
 
-    text = Marshal.load(Marshal.dump(stats))
-    text[:page_text_delivery_records] << { :page => 1 }
-    refute session.send(:pure_terminal_page_raster?, text, [1, 2])
+  def test_pure_terminal_page_raster_rejects_incomplete_or_nonimage_records
+    load_runner_library
+    session = SketchupBatchImport::RealHostSession.new
+    job = { :import_mode => 'raster', :text_mode => :labels, :pages => [1] }
+    mutations = [
+      ['requested labels', lambda { |record| record[:requested_mode] = :labels }],
+      ['item Raster', lambda { |record| record[:delivery_scope] = :item_raster }],
+      ['Geometry', lambda { |record| record[:created_entity_type] = 'Geometry' }],
+      ['Text', lambda { |record| record[:created_entity_type] = 'Text' }],
+      ['3D Text', lambda { |record| record[:created_entity_type] = 'Text3d' }],
+      ['wrong basis', lambda do |record|
+        record[:delivery_basis] = 'verified_zero_canonical_text'
+      end],
+      ['not full page', lambda { |record| record[:full_page_raster_request] = false }],
+      ['semantic text', lambda { |record| record[:semantic_text_evaluated] = true }],
+      ['source spans', lambda { |record| record[:source_span_ids] = ['span-1'] }],
+      ['no real proof', lambda { |record| record[:real_raster_verified] = false }],
+      ['no visual proof', lambda { |record| record[:visual_fidelity_verified] = false }],
+      ['cleanup performed', lambda { |record| record[:cleanup_outcome] = 'removed' }],
+      ['not explicit', lambda { |record| record[:explicit_request] = false }],
+      ['degraded', lambda { |record| record[:degraded] = true }],
+      ['missing artifact', lambda { |record| record[:artifact_evidence] = nil }],
+      ['multiple entities', lambda do |record|
+        record[:resulting_entity_ids] = [101, 102]
+      end]
+    ]
+
+    mutations.each do |label, mutation|
+      stats = pure_terminal_raster_stats([1])
+      mutation.call(stats[:raster_delivery_records][0])
+      refute session.send(:pure_terminal_page_raster?, stats, job), label
+    end
+  end
+
+  def test_pure_terminal_page_raster_rejects_nonempty_or_missing_empty_ledgers
+    load_runner_library
+    session = SketchupBatchImport::RealHostSession.new
+    job = { :import_mode => 'raster', :text_mode => :labels, :pages => [1] }
+    empty_ledgers = [
+      :text_source_span_ids, :text_attempts, :page_text_delivery_records,
+      :source_glyph_physical_deliveries, :fallback_transitions,
+      :page_representation_fallbacks, :inline_image_page_raster_fallbacks,
+      :empty_page_source_inspections
+    ]
+
+    empty_ledgers.each do |key|
+      nonempty = pure_terminal_raster_stats([1])
+      nonempty[key] = [{ :unexpected => true }]
+      refute session.send(:pure_terminal_page_raster?, nonempty, job),
+             "nonempty #{key}"
+
+      missing = pure_terminal_raster_stats([1])
+      missing.delete(key)
+      refute session.send(:pure_terminal_page_raster?, missing, job),
+             "missing #{key}"
+    end
+
+    fallback = pure_terminal_raster_stats([1])
+    fallback[:raster_fallback_used] = true
+    refute session.send(:pure_terminal_page_raster?, fallback, job),
+           'raster fallback marker'
   end
 
   def test_pure_raster_batch_path_defers_texture_proof_until_final_reopen
@@ -342,6 +396,45 @@ class SketchupBatchHostContractTest < Minitest::Test
 
 
   private
+
+  def pure_terminal_raster_stats(pages)
+    records = pages.map do |page|
+      {
+        :page => page,
+        :source_span_ids => [],
+        :requested_mode => :raster,
+        :delivered_mode => :raster,
+        :created_entity_type => 'raster_image',
+        :delivery_scope => :page_raster,
+        :delivery_basis => 'explicit_full_page_raster',
+        :full_page_raster_request => true,
+        :semantic_text_evaluated => false,
+        :real_raster_verified => true,
+        :visual_fidelity_verified => true,
+        :cleanup_outcome => 'not_required',
+        :explicit_request => true,
+        :degraded => false,
+        :artifact_evidence => {},
+        :resulting_entity_ids => [100 + page]
+      }
+    end
+    {
+      :text_mode => :raster,
+      :text => 0,
+      :selected_pages => pages,
+      :text_source_span_ids => [],
+      :text_attempts => [],
+      :page_text_delivery_records => [],
+      :source_glyph_physical_deliveries => [],
+      :fallback_transitions => [],
+      :page_representation_fallbacks => [],
+      :inline_image_page_raster_fallbacks => [],
+      :empty_page_source_inspections => [],
+      :raster_fallback_used => false,
+      :raster_delivery_records => records,
+      :terminal_text_delivery_records => Marshal.load(Marshal.dump(records))
+    }
+  end
 
   def load_runner_library
     Object.send(:remove_const, :SketchupBatchImport) if
