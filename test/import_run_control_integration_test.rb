@@ -57,6 +57,11 @@ class ImportRunControlIntegrationTest < Minitest::Test
 
   def test_page_offset_and_certification_are_inside_the_page_transaction
     assert_includes MAIN, 'running_y_offset = opts[:initial_y_offset].to_f'
+    loop_setup = MAIN[
+      /running_y_offset = opts\[:initial_y_offset\]\.to_f.*?pages\.each_with_index/m
+    ]
+    refute_nil loop_setup
+    assert_includes loop_setup, 'page_group_for_certification = nil'
     pipeline = MAIN[/def self\.run_pipeline\(model, path, opts\).*\z/m]
     refute_nil pipeline
     page_end = pipeline[/running_y_offset \+= page_stack_step.*?model\.commit_operation/m]

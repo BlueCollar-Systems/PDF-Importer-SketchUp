@@ -3433,6 +3433,7 @@ module BlueCollarSystems
       page_arrangement = normalize_page_arrangement(opts[:page_arrangement])
       page_gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
       running_y_offset = opts[:initial_y_offset].to_f
+      page_group_for_certification = nil
 
       pages.each_with_index do |page_num, idx|
        begin
