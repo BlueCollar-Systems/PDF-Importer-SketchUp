@@ -3,11 +3,17 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.125-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.126-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
+
+### Recent fixes (v3.7.126)
+
+- **SketchUp 2017 label stability**: native Labels now use the documented two-argument `entities.add_text` form and persist an explicit three-coordinate leader-vector evidence value, avoiding the zero-length-vector host crash while keeping placement verification fail-closed.
+- **Rotated label fidelity**: fraction and part-mark labels with source rotation advance through the item-specific ladder to exact source-outline 3D Text when a native SketchUp label cannot preserve their visual orientation.
+- **Multi-page accountability**: host QA now records every requested page as delivered, failed, or unaccounted and rejects incomplete page sets instead of allowing a page-one-only result to appear complete.
 
 ### Recent fixes (v3.7.125)
 
