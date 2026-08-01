@@ -31,7 +31,11 @@ class FakeGitHub:
 
     def create_release(self, tag, target, title, notes, assets, latest):
         self.calls.append(("create", tag, target, tuple(a.name for a in assets)))
-        payload = release.release_payload(tag, target, assets, immutable=False)
+        if target is not None:
+            self.tag_target = target
+        payload = release.release_payload(
+            tag, self.tag_target, assets, immutable=False
+        )
         self.downloads.update({a.name: a.path.read_bytes() for a in assets})
         self.release_data = payload
         if self.race_on_create:
@@ -66,7 +70,44 @@ class CompleteGitHubReleaseTest(unittest.TestCase):
             self.assertTrue(result["changed"])
             self.assertTrue(result["completed"])
             self.assertEqual("created", result["action"])
-            self.assertEqual("create", github.calls[0][0])
+            self.assertEqual(
+                ("create", "v1.2.3", None, ("product.rbz", "SHA256SUMS.txt")),
+                github.calls[0],
+            )
+
+    def test_absent_tag_creation_passes_exact_atomic_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            assets = self.make_assets(Path(tmp))
+            github = FakeGitHub(tag_target=None)
+            result = release.complete_release(
+                github, "v1.2.3", "a" * 40, "title", "notes", assets, True
+            )
+            self.assertTrue(result["completed"])
+            self.assertEqual("a" * 40, github.calls[0][2])
+
+    def test_gh_existing_tag_release_create_omits_target_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            assets = self.make_assets(Path(tmp))
+            github = release.GhClient("owner/repo")
+            captured = []
+            github._run = lambda args, **_kwargs: captured.append(args)
+            github.create_release(
+                "v1.2.3", None, "title", "notes", assets, True
+            )
+            self.assertEqual(1, len(captured))
+            self.assertNotIn("--target", captured[0])
+
+    def test_gh_absent_tag_release_create_includes_exact_target_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            assets = self.make_assets(Path(tmp))
+            github = release.GhClient("owner/repo")
+            captured = []
+            github._run = lambda args, **_kwargs: captured.append(args)
+            github.create_release(
+                "v1.2.3", "a" * 40, "title", "notes", assets, True
+            )
+            target_index = captured[0].index("--target")
+            self.assertEqual("a" * 40, captured[0][target_index + 1])
 
     def test_partial_mutable_release_uploads_only_missing_asset(self):
         with tempfile.TemporaryDirectory() as tmp:

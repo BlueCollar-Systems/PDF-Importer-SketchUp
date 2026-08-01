@@ -114,8 +114,10 @@ class GhClient:
     def create_release(self, tag, target, title, notes, assets, latest):
         args = [
             "release", "create", tag, "--repo", self.repo,
-            "--target", target, "--title", title, "--notes", notes,
         ]
+        if target is not None:
+            args.extend(["--target", target])
+        args.extend(["--title", title, "--notes", notes])
         if latest:
             args.append("--latest")
         args.extend(str(asset.path) for asset in assets)
@@ -185,8 +187,12 @@ def complete_release(github, tag, target, title, notes, assets, latest=False):
     current = github.get_release(tag)
     if current is None:
         action = "created"
+        # An existing exact tag has already established the release target.
+        # Omitting --target avoids asking the job token for an unnecessary tag
+        # write; an absent tag still uses --target for atomic tag creation.
+        create_target = expected_target if tag_target is None else None
         try:
-            github.create_release(tag, expected_target, title, notes, assets, latest)
+            github.create_release(tag, create_target, title, notes, assets, latest)
         except CommandFailed:
             current = github.get_release(tag)
             if current is None:
