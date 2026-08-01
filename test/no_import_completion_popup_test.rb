@@ -23,7 +23,7 @@ class NoImportCompletionPopupTest < Minitest::Test
 
   def success_branch
     # From the run_pipeline call to the failing else (the success handling).
-    b = import_pdf_body[/stats = run_pipeline.*?else/m]
+    b = import_pdf_body[/stats = run_(?:resumable_)?pipeline.*?else/m]
     refute_nil b, 'could not isolate the import success branch'
     b
   end

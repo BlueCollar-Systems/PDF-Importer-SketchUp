@@ -5,6 +5,7 @@ require File.join(File.dirname(__FILE__), 'cairo_glyph_source')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'logger')
 require File.join(File.dirname(__FILE__), 'svg_3d_text_solid_cache')
+require File.join(File.dirname(__FILE__), 'import_run_control')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -40,8 +41,13 @@ module BlueCollarSystems
           )
           return result
         end
+        run_checkpoint!(opts, :renderer_stage, 0, 5)
         model = opts[:model] || model_for_entities(entities)
-        candidate_cache = Svg3DTextSolidCache.new(model, depth)
+        candidate_cache = Svg3DTextSolidCache.new(
+          model, depth,
+          :run_controller => opts[:run_controller],
+          :page_number => opts[:page_number]
+        )
         if candidate_cache.supported_for?(entities)
           solid_cache = candidate_cache
           result[:solid_cache] = solid_cache.metrics.merge(:enabled => true)
@@ -50,6 +56,8 @@ module BlueCollarSystems
         parse_started = monotonic_ms
         loop_opts = opts.merge(:cache_model_space_loops => false)
         placed = CairoGlyphSource.model_space_loops(svg, media_box, loop_opts)
+        solid_cache.configure_progress!(placed.length) if solid_cache
+        run_checkpoint!(opts, :renderer_stage, 1, 5)
         record_phase_ms!(result, :parse_ms, parse_started)
         result[:source_placements] = placed.length
         verification_started = monotonic_ms
@@ -58,6 +66,7 @@ module BlueCollarSystems
         )
         record_phase_ms!(result, :verification_ms, verification_started)
         result[:source_loop_binding] = loop_binding
+        run_checkpoint!(opts, :renderer_stage, 2, 5)
         unless loop_binding[:ok] == true
           detail = Array(loop_binding[:failures]).first
           detail = detail ? detail.inspect : 'independent SVG loop binding failed'
@@ -154,7 +163,10 @@ module BlueCollarSystems
         end
 
         span_build_started = monotonic_ms
-        render_items.each do |item|
+        render_items.each_with_index do |item, render_index|
+          run_checkpoint!(
+            opts, :text_item, render_index, render_items.length
+          )
           source_id = begin
             RepresentationFidelity.source_span_id(item)
           rescue StandardError => e
@@ -214,6 +226,10 @@ module BlueCollarSystems
             )
             span_result[:source_ink_coverage] = ink_evidence if ink_evidence
             result[:span_results] << span_result
+          rescue ImportRunControl::ImportCancelled
+            cleanup_owned_group(entities, group)
+            owned_groups.delete(group)
+            raise
           rescue StandardError => e
             Logger.warn(
               'Svg3DTextRenderer',
@@ -228,6 +244,7 @@ module BlueCollarSystems
             )
           end
         end
+        run_checkpoint!(opts, :text_item, render_items.length, render_items.length)
         record_phase_ms!(result, :span_build_ms, span_build_started)
 
         preserve_unmatched = if opts.key?(:preserve_unmatched_source_placements)
@@ -255,9 +272,15 @@ module BlueCollarSystems
         end
         publish_performance!(result, solid_cache, render_started)
 
+        run_checkpoint!(opts, :renderer_stage, 5, 5)
         result[:ok] = result[:failures].empty? &&
           result[:transition_proofs].empty?
         result
+      rescue ImportRunControl::ImportCancelled
+        result ||= base_result
+        cleanup_all_owned!(entities, owned_groups || [], result)
+        cleanup_solid_cache!(solid_cache, result)
+        raise
       rescue StandardError => e
         result ||= base_result
         begin
@@ -272,6 +295,18 @@ module BlueCollarSystems
         publish_performance!(result, solid_cache, render_started)
         result[:ok] = false
         result
+      end
+
+      def self.run_checkpoint!(opts, stage, completed, total)
+        controller = opts.is_a?(Hash) ? opts[:run_controller] : nil
+        return false unless controller && controller.respond_to?(:checkpoint!)
+        controller.checkpoint!(
+          stage,
+          :completed => completed.to_i,
+          :total => total.to_i,
+          :page => opts[:page_number]
+        )
+        true
       end
 
       def self.base_result

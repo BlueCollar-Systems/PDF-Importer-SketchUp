@@ -73,6 +73,49 @@ module BlueCollarSystems
       # Closed-region page extrusion is disabled independently of 3D text.
       SHAPE_EXTRUSION_UI_ENABLED = false
 
+      def self.complexity_confirmation_message(assessment)
+        data = assessment.is_a?(Hash) ? assessment : {}
+        counts = data[:counts].is_a?(Hash) ? data[:counts] : {}
+        size_label = data[:class].to_s == 'very_large' ?
+          'Very large' : 'Large'
+        parts = []
+        parts << "#{format_integer(counts[:paths])} paths" if counts.key?(:paths)
+        if counts.key?(:text_items)
+          parts << "#{format_integer(counts[:text_items])} text items"
+        end
+        if counts.key?(:glyph_placements)
+          parts << "#{format_integer(counts[:glyph_placements])} glyph placements"
+        end
+        "#{size_label} editable import: #{parts.join(', ')} " \
+          "(#{format_integer(data[:work_units])} work units).\n\n" \
+          'Progress will remain visible. Esc cancels the current partial page; ' \
+          'certified completed pages are kept and can be resumed.'
+      end
+
+      def self.progress_status(snapshot)
+        data = snapshot.is_a?(Hash) ? snapshot : {}
+        stage = data[:stage].to_s.tr('_', ' ')
+        page = data[:page] || data[:page_index]
+        page_total = data[:page_total]
+        prefix = 'PDF Import'
+        if page && page_total
+          prefix += " — page #{page}/#{page_total}"
+        elsif page
+          prefix += " — page #{page}"
+        end
+        text = "#{prefix} — #{stage} #{data[:completed].to_i}/" \
+          "#{data[:total].to_i} — #{format('%.1f', data[:percentage].to_f)}% — " \
+          "elapsed #{format('%.1f', data[:elapsed_seconds].to_f)}s"
+        unless data[:eta_seconds].nil?
+          text += " — ETA #{format('%.1f', data[:eta_seconds].to_f)}s"
+        end
+        text + ' — Esc to cancel'
+      end
+
+      def self.format_integer(value)
+        value.to_i.to_s.reverse.scan(/.{1,3}/).join(',').reverse
+      end
+
       def self.show(filepath)
         filename = File.basename(filepath)
         saved    = load_prefs
@@ -516,6 +559,9 @@ module BlueCollarSystems
         # Mode-specific quality consolidation per BCS-ARCH-001:
         # Raster mode skips arcs / dashes / fills; everything else is on.
         is_raster = (mode_str == 'raster')
+        group_per_page = (raw[:group_per_page] || 'Yes') == 'Yes'
+        resumable = !is_raster && import_text && group_per_page &&
+          [:text, :labels, :text3d, :glyphs, :geometry].include?(text_mode)
 
         # Consolidated defaults (BCS-ARCH-001 Rule 5 — every mode targets
         # identical "indistinguishable from source" quality; quality dials
@@ -527,7 +573,8 @@ module BlueCollarSystems
           bezier_segments:  32,
           import_as:        is_raster ? :edges : :both,
           layer_name:       (raw[:layer_name] || 'PDF Import').to_s.strip,
-          group_per_page:   (raw[:group_per_page] || 'Yes') == 'Yes',
+          group_per_page:   group_per_page,
+          resumable:        resumable,
           flatten_to_2d:    true,
           merge_tolerance:  0.0005,
           import_fills:     !is_raster,

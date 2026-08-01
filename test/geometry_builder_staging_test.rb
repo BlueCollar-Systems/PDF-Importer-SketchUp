@@ -59,6 +59,7 @@ end
 require 'bc_pdf_vector_importer/content_stream_parser'
 require 'bc_pdf_vector_importer/arc_fitter'
 require 'bc_pdf_vector_importer/logger'
+require 'bc_pdf_vector_importer/import_run_control'
 require 'bc_pdf_vector_importer/geometry_builder'
 
 class GeometryBuilderStagingTest < Minitest::Test
@@ -385,6 +386,43 @@ class GeometryBuilderStagingTest < Minitest::Test
     )
     assert_equal 1, events[0][1][:path_count]
     assert_equal 0, events[2][1][:text_item_count]
+  end
+
+  def test_run_controller_cancels_before_first_geometry_batch
+    controller = BlueCollarSystems::PDFVectorImporter::ImportRunControl::Controller.new(
+      :pages => [7],
+      :requested_mode => :geometry,
+      :cancel_probe => lambda { true },
+      :clock => lambda { 0.0 }
+    )
+    builder = Builder.new(
+      Model.new, [line_path(0.0)], [], [0, 0, 612, 792],
+      :group_per_page => false, :detect_arcs => false,
+      :page_number => 7, :run_controller => controller
+    )
+
+    error = assert_raises(
+      BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled
+    ) { builder.build }
+    assert_equal 7, error.next_page
+    assert_equal :geometry_path, error.snapshot[:stage]
+    assert_equal 0, error.snapshot[:completed]
+  end
+
+  def test_progress_callback_cancellation_is_not_swallowed
+    error = BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled.new(
+      [], 1, { :stage => :geometry_started }
+    )
+    builder = Builder.new(
+      Model.new, [line_path(0.0)], [], [0, 0, 612, 792],
+      :group_per_page => false, :detect_arcs => false,
+      :progress_callback => lambda { |_phase, _detail| raise error }
+    )
+
+    raised = assert_raises(
+      BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled
+    ) { builder.build }
+    assert_same error, raised
   end
 
   private

@@ -50,4 +50,22 @@ class ReportDialogTest < Minitest::Test
     assert_includes summary,
       "Dense text used reusable glyph components for performance; outlines remain vector geometry."
   end
+
+  def test_cancelled_copy_names_kept_pages_and_exact_resume_page
+    stats = {
+      :cancelled => true,
+      :retained_pages => [1, 2],
+      :next_page => 3,
+      :pages => 2
+    }
+    assert_equal(
+      'PDF import cancelled — pages 1-2 kept; resume starts at page 3.',
+      R.cancelled_status(stats)
+    )
+    summary = R.build_summary(stats)
+    assert_includes summary, 'Import Cancelled'
+    assert_includes summary, 'Pages 1-2 were kept.'
+    assert_includes summary, 'Resume starts at page 3.'
+    refute_includes summary, 'Import Complete!'
+  end
 end

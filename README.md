@@ -3,11 +3,18 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.126-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.127-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
+
+### Recent fixes (v3.7.127)
+
+- **Bounded old-hardware imports**: expensive editable paths now publish deterministic complexity estimates, measured monotonic progress, and Escape checkpoints. Cancelling rolls back only the current partial page while retaining completed page groups.
+- **Certified save/reopen resume**: completed pages are journaled by exact PDF, behavior options, importer source, and package identity. Resume rejects missing, duplicated, recertified, or edited page groups—including in-place geometry edits—and continues at the saved page offset.
+- **Release and host identity closure**: existing-tag release completion is atomic and idempotent, every asset is post-verified, and release acceptance binds the repository commit/tag, exact RBZ digest and extracted source tree, loaded Ruby modules, requested pages, and live Q&A/host leases.
+- **Public deterministic regression corpus**: CI generates a multi-page feature PDF plus malformed-input fixture from literal public instructions, with reproducible manifest digests and no private customer files.
 
 ### Recent fixes (v3.7.126)
 

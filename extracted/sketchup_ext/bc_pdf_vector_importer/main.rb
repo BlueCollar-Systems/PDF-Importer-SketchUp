@@ -15,6 +15,7 @@ module BlueCollarSystems
     dir = File.dirname(__FILE__)
     # Core Engine
     require File.join(dir, 'import_config')
+    require File.join(dir, 'import_run_control')
     require File.join(dir, 'import_bounds')
     require File.join(dir, 'page_transform')
     require File.join(dir, 'primitives')
@@ -144,9 +145,56 @@ module BlueCollarSystems
       return false unless callback.respond_to?(:call)
       callback.call(phase.to_s, detail)
       true
+    rescue ImportRunControl::ImportCancelled
+      raise
     rescue StandardError => e
       Logger.warn('Pipeline', "progress callback failed: #{e.message}")
       false
+    end
+
+    def self.run_control_checkpoint!(opts, stage, detail = {})
+      return false unless opts.is_a?(Hash)
+      controller = opts[:run_controller]
+      return false unless controller && controller.respond_to?(:checkpoint!)
+      controller.checkpoint!(stage, detail)
+      true
+    end
+
+    def self.confirm_page_complexity!(opts, page_num, path_count, text_count)
+      controller = opts.is_a?(Hash) ? opts[:run_controller] : nil
+      return nil unless controller && controller.respond_to?(:assess)
+      assessment = controller.assess(
+        :paths => path_count.to_i,
+        :text_items => text_count.to_i
+      )
+      return assessment if assessment[:class] == :normal
+
+      message = ImportDialog.complexity_confirmation_message(assessment)
+      callback = opts[:complexity_confirm]
+      decision = if callback.respond_to?(:call)
+                   callback.call(assessment, message)
+                 elsif BatchHostPolicy.prompt_allowed? &&
+                       defined?(UI) && UI.respond_to?(:messagebox)
+                   UI.messagebox(message, MB_OKCANCEL)
+                 else
+                   Logger.info(
+                     'Pipeline',
+                     "Page #{page_num}: #{assessment[:class]} workload; " \
+                     'noninteractive run continues with checkpoints enabled.'
+                   )
+                   true
+                 end
+      accepted = decision == true
+      accepted ||= defined?(IDOK) && decision == IDOK
+      return assessment if accepted
+
+      snapshot = controller.progress(
+        :complexity_confirmation,
+        :page => page_num, :completed => 0, :total => 1
+      )
+      raise ImportRunControl::ImportCancelled.new(
+        controller.retained_pages, page_num, snapshot
+      )
     end
 
     # Keep exact per-span representation bookkeeping out of the ordinary page
@@ -1041,7 +1089,8 @@ module BlueCollarSystems
         :page_number => page_num,
         :match_text_items => Array(all_page_text_items || text_items),
         :preserve_unmatched_source_placements => false,
-        :source_context => svg_source_context(svg_document, page_num, {})
+        :source_context => svg_source_context(svg_document, page_num, {}),
+        :run_controller => opts[:run_controller]
       )
       unless Array(result[:failures]).empty?
         details = result[:failures].map do |failure|
@@ -3127,8 +3176,124 @@ module BlueCollarSystems
       end
     end
 
-    def self.run_pipeline(model, path, opts)
+    def self.resumable_import?(opts)
+      return false unless opts.is_a?(Hash) && opts[:resumable] == true
+      return false unless opts[:group_per_page] == true
+      return false unless opts[:import_text] == true
+      return false if opts[:force_raster] == true
+      [:text, :labels, :text3d, :glyphs, :geometry].include?(
+        normalize_text_renderer_mode(opts[:text_mode])
+      )
+    end
+
+    def self.run_resumable_pipeline(model, source_path, opts)
+      unless resumable_import?(opts)
+        inner_opts = opts.dup
+        inner_opts[:resumable_page_call] = true
+        return run_pipeline(model, source_path, inner_opts)
+      end
+
       Logger.reset
+      prepared_path = source_path
+      parser = nil
+      begin
+        prepared_path, salvage_note = PdfSalvage.prepare_if_needed(source_path)
+        Logger.info('Pipeline', salvage_note) if salvage_note
+        parser = PDFParser.new(prepared_path)
+        parser.parse
+        if parser.page_count.to_i <= 0
+          raise RepresentationFidelity::ContractError,
+                'PDF parser returned zero pages; requested representation was not changed.'
+        end
+        pages = opts[:pages]
+        pages = (1..parser.page_count).to_a if pages == :all
+        pages = Array(pages).select do |page|
+          page.to_i >= 1 && page.to_i <= parser.page_count
+        end.map { |page| page.to_i }.uniq.sort
+        return nil if pages.empty?
+
+        identity = ImportRunControl.identity_for(
+          source_path, opts, File.dirname(__FILE__)
+        )
+        status_sink = opts[:status_sink] || lambda do |snapshot|
+          if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+            Sketchup.status_text = ImportDialog.progress_status(snapshot)
+          end
+        end
+        controller = ImportRunControl::Controller.new(
+          :model => model,
+          :pages => pages,
+          :requested_mode => opts[:text_mode],
+          :identity => identity,
+          :cancel_probe => opts[:cancel_probe] ||
+            ImportRunControl::EscapeCancelProbe.new,
+          :status_sink => status_sink
+        )
+        runner = lambda do |page, offset, certifier|
+          page_opts = opts.dup
+          page_opts[:pages] = [page]
+          page_opts[:resumable_page_call] = true
+          page_opts[:run_controller] = controller
+          page_opts[:initial_y_offset] = offset
+          page_opts[:page_certifier] = certifier
+          page_opts[:prepared_parser] = parser
+          page_opts[:prepared_pdf_path] = prepared_path
+          page_opts[:preserve_prepared_parser] = true
+          page_opts[:preserve_logger] = true
+          page_opts[:defer_final_diagnostics] = true
+          page_stats = run_pipeline(model, source_path, page_opts)
+          {
+            :stats => page_stats,
+            :next_y_offset => page_stats[:next_y_offset]
+          }
+        end
+        result = ImportRunControl::PageOrchestrator.new(
+          :model => model,
+          :controller => controller,
+          :pages => pages,
+          :runner => runner,
+          :group_per_page => opts[:group_per_page]
+        ).run
+        stats = result[:stats] || {}
+        stats[:cancelled] = result[:cancelled] == true
+        stats[:retained_pages] = result[:retained_pages]
+        stats[:resumed_pages] = result[:resumed_pages]
+        stats[:new_pages] = result[:new_pages]
+        stats[:next_page] = result[:next_page]
+        stats[:resume_message] = result[:message]
+        stats[:resume_schema] = ImportRunControl::JOURNAL_SCHEMA
+        stats[:resume_supported] = true
+        stats[:log_path] = Logger.log_path
+        finalize_import_diagnostics!(source_path, opts, stats)
+        stats
+      ensure
+        begin
+          parser.release if parser
+        rescue StandardError => e
+          Logger.warn('Pipeline', "parser.release failed: #{e.message}")
+        end
+        Logger.flush_log
+        PdfSalvage.cleanup(prepared_path) if defined?(PdfSalvage)
+      end
+    end
+
+    def self.create_resumable_page_group!(model, page_num)
+      unless model && model.respond_to?(:active_entities) &&
+             model.active_entities.respond_to?(:add_group)
+        raise ImportRunControl::ResumeMismatch,
+              "page #{page_num} cannot create its atomic retained group"
+      end
+      group = model.active_entities.add_group
+      group.name = "PDF Page #{page_num}" if group.respond_to?(:name=)
+      group
+    end
+
+    def self.run_pipeline(model, path, opts)
+      unless opts[:resumable_page_call]
+        return run_resumable_pipeline(model, path, opts) if
+          resumable_import?(opts)
+      end
+      Logger.reset unless opts[:preserve_logger]
       config = RecognitionConfig.default
       source_input_path = path
       operation_open = false
@@ -3162,20 +3327,24 @@ module BlueCollarSystems
       # normalized through poppler before the strict internal parser sees
       # them, so "any PDF type" imports instead of failing or degrading.
       salvage_note = nil
-      begin
-        path, salvage_note = PdfSalvage.prepare_if_needed(path)
-      rescue PdfSalvage::SalvageError => e
-        BatchHostPolicy.handle_salvage_error!(e) do |failure|
-          UI.messagebox(failure.message)
+      if opts[:prepared_parser]
+        parser = opts[:prepared_parser]
+        path = opts[:prepared_pdf_path] || path
+      else
+        begin
+          path, salvage_note = PdfSalvage.prepare_if_needed(path)
+        rescue PdfSalvage::SalvageError => e
+          BatchHostPolicy.handle_salvage_error!(e) do |failure|
+            UI.messagebox(failure.message)
+          end
+          return nil
+        rescue StandardError => e
+          Logger.warn("Pipeline", "salvage preflight failed: #{e.message}")
         end
-        return nil
-      rescue StandardError => e
-        Logger.warn("Pipeline", "salvage preflight failed: #{e.message}")
+        Logger.info("Pipeline", salvage_note) if salvage_note
+        parser = PDFParser.new(path)
+        parser.parse
       end
-      Logger.info("Pipeline", salvage_note) if salvage_note
-
-      parser = PDFParser.new(path)
-      parser.parse
       if parser.page_count == 0
         Logger.warn(
           'Pipeline',
@@ -3263,7 +3432,7 @@ module BlueCollarSystems
       import_start = Time.now
       page_arrangement = normalize_page_arrangement(opts[:page_arrangement])
       page_gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
-      running_y_offset = 0.0
+      running_y_offset = opts[:initial_y_offset].to_f
 
       pages.each_with_index do |page_num, idx|
        begin
@@ -3273,6 +3442,11 @@ module BlueCollarSystems
 
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num}/#{parser.page_count} — Parsing... [#{elapsed}s]"
 
+        run_control_checkpoint!(
+          opts, :page_parse,
+          :page => page_num, :page_index => idx + 1,
+          :page_total => pages.length, :completed => 0, :total => 1
+        )
         page_data_started = Time.now
         raw = parser.page_data(page_num)
         record_pipeline_timing!(
@@ -3296,6 +3470,7 @@ module BlueCollarSystems
           "text_offset_pts=(#{text_offset_x.round(3)},#{text_offset_y.round(3)})")
         stack_box = svg_page_box
         source_svg_document = nil
+        page_group_for_certification = nil
         flat_text_fallbacks = {}
         curr_page_height_in = PageTransform.effective_height(stack_box, page_rotation) * (1.0 / 72.0) * opts[:scale].to_f
         curr_page_height_in = 11.0 * opts[:scale].to_f if curr_page_height_in <= 0.0
@@ -3395,9 +3570,15 @@ module BlueCollarSystems
         elsif inline_delivery == :verified_page_raster
           requested_strategy = opts[:import_mode].to_s.downcase
           requested_strategy = 'auto' if requested_strategy.empty?
+          if opts[:page_certifier].respond_to?(:call)
+            page_group_for_certification =
+              create_resumable_page_group!(model, page_num)
+          end
           raster = verified_raster_entity!(
             model, path, page_num, media_box, opts, import_start,
-            page_y_offset, svg_page_box, page_rotation
+            page_y_offset, svg_page_box, page_rotation,
+            page_group_for_certification &&
+              page_group_for_certification.entities
           )
           record_raster_performance!(stats, raster[:performance])
           artifact = raster[:artifact_evidence]
@@ -3668,9 +3849,15 @@ module BlueCollarSystems
             )
           elsif explicit_zero_canonical_page_raster ||
                 source_summary[:visible_nontext_source] == true
+            if opts[:page_certifier].respond_to?(:call)
+              page_group_for_certification =
+                create_resumable_page_group!(model, page_num)
+            end
             raster = verified_raster_entity!(
               model, path, page_num, media_box, opts, import_start,
-              page_y_offset, svg_page_box, page_rotation
+              page_y_offset, svg_page_box, page_rotation,
+              page_group_for_certification &&
+                page_group_for_certification.entities
             )
             record_raster_performance!(stats, raster[:performance])
             stats[:pages] += 1
@@ -3758,6 +3945,10 @@ module BlueCollarSystems
         end
 
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — #{paths.length} paths, #{text_items.length} text items... [#{(Time.now - import_start).round(1)}s]"
+
+        confirm_page_complexity!(
+          opts, page_num, paths.length, text_items.length
+        )
 
         prebuild_analysis_started = Time.now
         page_data = PrimitiveExtractor.extract(paths, text_items, media_box, page_num,
@@ -3890,13 +4081,15 @@ module BlueCollarSystems
           page_rotation: page_rotation,
           provenance_bucket: provenance_opts[:provenance_bucket],
           import_session_id: provenance_opts[:import_session_id],
-           progress_callback: opts[:progress_callback])
+          progress_callback: opts[:progress_callback],
+          run_controller: opts[:run_controller])
         record_pipeline_timing!(
           stats, :prebuild_analysis_ms,
           (Time.now - prebuild_analysis_started) * 1000.0
         )
         builder_started = Time.now
         result = builder.build
+        page_group_for_certification = builder.page_group
         builder_elapsed_ms = ((Time.now - builder_started) * 1000.0).round(3)
         if result[:geometry_staging].is_a?(Hash)
           staging_evidence = result[:geometry_staging].merge(
@@ -4083,6 +4276,7 @@ module BlueCollarSystems
             :layer => layer_mgr.text_fallback_layer,
             :model => model,
             :page_number => page_num,
+            :run_controller => opts[:run_controller],
             :preserve_unmatched_source_placements => Array(text_items).empty?,
             :source_context => svg_source_context(
               svg_document, page_num, svg_failure
@@ -4271,6 +4465,12 @@ module BlueCollarSystems
           delivery_started = Time.now
           glyph_component_cache = {}
           Array(text_items).each_with_index do |source_item, item_index|
+            run_control_checkpoint!(
+              opts, :text_item,
+              :completed => item_index,
+              :total => Array(text_items).length,
+              :page => page_num
+            )
             source_id = RepresentationFidelity.source_span_id(source_item)
             detailed_checkpoint = item_index < 10 ||
               ((item_index + 1) % 25).zero?
@@ -4295,6 +4495,12 @@ module BlueCollarSystems
               precomputed_peer_owners
             )
             completed_items = item_index + 1
+            run_control_checkpoint!(
+              opts, :text_item,
+              :completed => completed_items,
+              :total => Array(text_items).length,
+              :page => page_num
+            )
             if detailed_checkpoint
               report_pipeline_progress(
                 opts, 'svg_item_delivery_item_completed',
@@ -4401,8 +4607,18 @@ module BlueCollarSystems
       post_build_started = Time.now
       report_pipeline_progress(opts, 'post_build_commit_started')
       verified_commit_started = Time.now
+      run_control_checkpoint!(opts, :pre_commit, :completed => 0, :total => 1)
       cleanup_item_raster_page_cache!(opts)
       verify_cached_source_pdf_bindings!(opts)
+      if opts[:page_certifier].respond_to?(:call)
+        unless pages.length == 1 && page_group_for_certification
+          raise ImportRunControl::ResumeMismatch,
+                'resumable page did not produce exactly one retained page group'
+        end
+        opts[:page_certifier].call(
+          page_group_for_certification, running_y_offset, stats
+        )
+      end
       model.commit_operation
       operation_open = false
       stats[:pipeline_performance][:commit_ms] =
@@ -4422,7 +4638,7 @@ module BlueCollarSystems
 
       # Release the raw PDF buffer and object cache to free memory.
       begin
-        parser.release
+        parser.release unless opts[:preserve_prepared_parser]
       rescue StandardError => e
         Logger.warn("Pipeline", "parser.release failed: #{e.message}")
       end
@@ -4464,16 +4680,19 @@ module BlueCollarSystems
         "view_fit_ms=#{stats[:pipeline_performance][:view_fit_ms]}"
       )
 
+      stats[:next_y_offset] = running_y_offset
       stats[:log_path] = Logger.log_path
-      report_pipeline_progress(opts, 'diagnostics_started')
-      diagnostics_started = Time.now
-      finalize_import_diagnostics!(source_input_path, opts, stats)
-      stats[:pipeline_performance][:diagnostics_ms] =
-        ((Time.now - diagnostics_started) * 1000.0).round(3)
-      report_pipeline_progress(
-        opts, 'diagnostics_completed',
-        "diagnostics_ms=#{stats[:pipeline_performance][:diagnostics_ms]}"
-      )
+      unless opts[:defer_final_diagnostics]
+        report_pipeline_progress(opts, 'diagnostics_started')
+        diagnostics_started = Time.now
+        finalize_import_diagnostics!(source_input_path, opts, stats)
+        stats[:pipeline_performance][:diagnostics_ms] =
+          ((Time.now - diagnostics_started) * 1000.0).round(3)
+        report_pipeline_progress(
+          opts, 'diagnostics_completed',
+          "diagnostics_ms=#{stats[:pipeline_performance][:diagnostics_ms]}"
+        )
+      end
       stats[:pipeline_performance][:post_build_ms] =
         ((Time.now - post_build_started) * 1000.0).round(3)
       report_pipeline_progress(
@@ -4488,6 +4707,10 @@ module BlueCollarSystems
           "#{stats[:edges]} edges, #{stats[:text]} text items"
       end
       stats
+    rescue ImportRunControl::ImportCancelled
+      operation_open =
+        abort_open_operation!(model, operation_open, 'Pipeline cancellation')
+      raise
     rescue StandardError => e
       operation_open =
         abort_open_operation!(model, operation_open, 'Pipeline')
@@ -4496,7 +4719,11 @@ module BlueCollarSystems
       cleanup_item_raster_page_cache!(opts) if
         defined?(opts) && opts.is_a?(Hash)
       Logger.flush_log
-      PdfSalvage.cleanup(path) if defined?(PdfSalvage)
+      if defined?(PdfSalvage) &&
+         !(defined?(opts) && opts.is_a?(Hash) &&
+           opts[:preserve_prepared_parser])
+        PdfSalvage.cleanup(path)
+      end
     end
 
     def self.place_embedded_images(model, assets, media_box, opts, y_offset, page_rotation, target_entities = nil)
@@ -5646,11 +5873,15 @@ module BlueCollarSystems
       begin
         opts = ImportDialog.show(path)
         return unless opts
-        stats = run_pipeline(model, path, opts)
+        stats = run_resumable_pipeline(model, path, opts)
         if stats
           # No blocking every-import modal (owner rule). Concise result on
           # the status bar; full summary in import_report.json + Import Health.
-          ReportDialog.announce(stats)
+          if stats[:cancelled]
+            ReportDialog.announce_cancelled(stats)
+          else
+            ReportDialog.announce(stats)
+          end
         else
           UI.messagebox("No vector content found in PDF.")
         end

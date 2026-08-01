@@ -163,6 +163,57 @@ class SketchupHostJobTest < Minitest::Test
     end
   end
 
+  def test_release_acceptance_requires_and_preserves_exact_identity
+    load_job_tool
+    Dir.mktmpdir('su-host-release-identity') do |dir|
+      package = File.join(dir, 'candidate.rbz')
+      board = File.join(dir, 'RESOURCE_BOARD.md')
+      global_lock = File.join(dir, 'CAD-HOST-GLOBAL.lock')
+      host_lock = File.join(dir, 'SKETCHUP-HOST.lock')
+      File.binwrite(package, 'candidate-package')
+      [board, global_lock, host_lock].each { |path| File.write(path, 'lease') }
+      package_sha = Digest::SHA256.file(package).hexdigest
+      _pdf, job_path = write_json_job(
+        dir,
+        'release_acceptance' => true,
+        'repository_root' => dir,
+        'git_commit' => 'a' * 40,
+        'git_tag' => 'v3.7.127',
+        'package_path' => package,
+        'package_sha256' => package_sha,
+        'expected_importer_version' => '3.7.127',
+        'pages' => [1],
+        'source_tree_sha256' => 'b' * 64,
+        'lease_evidence' => {
+          'claimant' => 'Codex /root/sketchup_report_lane',
+          'resource_board_path' => board,
+          'global_lock_path' => global_lock,
+          'host_lock_path' => host_lock
+        }
+      )
+
+      job = SketchupHostJob.load(job_path)
+      assert_equal true, job[:release_acceptance]
+      assert_equal File.expand_path(package), job[:package_path]
+      assert_equal package_sha, job[:package_sha256]
+      assert_equal 'a' * 40, job[:git_commit]
+      assert_equal 'v3.7.127', job[:git_tag]
+      assert_equal '3.7.127', job[:expected_importer_version]
+      assert_equal Digest::SHA256.file(host_lock).hexdigest,
+                   job[:lease_evidence]['host_lock_sha256']
+    end
+  end
+
+  def test_release_acceptance_rejects_missing_exact_package_identity
+    load_job_tool
+    Dir.mktmpdir('su-host-release-missing') do |dir|
+      _pdf, job_path = write_json_job(dir, 'release_acceptance' => true)
+      error = assert_raises(ArgumentError) { SketchupHostJob.load(job_path) }
+      assert_match(/release acceptance.*repository_root|repository_root/i,
+                   error.message)
+    end
+  end
+
   private
 
   def assert_invalid_pages(value)

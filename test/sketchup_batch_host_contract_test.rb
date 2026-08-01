@@ -289,6 +289,7 @@ class SketchupBatchHostContractTest < Minitest::Test
     assert_equal :text3d, opts[:text_mode]
     assert_equal true, opts[:use_3d_text]
     assert_equal false, opts[:force_raster]
+    assert_equal true, opts[:resumable]
   end
 
   def test_runner_preserves_complete_evidence_and_source_provenance

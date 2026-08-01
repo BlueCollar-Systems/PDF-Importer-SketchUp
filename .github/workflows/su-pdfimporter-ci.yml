@@ -102,6 +102,7 @@ jobs:
           ruby test/rotated_run_merge_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
           ruby test/cairo_glyph_source_test.rb
+          ruby test/synthetic_public_corpus_test.rb
 
   poppler-prune:
     runs-on: ubuntu-latest
@@ -127,7 +128,9 @@ jobs:
       - name: Zero-ceremony release contract tests
         run: python tools/test_build_release.py -v
       - name: Release safety unit tests (R21-5)
-        run: python tools/test_release_safety.py
+        run: |
+          python tools/test_release_safety.py
+          python -m unittest tools.test_complete_github_release tools.test_skp_probe_lock_contract
       - name: Smoke the checked-in Windows Poppler helpers
         run: python tools/smoke_poppler_helpers.py --required
       - name: Validate release publication state

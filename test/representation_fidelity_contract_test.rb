@@ -2348,8 +2348,9 @@ class RepresentationFidelityContractTest < Minitest::Test
     )
     guarded_commits = main.scan(
       /cleanup_item_raster_page_cache!\(opts\)\s+
-       verify_cached_source_pdf_bindings!\(opts\)\s+
-       model\.commit_operation/x
+       verify_cached_source_pdf_bindings!\(opts\)
+       (?:(?!cleanup_item_raster_page_cache!\(opts\)).)*?
+       model\.commit_operation/mx
     )
 
     assert_equal 2, guarded_commits.length,

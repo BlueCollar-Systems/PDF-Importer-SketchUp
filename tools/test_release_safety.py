@@ -581,21 +581,19 @@ class ReleaseSafetyTest:
         )
         assert code == 0
 
-    def test_workflow_passes_push_boundary_and_gates_every_downstream_step(self):
+    def test_workflow_completes_release_idempotently_and_gates_dispatch(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
             encoding="utf-8"
         )
-        assert '--before "${{ github.event.before }}"' in workflow
-        assert '--head "$GITHUB_SHA"' in workflow
-        assert "--mode release" in workflow
-        assert '--summary "$GITHUB_STEP_SUMMARY"' in workflow
-        audit_at = workflow.index("release_safety.py audit-existing-tag")
-        false_at = workflow.rfind('echo "minted=false"', 0, audit_at)
-        assert false_at >= 0
+        assert "python tools/complete_github_release.py" in workflow
+        assert '--target "${RELEASE_TARGET:-$GITHUB_SHA}"' in workflow
+        assert '--asset "$RBZ"' in workflow
+        assert '--asset "$RELEASE_CHECKSUMS"' in workflow
+        assert '--asset "$SOURCE_CHECKSUMS"' in workflow
         token_at = workflow.index("- name: Check website dispatch token secret")
         token_block = workflow[token_at : workflow.index("- name:", token_at + 8)]
-        assert "if: steps.mint.outputs.minted == 'true'" in token_block
-        assert not re.search(r"^\s*gh release upload\b", workflow, re.MULTILINE)
+        assert "steps.mint.outputs.completed == 'true'" in token_block
+        assert "steps.mint.outputs.changed == 'true'" in token_block
         assert "--clobber" not in workflow
 
     def test_steel_shapes_release_never_overwrites_existing_assets(self):

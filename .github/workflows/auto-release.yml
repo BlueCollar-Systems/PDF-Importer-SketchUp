@@ -60,7 +60,9 @@ jobs:
           python tools/test_build_release.py -v
           python -m unittest tools.test_poppler_runtime_contract tools.test_workflow_poppler_contract
       - name: Release safety unit tests (R21-5)
-        run: python tools/test_release_safety.py
+        run: |
+          python tools/test_release_safety.py
+          python -m unittest tools.test_complete_github_release tools.test_skp_probe_lock_contract
       - name: Smoke the checked-in Windows Poppler helpers
         run: python tools/smoke_poppler_helpers.py --required
       - name: Evaluate release publication gate
@@ -134,7 +136,7 @@ jobs:
           python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext
           python3 tools/test_prune_poppler_bundle.py
           python3 tools/test_release_safety.py
-          python3 -m unittest tools.test_poppler_runtime_contract tools.test_workflow_poppler_contract
+          python3 -m unittest tools.test_poppler_runtime_contract tools.test_workflow_poppler_contract tools.test_complete_github_release tools.test_skp_probe_lock_contract
           find extracted/sketchup_ext test -type f -name "*.rb" -print0 | xargs -0 -n1 ruby -c
           ruby test/smoke_test.rb
           ruby test/ruby22_compat_test.rb
@@ -152,6 +154,7 @@ jobs:
           ruby test/textmode1_invariant_test.rb
           ruby test/rotated_run_merge_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
+          ruby test/synthetic_public_corpus_test.rb
 
       - name: Exact Ruby 2.2.4-p230 source-built parse and smoke gates
         run: |
@@ -266,46 +269,32 @@ jobs:
           SOURCE_CHECKSUMS_INPUT="third_party/sources/SHA256SUMS.txt"
           SOURCE_CHECKSUMS="approved-windows-rbz-download/SOURCE_SHA256SUMS.txt"
           RELEASE_CHECKSUMS="approved-windows-rbz-download/SHA256SUMS.txt"
+          RELEASE_NOTES="approved-windows-rbz-download/RELEASE_NOTES.md"
           test -f "$SOURCE_CHECKSUMS_INPUT"
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release ${TAG} already exists — immutable; skipping asset upload."
-            # Round 21 Task 5: Git history makes an ignored first warning
-            # enforceable across fresh CI checkouts. A docs-only push stays green.
-            echo "minted=false" >> "$GITHUB_OUTPUT"
-            python tools/release_safety.py audit-existing-tag \
-              --repo "${GITHUB_REPOSITORY}" \
-              --tag "$TAG" \
-              --before "${{ github.event.before }}" \
-              --head "$GITHUB_SHA" \
-              --session-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-              --mode release \
-              --summary "$GITHUB_STEP_SUMMARY" \
-              --warnings-file .release-safety/warnings.json
-            exit 0
-          else
-            ACTUAL_SHA256=$(sha256sum "$RBZ" | cut -d' ' -f1)
-            printf '%s  %s\n' "$ACTUAL_SHA256" "$(basename "$RBZ")" > "$RELEASE_CHECKSUMS"
-            cp "$SOURCE_CHECKSUMS_INPUT" "$SOURCE_CHECKSUMS"
-            (
-              cd "$(dirname "$RELEASE_CHECKSUMS")"
-              sha256sum --check SHA256SUMS.txt
-            )
-            gh release create "$TAG" \
-              --target "${RELEASE_TARGET:-$GITHUB_SHA}" \
-              --title "$TAG — PDF Vector Importer for SketchUp" \
-              --notes "Automated release from latest \`main\` commit.
-
-            **Install:** Download \`${RBZ}\` below, then in SketchUp: **Window > Extension Manager > Install Extension**." \
-              --latest \
-              "$RBZ" \
-              "$RELEASE_CHECKSUMS" \
-              "$SOURCE_CHECKSUMS"
-            echo "minted=true" >> "$GITHUB_OUTPUT"
-          fi
+          ACTUAL_SHA256=$(sha256sum "$RBZ" | cut -d' ' -f1)
+          printf '%s  %s\n' "$ACTUAL_SHA256" "$(basename "$RBZ")" > "$RELEASE_CHECKSUMS"
+          cp "$SOURCE_CHECKSUMS_INPUT" "$SOURCE_CHECKSUMS"
+          (
+            cd "$(dirname "$RELEASE_CHECKSUMS")"
+            sha256sum --check SHA256SUMS.txt
+          )
+          printf '%s\n\n%s\n' \
+            'Automated release from the exact main commit.' \
+            '**Install:** Download the RBZ below, then in SketchUp use Window > Extension Manager > Install Extension.' \
+            > "$RELEASE_NOTES"
+          python tools/complete_github_release.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --target "${RELEASE_TARGET:-$GITHUB_SHA}" \
+            --title "$TAG — PDF Vector Importer for SketchUp" \
+            --notes-file "$RELEASE_NOTES" \
+            --latest \
+            --asset "$RBZ" \
+            --asset "$RELEASE_CHECKSUMS" \
+            --asset "$SOURCE_CHECKSUMS"
 
       - name: Check website dispatch token secret
-        if: steps.mint.outputs.minted == 'true'
+        if: steps.mint.outputs.completed == 'true' && steps.mint.outputs.changed == 'true'
         id: website_dispatch_token
         env:
           WEBSITE_DISPATCH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN || secrets.BLUECOLLAR_WEBSITE_DISPATCH_TOKEN || secrets.REPO_DISPATCH_TOKEN }}
@@ -317,7 +306,7 @@ jobs:
           fi
 
       - name: Dispatch website release update
-        if: steps.mint.outputs.minted == 'true' && steps.website_dispatch_token.outputs.has_token == 'true'
+        if: steps.mint.outputs.completed == 'true' && steps.mint.outputs.changed == 'true' && steps.website_dispatch_token.outputs.has_token == 'true'
         uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.WEBSITE_DISPATCH_TOKEN || secrets.BLUECOLLAR_WEBSITE_DISPATCH_TOKEN || secrets.REPO_DISPATCH_TOKEN }}
@@ -343,7 +332,7 @@ jobs:
             core.info('Dispatched product-release to BlueCollar-Website');
 
       - name: Warn when website dispatch token is missing
-        if: steps.mint.outputs.minted == 'true' && steps.website_dispatch_token.outputs.has_token != 'true'
+        if: steps.mint.outputs.completed == 'true' && steps.mint.outputs.changed == 'true' && steps.website_dispatch_token.outputs.has_token != 'true'
         run: |
           echo "::warning::Skipping website dispatch because no valid dispatch token secret is configured."
           echo "Set WEBSITE_DISPATCH_TOKEN (or BLUECOLLAR_WEBSITE_DISPATCH_TOKEN / REPO_DISPATCH_TOKEN) to enable cross-repo dispatch."

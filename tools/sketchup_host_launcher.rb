@@ -6,6 +6,7 @@ require 'digest'
 require 'fileutils'
 require 'securerandom'
 require 'rbconfig'
+require 'open3'
 require File.expand_path('sketchup_host_job', __dir__)
 require File.expand_path('sketchup_host_evidence', __dir__)
 
@@ -288,6 +289,15 @@ module SketchupHostLauncher
       raise LaunchError,
             'job source tree SHA256 does not match the selected importer source'
     end
+    if original_job[:release_acceptance]
+      verify_repository_identity!(original_job)
+      package_tree = package_tree_sha256(original_job[:package_path])
+      unless package_tree == source_tree_sha256
+        raise LaunchError,
+              'selected importer source does not equal the exact RBZ package tree'
+      end
+      verify_lease_evidence_current!(original_job[:lease_evidence])
+    end
     original_job = original_job.merge(
       :source_tree_sha256 => source_tree_sha256
     )
@@ -464,7 +474,15 @@ module SketchupHostLauncher
       'original_pdf_sha256' => source_sha256,
       'immutable_pdf_path' => immutable_path,
       'immutable_pdf_sha256' => source_sha256,
-      'source_tree_sha256' => original_job[:source_tree_sha256]
+      'source_tree_sha256' => original_job[:source_tree_sha256],
+      'release_acceptance' => original_job[:release_acceptance] == true,
+      'repository_root' => original_job[:repository_root],
+      'git_commit' => original_job[:git_commit],
+      'git_tag' => original_job[:git_tag],
+      'package_path' => original_job[:package_path],
+      'package_sha256' => original_job[:package_sha256],
+      'expected_importer_version' => original_job[:expected_importer_version],
+      'lease_evidence' => original_job[:lease_evidence]
     }
     controlled_path = File.join(run_dir, 'job.json')
     atomic_write_json(controlled_path, payload)
@@ -508,6 +526,7 @@ module SketchupHostLauncher
     require_equal!(result['skp_export_only'], true, 'SKP export-only marker')
     require_equal!(result['requested_text_mode'], effective_requested_mode(job),
                    'requested representation mode')
+    verify_release_identity!(result, job)
     verify_source_tree_binding!(result, job)
     require_path_equal!(result['model_path'], job[:model_path],
                         'saved model path')
@@ -539,6 +558,7 @@ module SketchupHostLauncher
     )
     require_equal!(result['requested_text_mode'], effective_requested_mode(job),
                    'requested representation mode')
+    verify_release_identity!(result, job)
     verify_source_tree_binding!(result, job)
     require_equal!(result['worktree_metadata_version'],
                    result['loaded_importer_version'], 'loaded importer version')
@@ -621,6 +641,112 @@ module SketchupHostLauncher
                    'source tree SHA256 before load')
     require_equal!(result['source_tree_sha256_after_import'], expected,
                    'source tree SHA256 after import')
+    true
+  end
+
+  def verify_repository_identity!(job)
+    root = File.expand_path(job[:repository_root].to_s)
+    unless File.directory?(File.join(root, '.git'))
+      raise LaunchError, 'release repository_root is not a Git worktree'
+    end
+    head = git_output!(root, ['rev-parse', 'HEAD']).downcase
+    tag = git_output!(
+      root, ['rev-list', '-n', '1', "refs/tags/#{job[:git_tag]}"]
+    ).downcase
+    unless head == job[:git_commit] && tag == job[:git_commit]
+      raise LaunchError,
+            'release repository commit/tag identity does not match the job'
+    end
+    true
+  end
+
+  def git_output!(root, arguments)
+    stdout, stderr, status = Open3.capture3('git', *arguments, :chdir => root)
+    unless status.success? && !stdout.to_s.strip.empty?
+      raise LaunchError, "git identity command failed: #{stderr.to_s.strip}"
+    end
+    stdout.to_s.strip
+  end
+
+  def package_tree_sha256(package_path, python = nil)
+    package = File.expand_path(package_path.to_s)
+    unless File.file?(package)
+      raise LaunchError, 'exact RBZ package is missing'
+    end
+    executable = python.to_s.strip
+    executable = ENV['PYTHON'].to_s.strip if executable.empty?
+    executable = 'python' if executable.empty?
+    script = [
+      'import hashlib,sys,zipfile',
+      'd=hashlib.sha256()',
+      'z=zipfile.ZipFile(sys.argv[1])',
+      "names=sorted(n for n in z.namelist() if not n.endswith('/'))",
+      "[(d.update(n.encode('utf-8')),d.update(b'\\0'),d.update(str(len(z.read(n))).encode('ascii')),d.update(b'\\0'),d.update(hashlib.sha256(z.read(n)).hexdigest().encode('ascii')),d.update(b'\\0')) for n in names]",
+      'print(d.hexdigest())'
+    ].join(';')
+    stdout, stderr, status = Open3.capture3(executable, '-c', script, package)
+    digest = stdout.to_s.strip.downcase
+    unless status.success? && digest =~ /\A[0-9a-f]{64}\z/
+      raise LaunchError,
+            "could not inspect exact RBZ package tree: #{stderr.to_s.strip}"
+    end
+    digest
+  end
+
+  def verify_lease_evidence_current!(lease)
+    unless lease.is_a?(Hash) && !lease['claimant'].to_s.strip.empty?
+      raise LaunchError, 'host lease evidence is missing'
+    end
+    %w[resource_board global_lock host_lock].each do |name|
+      path = lease["#{name}_path"]
+      expected = lease["#{name}_sha256"]
+      unless File.file?(path.to_s) &&
+             Digest::SHA256.file(path.to_s).hexdigest == expected
+        raise LaunchError, "#{name.tr('_', ' ')} lease evidence changed"
+      end
+    end
+    true
+  end
+
+  def verify_release_identity!(result, job)
+    return true unless job[:release_acceptance] == true
+    require_equal!(result['release_acceptance'], true,
+                   'release acceptance marker')
+    require_path_equal!(result['repository_root'], job[:repository_root],
+                        'release repository root')
+    require_equal!(result['git_commit'], job[:git_commit], 'release commit')
+    require_equal!(result['git_tag'], job[:git_tag], 'release tag')
+    require_path_equal!(result['package_path'], job[:package_path],
+                        'release package path')
+    require_equal!(result['package_sha256'], job[:package_sha256],
+                   'release package SHA256')
+    require_equal!(Digest::SHA256.file(job[:package_path]).hexdigest,
+                   job[:package_sha256], 'current release package SHA256')
+    require_equal!(result['loaded_importer_version'],
+                   job[:expected_importer_version],
+                   'expected release importer version')
+    require_equal!(result['requested_pages'], job[:pages],
+                   'requested release pages')
+    require_equal!(result['lease_evidence'], job[:lease_evidence],
+                   'release lease evidence')
+    modules = result['module_identities']
+    locations = result['source_locations']
+    unless modules.is_a?(Hash) && locations.is_a?(Hash) &&
+           modules.keys.sort == locations.keys.sort
+      raise LaunchError, 'loaded module identity set is incomplete'
+    end
+    modules.each do |name, identity|
+      path = Array(locations[name]).first
+      unless identity.is_a?(Hash)
+        raise LaunchError, "loaded module identity #{name} is invalid"
+      end
+      require_path_equal!(identity['path'], path, "loaded module #{name} path")
+      require_sha256!(identity['sha256'], "loaded module #{name} SHA256")
+      require_equal!(Digest::SHA256.file(path).hexdigest, identity['sha256'],
+                     "loaded module #{name} SHA256")
+    end
+    verify_repository_identity!(job)
+    verify_lease_evidence_current!(job[:lease_evidence])
     true
   end
 

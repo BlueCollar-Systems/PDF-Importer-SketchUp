@@ -330,7 +330,7 @@ module SketchupBatchImport
           Array(stats[:source_glyph_physical_deliveries]),
         'representation_fidelity' => stats[:representation_fidelity],
         'import_contract_ready' => stats[:import_contract_ready]
-      }
+      }.merge(release_identity_payload(job, source_locations))
     end
 
     def require_su2017_ruby_identity!
@@ -470,6 +470,37 @@ module SketchupBatchImport
       }
     end
 
+    def release_identity_payload(job, source_locations)
+      module_identities = {}
+      source_locations.each do |name, location|
+        path = Array(location).first
+        unless path && File.file?(path)
+          raise "loaded module path is missing for #{name}"
+        end
+        module_identities[name] = {
+          'path' => path,
+          'sha256' => Digest::SHA256.file(path).hexdigest
+        }
+      end
+      payload = {
+        'release_acceptance' => job[:release_acceptance] == true,
+        'requested_pages' => job[:pages],
+        'module_identities' => module_identities
+      }
+      if job[:release_acceptance]
+        payload.merge!(
+          'repository_root' => job[:repository_root],
+          'git_commit' => job[:git_commit],
+          'git_tag' => job[:git_tag],
+          'package_path' => job[:package_path],
+          'package_sha256' => job[:package_sha256],
+          'expected_importer_version' => job[:expected_importer_version],
+          'lease_evidence' => job[:lease_evidence]
+        )
+      end
+      payload
+    end
+
     def effective_requested_mode(job)
       return :raster if job[:import_mode].to_s == 'raster'
       job[:text_mode]
@@ -547,6 +578,7 @@ module SketchupBatchImport
       opts[:import_text] = !full_page_raster
       opts[:use_3d_text] = (opts[:text_mode] == :text3d)
       opts[:group_per_page] = true
+      opts[:resumable] = !full_page_raster
       opts[:source_lineage] = {
         :original_pdf_path => job[:original_pdf_path],
         :original_pdf_sha256 => job[:original_pdf_sha256],
@@ -654,7 +686,7 @@ module SketchupBatchImport
         'text_renderers' => Array(stats[:text_renderers]),
         'representation_fidelity' => stats[:representation_fidelity],
         'import_contract_ready' => stats[:import_contract_ready]
-      }
+      }.merge(release_identity_payload(job, source_locations))
     end
 
     def reopen_model!(model_path)

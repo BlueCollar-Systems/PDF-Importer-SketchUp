@@ -72,6 +72,7 @@ module Geom
 end
 
 require 'bc_pdf_vector_importer/svg_3d_text_renderer'
+require 'bc_pdf_vector_importer/import_run_control'
 
 class Svg3DBounds
   attr_reader :min, :max
@@ -1254,6 +1255,36 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal 1, result[:unmatched_source_results].length
     assert_equal [0], result[:unmatched_source_results][0][:placement_indices]
     assert result[:unmatched_source_results][0][:depth_verified]
+  end
+
+  def test_cached_glyph_cancellation_cleans_owned_span_and_propagates
+    model = Svg3DModel.new(:with_definitions => true)
+    entities = Svg3DEntities.new(:model => model, :with_definitions => true)
+    controller =
+      BlueCollarSystems::PDFVectorImporter::ImportRunControl::Controller.new(
+        :pages => [1],
+        :requested_mode => :text3d,
+        :cancel_probe => lambda do |snapshot|
+          snapshot[:stage] == :glyph_placement
+        end,
+        :clock => lambda { 0.0 }
+      )
+
+    error = assert_raises(
+      BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled
+    ) do
+      RENDERER.render_svg(
+        entities, square_svg, MEDIA_BOX, [span],
+        :depth => 0.05, :model => model, :run_controller => controller,
+        :page_number => 1
+      )
+    end
+
+    assert_equal :glyph_placement, error.snapshot[:stage]
+    assert_empty entities.groups,
+                 'the partial source-span group must not survive cancellation'
+    assert_empty model.definitions.to_a,
+                 'the partial exact-glyph definition must not survive cancellation'
   end
 
 end

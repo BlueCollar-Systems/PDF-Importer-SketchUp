@@ -353,4 +353,70 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_equal 'Yes', prefs[:match_pdf_layers]
     assert_equal 'Yes', Sketchup.default_value(PREF_KEY, 'match_pdf_layers')
   end
+
+  def test_large_import_copy_names_exact_counts_cancel_and_page_retention
+    message = BID.complexity_confirmation_message(
+      :class => :very_large,
+      :counts => { :paths => 20, :text_items => 1_200,
+                   :glyph_placements => 5_000 },
+      :work_units => 9_820
+    )
+
+    assert_includes message, 'Very large editable import'
+    assert_includes message, '20 paths'
+    assert_includes message, '1,200 text items'
+    assert_includes message, '5,000 glyph placements'
+    assert_includes message, 'Esc cancels the current partial page'
+    assert_includes message, 'certified completed pages are kept'
+  end
+
+  def test_progress_status_uses_measured_eta_only_when_available
+    measured = BID.progress_status(
+      :stage => :text_item, :page => 2, :page_index => 2, :page_total => 3,
+      :completed => 25, :total => 100, :percentage => 25.0,
+      :elapsed_seconds => 10.2, :eta_seconds => 30.1
+    )
+    assert_equal(
+      'PDF Import — page 2/3 — text item 25/100 — 25.0% — ' \
+      'elapsed 10.2s — ETA 30.1s — Esc to cancel', measured
+    )
+
+    unmeasured = BID.progress_status(
+      :stage => :geometry_path, :page => 1, :page_index => 1,
+      :page_total => 1, :completed => 0, :total => 100,
+      :percentage => 0.0, :elapsed_seconds => 0.0, :eta_seconds => nil
+    )
+    refute_includes unmeasured, 'ETA'
+    assert_includes unmeasured, 'Esc to cancel'
+  end
+
+  def test_resume_is_enabled_only_for_grouped_editable_text_imports
+    editable = BID.send(
+      :build_opts,
+      :import_mode => 'vector', :import_text => 'Yes',
+      :text_mode => '3D Text', :group_per_page => 'Yes'
+    )
+    assert_equal true, editable[:resumable]
+
+    no_text = BID.send(
+      :build_opts,
+      :import_mode => 'vector', :import_text => 'No',
+      :text_mode => '3D Text', :group_per_page => 'Yes'
+    )
+    assert_equal false, no_text[:resumable]
+
+    raster = BID.send(
+      :build_opts,
+      :import_mode => 'raster', :import_text => 'Yes',
+      :text_mode => 'Raster', :group_per_page => 'Yes'
+    )
+    assert_equal false, raster[:resumable]
+
+    ungrouped = BID.send(
+      :build_opts,
+      :import_mode => 'vector', :import_text => 'Yes',
+      :text_mode => 'Geometry', :group_per_page => 'No'
+    )
+    assert_equal false, ungrouped[:resumable]
+  end
 end

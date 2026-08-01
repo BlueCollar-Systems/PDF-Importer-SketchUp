@@ -2,13 +2,14 @@
 # Import-scoped reuse of exact PDF-renderer glyph solids.
 
 require 'digest'
+require File.join(File.dirname(__FILE__), 'import_run_control')
 
 module BlueCollarSystems
   module PDFVectorImporter
     class Svg3DTextSolidCache
       attr_reader :depth
 
-      def initialize(model, depth)
+      def initialize(model, depth, opts = {})
         @model = model
         @depth = finite_number!(depth, '3D text cache depth')
         raise '3D text cache depth must be positive' unless @depth > 0.0
@@ -16,6 +17,10 @@ module BlueCollarSystems
           model.definitions : nil
         @records = {}
         @created_definitions = []
+        @run_controller = opts[:run_controller]
+        @page_number = opts[:page_number]
+        @placement_total = 0
+        @placement_index = 0
         @metrics = {
           :definition_builds => 0,
           :cache_hits => 0,
@@ -26,6 +31,12 @@ module BlueCollarSystems
           :instance_placement_ms => 0.0,
           :transaction_abort_required => false
         }
+      end
+
+      def configure_progress!(total)
+        @placement_total = total.to_i
+        @placement_total = 0 if @placement_total < 0
+        self
       end
 
       def supported_for?(target_entities)
@@ -98,6 +109,14 @@ module BlueCollarSystems
 
       def add_instance(target_entities, record)
         placement_started = monotonic_ms
+        if @run_controller && @run_controller.respond_to?(:checkpoint!)
+          @run_controller.checkpoint!(
+            :glyph_placement,
+            :completed => @placement_index,
+            :total => @placement_total,
+            :page => @page_number
+          )
+        end
         unless supported_for?(target_entities)
           raise 'host cannot place an exact glyph component instance'
         end
@@ -119,6 +138,7 @@ module BlueCollarSystems
         instance = target_entities.add_instance(definition, transform)
         raise 'host rejected exact glyph component instance' unless instance
         @metrics[:instance_placements] += 1
+        @placement_index += 1
         instance
       ensure
         if placement_started

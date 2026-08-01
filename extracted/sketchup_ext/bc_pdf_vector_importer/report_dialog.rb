@@ -28,6 +28,27 @@ module BlueCollarSystems
         nil
       end
 
+      def self.cancelled_status(stats)
+        retained = Array(stats[:retained_pages]).map { |page| page.to_i }.sort
+        kept = if retained.empty?
+                 'no completed pages kept'
+               elsif retained.length == 1
+                 "page #{retained.first} kept"
+               else
+                 "pages #{format_page_list(retained)} kept"
+               end
+        resume = stats[:next_page] ?
+          "; resume starts at page #{stats[:next_page].to_i}" : ''
+        "PDF import cancelled — #{kept}#{resume}."
+      end
+
+      def self.announce_cancelled(stats)
+        return unless defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+        Sketchup.status_text = cancelled_status(stats)
+      rescue StandardError
+        nil
+      end
+
       # ---------------------------------------------------------------
       # On-demand summary (Import Health / menu only — never auto-fired
       # as a blocking modal after import).
@@ -42,8 +63,24 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       def self.build_summary(stats)
         lines = []
-        lines << "Import Complete!"
+        cancelled = stats[:cancelled] == true
+        lines << (cancelled ? 'Import Cancelled' : 'Import Complete!')
         lines << ""
+
+        if cancelled
+          retained = Array(stats[:retained_pages]).map { |page| page.to_i }.sort
+          if retained.empty?
+            lines << 'No completed pages were kept.'
+          elsif retained.length == 1
+            lines << "Page #{retained.first} was kept."
+          else
+            lines << "Pages #{format_page_list(retained)} were kept."
+          end
+          if stats[:next_page]
+            lines << "Resume starts at page #{stats[:next_page].to_i}."
+          end
+          lines << ''
+        end
 
         # What happened
         pg = stats[:pages] || 0

@@ -7,6 +7,7 @@
 
 require File.join(File.dirname(__FILE__), 'page_transform')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
+require File.join(File.dirname(__FILE__), 'import_run_control')
 require 'digest'
 
 module BlueCollarSystems
@@ -60,6 +61,7 @@ module BlueCollarSystems
         @provenance_bucket = [] unless @provenance_bucket.is_a?(Array)
         @import_session_id = opts[:import_session_id].to_s
         @progress_callback = opts[:progress_callback]
+        @run_controller = opts[:run_controller]
 
         @edge_count = 0
         @face_count = 0
@@ -116,6 +118,14 @@ module BlueCollarSystems
         configure_geometry_staging!(heavy_page)
         path_yield_every = heavy_page ? 100 : 0
         @paths.each_with_index do |path, path_idx|
+          if (path_idx % 100).zero?
+            run_checkpoint!(
+              :geometry_path,
+              :completed => path_idx,
+              :total => @paths.length,
+              :page => @page_number
+            )
+          end
           if path_yield_every > 0 && (path_idx % path_yield_every).zero?
             Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)..."
           end
@@ -184,6 +194,12 @@ module BlueCollarSystems
             end
           end
         end
+        run_checkpoint!(
+          :geometry_path,
+          :completed => @paths.length,
+          :total => @paths.length,
+          :page => @page_number
+        )
         finalize_geometry_staging!
         flush_deferred_small_faces!
         emit_progress(
@@ -211,6 +227,12 @@ module BlueCollarSystems
           text_target = text_group ? text_group.entities : target
 
           @text_items.each_with_index do |item, text_index|
+            run_checkpoint!(
+              :text_item,
+              :completed => text_index,
+              :total => @text_items.length,
+              :page => @page_number
+            )
             source_span_id = if item.respond_to?(:source_span_id)
                                item.source_span_id.to_s
                              else
@@ -229,6 +251,12 @@ module BlueCollarSystems
                            text_fallback_layer
                          end
             place_text(text_target, item, page_origin_x, page_origin_y, page_height, item_layer)
+            run_checkpoint!(
+              :text_item,
+              :completed => text_index + 1,
+              :total => @text_items.length,
+              :page => @page_number
+            )
             emit_progress(:text_item_completed, progress_detail)
           end
         end
@@ -269,12 +297,21 @@ module BlueCollarSystems
         return false unless callback.respond_to?(:call)
         callback.call(phase, detail)
         true
+      rescue ImportRunControl::ImportCancelled
+        raise
       rescue StandardError => e
         Logger.warn(
           'GeometryBuilder',
           "progress callback #{phase} failed: #{e.message}"
         )
         false
+      end
+
+      def run_checkpoint!(stage, detail)
+        controller = @run_controller
+        return false unless controller && controller.respond_to?(:checkpoint!)
+        controller.checkpoint!(stage, detail)
+        true
       end
 
       def disabled_geometry_staging
