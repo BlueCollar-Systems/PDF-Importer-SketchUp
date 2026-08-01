@@ -1806,21 +1806,24 @@ module BlueCollarSystems
 
       def try_add_annotation_text(entities, text, pt, leader_vector,
                                   rung = nil)
-        ent = try_annotation_add(entities, rung, 'add_text with hidden leader vector') do
-          entities.add_text(text, pt, leader_vector)
-        end
-        return ent if ent
-
-        ent = try_annotation_add(entities, rung, 'add_text with zero vector') do
-          entities.add_text(text, pt, Geom::Vector3d.new(0, 0, 0))
-        end
-        return ent if ent
-
-        try_annotation_add(entities, rung, 'add_text') do
+        # Avoid a zero-length leader vector, which can crash SketchUp 2017.
+        ent = try_annotation_add(entities, rung, 'add_text') do
           entities.add_text(text, pt)
         end
-      end
+        return ent if ent
 
+        if leader_vector && leader_vector.respond_to?(:length) &&
+           leader_vector.length.to_f > 1.0e-12
+          ent = try_annotation_add(entities, rung, 'add_text with hidden leader vector') do
+            entities.add_text(text, pt, leader_vector)
+          end
+          return ent if ent
+        end
+
+        try_annotation_add(entities, rung, 'add_text with zero vector') do
+          entities.add_text(text, pt, Geom::Vector3d.new(0, 0, 0))
+        end
+      end
       def zero_label_leader_vector
         Geom::Vector3d.new(0, 0, 0)
       rescue StandardError
