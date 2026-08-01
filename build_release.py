@@ -55,11 +55,14 @@ PRIVATE_ARTIFACT_SUFFIXES = {
 PRIVATE_ARCHIVE_SUFFIXES = {
     ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".rbz",
 }
-PRIVATE_NAME_FRAGMENTS = {
-    "tx_alvord", "scombined", "attachment-c-drawings",
-    "awsweldsymbolchart", "welding-symbol-chart", "cmj report",
-    "alvord", "plant_list", "zoning-map", " - rev 0",
-    "pdf with embedded images", "pdf_vector_importer_master_bundle",
+PRIVATE_NAME_FRAGMENTS_ENV = "BCS_PRIVATE_NAME_FRAGMENTS"
+PRIVATE_GENERIC_NAME_FRAGMENTS = {
+    "private-corpus",
+    "private_corpus",
+    "private-fixture",
+    "private_fixture",
+    "confidential-evidence",
+    "confidential_evidence",
 }
 
 SMOKE_SCRIPT = REPO_ROOT / "tools" / "smoke_poppler_helpers.py"
@@ -126,6 +129,7 @@ def _read_version() -> str:
 
 def _require_no_private_artifacts() -> None:
     violations: list[str] = []
+    private_name_fragments = _private_name_fragments()
     for path in sorted(SUPPORT_DIR.rglob("*")):
         rel = path.relative_to(SUPPORT_DIR)
         normalized = rel.as_posix().casefold()
@@ -146,7 +150,7 @@ def _require_no_private_artifacts() -> None:
             suffix in PRIVATE_ARTIFACT_SUFFIXES
             or suffix in PRIVATE_ARCHIVE_SUFFIXES
             or "import_report" in path.name.casefold()
-            or any(fragment in normalized for fragment in PRIVATE_NAME_FRAGMENTS)
+            or any(fragment in normalized for fragment in private_name_fragments)
         ):
             violations.append(rel.as_posix())
     if violations:
@@ -158,6 +162,25 @@ def _require_no_private_artifacts() -> None:
             "Release blocked: private corpus artifact or generated counterpart "
             f"found under the shippable extension tree: {preview}"
         )
+
+
+def _private_name_fragments() -> set[str]:
+    """Return tracked-safe markers plus an optional untracked local denylist."""
+    configured = os.environ.get(PRIVATE_NAME_FRAGMENTS_ENV, "")
+    private_root_active = any(
+        os.environ.get(name)
+        for name in ("BCS_PRIVATE_VALIDATION_ROOT", "PDF_PRIVATE_VALIDATION_ROOT")
+    )
+    if private_root_active and not configured.strip():
+        raise RuntimeError(
+            "Release blocked: BCS_PRIVATE_NAME_FRAGMENTS is required when "
+            "a private validation root is active"
+        )
+    return PRIVATE_GENERIC_NAME_FRAGMENTS | {
+        fragment.strip().casefold()
+        for fragment in configured.split(os.pathsep)
+        if fragment.strip()
+    }
 
 
 def _run_poppler_smoke(*, required: bool = False) -> None:

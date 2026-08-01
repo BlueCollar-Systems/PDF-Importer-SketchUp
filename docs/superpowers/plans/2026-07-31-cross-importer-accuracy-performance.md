@@ -47,7 +47,7 @@
 - [x] **Step 2:** Write failing unit test with synthetic SVG + semantic items that currently returns `svg_item_assignment_empty`
 - [x] **Step 3:** Implement matching/filter fix (full-page inventory matching like SketchUp; do not subset-match only target items)
 - [x] **Step 4:** Run FreeCAD-relevant pytest subset; confirm glyphs path no longer empty-assigns for fixture
-- [x] **Step 5:** Optional local FreeCADCmd smoke on Desktop `1011` page 1 glyphs → output under `C:\TMP` only
+- [x] **Step 5:** Optional local FreeCADCmd smoke on a private shop-drawing fixture, page 1 glyphs → output under `C:\TMP` only
 
 ---
 
@@ -57,7 +57,7 @@
 - Modify: LibreCAD / pdfcadcore text verification + native DXF text delivery modules
 - Test: existing LibreCAD pytest
 
-- [x] **Step 1:** Load failed report `TX_Alvord… out_failed_import_report_*.json`; isolate verification predicate for `text_span:1:3037`
+- [x] **Step 1:** Load the private dense-map failed report from out-of-tree evidence; isolate verification predicate for `text_span:1:3037`
 - [x] **Step 2:** Write failing test that encodes the false-negative condition (synthetic, no corpus bytes in repo)
 - [x] **Step 3:** Fix verification or placement so valid native text certifies; keep loud failure for real mismatches
 - [x] **Step 4:** Fix `text_mode=raster` exit-2 path to certify item raster or report exact ladder failure

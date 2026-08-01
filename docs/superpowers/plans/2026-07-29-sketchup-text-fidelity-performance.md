@@ -18,7 +18,7 @@
 - No lossy contour simplification or arbitrary visual-tolerance culling is permitted.
 - Ruby 2.2.4 and SketchUp Make 2017 remain supported.
 - Failure after entity creation must clean every owned group, instance, and unused definition.
-- The reference PDF is `C:\Users\Rowdy Payton\Desktop\PDFTest Files\1011 (1 OF 2) - Rev 0.pdf` with SHA-256 `e84a16bd2243277a523320aa276ce1207c2b80722e964b73e801200846eb4d94`.
+- The reference input is a private corpus PDF supplied through `BCS_PRIVATE_REFERENCE_PDF`; record its exact SHA-256 only in out-of-tree acceptance evidence.
 
 ---
 
@@ -527,7 +527,7 @@ placement_to_definition_ratio=10.3632
 Run:
 
 ```powershell
-ruby tools\glyph_perf_probe.rb "C:\Users\Rowdy Payton\Desktop\PDFTest Files\1011 (1 OF 2) - Rev 0.pdf"
+ruby tools\glyph_perf_probe.rb "$env:BCS_PRIVATE_REFERENCE_PDF"
 ```
 
 Expected reference values: 4,280 physical placements, 413 unique definitions,
@@ -582,9 +582,9 @@ Create `C:\TMP\su-acceptance-20260729\text3d\job.json` with:
 
 ```json
 {
-  "pdf_path": "C:\\Users\\Rowdy Payton\\Desktop\\PDFTest Files\\1011 (1 OF 2) - Rev 0.pdf",
-  "original_pdf_path": "C:\\Users\\Rowdy Payton\\Desktop\\PDFTest Files\\1011 (1 OF 2) - Rev 0.pdf",
-  "original_pdf_sha256": "e84a16bd2243277a523320aa276ce1207c2b80722e964b73e801200846eb4d94",
+  "pdf_path": "<absolute private reference path>",
+  "original_pdf_path": "<absolute private reference path>",
+  "original_pdf_sha256": "<computed private source SHA-256>",
   "output_dir": "C:\\TMP\\su-acceptance-20260729\\text3d",
   "text_mode": "text3d",
   "import_mode": "auto",

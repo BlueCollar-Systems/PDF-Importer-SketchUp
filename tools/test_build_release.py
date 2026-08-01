@@ -160,7 +160,7 @@ class BuildReleaseTest(unittest.TestCase):
 
                 legacy.unlink()
                 legacy.parent.rmdir()
-                private_pdf = support / "AWSWeldSymbolchart.pdf"
+                private_pdf = support / "private-corpus-fixture.pdf"
                 private_pdf.write_bytes(b"private corpus fixture")
                 with mock.patch.object(br.subprocess, "run"), mock.patch.object(
                     br, "_run_poppler_smoke"
@@ -178,6 +178,26 @@ class BuildReleaseTest(unittest.TestCase):
         finally:
             br.EXT_ROOT = original_ext_root
             br.LOADER_FILE = original_loader
+            br.SUPPORT_DIR = original_support
+
+    def test_private_name_gate_uses_untracked_configuration(self):
+        original_support = br.SUPPORT_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                support = Path(tmp) / "bc_pdf_vector_importer"
+                support.mkdir()
+                (support / "client-fixture-a__page-001.png").write_bytes(b"evidence")
+                br.SUPPORT_DIR = support
+                with mock.patch.dict(
+                    os.environ,
+                    {br.PRIVATE_NAME_FRAGMENTS_ENV: "client-fixture-a"},
+                    clear=False,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "private corpus artifact"
+                    ):
+                        br._require_no_private_artifacts()
+        finally:
             br.SUPPORT_DIR = original_support
 
     def test_auto_release_requires_zero_ceremony_runtime(self):

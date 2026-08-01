@@ -3,8 +3,8 @@
 **Status:** Approved for implementation
 **Approved:** 2026-07-29
 **Scope:** `C:\1PDF-Importer-SketchUp`
-**Reference PDF:** `C:\Users\Rowdy Payton\Desktop\PDFTest Files\1011 (1 OF 2) - Rev 0.pdf`
-**Reference PDF SHA-256:** `e84a16bd2243277a523320aa276ce1207c2b80722e964b73e801200846eb4d94`
+**Reference PDF:** private fixture supplied through `BCS_PRIVATE_REFERENCE_PDF`
+**Reference PDF SHA-256:** computed at runtime and retained only in out-of-tree evidence
 
 ## 1. Outcome
 

@@ -28,9 +28,9 @@
 ### A1 LibreCAD (~30 fails)
 | Bucket | Evidence | Plan |
 |--------|----------|------|
-| Huge map pages (`TX_Alvord…` ×24) | `native DXF text failed type or visual verification` on dense spans | Fix false-negative type/visual verification or placement for map-scale text; page-1 acceptance gate |
-| Shop `text_mode=raster` on 1011 | CLI exit 2 | Item-raster text must certify or fail with exact ladder reason — no silent empty DXF |
-| `alvord-2013` (×4) | Same stress family | Reuse map-text fix; timeout/memory guardrails without dropping fidelity |
+| Huge private map pages (×24) | `native DXF text failed type or visual verification` on dense spans | Fix false-negative type/visual verification or placement for map-scale text; page-1 acceptance gate |
+| Private shop `text_mode=raster` fixture | CLI exit 2 | Item-raster text must certify or fail with exact ladder reason — no silent empty DXF |
+| Private dense-map stress fixture (×4) | Same stress family | Reuse map-text fix; timeout/memory guardrails without dropping fidelity |
 
 ### A2 FreeCAD (~31 fails)
 | Bucket | Evidence | Plan |
@@ -44,14 +44,14 @@
 - Validate requested `text3d` through the source-outline renderer on SketchUp 2017; keep the unstable native `add_3d_text` path out of this workflow.
 
 ### A4 Blender
-- Preserve inline image placements that the former XObject-only path omitted, then rerun the affected Attachment pages in native Blender with saved/reopened `.blend` evidence.
+- Preserve inline image placements that the former XObject-only path omitted, then rerun the affected private inline-image pages in native Blender with saved/reopened `.blend` evidence.
 
 ### Phase A done when
 The affected matrix is rerun from `C:\TMP`/Desktop Imported Evidence with saved/reopened host models: FreeCAD glyphs/geometry and LibreCAD map-text failures drop materially; SketchUp shop Text/Labels/3D Text evidence remains accurate; Blender's affected inline-image cells are re-proven; no corpus enters a repository.
 
 ## 3. Phase B — Shared fidelity + performance
 
-Port methods proven on SketchUp shop drawings (`1011`) and dense-text perf (v3.7.114–120):
+Port methods proven on private SketchUp shop-drawing and dense-text performance fixtures (v3.7.114–120):
 
 1. **Finite host-specific ladders** — all hosts expose the same six requested representations, but each host retains its own justified, tested fallback order. Shared vocabulary does not imply a fleet-global ladder.
 2. **Residual semantic rotation** — when SVG glyph matrices are axis-aligned but PDF angle is nonzero, apply residual rotation in 3D/solid text paths (already in SketchUp `Svg3DTextRenderer`; mirror where hosts use SVG outlines).

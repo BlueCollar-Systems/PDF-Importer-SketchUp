@@ -37,11 +37,11 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 - **Rotated text fidelity**: exact pdftocairo source-glyph outlines keep their own source orientation without a second semantic rotation; native Labels still use the PDF text-matrix angle.
 - **Dimension placement**: horizontal wide-short dimensions are no longer misclassified as 90° text, one-digit mixed numbers center only in tight dimension breaks, and split diagonal part marks such as `a1` + `0` + `20` rejoin as `a1020`.
 - **Text accuracy**: a Text request no longer accepts an unmeasured SketchUp screen label as visually exact. Because `Sketchup::Text` exposes no source glyph-size or run-width control, the item-bound ladder advances automatically to exact source-outline 3D Text; the explicit Labels option remains native and editable.
-- **Older-hardware performance**: source-glyph matching uses exact spatial preselection, single-use host renders avoid retaining a duplicate full-page point graph, and repeated component evidence reuses immutable definition topology and canonical fragments. On the installed SketchUp 2017 build, the 1011 regression page's exact 3D evidence time fell from 90.5 s to 20.5 s and total host import time from 170.0 s to 96.3 s without changing its 791-span/4,134-glyph delivery.
+- **Older-hardware performance**: source-glyph matching uses exact spatial preselection, single-use host renders avoid retaining a duplicate full-page point graph, and repeated component evidence reuses immutable definition topology and canonical fragments. On the installed SketchUp 2017 build, the private large-shop regression page's exact 3D evidence time fell from 90.5 s to 20.5 s and total host import time from 170.0 s to 96.3 s without changing its 791-span/4,134-glyph delivery.
 
 ### Recent fixes (v3.7.113)
 
-- **3D Text performance**: glyph contour point culling and spatial-bucket duplicate detection dramatically reduce mesh complexity for large drawings (e.g. 1015 PDF).
+- **3D Text performance**: glyph contour point culling and spatial-bucket duplicate detection dramatically reduce mesh complexity for large drawings, including the private large-sheet fixture.
 - **Flat Text / Labels stacked dimensions**: stacked vertical dimension numerals are no longer split into sub-items in flat Text mode, fixing source-span contract conflicts and improving alignment/rotation handling.
 
 Core vector import uses the built-in Ruby parser. Windows release RBZ files ship a free zero-ceremony Poppler runtime for higher-fidelity text/raster/SVG paths. MuPDF remains an optional free alternate; Ghostscript remains optional for non-embedded font repair.

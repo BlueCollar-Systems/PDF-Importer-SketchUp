@@ -1178,7 +1178,7 @@ git commit -m "fix: report native 3D text metric decisions"
 - Evidence outside git: `C:/TMP/su_text3d_live_20260715/`
 
 **Interfaces:**
-- Consumes: Tasks 1-5, the `1015 - Rev 0.pdf` fixture, built RBZ, installed plugin bytes, and proven live probe scripts.
+- Consumes: Tasks 1-5, the private 3D-text regression fixture, built RBZ, installed plugin bytes, and proven live probe scripts.
 - Produces: passing full suite, Ruby 2.2 proof, release artifact, installed-byte hashes, saved `.skp`, report JSON, probe JSON, registered screenshot, measured acceptance, version `3.7.95`, and pushed commits. Q&A authority remains gated on the follow-on five-mode host matrix.
 
 - [ ] **Step 1: Run all focused tests as a fail-fast gate**
@@ -1282,7 +1282,7 @@ Expected host facts: Ruby `2.2.4`, SketchUp `17.2.2555`, requested/reported mode
 
 - [ ] **Step 6: Perform the registered visual acceptance**
 
-Use the source render `C:/TMP/su_text3d_live_20260715/1015_source-1.png`, the new top view `C:/TMP/su_text3d_live_20260715/1015_text3d_top.png`, and linework registration. Acceptance requires all of the following:
+Use the source render `C:/TMP/su_text3d_live_20260715/private_fixture_source-1.png`, the new top view `C:/TMP/su_text3d_live_20260715/private_fixture_text3d_top.png`, and linework registration. Acceptance requires all of the following:
 
 ```text
 SECTION A and SECTION B visible width error <= 5%
@@ -1354,8 +1354,8 @@ $evidence = @(
   'C:\TMP\su_text3d_release_final_20260715\SketchUp-PDF-Importer_v3.7.95.rbz',
   'C:\TMP\su_text3d_live_20260715\probe_result.json',
   'C:\TMP\su_text3d_live_20260715\text3d_width_measurements.json',
-  'C:\TMP\su_text3d_live_20260715\1015_text3d_live.skp',
-  'C:\TMP\su_text3d_live_20260715\1015_text3d_top.png'
+  'C:\TMP\su_text3d_live_20260715\private_fixture_text3d_live.skp',
+  'C:\TMP\su_text3d_live_20260715\private_fixture_text3d_top.png'
 )
 Get-FileHash -Algorithm SHA256 -LiteralPath $evidence | Format-Table -AutoSize
 ```

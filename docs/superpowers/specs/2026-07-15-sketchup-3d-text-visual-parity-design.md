@@ -15,7 +15,7 @@ rotation, and placement as closely as SketchUp permits. It must not change the
 requested representation to hide alignment, rotation, or scaling defects.
 
 This design corrects the live SketchUp 2017 failure reproduced with
-`1015 - Rev 0.pdf`: all 289 spans were delivered as native 3D Text with no
+the private large-shop regression fixture: all 289 spans were delivered as native 3D Text with no
 fallback, but representative runs were 17–42% too wide and 29–46% too tall,
 causing BOM, dimension-chain, and title-block collisions.
 
