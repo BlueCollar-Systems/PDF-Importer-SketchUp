@@ -54,6 +54,37 @@ class QAReportTest < Minitest::Test
     assert_equal [], report[:extra][:source_provenance][:objects]
   end
 
+  def test_report_records_exact_text_delivery_accounting
+    stats = {
+      pages: 2, primitives: 3, edges: 0, text: 2, arcs: 0, layers: [],
+      text_renderers: [], requested_text_mode: :labels,
+      text_mode: :text3d,
+      text_source_span_ids: [
+        'text_span:2:0', 'text_span:2:1', 'text_span:2:2'
+      ],
+      text_attempts: [
+        { source_span_id: 'text_span:2:0', delivered_mode: :labels },
+        { source_span_id: 'text_span:2:1', delivered_mode: :text3d },
+        { source_span_id: 'text_span:2:2', delivered_mode: nil }
+      ],
+      text_delivery_failures: [
+        { source_span_id: 'text_span:2:2', requested: :labels }
+      ]
+    }
+
+    report = BlueCollarSystems::PDFVectorImporter::QAReport.
+      build_from_stats('page-two.pdf', { text_mode: :labels }, stats)
+    accounting = report[:extra].fetch(:text_delivery_accounting)
+
+    assert_equal 'labels', accounting.fetch(:requested_mode)
+    assert_equal '3d_text', accounting.fetch(:effective_mode)
+    assert_equal 3, accounting.fetch(:source_count)
+    assert_equal 2, accounting.fetch(:delivered_count)
+    assert_equal 1, accounting.fetch(:failed_count)
+    assert_equal 0, accounting.fetch(:unaccounted_count)
+    assert_equal true, accounting.fetch(:counts_reconciled)
+  end
+
   def test_builds_import_report_schema
     stats = {
       pages: 2,

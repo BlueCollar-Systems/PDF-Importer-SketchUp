@@ -110,9 +110,10 @@ class DummyEntities
 
   def add_text(text, point, vector = nil)
     @next_id += 1
-    ent = DummyTextEntity.new(@next_id, point, vector)
+    effective_vector = vector || Geom::Vector3d.new(0, 0, 0)
+    ent = DummyTextEntity.new(@next_id, point, effective_vector)
     @entities << ent
-    @texts << [text, point, vector, ent]
+    @texts << [text, point, effective_vector, ent]
     ent
   end
 

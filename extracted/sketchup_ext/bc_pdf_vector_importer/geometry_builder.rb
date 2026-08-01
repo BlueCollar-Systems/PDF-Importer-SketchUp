@@ -1080,6 +1080,9 @@ module BlueCollarSystems
           width_verified: false,
           height_verified: false,
           content_verified: false,
+          leader_verified: false,
+          leader_vector_verified: false,
+          leader_vector: nil,
           entity_type_verified: false,
           physical_geometry_verified: false,
           physical_style_verified: false,
@@ -1102,7 +1105,9 @@ module BlueCollarSystems
           cleaned_entity_ids: [], cleanup_outcome: :not_required,
           visual_fidelity_verified: false,
           placement_verified: false, rotation_verified: false,
-          content_verified: false, entity_type_verified: false,
+          content_verified: false, leader_verified: false,
+          leader_vector_verified: false, leader_vector: nil,
+          entity_type_verified: false,
           physical_geometry_verified: false,
           physical_style_verified: false,
           transform_verified: false,
@@ -1169,7 +1174,10 @@ module BlueCollarSystems
             evidence[:font_identity_verified] == true
         elsif normalized_mode == :labels
           valid = valid && evidence[:content_verified] == true &&
-            evidence[:leader_verified] == true
+            evidence[:leader_verified] == true &&
+            evidence[:leader_vector_verified] == true &&
+            evidence[:leader_vector].is_a?(Array) &&
+            evidence[:leader_vector].length == 3
         elsif normalized_mode == :text
           # Flat editable Text: content and placement verified; rotation is a
           # known host limitation (SketchUp Text has no glyph-angle control)
@@ -1193,6 +1201,9 @@ module BlueCollarSystems
         rung[:font_identity_verified] = evidence[:font_identity_verified] == true
         rung[:content_verified] = evidence[:content_verified] == true
         rung[:leader_verified] = evidence[:leader_verified] == true
+        rung[:leader_vector_verified] =
+          evidence[:leader_vector_verified] == true
+        rung[:leader_vector] = evidence[:leader_vector]
         rung[:entity_type_verified] = true
         rung[:physical_geometry_verified] = true
         rung[:physical_style_verified] = true
@@ -1209,6 +1220,9 @@ module BlueCollarSystems
         attempt[:font_identity_verified] = evidence[:font_identity_verified] == true
         attempt[:content_verified] = evidence[:content_verified] == true
         attempt[:leader_verified] = evidence[:leader_verified] == true
+        attempt[:leader_vector_verified] =
+          evidence[:leader_vector_verified] == true
+        attempt[:leader_vector] = evidence[:leader_vector]
         attempt[:entity_type_verified] = evidence[:entity_type_verified] == true
         attempt[:physical_geometry_verified] = true
         attempt[:physical_style_verified] = true
@@ -1804,46 +1818,28 @@ module BlueCollarSystems
         nil
       end
 
-      def try_add_annotation_text(entities, text, pt, leader_vector,
+      def try_add_annotation_text(entities, text, pt, _leader_vector,
                                   rung = nil)
-        # Avoid a zero-length leader vector, which can crash SketchUp 2017.
-        ent = try_annotation_add(entities, rung, 'add_text') do
+        # SketchUp 2017 can terminate the host when add_text receives a
+        # zero-length leader vector. The documented two-argument overload
+        # creates a native Text entity without passing that crash trigger.
+        try_annotation_add(entities, rung, 'add_text without leader vector') do
           entities.add_text(text, pt)
         end
-        return ent if ent
-
-        if leader_vector && leader_vector.respond_to?(:length) &&
-           leader_vector.length.to_f > 1.0e-12
-          ent = try_annotation_add(entities, rung, 'add_text with hidden leader vector') do
-            entities.add_text(text, pt, leader_vector)
-          end
-          return ent if ent
-        end
-
-        try_annotation_add(entities, rung, 'add_text with zero vector') do
-          entities.add_text(text, pt, Geom::Vector3d.new(0, 0, 0))
-        end
       end
+
       def zero_label_leader_vector
         Geom::Vector3d.new(0, 0, 0)
       rescue StandardError
         nil
       end
 
-      def hide_annotation_leader(text, preserve_vector = false)
+      def hide_annotation_leader(text, _preserve_vector = false)
         return unless text
         begin
           text.display_leader = false if text.respond_to?(:display_leader=)
         rescue StandardError => e
           Logger.warn("GeometryBuilder", "hide label leader failed: #{e.message}")
-        end
-        return if preserve_vector
-
-        begin
-          vec = zero_label_leader_vector
-          text.vector = vec if vec && text.respond_to?(:vector=)
-        rescue StandardError => e
-          Logger.warn("GeometryBuilder", "zero label vector failed: #{e.message}")
         end
       end
 
@@ -1877,7 +1873,8 @@ module BlueCollarSystems
 
       def verify_annotation_label(text, expected_text, expected_point,
                                   display_angle,
-                                  verify_leader = false)
+                                  verify_leader = false,
+                                  expected_leader_vector = nil)
         type = if text.respond_to?(:typename)
                  text.typename.to_s
                else
@@ -1901,6 +1898,25 @@ module BlueCollarSystems
           )
         end
         raise RepresentationFidelity::ContractError, 'label anchor verification failed' unless placement_ok
+
+        actual_vector = text.respond_to?(:vector) ?
+          RepresentationFidelity.numeric_point(text.vector) : nil
+        unless actual_vector && actual_vector.length == 3 &&
+               actual_vector.all? { |value| value.to_f.finite? }
+          raise RepresentationFidelity::ContractError,
+                'label leader vector is not observable in all three coordinates'
+        end
+        if expected_leader_vector
+          target_vector = Array(expected_leader_vector)
+          vector_ok = target_vector.length == 3 &&
+            [0, 1, 2].all? do |axis|
+              RepresentationFidelity.close?(
+                actual_vector[axis], target_vector[axis], tolerance
+              )
+            end
+          raise RepresentationFidelity::ContractError,
+                'label leader vector readback changed' unless vector_ok
+        end
 
         # SketchUp::Text#vector is the leader vector, not a text-orientation
         # axis. Native labels therefore cannot represent non-horizontal PDF
@@ -1936,6 +1952,8 @@ module BlueCollarSystems
           height_verified: false,
           content_verified: true,
           leader_verified: leader_verified,
+          leader_vector_verified: true,
+          leader_vector: actual_vector,
           entity_type_verified: true,
           display_angle: display_angle.to_f
         }
@@ -1992,7 +2010,7 @@ module BlueCollarSystems
         if text
           begin
             identity = RepresentationFidelity.stable_entity_id(text)
-            evidence = verify_annotation_label(
+            initial_evidence = verify_annotation_label(
               text, item.text, pt, display_angle
             )
             hide_annotation_leader(text)
@@ -2000,7 +2018,8 @@ module BlueCollarSystems
             # and hidden-leader state are the delivery evidence. Text#vector
             # is never interpreted as text orientation.
             evidence = verify_annotation_label(
-              text, item.text, pt, display_angle, true
+              text, item.text, pt, display_angle, true,
+              initial_evidence[:leader_vector]
             )
             set_layer(text, layer)
             expected_width = source_geometry[:expected_width]
@@ -2572,7 +2591,10 @@ module BlueCollarSystems
         angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
         bbox_w = label_has_bbox?(item) ? (item.bbox_x1.to_f - item.bbox_x0.to_f).abs : nil
         bbox_h = label_has_bbox?(item) ? (item.bbox_y1.to_f - item.bbox_y0.to_f).abs : nil
-        return 0.0 if annotation_like_label?(item.text, bbox_w, bbox_h)
+        if annotation_like_label?(item.text, bbox_w, bbox_h)
+          return normalize_text_angle_deg(angle) if angle.abs >= 12.0
+          return 0.0
+        end
         if bom_table_row?(item) &&
            !bom_table_quantity_label?(item.text, bbox_w, bbox_h, angle, item)
           return 0.0

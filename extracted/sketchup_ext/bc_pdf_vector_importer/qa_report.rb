@@ -282,6 +282,7 @@ module BlueCollarSystems
             stats[:pipeline_performance] || stats['pipeline_performance'] || {}
           ),
           delivered_text_entity_counts: delivered_text_entity_counts(stats),
+          text_delivery_accounting: text_delivery_accounting(stats),
           execution_scope: (stats[:execution_scope] ||
                             stats['execution_scope'] || :host_import).to_s,
           extracted_text_items: (stats[:extracted_text_items] ||
@@ -334,6 +335,63 @@ module BlueCollarSystems
           text_height_crosscheck: text_height_crosscheck_block(stats),
           text_width_crosscheck: text_width_crosscheck_block(stats),
           glyph_source: glyph_source_block(stats)
+        }
+      end
+
+      def text_delivery_accounting(stats)
+        source_ids = Array(
+          stats[:text_source_span_ids] || stats['text_source_span_ids']
+        ).map { |value| value.to_s.strip }.reject(&:empty?).uniq
+        delivered_ids = []
+        failed_ids = []
+        Array(stats[:text_attempts] || stats['text_attempts']).each do |entry|
+          next unless entry.is_a?(Hash)
+          source_id = (entry[:source_span_id] ||
+                       entry['source_span_id']).to_s.strip
+          next if source_id.empty?
+          delivered_mode = entry[:delivered_mode] || entry['delivered_mode']
+          if normalize_report_text_mode(delivered_mode)
+            delivered_ids << source_id
+          else
+            failed_ids << source_id
+          end
+        end
+        Array(
+          stats[:text_delivery_failures] || stats['text_delivery_failures']
+        ).each do |entry|
+          next unless entry.is_a?(Hash)
+          source_id = (entry[:source_span_id] ||
+                       entry['source_span_id']).to_s.strip
+          failed_ids << source_id unless source_id.empty?
+        end
+        delivered_ids = delivered_ids.uniq & source_ids
+        failed_ids = (failed_ids.uniq & source_ids) - delivered_ids
+        unaccounted_ids = source_ids - delivered_ids - failed_ids
+        requested = stats[:requested_text_mode] ||
+                    stats['requested_text_mode'] || stats[:text_mode] ||
+                    stats['text_mode']
+        effective = stats[:text_mode] || stats['text_mode'] || requested
+        source_count = source_ids.length
+        delivered_count = delivered_ids.length
+        failed_count = failed_ids.length
+        unaccounted_count = unaccounted_ids.length
+        {
+          requested_mode: normalize_report_text_mode(requested) ||
+                          requested.to_s,
+          effective_mode: normalize_report_text_mode(effective) ||
+                          effective.to_s,
+          source_count: source_count,
+          delivered_count: delivered_count,
+          failed_count: failed_count,
+          unaccounted_count: unaccounted_count,
+          counts_reconciled: source_count ==
+            delivered_count + failed_count + unaccounted_count
+        }
+      rescue StandardError
+        {
+          requested_mode: '', effective_mode: '', source_count: 0,
+          delivered_count: 0, failed_count: 0, unaccounted_count: 0,
+          counts_reconciled: false
         }
       end
 
@@ -622,8 +680,14 @@ module BlueCollarSystems
           telemetry_value(entry, :width_verified) == true &&
             telemetry_value(entry, :height_verified) == true
         when :labels
+          leader_vector = telemetry_value(entry, :leader_vector)
           telemetry_value(entry, :content_verified) == true &&
-            telemetry_value(entry, :leader_verified) == true
+            telemetry_value(entry, :leader_verified) == true &&
+            telemetry_value(entry, :leader_vector_verified) == true &&
+            leader_vector.is_a?(Array) && leader_vector.length == 3 &&
+            leader_vector.all? do |value|
+              value.is_a?(Numeric) && value.to_f.finite?
+            end
         else
           false
         end

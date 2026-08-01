@@ -243,9 +243,12 @@ class DummyEntities
   def add_text(text, point, vector = nil)
     raise 'add_text forced failure' if @fail_text
     @next_id += 1
-    ent = DummyTextEntity.new(@next_id, text, point, vector)
+    effective_vector = vector || Geom::Vector3d.new(0, 0, 0)
+    ent = DummyTextEntity.new(@next_id, text, point, effective_vector)
     @entities << ent
-    @texts << { text: text, point: point, vector: vector, entity: ent }
+    @texts << {
+      text: text, point: point, vector: effective_vector, entity: ent
+    }
     ent
   end
 

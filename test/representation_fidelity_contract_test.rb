@@ -255,6 +255,7 @@ class FidelityEntities
     id = @options[:identityless_label] ? nil : (@next_id += 1)
     delivered_text = @options.fetch(:label_text, text)
     typename = @options.fetch(:label_typename, 'Text')
+    vector ||= Geom::Vector3d.new(0, 0, 0)
     delivered_point = if @options.key?(:label_point_z)
                         Geom::Point3d.new(
                           point.x, point.y, @options[:label_point_z]
@@ -1065,7 +1066,13 @@ class RepresentationFidelityContractTest < Minitest::Test
       :place_annotation_label, entities, source, 0.0, 0.0, nil, :labels
     )
 
-    expected = b.text_attempts.fetch(0).fetch(:expected_evidence)
+    attempt = b.text_attempts.fetch(0)
+    rung = attempt.fetch(:attempt_history).fetch(0)
+    [attempt, rung].each do |delivery|
+      assert_equal true, delivery.fetch(:leader_vector_verified)
+      assert_equal [0.0, 0.0, 0.0], delivery.fetch(:leader_vector)
+    end
+    expected = attempt.fetch(:expected_evidence)
     assert_in_delta 24.0 * 2.5 / 72.0,
                     expected.fetch(:expected_width), 1.0e-9
     assert_in_delta 10.0 * 2.5 / 72.0,
@@ -1449,9 +1456,13 @@ class RepresentationFidelityContractTest < Minitest::Test
     labels[:text_attempts][0][:delivered_mode] = :labels
     labels[:text_attempts][0][:content_verified] = true
     labels[:text_attempts][0][:leader_verified] = true
+    labels[:text_attempts][0][:leader_vector_verified] = true
+    labels[:text_attempts][0][:leader_vector] = [0.0, 0.0, 0.0]
     labels[:text_attempts][0][:attempt_history][0][:mode] = :labels
     labels[:text_attempts][0][:attempt_history][0][:content_verified] = true
     labels[:text_attempts][0][:attempt_history][0][:leader_verified] = true
+    labels[:text_attempts][0][:attempt_history][0][:leader_vector_verified] = true
+    labels[:text_attempts][0][:attempt_history][0][:leader_vector] = [0.0, 0.0, 0.0]
 
     assert_equal true, IMP::QAReport.send(:validate_representation_fidelity, text3d)[:ready]
     assert_equal true, IMP::QAReport.send(:validate_representation_fidelity, labels)[:ready]
@@ -1484,7 +1495,8 @@ class RepresentationFidelityContractTest < Minitest::Test
       text3d => [:placement_verified, :rotation_verified, :entity_type_verified,
                  :width_verified, :height_verified],
       labels => [:placement_verified, :rotation_verified, :entity_type_verified,
-                 :content_verified, :leader_verified]
+                 :content_verified, :leader_verified,
+                 :leader_vector_verified]
     }.each do |valid, required_fields|
       required_fields.each do |field|
         [:attempt, :rung].each do |location|
@@ -1505,6 +1517,24 @@ class RepresentationFidelityContractTest < Minitest::Test
                        "false #{field} on #{location} must fail closed"
         end
       end
+    end
+
+    [:attempt, :rung].each do |location|
+      missing = Marshal.load(Marshal.dump(labels))
+      target = location == :attempt ? missing[:text_attempts][0] :
+               missing[:text_attempts][0][:attempt_history][0]
+      target.delete(:leader_vector)
+      result = IMP::QAReport.send(:validate_representation_fidelity, missing)
+      assert_equal false, result[:ready],
+                   "missing leader_vector on #{location} must fail closed"
+
+      malformed = Marshal.load(Marshal.dump(labels))
+      target = location == :attempt ? malformed[:text_attempts][0] :
+               malformed[:text_attempts][0][:attempt_history][0]
+      target[:leader_vector] = [0.0, 0.0]
+      result = IMP::QAReport.send(:validate_representation_fidelity, malformed)
+      assert_equal false, result[:ready],
+                   "malformed leader_vector on #{location} must fail closed"
     end
   end
 

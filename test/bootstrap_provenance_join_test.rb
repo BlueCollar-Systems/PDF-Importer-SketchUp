@@ -93,7 +93,8 @@ class FakeEntities
 
   def add_text(text, pt, vec = nil)
     @next_id += 1
-    label = FakeLabel.new(@next_id, text, pt, vec)
+    effective_vector = vec || Geom::Vector3d.new(0, 0, 0)
+    label = FakeLabel.new(@next_id, text, pt, effective_vector)
     @labels << label
     @entities << label
     label
@@ -148,18 +149,39 @@ class BootstrapProvenanceJoinTest < Minitest::Test
            400.0, 300.0, 408.0, 340.0, nil)
   end
 
-  def build_geometry(items, page, bucket)
+  def build_geometry(items, page, bucket, entities = FakeEntities.new)
     builder = MOD::GeometryBuilder.new(
       nil, [], items, MEDIA_BOX,
       import_text: true,
       group_per_page: false,
       page_number: page,
       layer_manager: FakeLayerManager.new,
-      target_entities: FakeEntities.new,
+      target_entities: entities,
       provenance_bucket: bucket,
       import_session_id: 'join-test-session'
     )
     builder.build
+  end
+
+  def test_page_two_only_selection_places_only_page_two_text
+    page_map = { 1 => bom_page_items(1), 2 => second_page_items }
+    selected_pages = MOD.normalized_requested_pages([2], page_map.length)
+    assert_equal [2], selected_pages
+
+    bucket = []
+    entities = FakeEntities.new
+    selected_pages.each do |page|
+      MOD::TextSourceIdentity.assign!(page_map.fetch(page), page)
+      result = build_geometry(page_map.fetch(page), page, bucket, entities)
+      assert_operator result[:text_objects], :>, 0
+    end
+
+    placed_text = entities.labels.map(&:text)
+    assert_includes placed_text, 'b202'
+    refute_includes placed_text, 'p1019'
+    assert_equal [2], bucket.map { |entry| entry[:page] }.uniq
+    assert page_map.fetch(1).all? { |item| item.source_span_id.nil? },
+           'unselected page 1 must not enter identity or placement seams'
   end
 
   # ── The acceptance test from the corrective spec ─────────────────────────

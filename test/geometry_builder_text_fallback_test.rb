@@ -235,6 +235,57 @@ class TextFallbackEntities
   end
 end
 
+class AnnotationSignatureProbe
+  attr_reader :argument_counts
+
+  def initialize
+    @argument_counts = []
+  end
+
+  def to_a
+    []
+  end
+
+  def add_text(*args)
+    @argument_counts << args.length
+    nil
+  end
+end
+
+class HiddenLabelMutationProbe
+  attr_reader :vector, :vector_writes
+  attr_accessor :display_leader
+
+  def initialize
+    @vector = Geom::Vector3d.new(0, 0, 0)
+    @vector_writes = []
+    @display_leader = true
+  end
+
+  def vector=(value)
+    @vector_writes << value
+    @vector = value
+  end
+end
+
+class AnnotationReadbackProbe
+  attr_reader :text, :point, :vector
+
+  def initialize(text, point, vector)
+    @text = text
+    @point = point
+    @vector = vector
+  end
+
+  def typename
+    'Text'
+  end
+
+  def display_leader?
+    false
+  end
+end
+
 load File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'geometry_builder.rb')
 
 class GeometryBuilderTextFallbackTest < Minitest::Test
@@ -412,7 +463,7 @@ class GeometryBuilderTextFallbackTest < Minitest::Test
     )
 
     refute delivered
-    assert_equal ['   ', '   ', '   '], entities.added_texts,
+    assert_equal ['   '], entities.added_texts,
                  'all native label signatures must receive exact source content'
     failure = builder.text_delivery_failures.fetch(0)
     assert_equal 'text_span:1:1', failure[:source_span_id]
@@ -442,5 +493,42 @@ class GeometryBuilderTextFallbackTest < Minitest::Test
     assert_equal true, proof[:affirmative_impossibility]
     assert_equal false, proof[:generic_failure]
     assert_equal :not_required, proof[:cleanup_outcome]
+  end
+
+  def test_sketchup_2017_never_receives_a_zero_length_add_text_vector
+    builder = make_builder(false, [], :labels)
+    entities = AnnotationSignatureProbe.new
+
+    result = builder.send(
+      :try_add_annotation_text, entities, 'A1', Geom::Point3d.new,
+      Geom::Vector3d.new(0, 0, 0)
+    )
+
+    assert_nil result
+    assert_equal [2], entities.argument_counts,
+                 'a failed plain add_text call must stop without the crashing zero-vector signature'
+  end
+
+  def test_hiding_a_native_label_does_not_assign_a_zero_length_vector
+    builder = make_builder(false, [], :labels)
+    label = HiddenLabelMutationProbe.new
+    original_vector = label.vector
+
+    builder.send(:hide_annotation_leader, label)
+
+    assert_equal false, label.display_leader
+    assert_same original_vector, label.vector
+    assert_empty label.vector_writes,
+                 'SketchUp 2017 can crash when a Text leader is assigned a zero-length vector'
+  end
+
+  def test_label_certification_requires_three_coordinate_vector_readback
+    builder = make_builder(false, [], :labels)
+    point = Geom::Point3d.new(1, 2, 3)
+    label = AnnotationReadbackProbe.new('A1', point, nil)
+
+    assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+      builder.send(:verify_annotation_label, label, 'A1', point, 0.0, true)
+    end
   end
 end

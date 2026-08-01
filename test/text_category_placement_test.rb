@@ -132,6 +132,12 @@ assert_true(w_ang.abs < 0.01, 'weld fraction forced horizontal')
 assert_true(builder.send(:zero_label_leader_vector).y.abs < 0.01,
             'weld fraction uses the active zero leader vector')
 
+diagonal_weld = make_item('3/16', 420.0, 1540.0, 435.0, 1552.0,
+                          angle: 33.0, font_size: 8.0)
+_, _, diagonal_weld_angle = builder.send(:label_insertion_pdf, diagonal_weld)
+assert_near(diagonal_weld_angle, 33.0, 0.01,
+            'a fraction with an affirmative source angle must keep that rotation')
+
 typ = make_item('TYP.', 465.0, 1550.0, 480.0, 1562.0, angle: 0.0, font_size: 8.0)
 _, _, tang = builder.send(:label_insertion_pdf, typ)
 assert_true(tang.abs < 0.01, 'TYP annotation stays horizontal')
