@@ -1180,11 +1180,49 @@ class SketchupHostEvidenceTest < Minitest::Test
   def test_host_heal_preservation_rejects_unproven_geometry_digest_drift
     before = compact_heal_manifest('a' * 64)
     healed = Marshal.load(Marshal.dump(before))
+    before[0]['geometry_evidence'].delete('topology')
+    healed[0]['geometry_evidence'].delete('topology')
     healed[0]['entity_id'] = 90
     healed[0]['geometry_evidence']['sha256'] = 'b' * 64
 
     error = assert_raises(StandardError) do
       SketchupHostEvidence.verify_host_heal_preservation!(before, healed)
+    end
+    assert_match(/geometry/i, error.message)
+  end
+
+  def test_host_heal_preservation_accepts_proven_compact_digest_normalization
+    before = compact_heal_manifest('a' * 64)
+    healed = Marshal.load(Marshal.dump(before))
+    healed[0]['entity_id'] = 90
+    healed[0]['geometry_evidence']['sha256'] = 'b' * 64
+
+    assert SketchupHostEvidence.verify_host_heal_preservation!(before, healed)
+  end
+
+  def test_host_heal_preservation_rejects_compact_topology_change
+    before = compact_heal_manifest('a' * 64)
+    healed = Marshal.load(Marshal.dump(before))
+    geometry = healed[0]['geometry_evidence']
+    geometry['sha256'] = 'b' * 64
+    geometry['topology']['direct_child_types'] = ['Edge']
+    geometry['topology']['descendant_type_counts'].delete('ComponentInstance')
+    geometry['topology']['descendant_type_counts']['Edge'] = 1
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_host_heal_preservation!(before, healed)
+    end
+    assert_match(/geometry|topology/i, error.message)
+  end
+
+  def test_reopen_continuity_remains_strict_after_compact_host_heal
+    stabilized = compact_heal_manifest('b' * 64)
+    reopened = Marshal.load(Marshal.dump(stabilized))
+    reopened[0]['entity_id'] = 90
+    reopened[0]['geometry_evidence']['sha256'] = 'c' * 64
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_reopen_continuity!(stabilized, reopened)
     end
     assert_match(/geometry/i, error.message)
   end

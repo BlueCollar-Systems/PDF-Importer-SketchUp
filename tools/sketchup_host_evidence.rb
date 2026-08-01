@@ -304,8 +304,7 @@ module SketchupHostEvidence
               "host heal child structure mismatch for persistent_id:#{persistent_id}"
       end
       unless host_heal_geometry_equivalent?(
-        hash_value(row, :geometry_evidence),
-        hash_value(other, :geometry_evidence)
+        row, other
       )
         raise EvidenceError,
               "host heal geometry/topology mismatch for persistent_id:#{persistent_id}"
@@ -410,8 +409,24 @@ module SketchupHostEvidence
   end
   private_class_method :direct_child_persistent_ids
 
-  def self.host_heal_geometry_equivalent?(source, healed)
-    evidence_payload_equal?(source, healed)
+  def self.host_heal_geometry_equivalent?(source_row, healed_row)
+    source = hash_value(source_row, :geometry_evidence)
+    healed = hash_value(healed_row, :geometry_evidence)
+    return true if evidence_payload_equal?(source, healed)
+
+    # A first SketchUp 2017 save/load may rewrite the canonical bytes of a
+    # nested solid-text partition. The exception is deliberately limited to
+    # independently valid compact rows whose complete non-digest geometry
+    # evidence (including physical count and topology) remains exact.
+    return false unless compact_physical_partition_row?(source_row) &&
+                        compact_physical_partition_row?(healed_row)
+    source_without_digest = source.dup
+    healed_without_digest = healed.dup
+    source_without_digest.delete('sha256')
+    source_without_digest.delete(:sha256)
+    healed_without_digest.delete('sha256')
+    healed_without_digest.delete(:sha256)
+    evidence_payload_equal?(source_without_digest, healed_without_digest)
   end
   private_class_method :host_heal_geometry_equivalent?
 
