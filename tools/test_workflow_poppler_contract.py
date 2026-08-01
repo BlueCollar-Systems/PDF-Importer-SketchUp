@@ -78,7 +78,7 @@ class WorkflowPopplerContractTest(unittest.TestCase):
         self.assertIn('"$SOURCE_CHECKSUMS"', text)
         self.assertLess(
             text.index("python build_release.py"),
-            text.index("gh release create"),
+            text.index("python tools/complete_github_release.py"),
         )
 
     def test_release_checksum_names_and_verifies_the_published_rbz(self):
