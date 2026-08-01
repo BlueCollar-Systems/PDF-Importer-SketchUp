@@ -198,7 +198,16 @@ jobs:
 
       - name: Set release target
         run: |
-          echo "RELEASE_TARGET=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          set -e
+          TAG="v${{ steps.version.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+            RELEASE_TARGET=$(git rev-list -n 1 "refs/tags/$TAG")
+          else
+            RELEASE_TARGET=$(git rev-parse HEAD)
+          fi
+          test "${#RELEASE_TARGET}" -eq 40
+          echo "RELEASE_TARGET=$RELEASE_TARGET" >> "$GITHUB_ENV"
 
       - name: Smoke RBZ structure
         run: |

@@ -81,6 +81,24 @@ class WorkflowPopplerContractTest(unittest.TestCase):
             text.index("python tools/complete_github_release.py"),
         )
 
+    def test_existing_tag_is_peeled_as_the_release_target(self):
+        text = (
+            ROOT / ".github" / "workflows" / "auto-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"',
+            text,
+        )
+        self.assertIn(
+            'RELEASE_TARGET=$(git rev-list -n 1 "refs/tags/$TAG")',
+            text,
+        )
+        self.assertLess(
+            text.index('RELEASE_TARGET=$(git rev-list'),
+            text.index("python tools/complete_github_release.py"),
+        )
+
     def test_release_checksum_names_and_verifies_the_published_rbz(self):
         text = (
             ROOT / ".github" / "workflows" / "auto-release.yml"

@@ -586,6 +586,9 @@ class ReleaseSafetyTest:
             encoding="utf-8"
         )
         assert "python tools/complete_github_release.py" in workflow
+        assert 'git ls-remote --exit-code --tags origin "refs/tags/$TAG"' in workflow
+        assert 'git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"' in workflow
+        assert 'RELEASE_TARGET=$(git rev-list -n 1 "refs/tags/$TAG")' in workflow
         assert '--target "${RELEASE_TARGET:-$GITHUB_SHA}"' in workflow
         assert '--asset "$RBZ"' in workflow
         assert '--asset "$RELEASE_CHECKSUMS"' in workflow
