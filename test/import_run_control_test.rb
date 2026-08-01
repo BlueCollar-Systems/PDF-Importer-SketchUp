@@ -138,4 +138,28 @@ class ImportRunControlTest < Minitest::Test
     refute probe.call
     assert probe.call
   end
+
+  def test_controller_accepts_a_callable_object_without_proc_arity
+    probe = Class.new do
+      attr_reader :calls
+
+      def initialize
+        @calls = 0
+      end
+
+      def call
+        @calls += 1
+        false
+      end
+    end.new
+    run = controller(
+      :cancel_probe => probe,
+      :clock => FakeClock.new([0.0, 1.0])
+    )
+
+    snapshot = run.checkpoint!(:page, :page => 1, :completed => 0, :total => 1)
+
+    assert_equal :page, snapshot[:stage]
+    assert_equal 1, probe.calls
+  end
 end

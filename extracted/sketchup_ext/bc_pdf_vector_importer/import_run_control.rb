@@ -631,7 +631,12 @@ module BlueCollarSystems
 
         def cancellation_requested?(snapshot)
           return false unless @cancel_probe.respond_to?(:call)
-          @cancel_probe.arity == 0 ? @cancel_probe.call : @cancel_probe.call(snapshot)
+          arity = if @cancel_probe.respond_to?(:arity)
+                    @cancel_probe.arity
+                  else
+                    @cancel_probe.method(:call).arity
+                  end
+          arity == 0 ? @cancel_probe.call : @cancel_probe.call(snapshot)
         end
 
         def publish(snapshot)
