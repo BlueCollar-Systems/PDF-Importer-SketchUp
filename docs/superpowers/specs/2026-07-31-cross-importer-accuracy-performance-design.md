@@ -5,15 +5,15 @@
 **Choice:** Sequenced both — Phase A sweep triage, then Phase B shared fidelity/perf  
 **Hosts:** SketchUp, LibreCAD, Blender, FreeCAD  
 **Sweep hub (local only):** `C:\TMP\cross-importer-sweep-20260730`  
-**Corpus (local only):** `C:\Users\Rowdy Payton\Desktop\PDFTest Files` — never commit PDFs or derived CAD
+**Corpus (local only):** `$env:BCS_CORPUS_ROOT` — never commit PDFs or derived CAD
 
 ## 1. Goals & sequencing
 
-**Goal:** Raise accuracy and performance across all four importers for all import modes and text modes, without weakening text-mode fidelity, and without putting Desktop `PDFTest Files` (or derived CAD) into any repository.
+**Goal:** Raise accuracy and performance across all four importers for all import modes and text modes, without weakening text-mode fidelity, and without putting the external private corpus (or derived CAD) into any repository.
 
 | Phase | Focus | Exit criteria |
 |-------|--------|----------------|
-| **A — Sweep triage** | Fix concrete fail classes from the cross-importer sweep | Fail buckets drop sharply on re-run; artifacts stay under Desktop / `C:\TMP` |
+| **A — Sweep triage** | Fix concrete fail classes from the cross-importer sweep | Fail buckets drop sharply on re-run; artifacts stay under the configured private evidence root / `C:\TMP` |
 | **B — Shared fidelity + perf** | Port reusable rotation, indexing, caching, and evidence methods while retaining each host's finite contract ladder | Dense shop drawings stay correct *and* faster; no unauthorized mode swaps |
 
 **Hard constraints**
@@ -47,7 +47,7 @@
 - Preserve inline image placements that the former XObject-only path omitted, then rerun the affected private inline-image pages in native Blender with saved/reopened `.blend` evidence.
 
 ### Phase A done when
-The affected matrix is rerun from `C:\TMP`/Desktop Imported Evidence with saved/reopened host models: FreeCAD glyphs/geometry and LibreCAD map-text failures drop materially; SketchUp shop Text/Labels/3D Text evidence remains accurate; Blender's affected inline-image cells are re-proven; no corpus enters a repository.
+The affected matrix is rerun from `C:\TMP` or the configured private evidence root with saved/reopened host models: FreeCAD glyphs/geometry and LibreCAD map-text failures drop materially; SketchUp shop Text/Labels/3D Text evidence remains accurate; Blender's affected inline-image cells are re-proven; no corpus enters a repository.
 
 ## 3. Phase B — Shared fidelity + performance
 
@@ -66,12 +66,12 @@ Port methods proven on private SketchUp shop-drawing and dense-text performance 
 - Blender remains green; LibreCAD/FreeCAD map and glyphs buckets stay fixed under regression.
 
 ## 4. Non-goals
-- Committing or redistributing `PDFTest Files` or Imported Evidence trees.
+- Committing or redistributing private corpus or evidence trees.
 - Paying for fonts/APIs.
 - Replacing a host-specific finite ladder with a fleet-global shortcut.
 - Treating page-1 smoke tests as full-corpus or multipage acceptance.
 
 ## 5. Verification
 - Unit/integration tests in each repo (synthetic fixtures only in-repo).
-- Optional local re-smoke against Desktop corpus → `C:\TMP` only.
+- Optional local re-smoke against the configured private corpus → `C:\TMP` only.
 - Confirm `git ls-files` has no corpus PDFs/CAD; `.gitignore` containment remains.

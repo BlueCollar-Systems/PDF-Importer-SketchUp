@@ -5,7 +5,7 @@ param(
   [Parameter(Mandatory = $true)][hashtable]$EnvVars,
   [int]$TimeoutSeconds = 600,
   [string]$Claimant = 'Codex /root/sketchup_report_lane',
-  [string]$ResourceBoardPath = 'C:\Users\Rowdy Payton\Desktop\PDFTest Files\Q&A\RESOURCE_BOARD.md',
+  [string]$ResourceBoardPath = $env:BCS_RESOURCE_BOARD_PATH,
   [string]$LeaseRoot = 'C:\TMP'
 )
 
@@ -40,6 +40,9 @@ function Acquire-HostLock([string]$Path, [string]$Kind) {
   }
 }
 
+if ([string]::IsNullOrWhiteSpace($ResourceBoardPath)) {
+  throw 'REFUSING: supply -ResourceBoardPath or BCS_RESOURCE_BOARD_PATH'
+}
 if (!(Test-Path -LiteralPath $ResourceBoardPath -PathType Leaf)) {
   throw "REFUSING: RESOURCE_BOARD.md is missing: $ResourceBoardPath"
 }

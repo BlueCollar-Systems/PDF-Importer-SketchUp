@@ -20,6 +20,71 @@ module SketchupFullCorpusSweep
     File.expand_path('../extracted/sketchup_ext', __dir__)
   end
 
+  def cli_options(argv, env = ENV)
+    options = {
+      :corpus_root => env['BCS_CORPUS_ROOT'].to_s.strip,
+      :evidence_root => env['BCS_EVIDENCE_ROOT'].to_s.strip,
+      :import_modes => IMPORT_MODES,
+      :text_modes => TEXT_MODES,
+      :skp_export_only => false,
+      :source_root => default_source_root
+    }
+    parser = OptionParser.new do |opts|
+      opts.banner = 'Usage: ruby tools/sketchup_full_corpus_sweep.rb [options]'
+      opts.on('--corpus DIR', 'PDF corpus root (or BCS_CORPUS_ROOT)') do |value|
+        options[:corpus_root] = value
+      end
+      opts.on('--evidence DIR', 'Evidence root (or BCS_EVIDENCE_ROOT)') do |value|
+        options[:evidence_root] = value
+      end
+      opts.on('--import-mode MODE', 'Repeat to select import modes') do |value|
+        options[:import_modes] = [] if
+          options[:import_modes] == IMPORT_MODES
+        options[:import_modes] << value
+      end
+      opts.on('--text-mode MODE', 'Repeat to select representations') do |value|
+        options[:text_modes] = [] if options[:text_modes] == TEXT_MODES
+        options[:text_modes] << value
+      end
+      opts.on('--max-jobs COUNT', Integer, 'Bound new host jobs') do |value|
+        options[:max_jobs] = value
+      end
+      opts.on('--full-verification', 'Include entity/reopen verification') do
+        options[:skp_export_only] = false
+      end
+      opts.on('--export-only', 'Save diagnostic SKP without release acceptance') do
+        options[:skp_export_only] = true
+      end
+      opts.on('--pause-file PATH', 'Stop safely between host cells when present') do |value|
+        options[:pause_file] = value
+      end
+      opts.on('--sketchup-exe PATH', 'SketchUp executable') do |value|
+        options[:sketchup_exe] = value
+      end
+      opts.on('--source-root DIR', 'Importer source/install root') do |value|
+        options[:source_root] = value
+      end
+    end
+    parser.parse!(Array(argv).dup)
+
+    missing = []
+    missing << '--corpus or BCS_CORPUS_ROOT' if
+      options[:corpus_root].to_s.strip.empty?
+    missing << '--evidence or BCS_EVIDENCE_ROOT' if
+      options[:evidence_root].to_s.strip.empty?
+    unless missing.empty?
+      raise OptionParser::MissingArgument, missing.join(' and ')
+    end
+
+    invalid_import_modes = options[:import_modes] - IMPORT_MODES
+    invalid_text_modes = options[:text_modes] - TEXT_MODES
+    unless invalid_import_modes.empty? && invalid_text_modes.empty?
+      raise OptionParser::InvalidArgument,
+            "unsupported modes: #{(invalid_import_modes + invalid_text_modes).join(', ')}"
+    end
+    options
+  end
+
   def discover_pdfs(root)
     expanded = File.expand_path(root.to_s)
     raise ArgumentError, "corpus directory not found: #{expanded}" unless
@@ -500,62 +565,10 @@ module SketchupFullCorpusSweep
 end
 
 if __FILE__ == $PROGRAM_NAME
-  options = {
-    :corpus_root =>
-      'C:/Users/Rowdy Payton/Desktop/PDFTest Files',
-    :evidence_root =>
-      'C:/Users/Rowdy Payton/Desktop/PDFTest Files/Imported Evidence/' \
-      'SketchUp/full-corpus-host-sweep',
-    :import_modes => SketchupFullCorpusSweep::IMPORT_MODES,
-    :text_modes => SketchupFullCorpusSweep::TEXT_MODES,
-    :skp_export_only => false,
-    :source_root => SketchupFullCorpusSweep.default_source_root
-  }
-  parser = OptionParser.new do |opts|
-    opts.banner = 'Usage: ruby tools/sketchup_full_corpus_sweep.rb [options]'
-    opts.on('--corpus DIR', 'PDF corpus root') do |value|
-      options[:corpus_root] = value
-    end
-    opts.on('--evidence DIR', 'Evidence output root') do |value|
-      options[:evidence_root] = value
-    end
-    opts.on('--import-mode MODE', 'Repeat to select import modes') do |value|
-      options[:import_modes] = [] if
-        options[:import_modes] == SketchupFullCorpusSweep::IMPORT_MODES
-      options[:import_modes] << value
-    end
-    opts.on('--text-mode MODE', 'Repeat to select representations') do |value|
-      options[:text_modes] = [] if
-        options[:text_modes] == SketchupFullCorpusSweep::TEXT_MODES
-      options[:text_modes] << value
-    end
-    opts.on('--max-jobs COUNT', Integer, 'Bound new host jobs') do |value|
-      options[:max_jobs] = value
-    end
-    opts.on('--full-verification', 'Include entity/reopen verification') do
-      options[:skp_export_only] = false
-    end
-    opts.on('--export-only', 'Save diagnostic SKP without release acceptance') do
-      options[:skp_export_only] = true
-    end
-    opts.on('--pause-file PATH', 'Stop safely between host cells when present') do |value|
-      options[:pause_file] = value
-    end
-    opts.on('--sketchup-exe PATH', 'SketchUp executable') do |value|
-      options[:sketchup_exe] = value
-    end
-    opts.on('--source-root DIR', 'Importer source/install root') do |value|
-      options[:source_root] = value
-    end
-  end
-  parser.parse!(ARGV)
-  invalid_import_modes =
-    options[:import_modes] - SketchupFullCorpusSweep::IMPORT_MODES
-  invalid_text_modes =
-    options[:text_modes] - SketchupFullCorpusSweep::TEXT_MODES
-  unless invalid_import_modes.empty? && invalid_text_modes.empty?
-    warn "ERROR: unsupported modes: " \
-      "#{(invalid_import_modes + invalid_text_modes).join(', ')}"
+  begin
+    options = SketchupFullCorpusSweep.cli_options(ARGV)
+  rescue OptionParser::ParseError => e
+    warn "ERROR: #{e.message}"
     exit 2
   end
   summary = SketchupFullCorpusSweep::Runner.new(options).run

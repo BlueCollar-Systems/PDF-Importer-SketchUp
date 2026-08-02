@@ -764,8 +764,8 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal :verified, result[:solid_cache][:cleanup_outcome]
   end
 
-  # Ghosting behavior contract (R-D, LOOP-1 Welding-Symbol-Chart su overlap
-  # 0.2957): extruded source glyphs delivered with nil materials render as
+  # Ghosting behavior contract: extruded source glyphs delivered with nil
+  # materials render as
   # white-filled outlines — edges only, no face ink. Delivered 3D Text must
   # carry the shared black text-ink material on its owned span group so the
   # glyph caps and walls render with visible weight.

@@ -673,7 +673,7 @@ every shipped Ruby file.
 Install the extracted bytes into:
 
 ```text
-C:\Users\Rowdy Payton\AppData\Roaming\SketchUp\SketchUp 2017\SketchUp\Plugins
+%APPDATA%\SketchUp\SketchUp 2017\SketchUp\Plugins
 ```
 
 Restart SketchUp and repeat one Text and one 3D Text host import from the

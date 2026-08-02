@@ -1240,7 +1240,7 @@ Expected: builder, bundled-helper smoke, and release-builder tests exit 0.
 With SketchUp closed, expand the RBZ and swap the loader/folder while retaining backups:
 
 ```powershell
-$plugins = 'C:\Users\Rowdy Payton\AppData\Roaming\SketchUp\SketchUp 2017\SketchUp\Plugins'
+$plugins = Join-Path $env:APPDATA 'SketchUp\SketchUp 2017\SketchUp\Plugins'
 $stage = 'C:\TMP\su_text3d_release_candidate_20260715\expanded'
 $rbz = (Get-ChildItem -LiteralPath 'C:\TMP\su_text3d_release_candidate_20260715' -Filter '*.rbz' | Select-Object -First 1).FullName
 $zip = 'C:\TMP\su_text3d_release_candidate_20260715\candidate.zip'
@@ -1318,7 +1318,7 @@ python tools/test_build_release.py
 Install the final RBZ with a second reversible swap, then rerun the live probe:
 
 ```powershell
-$plugins = 'C:\Users\Rowdy Payton\AppData\Roaming\SketchUp\SketchUp 2017\SketchUp\Plugins'
+$plugins = Join-Path $env:APPDATA 'SketchUp\SketchUp 2017\SketchUp\Plugins'
 $finalRoot = 'C:\TMP\su_text3d_release_final_20260715'
 $finalStage = Join-Path $finalRoot 'expanded'
 $finalRbz = (Get-ChildItem -LiteralPath $finalRoot -Filter '*.rbz' | Select-Object -First 1).FullName

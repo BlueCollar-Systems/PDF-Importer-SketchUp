@@ -1,6 +1,11 @@
 #!/usr/bin/env ruby
 # Read-only fixture diagnostic for the exact source-outline 3D text path.
 
+unless ARGV.length == 2
+  warn 'ERROR: expected exactly two PDF paths'
+  exit 2
+end
+
 require 'json'
 require 'tmpdir'
 
@@ -363,10 +368,7 @@ rescue StandardError => e
   }
 end
 
-paths = ARGV.empty? ? [
-  'C:/Users/Rowdy Payton/Desktop/PDFTest Files/Welding-Symbol-Chart.pdf',
-  'C:/Users/Rowdy Payton/Desktop/PDFTest Files/AWSWeldSymbolchart.pdf'
-] : ARGV
+paths = ARGV.dup
 
 reports = paths.map do |pdf_path|
   begin

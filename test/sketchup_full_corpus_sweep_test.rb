@@ -10,6 +10,35 @@ require File.expand_path(
 )
 
 class SketchupFullCorpusSweepTest < Minitest::Test
+  def test_cli_requires_explicit_corpus_and_evidence_roots
+    error = assert_raises(OptionParser::MissingArgument) do
+      SketchupFullCorpusSweep.cli_options([], {})
+    end
+
+    assert_match(/BCS_CORPUS_ROOT/, error.message)
+    assert_match(/BCS_EVIDENCE_ROOT/, error.message)
+  end
+
+  def test_cli_accepts_private_roots_only_from_environment_or_arguments
+    env_options = SketchupFullCorpusSweep.cli_options(
+      [],
+      'BCS_CORPUS_ROOT' => 'C:/private/source',
+      'BCS_EVIDENCE_ROOT' => 'C:/private/evidence'
+    )
+
+    assert_equal 'C:/private/source', env_options[:corpus_root]
+    assert_equal 'C:/private/evidence', env_options[:evidence_root]
+
+    cli_options = SketchupFullCorpusSweep.cli_options(
+      ['--corpus', 'D:/source', '--evidence', 'D:/evidence'],
+      'BCS_CORPUS_ROOT' => 'C:/private/source',
+      'BCS_EVIDENCE_ROOT' => 'C:/private/evidence'
+    )
+
+    assert_equal 'D:/source', cli_options[:corpus_root]
+    assert_equal 'D:/evidence', cli_options[:evidence_root]
+  end
+
   def test_default_source_root_is_the_versioned_importer_tree
     expected = File.expand_path(
       '../extracted/sketchup_ext', File.join(__dir__, '..', 'tools')
