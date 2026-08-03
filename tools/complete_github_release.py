@@ -120,6 +120,8 @@ class GhClient:
         args.extend(["--title", title, "--notes", notes])
         if latest:
             args.append("--latest")
+        else:
+            args.append("--latest=false")
         args.extend(str(asset.path) for asset in assets)
         self._run(args)
 

@@ -109,6 +109,17 @@ class CompleteGitHubReleaseTest(unittest.TestCase):
             target_index = captured[0].index("--target")
             self.assertEqual("a" * 40, captured[0][target_index + 1])
 
+    def test_gh_nonproduct_release_is_explicitly_not_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            assets = self.make_assets(Path(tmp))
+            github = release.GhClient("owner/repo")
+            captured = []
+            github._run = lambda args, **_kwargs: captured.append(args)
+            github.create_release(
+                "steel-v1.0.1", "a" * 40, "title", "notes", assets, False
+            )
+            self.assertIn("--latest=false", captured[0])
+
     def test_partial_mutable_release_uploads_only_missing_asset(self):
         with tempfile.TemporaryDirectory() as tmp:
             assets = self.make_assets(Path(tmp))

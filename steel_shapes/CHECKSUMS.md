@@ -1,18 +1,16 @@
 # Checksums
 
-Release asset checksums for quick integrity verification.
-
-## v1.0.0
-
-- `Structural-Steel-SU-Shapes-v1.0.0.zip`
-  - SHA-256: `7786f2a194ec8c4e04c21d654f767c2b26a71f6563b19ed732c016e2b49bfa7e`
+Every immutable `steel-v*` release includes a release-bound `SHA256SUMS.txt`
+asset beside its versioned ZIP and `latest` alias. The two ZIPs are required to
+be byte-identical. Use the checksum manifest from the same release; do not copy
+a digest from a different tag.
 
 ## Verify locally
 
 PowerShell:
 
-`Get-FileHash .\Structural-Steel-SU-Shapes-v1.0.0.zip -Algorithm SHA256`
+`Get-FileHash .\Structural-Steel-SU-Shapes-v1.0.1.zip -Algorithm SHA256`
 
 macOS / Linux:
 
-`shasum -a 256 Structural-Steel-SU-Shapes-v1.0.0.zip`
+`shasum -a 256 Structural-Steel-SU-Shapes-v1.0.1.zip`

@@ -131,6 +131,7 @@ jobs:
         run: |
           python tools/test_release_safety.py
           python -m unittest tools.test_complete_github_release tools.test_skp_probe_lock_contract
+          python tools/test_build_steel_shapes_release.py
       - name: Smoke the checked-in Windows Poppler helpers
         run: python tools/smoke_poppler_helpers.py --required
       - name: Validate release publication state
