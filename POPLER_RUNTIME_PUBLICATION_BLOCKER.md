@@ -1,6 +1,17 @@
-# Poppler runtime publication blocker
+# Poppler runtime publication blocker — superseded/resolved
 
-Status: **blocked pending qualified third-party review**.
+> **SUPERSEDED / RESOLVED:** This local historical blocker no longer describes
+> the tracked publication state. The owner recorded an approved determination
+> in `third_party/sources/POPPLER_LICENSE_REVIEW.md`, completed
+> `Library/SOURCE_OFFER.txt`, and bound that evidence into the tracked runtime
+> manifest. That determination is explicitly **not independent legal counsel**.
+> The executable publication gate remains fail-closed on the exact manifest,
+> source offer, notices, licence texts, source pins, and runtime inventory.
+
+Status: **superseded by the tracked owner-approved determination**.
+
+The text below is retained as historical pre-approval context. It is not the
+current publication-state authority.
 
 The zero-setup Windows runtime is technically integrated and pinned, but a
 helper-bearing RBZ must not be published as stable until an independent

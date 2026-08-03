@@ -1,10 +1,14 @@
 # Third-Party Notices — SketchUp PDF Importer
 
+**Status:** approved
+
 Windows release RBZ files ship a free zero-ceremony Poppler runtime so clean
-machines can import without a separate helper download. Publication requires an
-approved integrity manifest for the exact staged bytes. The currently staged
-runtime is **blocked from stable publication** pending the independent review
-described in `POPLER_RUNTIME_PUBLICATION_BLOCKER.md`.
+machines can import without a separate helper download. Publication remains
+fail-closed on the approved integrity manifest for the exact staged bytes, the
+complete source offer, the mapped licence texts, and the pinned source/archive
+hashes. The checked-in approval is the recorded determination of owner Rowdy
+Payton (BlueCollar Systems); it is **not independent legal counsel**. See
+`third_party/sources/POPPLER_LICENSE_REVIEW.md` for its facts and scope.
 
 ## Bundled components
 
@@ -25,9 +29,8 @@ Poppler character-map/data files live under
   texts plus Poppler-data notices.
 - `bc_pdf_vector_importer/Library/THIRD_PARTY_NOTICES.txt` — component,
   binary, source, license, and hash mapping.
-- `bc_pdf_vector_importer/Library/SOURCE_OFFER.txt` — written-source-offer
-  draft; owner contact and publication details must be completed before
-  approval.
+- `bc_pdf_vector_importer/Library/SOURCE_OFFER.txt` — completed written source
+  offer with owner contact and pinned source-publication details.
 
 ## Authoritative manifest
 
