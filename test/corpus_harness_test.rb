@@ -5,6 +5,18 @@ require 'tempfile'
 require_relative 'support/corpus_harness'
 
 class CorpusHarnessTest < Minitest::Test
+  def test_headless_two_argument_text_mirrors_host_zero_leader_vector
+    CorpusHarness.install_headless_stubs!
+    entities = CorpusDummyEntities.new
+    point = Geom::Point3d.new(1, 2, 3)
+
+    text = entities.add_text('synthetic', point)
+    vector = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+      .numeric_point(text.vector)
+
+    assert_equal [0.0, 0.0, 0.0], vector
+  end
+
   def test_stress_pdf_optout_is_not_hard_coded
     assert_empty CorpusHarness::STRESS_PDF_SLUGS
   end

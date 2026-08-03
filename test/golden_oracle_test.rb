@@ -1,8 +1,9 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Headless golden-oracle gate: named private validation PDFs vs numeric ranges in validation_oracles.json.
-# Skips oracles whose PDF is not on disk (manifest-only / user-desktop).
+# Headless golden-oracle gate: private manifest acceptance roles vs numeric
+# ranges in validation_oracles.json. Private identifiers and paths stay in the
+# external manifest; committed acceptance keys are semantic and non-sensitive.
 
 require 'json'
 require 'minitest/autorun'
@@ -21,16 +22,19 @@ class GoldenOracleTest < Minitest::Test
   def test_oracle_schema
     assert_equal 'bcs.validation_oracles/1', @doc['schema']
     assert @oracles.length >= 5
+    keys = @oracles.map { |oracle| oracle['acceptance_key'].to_s.strip }
+    assert keys.all? { |key| !key.empty? }, 'every oracle requires acceptance_key'
+    assert_equal keys.length, keys.uniq.length, 'acceptance_key values must be unique'
   end
 
   def test_named_oracles_against_corpus
+    paths = BlueCollarSystems::PDFVectorImporter::CorpusPaths
+    skip 'Set BCS_PRIVATE_VALIDATION_ROOT to run golden oracles' unless paths.configured_private_validation_root
+
     failures = []
+    executed_count = 0
     @oracles.each do |oracle|
       pdf = resolve_oracle_pdf(oracle)
-      unless pdf
-        warn "SKIP #{oracle['id']} — PDF not on disk (#{oracle['name']})"
-        next
-      end
 
       info = {
         path: pdf,
@@ -39,34 +43,20 @@ class GoldenOracleTest < Minitest::Test
       result = CorpusHarness.analyze_pdf(info)
       expect = oracle['expect'] || {}
       failures.concat(check_oracle(oracle, result, expect))
+      executed_count += 1
     end
 
+    assert_equal @oracles.length, executed_count,
+                 "executed #{executed_count} of #{@oracles.length} configured oracles"
     assert_empty failures, failures.join("\n")
   end
 
   private
 
   def resolve_oracle_pdf(oracle)
-    entry_id = oracle['manifest_entry_id']
-    if entry_id && !entry_id.to_s.empty?
-      found = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf(entry_id)
-      return found if found
-    end
-
-    key = oracle['corpus_key']
-    if key && !key.to_s.empty?
-      rel = key.sub(%r{\A[^/]+/}, '')
-      found = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(rel)
-      return found if found
-      found = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(key)
-      return found if found
-    end
-
-    Array(oracle['pdf_candidates']).each do |name|
-      found = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(name)
-      return found if found
-    end
-    nil
+    BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_acceptance_pdf(
+      oracle.fetch('acceptance_key')
+    )
   end
 
   def check_oracle(oracle, result, expect)

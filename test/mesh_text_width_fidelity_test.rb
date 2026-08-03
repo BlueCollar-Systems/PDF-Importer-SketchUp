@@ -188,7 +188,7 @@ class MeshTextWidthFidelityTest < Minitest::Test
   end
 
   def test_boxless_span_fails_closed_after_exact_owned_cleanup
-    boxless = no_bbox_item('p1019', 8.0)
+    boxless = no_bbox_item('p7302', 8.0)
     b, ents, delivered = place(boxless)
 
     refute delivered, 'Text3D cannot be certified without a declared source width'

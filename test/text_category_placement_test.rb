@@ -56,20 +56,21 @@ builder = BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
 )
 
 # --- Part marks: [wap]\d+ — PDF angle; tall bbox uses min(w,h) font; no false 90° ---
-assert_true(builder.send(:part_mark_label?, 'w1023'), 'w-prefix part mark recognized')
-assert_true(builder.send(:part_mark_label?, 'p1052'), 'p-prefix part mark recognized')
-assert_true(builder.send(:part_mark_label?, 'a1006'), 'a-prefix part mark recognized')
+assert_true(builder.send(:part_mark_label?, 'w7304'), 'w-prefix part mark recognized')
+assert_true(builder.send(:part_mark_label?, 'p7303'), 'p-prefix part mark recognized')
+assert_true(builder.send(:part_mark_label?, 'a7307'), 'a-prefix part mark recognized')
 assert_true(!builder.send(:part_mark_label?, '1017'), 'bare job number is not a part mark')
 assert_true(!builder.send(:part_mark_label?, '4'), 'bare digit is not a part mark')
 
-tall_w = make_item('w1023', 100.0, 200.0, 110.0, 240.0, angle: 0.0, font_size: 10.79)
+tall_w = make_item('w7304', 100.0, 200.0, 110.0, 240.0, angle: 0.0, font_size: 10.0)
 wx, wy, wang = builder.send(:label_insertion_pdf, tall_w)
 assert_near(wx, 100.0, 0.05, 'tall-bbox horizontal part mark anchors at bbox x0')
 assert_true(wang.abs < 0.01, 'tall-bbox horizontal part mark keeps PDF angle 0')
 eff_fs = builder.send(:effective_font_size_pts, tall_w)
-assert_true(eff_fs <= 11.0, 'tall-bbox part mark uses min(w,h) for effective font size')
+assert_near(eff_fs, 10.0, 0.01,
+            'geometry builder preserves the extractor-resolved nominal font size')
 
-diag_a = make_item('a1005', 500.0, 300.0, 530.0, 312.0, angle: 45.0, font_size: 10.79)
+diag_a = make_item('a7306', 500.0, 300.0, 530.0, 312.0, angle: 45.0, font_size: 10.79)
 _, _, dang = builder.send(:label_insertion_pdf, diag_a)
 assert_true(dang.abs >= 8.0 && dang.abs < 75.0, 'diagonal part mark follows PDF angle band')
 
@@ -174,7 +175,7 @@ assert_true(builder.send(:angle_requires_rotated_origin?, 45.0),
 bom_mesh_x, _, _ = builder.send(:mesh_label_anchor_pdf, bom)
 assert_near(bom_mesh_x, bx, 0.001, 'mesh anchor matches centered label insertion X')
 
-# --- BOM table orientation regression (mirrors PRIVATE-01 QUAN|MARK|DESCRIPTION) ---
+# --- Synthetic BOM table orientation regression (QUAN|MARK|DESCRIPTION) ---
 # QUAN single-digit quantities must render UPRIGHT (0deg), not rotated 90deg.
 # MARK/DESCRIPTION cells stay horizontal. Only genuinely PDF-rotated field
 # dimensions should rotate — see label_angle_pdf QUAN-column branch (R26).
@@ -185,9 +186,9 @@ bom_desc_hdr = make_item('DESCRIPTION', 200.0, 698.0, 290.0, 710.0, font_size: 8
 bom_q1 = make_item('1', 108.0, 684.0, 113.0, 694.0, font_size: 8.0)
 bom_q3 = make_item('3', 107.0, 668.0, 114.0, 678.0, font_size: 8.0)
 bom_q2 = make_item('2', 107.0, 636.0, 114.0, 646.0, font_size: 8.0)
-bom_mark_txt = make_item('1017FR1', 140.0, 684.0, 180.0, 694.0, font_size: 8.0)
-bom_mark_pm  = make_item('w1023', 140.0, 668.0, 170.0, 678.0, font_size: 8.0)
-bom_desc_txt = make_item('W12X30', 200.0, 684.0, 250.0, 694.0, font_size: 8.0)
+bom_mark_txt = make_item('7309FR4', 140.0, 684.0, 180.0, 694.0, font_size: 8.0)
+bom_mark_pm  = make_item('w7304', 140.0, 668.0, 170.0, 678.0, font_size: 8.0)
+bom_desc_txt = make_item('W10X22', 200.0, 684.0, 250.0, 694.0, font_size: 8.0)
 bom_items = [bom_quan_hdr, bom_mark_hdr, bom_desc_hdr,
              bom_q1, bom_q3, bom_q2, bom_mark_txt, bom_mark_pm, bom_desc_txt]
 builder.send(:prepare_bom_table_context, bom_items)
@@ -208,7 +209,7 @@ assert_true((q3x - q3_center).abs < 5.0,
 _, _, mtxt_ang = builder.send(:label_insertion_pdf, bom_mark_txt)
 assert_true(mtxt_ang.abs < 0.01, 'BOM MARK cell stays horizontal (not forced vertical)')
 _, _, mpm_ang = builder.send(:label_insertion_pdf, bom_mark_pm)
-assert_true(mpm_ang.abs < 0.01, 'BOM MARK part label w1023 stays horizontal at PDF angle 0')
+assert_true(mpm_ang.abs < 0.01, 'BOM MARK part label w7304 stays horizontal at PDF angle 0')
 _, _, desc_ang = builder.send(:label_insertion_pdf, bom_desc_txt)
 assert_true(desc_ang.abs < 0.01, 'BOM DESCRIPTION cell stays horizontal')
 
@@ -219,12 +220,43 @@ assert_true(builder.send(:label_angle_pdf, bom_frac).abs < 0.01,
 
 # Two-digit mixed numbers in tall pdftotext cells stay horizontal when the
 # PDF angle is near zero (shop-drawing dimension breaks, not vertical runs).
-wide_mixed = make_item('13 3/4', 300.0, 400.0, 312.0, 430.0, angle: 0.0, font_size: 6.0)
+wide_mixed = make_item('13 3/4', 300.0, 300.0, 312.0, 330.0, angle: 0.0, font_size: 6.0)
 assert_true(builder.send(:label_angle_pdf, wide_mixed).abs < 0.01,
             'two-digit stacked fraction stays horizontal at PDF angle 0')
 wx, _, _ = builder.send(:label_insertion_pdf, wide_mixed)
 assert_true(wx > 300.0 && wx < 312.0,
             'two-digit stacked fraction centers in its dimension break')
+
+# The same text shape is a true vertical run when the extractor reports the
+# tall bbox side as the source font size. Rotated placement must then use the
+# bbox short side for both its run width and baseline offset.
+vertical_mixed = Item.new(
+  '10 3/8', 600.0, 300.0, 12.0, 0.0, 'pdftotext', 30.0,
+  600.0, 300.0, 612.0, 330.0
+)
+vertical_ang = builder.send(:label_angle_pdf, vertical_mixed)
+assert_near(vertical_ang, 90.0, 0.01,
+            'tall mixed dimension with long-side source size infers a vertical run')
+vertical_x, vertical_y, = builder.send(:label_insertion_pdf, vertical_mixed)
+assert_near(vertical_x, 608.16, 0.01,
+            'vertical mixed dimension uses short-side baseline offset')
+assert_near(vertical_y, 308.70, 0.01,
+            'vertical mixed dimension uses calibrated 1.05em run width')
+
+assert_near(builder.send(:dimension_label_raw_width_pts, '12', 10.0), 5.5, 0.01,
+            'one- and two-digit dimensions retain the calibrated 0.55em run width')
+assert_near(builder.send(:dimension_label_raw_width_pts, '10 3/8', 10.0), 10.5, 0.01,
+            'mixed dimensions retain the calibrated 1.05em run width')
+
+stacked_parent = make_item('2 2', 700.0, 400.0, 712.0, 430.0,
+                           angle: 0.0, font_size: 30.0)
+sub_y0, sub_y1 = builder.send(:stacked_dimension_row_bounds, 400.0, 430.0, 0, 2)
+stacked_sub = builder.send(:sub_dimension_text_item, stacked_parent, '2',
+                           700.0, 712.0, sub_y0, sub_y1)
+stacked_x, = builder.send(:label_insertion_pdf, stacked_sub)
+expected_stacked_x = 706.0 - (stacked_sub.font_size.to_f * 0.55 * 0.5)
+assert_near(stacked_x, expected_stacked_x, 0.01,
+            'derived stacked digits center without changing ordinary digit placement')
 
 # Diagonal brace dimensions keep the extractor angle so Labels → 3D Text
 # preserves the source tilt instead of snapping to 90°.

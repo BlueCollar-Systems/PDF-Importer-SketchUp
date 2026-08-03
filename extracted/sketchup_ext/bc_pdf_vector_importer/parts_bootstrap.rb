@@ -13,8 +13,8 @@
 #     tables: [
 #       { page: 1,
 #         rows: [
-#           { piece_mark: 'p1019', quantity: 2, description: 'PL1/2X8X24',
-#             profile_hint: 'PL', length_in: 24.0,
+#           { piece_mark: 'p7302', quantity: 2, description: 'PL5/8X9X30',
+#             profile_hint: 'PL', length_in: 30.0,
 #             span_ids: ['text_span:1:42'] }
 #         ] }
 #     ] }

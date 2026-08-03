@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Measure whether rotated engineering notation survives an import.
 
-Owner-reported defect (2026-07-30): on rotated dimension leaders, the whole
-number keeps its angle while the stacked fraction and the part mark do not --
-"1 3/4" arrives as a rotated "1" plus a horizontal "3/4", and "a1020" arrives
+Synthetic regression class: on rotated dimension leaders, the whole number
+keeps its angle while the stacked fraction and the part mark do not --
+"2 5/8" arrives as a rotated "2" plus a horizontal "5/8", and "a1234" arrives
 fragmented. Counting delivered entity types does not catch this; you have to
 compare each source word against the rotation actually delivered for the span
 that covers it.
@@ -18,8 +18,8 @@ nothing wires that on your behalf.
 
 Self-validating: pdftotext -bbox measures y from the page top while PDF user
 space measures it from the bottom. Getting that backwards makes a healthy
-import look catastrophic (it reported 21% coverage instead of 99.6% during the
-investigation that produced this tool). The probe therefore tests both
+import look catastrophic by reporting low coverage instead of near-complete
+coverage. The probe therefore tests both
 orientations, picks the one that actually fits, and refuses to report numbers
 if neither fits -- a bad instrument must not masquerade as a bad product.
 """

@@ -123,8 +123,8 @@ class BootstrapProvenanceJoinTest < Minitest::Test
       bbox_item('MARK',          120.0, 500.0, 30.0, 510.0),
       bbox_item('DESCRIPTION',   220.0, 500.0, 80.0, 510.0),
       bbox_item('2',              50.0, 460.0, 8.0, 470.0),
-      bbox_item('p1019',         120.0, 460.0, 34.0, 470.0),
-      bbox_item("PL1/2X8X2'-0\"", 220.0, 460.0, 90.0, 470.0)
+      bbox_item('p7302',           120.0, 460.0, 34.0, 470.0),
+      bbox_item("PL5/8X9X2'-6\"", 220.0, 460.0, 90.0, 470.0)
     ]
   end
 
@@ -178,7 +178,7 @@ class BootstrapProvenanceJoinTest < Minitest::Test
 
     placed_text = entities.labels.map(&:text)
     assert_includes placed_text, 'b202'
-    refute_includes placed_text, 'p1019'
+    refute_includes placed_text, 'p7302'
     assert_equal [2], bucket.map { |entry| entry[:page] }.uniq
     assert page_map.fetch(1).all? { |item| item.source_span_id.nil? },
            'unselected page 1 must not enter identity or placement seams'
@@ -274,9 +274,9 @@ class BootstrapProvenanceJoinTest < Minitest::Test
 
   # Post-assignment clones keep identity (real helper, not a mock).
   def test_angle_hint_clone_preserves_assigned_identity
-    item = TI.new('w1023', 822.0, 760.0, 33.0, 0.0, 'pdftotext', nil,
-                  822.0, 760.0, 833.0, 794.0, nil)
-    hint = TI.new('w1023', 831.0, 760.0, 11.0, -90.0, 'F1', 1.0)
+    item = TI.new('w7304', 622.0, 540.0, 33.0, 0.0, 'pdftotext', nil,
+                  622.0, 540.0, 633.0, 574.0, nil)
+    hint = TI.new('w7304', 631.0, 540.0, 11.0, -90.0, 'F1', 1.0)
     MOD::TextSourceIdentity.assign!([item], 1)
     merged = MOD.apply_internal_text_angle_hints([item], [hint])
     refute_same item, merged[0], 'expected an enriched clone'

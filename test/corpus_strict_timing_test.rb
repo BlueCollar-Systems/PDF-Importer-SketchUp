@@ -1,10 +1,10 @@
 #!/usr/bin/env ruby
 # test/corpus_strict_timing_test.rb
-# Strict-mode timing budget on one named private validation PDF (Round-2 action #10).
+# Strict-mode timing budget for one explicitly supplied external-reference PDF.
 #
-# Usage (opt-in — not part of default private validation gate):
+# Usage (opt-in — not part of the default validation gate):
 #   CORPUS_STRICT_TIMING=1 ruby test/corpus_strict_timing_test.rb
-#   CORPUS_STRICT_TIMING=1 CORPUS_STRICT_TIMING_PDF=PRIVATE-01 ruby test/corpus_strict_timing_test.rb
+#   CORPUS_STRICT_TIMING=1 CORPUS_STRICT_TIMING_PDF=C:\path\to\reference.pdf ruby test/corpus_strict_timing_test.rb
 #
 # Uses normal (non-heavy) timeout from corpus_harness. Fails if wall-clock
 # exceeds CORPUS_STRICT_TIMING_BUDGET_S (default 60s post-v3.7.55).
@@ -13,15 +13,19 @@ exit 0 unless ENV['CORPUS_STRICT_TIMING'] == '1'
 
 require_relative 'support/corpus_harness'
 
-slug = (ENV['CORPUS_STRICT_TIMING_PDF'] || 'PRIVATE-01').strip
+begin
+  pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_acceptance_pdf(
+    'shop-bom-tier1', 'CORPUS_STRICT_TIMING_PDF'
+  )
+rescue BlueCollarSystems::PDFVectorImporter::CorpusPaths::AcceptanceInputError => e
+  warn "FAIL: #{e.message}"
+  exit 1
+end
 budget_s = (ENV['CORPUS_STRICT_TIMING_BUDGET_S'] || '60').to_f
 budget_s = 60.0 if budget_s <= 0
 
-pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf(slug)
-pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf("private/user/#{slug}.pdf") unless pdf_path && File.file?(pdf_path)
-pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(slug) unless pdf_path && File.file?(pdf_path)
-unless pdf_path && File.file?(pdf_path)
-  warn "SKIP: private validation PDF #{slug.inspect} not found (set BCS_PRIVATE_VALIDATION_ROOT)"
+unless pdf_path
+  warn 'SKIP: set BCS_PRIVATE_VALIDATION_ROOT or CORPUS_STRICT_TIMING_PDF'
   exit 0
 end
 

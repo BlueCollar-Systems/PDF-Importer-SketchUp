@@ -1070,7 +1070,7 @@ class QAReportTest < Minitest::Test
       layers: [],
       text_renderers: [],
       text_mode: :labels,
-      model_3d_texts: ['p1052 PL3/4"X7"', 'w1025 W12X30']
+      model_3d_texts: ['p7303 PL5/8"X9 1/2"', 'w7305 W10X22']
     }
 
     report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
@@ -1083,7 +1083,7 @@ class QAReportTest < Minitest::Test
     assert_equal true, intent['feasible']
     assert_equal 1, intent['plates'].length
     assert_equal 1, intent['members'].length
-    assert_equal 'W12X30', intent['members'][0]['designation']
+    assert_equal 'W10X22', intent['members'][0]['designation']
   end
 
   def test_parts_bootstrap_is_reported_from_page_text_map
@@ -1102,8 +1102,8 @@ class QAReportTest < Minitest::Test
           QAReportTextItem.new('MARK', 1, 120.0, 500.0, 'h2'),
           QAReportTextItem.new('DESCRIPTION', 1, 220.0, 500.0, 'h3'),
           QAReportTextItem.new('2', 1, 50.0, 460.0, 'r1a'),
-          QAReportTextItem.new('p1052', 1, 120.0, 460.0, 'r1b'),
-          QAReportTextItem.new('PL3/4X7"', 1, 220.0, 460.0, 'r1c')
+          QAReportTextItem.new('p7303', 1, 120.0, 460.0, 'r1b'),
+          QAReportTextItem.new('PL5/8X9 1/2"', 1, 220.0, 460.0, 'r1c')
         ]
       }
     }
@@ -1118,7 +1118,7 @@ class QAReportTest < Minitest::Test
     assert_equal 'bcs.parts_bootstrap/1.0', bootstrap['schema']
     assert_equal 1, bootstrap['row_count']
     row = bootstrap['tables'][0]['rows'][0]
-    assert_equal 'p1052', row['piece_mark']
+    assert_equal 'p7303', row['piece_mark']
     assert_equal 2, row['quantity']
     assert_equal 'PL', row['profile_hint']
   end

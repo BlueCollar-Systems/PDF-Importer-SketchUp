@@ -1794,9 +1794,19 @@ module BlueCollarSystems
         if sub.respond_to?(:source_span_id=) && item.respond_to?(:source_span_id)
           sub.source_span_id = item.source_span_id
         end
+        # Ordinary one-digit spans remain left anchored. Only digits derived
+        # from a verified stacked parent are centered in that parent's gap.
+        sub.instance_variable_set(:@stacked_dimension_sub_item, true)
         sub
       rescue StandardError
         item
+      end
+
+      def stacked_dimension_sub_item?(item)
+        item && item.instance_variable_defined?(:@stacked_dimension_sub_item) &&
+          item.instance_variable_get(:@stacked_dimension_sub_item) == true
+      rescue StandardError
+        false
       end
 
       def try_annotation_add(entities, rung, description)
@@ -2530,21 +2540,18 @@ module BlueCollarSystems
         fs = [font_size_pts.to_f, 1.0].max
         t = text.to_s.strip
         if t =~ /\A\d{1,2}\/\d{1,2}"?\z/
-          fs * 0.72
+          fs * 0.58
         elsif t =~ /\A\d+\s+\d{1,2}\/\d{1,2}"?\z/
-          # Mixed number (e.g. "2 1/2", "13 3/4"): SketchUp Label glyphs are
-          # wider than condensed CAD ink; underestimate shifts the visual
-          # center to the right of the dimension break.
-          fs * (0.62 + (0.38 * t.gsub(/[^0-9]/, '').length))
+          fs * 1.05
         elsif t =~ /\A\d{1,2}\z/
-          fs * 0.72
+          fs * 0.55
         elsif feet_inch_dimension_label?(t)
           feet_inch_label_width_pts(t, fs)
         else
-          t.length * fs * 0.62
+          t.length * fs * 0.55
         end
       rescue StandardError
-        [font_size_pts.to_f * 0.62, 1.0].max
+        [font_size_pts.to_f * 0.55, 1.0].max
       end
 
       def dimension_label_est_width_pts(text, font_size_pts, bbox_w_pts)
@@ -2592,8 +2599,17 @@ module BlueCollarSystems
         # extractor already reports a near-vertical angle.
         return false if angle_deg.to_f.abs >= 45.0
         t = text.to_s.strip
-        !!(t =~ /\A\d+\s+\d{1,2}\/\d{1,2}"?\z/ ||
-           t =~ /\A\d{1,2}\/\d{1,2}"?\z/)
+        return true if t =~ /\A\d{1,2}\/\d{1,2}"?\z/
+        mixed = /\A(\d+)\s+\d{1,2}\/\d{1,2}"?\z/.match(t)
+        return false unless mixed
+        return true if mixed[1].length == 1
+
+        # A source font no larger than the bbox short side describes an
+        # upright stacked fraction inside a tall dimension-break cell. When
+        # the reported source size is the long side, the same AABB describes
+        # a true rotated run and must not be flattened to horizontal.
+        short_side = [bbox_w_pts.to_f.abs, bbox_h_pts.to_f.abs].min
+        font_size_pts.to_f <= short_side * 1.05
       rescue StandardError
         false
       end
@@ -2654,8 +2670,15 @@ module BlueCollarSystems
         end
         if dimension_like_label?(item.text)
           fs = effective_font_size_pts(item)
+          orientation_fs = fs
+          if external_text_item?(item) && item.respond_to?(:raw_font_size) &&
+             item.raw_font_size && item.raw_font_size.to_f > 0.0
+            orientation_fs = item.raw_font_size.to_f
+          end
           if bbox_w && bbox_h && vertical_dimension_bbox?(item, bbox_w, bbox_h) &&
-             !narrow_fraction_dimension_stays_horizontal?(item.text, bbox_w, bbox_h, fs, angle)
+             !narrow_fraction_dimension_stays_horizontal?(
+               item.text, bbox_w, bbox_h, orientation_fs, angle
+             )
             raw = item.respond_to?(:angle) ? item.angle.to_f : 0.0
             # Trust the extractor when it already reports a meaningful tilt
             # (diagonal brace dims). Only synthesize 90° for upright PDF
@@ -2895,6 +2918,9 @@ module BlueCollarSystems
             baseline_offset = for_mesh ? (fs * 0.5) : nil
             x, y = rotated_bbox_text_origin_pdf(item, bx0, by0, bx1, by1, fs, angle, baseline_offset)
             used_rotated_origin = true
+          elsif stacked_dimension_sub_item?(item)
+            est_w = dimension_label_est_width_pts(item.text, fs, bbox_w)
+            x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
           elsif slope_triangle_label?(item.text, bbox_w, bbox_h, angle)
             est_w = dimension_label_est_width_pts(item.text, fs, bbox_w)
             x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
@@ -2913,10 +2939,7 @@ module BlueCollarSystems
             x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
           elsif should_center_label?(item.text, bbox_w, fs, angle)
             t = item.text.to_s.strip
-            # Use a wider per-glyph multiplier for all-caps strings (BOM headers
-            # like QUAN/DESC/MARK) vs mixed-case text to avoid over-centering.
-            char_w = (t == t.upcase && t =~ /[A-Z]/) ? 0.79 : 0.55
-            est_w = t.length * fs * char_w
+            est_w = t.length * fs * 0.55
             x = ((bx0 + bx1) * 0.5) - (est_w * 0.5)
           else
             x = bx0

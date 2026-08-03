@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # test/text_label_placement_test.rb
-# Headless checks for label anchor heuristics and PRIVATE-01 golden PDF text extraction.
-# Golden tier: PRIVATE-01 coordinate assertions below. Unit tier: text_category_placement_test.rb
+# Headless checks for label anchor heuristics and optional external-reference extraction.
+# Unit tier: text_category_placement_test.rb
 
 require 'fileutils'
 
@@ -12,14 +12,13 @@ $LOAD_PATH.unshift(SRC_ROOT)
 require 'bc_pdf_vector_importer/logger'
 require 'bc_pdf_vector_importer/text_parser'
 require 'bc_pdf_vector_importer/external_text_extractor'
+require 'bc_pdf_vector_importer/text_source_identity'
 require_relative '../corpus_paths'
 
-pdf_tier1 = ENV['BCS_TIER1_USER_PDF'].to_s
-if pdf_tier1.empty?
-  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf('PRIVATE-01').to_s
-  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('private/user/PRIVATE-01.pdf').to_s if pdf_tier1.empty?
-end
-PDF_TIER1_USER = pdf_tier1
+PDF_EXTERNAL_REFERENCE = BlueCollarSystems::PDFVectorImporter::CorpusPaths
+                         .resolve_acceptance_pdf(
+                           'shop-bom-tier1', 'BCS_TIER1_USER_PDF'
+                         )
 PDF_TOL = 1.5
 TextAlignLeft = 0
 
@@ -39,6 +38,11 @@ end
 
 def assert_near(actual, expected, tol, msg)
   assert_true((actual.to_f - expected.to_f).abs <= tol, msg)
+end
+
+def require_acceptance_item(item, description)
+  assert_true(!item.nil?, "tier-1 acceptance input is missing #{description}")
+  item
 end
 
 # Stub SketchUp Geom types used by geometry_builder helpers.
@@ -80,12 +84,22 @@ Z_AXIS = Geom::Vector3d.new(0, 0, 1)
 
 class DummyTextEntity
   attr_accessor :layer, :display_leader, :vector
-  attr_reader :persistent_id, :point
+  attr_reader :persistent_id, :point, :text
 
-  def initialize(id, point, vector)
+  def initialize(id, text, point, vector)
     @persistent_id = id
+    @text = text
     @point = point
     @vector = vector
+    @display_leader = true
+  end
+
+  def typename
+    'Text'
+  end
+
+  def display_leader?
+    @display_leader
   end
 end
 
@@ -111,7 +125,7 @@ class DummyEntities
   def add_text(text, point, vector = nil)
     @next_id += 1
     effective_vector = vector || Geom::Vector3d.new(0, 0, 0)
-    ent = DummyTextEntity.new(@next_id, point, effective_vector)
+    ent = DummyTextEntity.new(@next_id, text, point, effective_vector)
     @entities << ent
     @texts << [text, point, effective_vector, ent]
     ent
@@ -159,10 +173,8 @@ center_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
 x, y, angle = builder.send(:label_insertion_pdf, center_item)
 assert_true(builder.send(:should_center_label?, 'QUAN', 40.0, 8.0, 0.0),
             'BOM header QUAN should center in wide table cell')
-# Calibrated mesh width table (v3.7.82 grow-path fix) models wide caps
-# like Q/U/A/N at realistic Helvetica widths (~0.79em avg), shifting the
-# centered start left of the old crude 0.55em estimate (101.2 -> 97.3).
-assert_true((x - 97.3).abs < 1.0, "centered BOM header should shift X toward bbox center (got #{x})")
+# The private golden oracle calibrates BOM headers at 0.55em per glyph.
+assert_true((x - 101.2).abs < 1.0, "centered BOM header should shift X toward bbox center (got #{x})")
 assert_true(y > center_item.bbox_y0, 'baseline should sit above bbox bottom')
 assert_true(angle.abs < 0.01, 'horizontal label keeps angle')
 
@@ -186,7 +198,7 @@ assert_true(builder.send(:bom_table_quantity_label?, '1', 5.4, 9.1, 0.0, narrow_
 assert_true(builder.send(:label_angle_pdf, narrow_qty).abs < 0.01,
             'QUAN-column qty should stay horizontal in BOM table')
 mark_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
-  '1017FR1', 145.0, 175.0, 8.0, -90.0, 'pdftotext', nil, 144.0, 166.0, 183.9, 175.1
+  '7309FR4', 145.0, 175.0, 8.0, -90.0, 'pdftotext', nil, 144.0, 166.0, 183.9, 175.1
 )
 assert_true(builder.send(:label_angle_pdf, mark_item).abs < 0.01,
             'MARK-column labels must stay horizontal even with tall pdftotext bbox')
@@ -227,7 +239,7 @@ assert_true(placed_vector.respond_to?(:x) && placed_vector.respond_to?(:y),
             'placed label should receive a direction vector')
 
 rotated_label = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
-  'p1052', 150.0, 220.0, 8.0, 90.0, 'pdftotext', nil,
+  'p7303', 150.0, 220.0, 8.0, 90.0, 'pdftotext', nil,
   148.0, 210.0, 158.0, 246.0, nil, 'text_span:1:1'
 )
 rotated_entities = DummyEntities.new
@@ -255,17 +267,20 @@ assert_true(rotated_failure && rotated_failure[:transition_proof] &&
             rotated_failure[:transition_proof][:to_mode] == :text3d,
             'rotated Labels may advance only to the adjacent verified rung')
 
-if File.exist?(PDF_TIER1_USER)
-  # 342 = 346 raw pdftotext words minus 2 angle-mark stitch merges (a1+00+5 → a1005/a1006).
-  GOLDEN_TIER1_ITEM_COUNT = 342
-  items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_TIER1_USER, 1)
+if PDF_EXTERNAL_REFERENCE && File.file?(PDF_EXTERNAL_REFERENCE)
+  items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_EXTERNAL_REFERENCE, 1)
+  items ||= []
+  BlueCollarSystems::PDFVectorImporter::TextSourceIdentity.assign!(items, 1)
   builder.send(:prepare_bom_table_context, items)
-  assert_true(items && items.length == GOLDEN_TIER1_ITEM_COUNT,
-              "PRIVATE-01 golden PDF regression guard: need exactly #{GOLDEN_TIER1_ITEM_COUNT} labels (got #{items ? items.length : 0})")
+  golden_item_count = 342
+  assert_true(items && items.length == golden_item_count,
+              "tier-1 acceptance coverage requires exactly #{golden_item_count} labels " \
+              "(got #{items ? items.length : 0})")
   with_bbox = items.count { |it| builder.send(:label_has_bbox?, it) }
-  assert_true(with_bbox > 100, "PRIVATE-01 text items should carry bbox metadata (got #{with_bbox})")
+  assert_true(with_bbox > 100,
+              "tier-1 acceptance items should carry dense bbox metadata (got #{with_bbox})")
   headers = items.select { |it| it.text.to_s.strip =~ /\A(QUAN|MARK|DESCRIPTION)\z/i }
-  assert_true(!headers.empty?, 'PRIVATE-01 PDF should include BOM header labels')
+  assert_true(!headers.empty?, 'external reference should include BOM header labels')
   headers.each do |h|
     bw = (h.bbox_x1 - h.bbox_x0).abs
     est_w = h.text.to_s.strip.length * h.font_size.to_f * 0.55
@@ -302,13 +317,17 @@ if File.exist?(PDF_TIER1_USER)
     assert_true(bang.abs < 0.01, "BOM quantity 3 should stay horizontal (got #{bang})")
   end
 
-  p1052 = items.select { |it| it.text.to_s.strip == 'p1052' }
-                 .min_by { |it| (it.bbox_y0.to_f - 684.21).abs }
-  if p1052
-    px, py, pang = builder.send(:label_insertion_pdf, p1052)
-    assert_near(px, p1052.bbox_x0.to_f, 0.05, "p1052 X should anchor at bbox x0 (got #{px})")
-    assert_near(py, 686.15, PDF_TOL, "p1052 Y baseline near section P-P (got #{py})")
-    assert_true(pang.abs < 0.01, "p1052 angle should be horizontal (got #{pang})")
+  part_mark_pattern = /\A[a-z]\d+\z/i
+  section_part = require_acceptance_item(
+    items.select { |it| part_mark_pattern =~ it.text.to_s.strip }
+         .min_by { |it| (it.bbox_y0.to_f - 684.21).abs },
+    'the section part mark'
+  )
+  if section_part
+    px, py, pang = builder.send(:label_insertion_pdf, section_part)
+    assert_near(px, section_part.bbox_x0.to_f, 0.05, "section part-mark X should anchor at bbox x0 (got #{px})")
+    assert_near(py, 686.15, PDF_TOL, "section part-mark Y baseline near section P-P (got #{py})")
+    assert_true(pang.abs < 0.01, "section part-mark angle should be horizontal (got #{pang})")
   end
 
   dim_half = items.find { |it| it.text.to_s.strip == '1 1/2' && (it.bbox_x0.to_f - 1434.71).abs < 1.0 }
@@ -374,10 +393,13 @@ if File.exist?(PDF_TIER1_USER)
                 'SECTION F-F 2 2 should use stacked vertical dimension placement')
   end
 
-  # SECTION C-C (PRIVATE-01 page 1) — horizontal beam w1023 between w1025 and 1017FR1
-  def find_cc_label(items, text, bbox_x0)
+  # SECTION C-C source-specific placement anchors, located without committing
+  # private drawing identifiers.
+  def find_cc_label(items, text_matcher, bbox_x0)
     items.find do |it|
-      it.text.to_s.strip == text && (it.bbox_x0.to_f - bbox_x0).abs < 1.5
+      text = it.text.to_s.strip
+      matches = text_matcher.is_a?(Regexp) ? (text_matcher =~ text) : text == text_matcher
+      matches && (it.bbox_x0.to_f - bbox_x0).abs < 1.5
     end
   end
 
@@ -389,12 +411,15 @@ if File.exist?(PDF_TIER1_USER)
     assert_true(fang.abs < 0.01, "SECTION C-C 4'-0\" angle should be horizontal (got #{fang})")
   end
 
-  cc_311 = find_cc_label(items, "3'-11 3/4", 504.84)
-  if cc_311
-    mx, my, mang = builder.send(:label_insertion_pdf, cc_311)
-    assert_near(mx, 505.77, PDF_TOL, "SECTION C-C 3'-11 3/4\" X should center in dim bbox (got #{mx})")
-    assert_near(my, 1592.03, PDF_TOL, "SECTION C-C 3'-11 3/4\" Y baseline (got #{my})")
-    assert_true(mang.abs < 0.01, "SECTION C-C 3'-11 3/4\" angle should be horizontal (got #{mang})")
+  cc_mixed_dimension = require_acceptance_item(
+    find_cc_label(items, /\A\d+'-\d+(?: \d+\/\d+)?\z/, 504.84),
+    'the SECTION C-C mixed dimension'
+  )
+  if cc_mixed_dimension
+    mx, my, mang = builder.send(:label_insertion_pdf, cc_mixed_dimension)
+    assert_near(mx, 505.77, PDF_TOL, "SECTION C-C mixed dimension X should center in dim bbox (got #{mx})")
+    assert_near(my, 1592.03, PDF_TOL, "SECTION C-C mixed dimension Y baseline (got #{my})")
+    assert_true(mang.abs < 0.01, "SECTION C-C mixed dimension angle should be horizontal (got #{mang})")
   end
 
   cc_eighth = find_cc_label(items, '1/8', 368.77)
@@ -431,11 +456,14 @@ if File.exist?(PDF_TIER1_USER)
     assert_true(tang.abs < 0.01, "SECTION C-C TYP. angle should be horizontal (got #{tang})")
   end
 
-  cc_w1023 = find_cc_label(items, 'w1023', 474.24)
-  if cc_w1023
-    w3x, w3y, _ = builder.send(:label_insertion_pdf, cc_w1023)
-    assert_near(w3x, 474.24, PDF_TOL, "SECTION C-C w1023 X should anchor at bbox x0 (got #{w3x})")
-    assert_near(w3y, 1529.39, PDF_TOL, "SECTION C-C w1023 Y baseline (got #{w3y})")
+  cc_part_mark = require_acceptance_item(
+    find_cc_label(items, part_mark_pattern, 474.24),
+    'the SECTION C-C part mark'
+  )
+  if cc_part_mark
+    w3x, w3y, _ = builder.send(:label_insertion_pdf, cc_part_mark)
+    assert_near(w3x, 474.24, PDF_TOL, "SECTION C-C part-mark X should anchor at bbox x0 (got #{w3x})")
+    assert_near(w3y, 1529.39, PDF_TOL, "SECTION C-C part-mark Y baseline (got #{w3y})")
   end
 
   cc_section = items.find { |it| it.text.to_s.strip == 'SECTION - C - C' }
@@ -445,16 +473,25 @@ if File.exist?(PDF_TIER1_USER)
     assert_near(sy, 1420.08, PDF_TOL, "SECTION C-C title Y baseline (got #{sy})")
   end
 
-  # Main elevation / truss view (PRIVATE-01 page 1)
-  def find_main_label(items, text, bbox_x0, bbox_y0 = nil)
+  # Main elevation / truss acceptance reference view.
+  def find_main_label(items, text_matcher, bbox_x0, bbox_y0 = nil)
     items.find do |it|
-      it.text.to_s.strip == text &&
+      text = it.text.to_s.strip
+      matches = text_matcher.is_a?(Regexp) ? (text_matcher =~ text) : text == text_matcher
+      matches &&
         (it.bbox_x0.to_f - bbox_x0).abs < 2.0 &&
         (bbox_y0.nil? || (it.bbox_y0.to_f - bbox_y0).abs < 8.0)
     end
   end
 
-  top_chord = items.find { |it| it.text.to_s.include?("14'-0 (W12X30") }
+  top_chord = require_acceptance_item(
+    items.select { |it| it.text.to_s =~ /\bW\d+X\d+\b/i }
+         .min_by do |it|
+           x, y, = builder.send(:label_insertion_pdf, it)
+           (x - 694.29).abs + (y - 1056.95).abs
+         end,
+    'the main structural profile label'
+  )
   if top_chord
     tx, ty, tang = builder.send(:label_insertion_pdf, top_chord)
     assert_near(tx, 694.29, PDF_TOL, "main top chord spec X should center in bbox (got #{tx})")
@@ -490,11 +527,14 @@ if File.exist?(PDF_TIER1_USER)
     assert_near(my, 971.42, PDF_TOL, "main 3/4\" offset Y baseline (got #{my})")
   end
 
-  main_1311 = find_main_label(items, "13'-11 1/4", 733.44, 1032.51)
-  if main_1311
-    mx, my, _ = builder.send(:label_insertion_pdf, main_1311)
-    assert_near(mx, 734.53, PDF_TOL, "main 13'-11 1/4\" X should center in dim bbox (got #{mx})")
-    assert_near(my, 1034.99, PDF_TOL, "main 13'-11 1/4\" Y baseline (got #{my})")
+  main_span = require_acceptance_item(
+    find_main_label(items, /\A\d+'-\d+(?: \d+\/\d+)?\z/, 733.44, 1032.51),
+    'the main span dimension'
+  )
+  if main_span
+    mx, my, _ = builder.send(:label_insertion_pdf, main_span)
+    assert_near(mx, 734.53, PDF_TOL, "main span X should center in dim bbox (got #{mx})")
+    assert_near(my, 1034.99, PDF_TOL, "main span Y baseline (got #{my})")
   end
 
   slope_12 = find_main_label(items, '12', 690.26, 731.97)
@@ -511,46 +551,61 @@ if File.exist?(PDF_TIER1_USER)
     assert_near(sy, 705.49, PDF_TOL, "main slope 10 3/8 Y baseline (got #{sy})")
   end
 
-  w1023_diag = find_main_label(items, 'w1023', 822.74, 760.18)
-  if w1023_diag
-    wx, wy, wang = builder.send(:label_insertion_pdf, w1023_diag)
-    assert_near(wx, 822.74, PDF_TOL, "connection w1023 X left-anchored at bbox x0 (got #{wx})")
-    assert_near(wy, 762.12, PDF_TOL, "connection w1023 Y baseline (got #{wy})")
-    assert_true(wang.abs < 0.01, "connection w1023 stays horizontal — tall bbox is not 90° (got #{wang})")
+  connection_part = require_acceptance_item(
+    find_main_label(items, part_mark_pattern, 822.74, 760.18),
+    'the connection part mark'
+  )
+  if connection_part
+    wx, wy, wang = builder.send(:label_insertion_pdf, connection_part)
+    assert_near(wx, 822.74, PDF_TOL, "connection part-mark X left-anchored at bbox x0 (got #{wx})")
+    assert_near(wy, 762.12, PDF_TOL, "connection part-mark Y baseline (got #{wy})")
+    assert_true(wang.abs < 0.01, "connection part mark stays horizontal — tall bbox is not 90° (got #{wang})")
   end
 
-  # Connection detail region (PRIVATE-01 page 1, brace/member cluster)
-  conn_p1016 = find_main_label(items, 'p1016', 868.8, 703.41)
-  if conn_p1016
-    px, py, _ = builder.send(:label_insertion_pdf, conn_p1016)
-    assert_near(px, 868.8, PDF_TOL, "connection p1016 X at bbox x0 (got #{px})")
-    assert_near(py, 705.35, PDF_TOL, "connection p1016 Y baseline (got #{py})")
+  # Connection detail region in the brace/member cluster.
+  connection_part_one = require_acceptance_item(
+    find_main_label(items, part_mark_pattern, 868.8, 703.41),
+    'the first connection-detail part mark'
+  )
+  if connection_part_one
+    px, py, _ = builder.send(:label_insertion_pdf, connection_part_one)
+    assert_near(px, 868.8, PDF_TOL, "first connection-detail part-mark X at bbox x0 (got #{px})")
+    assert_near(py, 705.35, PDF_TOL, "first connection-detail part-mark Y baseline (got #{py})")
   end
 
-  conn_p1017 = find_main_label(items, 'p1017', 639.72, 782.97)
-  if conn_p1017
-    px, py, _ = builder.send(:label_insertion_pdf, conn_p1017)
-    assert_near(px, 639.72, PDF_TOL, "connection p1017 X at bbox x0 (got #{px})")
-    assert_near(py, 784.91, PDF_TOL, "connection p1017 Y baseline (got #{py})")
+  connection_part_two = require_acceptance_item(
+    find_main_label(items, part_mark_pattern, 639.72, 782.97),
+    'the second connection-detail part mark'
+  )
+  if connection_part_two
+    px, py, _ = builder.send(:label_insertion_pdf, connection_part_two)
+    assert_near(px, 639.72, PDF_TOL, "second connection-detail part-mark X at bbox x0 (got #{px})")
+    assert_near(py, 784.91, PDF_TOL, "second connection-detail part-mark Y baseline (got #{py})")
   end
 
-  # SECTION A-A diagonal brace part marks (PRIVATE-01 page 1)
-  aa_a1006 = find_main_label(items, 'a1006', 782.16, 297.45)
-  if aa_a1006
-    ax, ay, aang = builder.send(:label_insertion_pdf, aa_a1006)
-    assert_near(ax, 782.16, PDF_TOL, "SECTION A-A a1006 X left-anchored at bbox x0 (got #{ax})")
-    assert_near(ay, 299.39, PDF_TOL, "SECTION A-A a1006 Y baseline (got #{ay})")
+  # SECTION A-A diagonal brace part marks.
+  brace_part_left = require_acceptance_item(
+    find_main_label(items, part_mark_pattern, 782.16, 297.45),
+    'the left SECTION A-A brace part mark'
+  )
+  if brace_part_left
+    ax, ay, aang = builder.send(:label_insertion_pdf, brace_part_left)
+    assert_near(ax, 782.16, PDF_TOL, "SECTION A-A left brace part-mark X left-anchored at bbox x0 (got #{ax})")
+    assert_near(ay, 299.39, PDF_TOL, "SECTION A-A left brace part-mark Y baseline (got #{ay})")
     assert_true(aang.abs < 0.01,
-                "SECTION A-A a1006 stays horizontal per PDF angle (got #{aang})")
+                "SECTION A-A left brace part mark stays horizontal per PDF angle (got #{aang})")
   end
 
-  aa_a1005 = find_main_label(items, 'a1005', 901.55, 296.38)
-  if aa_a1005
-    ax, ay, aang = builder.send(:label_insertion_pdf, aa_a1005)
-    assert_near(ax, 901.55, PDF_TOL, "SECTION A-A a1005 X left-anchored at bbox x0 (got #{ax})")
-    assert_near(ay, 298.32, PDF_TOL, "SECTION A-A a1005 Y baseline (got #{ay})")
+  brace_part_right = require_acceptance_item(
+    find_main_label(items, part_mark_pattern, 901.55, 296.38),
+    'the right SECTION A-A brace part mark'
+  )
+  if brace_part_right
+    ax, ay, aang = builder.send(:label_insertion_pdf, brace_part_right)
+    assert_near(ax, 901.55, PDF_TOL, "SECTION A-A right brace part-mark X left-anchored at bbox x0 (got #{ax})")
+    assert_near(ay, 298.32, PDF_TOL, "SECTION A-A right brace part-mark Y baseline (got #{ay})")
     assert_true(aang.abs < 0.01,
-                "SECTION A-A a1005 stays horizontal per PDF angle (got #{aang})")
+                "SECTION A-A right brace part mark stays horizontal per PDF angle (got #{aang})")
   end
 
   conn_78 = find_main_label(items, '7/8', 748.07, 752.11)
@@ -600,6 +655,7 @@ if File.exist?(PDF_TIER1_USER)
   end
 
   placed_entities = DummyEntities.new
+  failure_start = builder.text_delivery_failures.length
   items.each do |item|
     builder.send(:place_text, placed_entities, item, 0.0, 0.0, 792.0, 'TextLayer')
   end
@@ -608,13 +664,26 @@ if File.exist?(PDF_TIER1_USER)
              it.text.to_s.strip.split(/\s+/).length - 1 : 0)
   end
   expected_placements = items.length + extra_placements
-  placed_total = placed_entities.texts.length + placed_entities.mesh_calls.length
-  assert_true(placed_total == expected_placements,
-              "all PRIVATE-01 bbox-backed labels should place (got #{placed_total} of #{expected_placements})")
-  puts "  PRIVATE-01 PDF: #{items.length} text items, #{with_bbox} with bbox, #{headers.length} BOM headers"
+  placed_total = placed_entities.entities.count do |entity|
+    entity.respond_to?(:typename) && entity.typename.to_s == 'Text'
+  end + placed_entities.mesh_calls.length
+  delivery_failures = builder.text_delivery_failures[failure_start..-1] || []
+  rotation_transitions = delivery_failures.select do |failure|
+    proof = failure[:transition_proof]
+    failure[:reason] == 'label_rotation_unsupported_by_host' &&
+      failure[:source_span_id].to_s =~ /\Atext_span:1:\d+\z/ &&
+      proof && proof[:source_span_id] == failure[:source_span_id] &&
+      proof[:affirmative_impossibility] == true &&
+      proof[:from_mode] == :labels && proof[:to_mode] == :text3d
+  end
+  assert_true(delivery_failures.length == rotation_transitions.length,
+              'every undelivered acceptance label must have an item-bound rotation-impossibility transition')
+  assert_true(placed_total + rotation_transitions.length == expected_placements,
+              "all external-reference labels must place or prove the adjacent rotation transition " \
+              "(got #{placed_total} placements + #{rotation_transitions.length} proofs of #{expected_placements})")
+  puts "  External reference: #{items.length} text items, #{with_bbox} with bbox, #{headers.length} BOM headers"
 else
-  skip_at = PDF_TIER1_USER.to_s.strip.empty? ? '(set BCS_TIER1_USER_PDF or BCS_CORPUS_ROOT)' : PDF_TIER1_USER
-  puts "  SKIP: PRIVATE-01 PDF not found at #{skip_at}"
+  puts '  SKIP: set BCS_PRIVATE_VALIDATION_ROOT or BCS_TIER1_USER_PDF'
 end
 
 puts

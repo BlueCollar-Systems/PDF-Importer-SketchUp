@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # test/text_mode_placement_test.rb
-# Per-mode placement checks for PRIVATE-01 key labels (Labels + 3D Text).
-# Golden tier regression — see text_category_placement_test.rb for pattern rules.
+# Per-mode placement checks for synthetic fixtures and an optional external reference.
+# See text_category_placement_test.rb for pattern rules.
 
 require 'fileutils'
 
@@ -12,14 +12,13 @@ $LOAD_PATH.unshift(SRC_ROOT)
 require 'bc_pdf_vector_importer/logger'
 require 'bc_pdf_vector_importer/text_parser'
 require 'bc_pdf_vector_importer/external_text_extractor'
+require 'bc_pdf_vector_importer/text_source_identity'
 require_relative '../corpus_paths'
 
-pdf_tier1 = ENV['BCS_TIER1_USER_PDF'].to_s
-if pdf_tier1.empty?
-  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_manifest_pdf('PRIVATE-01').to_s
-  pdf_tier1 = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf('private/user/PRIVATE-01.pdf').to_s if pdf_tier1.empty?
-end
-PDF_TIER1_USER = pdf_tier1
+PDF_EXTERNAL_REFERENCE = BlueCollarSystems::PDFVectorImporter::CorpusPaths
+                         .resolve_acceptance_pdf(
+                           'shop-bom-tier1', 'BCS_TIER1_USER_PDF'
+                         )
 PDF_TOL = 1.5
 
 $failures = []
@@ -32,6 +31,11 @@ end
 
 def assert_near(actual, expected, tol, msg)
   assert_true((actual.to_f - expected.to_f).abs <= tol, msg)
+end
+
+def require_acceptance_item(item, description)
+  assert_true(!item.nil?, "tier-1 acceptance input is missing #{description}")
+  item
 end
 
 TextAlignLeft = 0
@@ -435,30 +439,48 @@ assert_true(
   'geometry_builder must not reintroduce mesh_text_post_rotation_offset'
 )
 
-unless File.exist?(PDF_TIER1_USER)
-  puts "  SKIP: PRIVATE-01 PDF not found at #{PDF_TIER1_USER}"
+unless PDF_EXTERNAL_REFERENCE && File.file?(PDF_EXTERNAL_REFERENCE)
+  puts '  SKIP: set BCS_PRIVATE_VALIDATION_ROOT or BCS_TIER1_USER_PDF'
 else
-  items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_TIER1_USER, 1)
-  GOLDEN_TIER1_ITEM_COUNT = 342
-  assert_true(items && items.length == GOLDEN_TIER1_ITEM_COUNT,
-              "PRIVATE-01 coverage guard: need #{GOLDEN_TIER1_ITEM_COUNT} text items (got #{items ? items.length : 0})")
+  items = BlueCollarSystems::PDFVectorImporter::ExternalTextExtractor.extract(PDF_EXTERNAL_REFERENCE, 1)
+  items ||= []
+  BlueCollarSystems::PDFVectorImporter::TextSourceIdentity.assign!(items, 1)
+  golden_item_count = 342
+  assert_true(items && items.length == golden_item_count,
+              "tier-1 acceptance coverage requires exactly #{golden_item_count} labels " \
+              "(got #{items ? items.length : 0})")
 
-  def find_label(items, text, bbox_x0, bbox_y0 = nil)
+  def find_label(items, text_pattern, bbox_x0, bbox_y0 = nil)
     items.find do |it|
-      it.text.to_s.strip == text &&
+      (text_pattern =~ it.text.to_s.strip) &&
         (it.bbox_x0.to_f - bbox_x0).abs < 2.0 &&
         (bbox_y0.nil? || (it.bbox_y0.to_f - bbox_y0).abs < 8.0)
     end
   end
 
-  quan_bom = items.find { |it| it.text.to_s.strip == 'QUAN' }
-  p1052 = items.select { |it| it.text.to_s.strip == 'p1052' }
-               .min_by { |it| (it.bbox_y0.to_f - 684.21).abs }
-  w1023 = find_label(items, 'w1023', 822.74, 760.18)
-  aa_a1006 = find_label(items, 'a1006', 782.16, 297.45)
-  aa_a1005 = find_label(items, 'a1005', 901.55, 296.38)
+  part_mark = /\A[a-z]\d+\z/i
+  quan_bom = require_acceptance_item(
+    items.find { |it| it.text.to_s.strip == 'QUAN' }, 'the QUAN header'
+  )
+  section_part = require_acceptance_item(
+    items.select { |it| part_mark =~ it.text.to_s.strip }
+         .min_by { |it| (it.bbox_y0.to_f - 684.21).abs },
+    'the section part mark'
+  )
+  connection_part = require_acceptance_item(
+    find_label(items, part_mark, 822.74, 760.18),
+    'the connection part mark'
+  )
+  brace_part_left = require_acceptance_item(
+    find_label(items, part_mark, 782.16, 297.45),
+    'the left brace part mark'
+  )
+  brace_part_right = require_acceptance_item(
+    find_label(items, part_mark, 901.55, 296.38),
+    'the right brace part mark'
+  )
 
-  [quan_bom, p1052, w1023, aa_a1006, aa_a1005].compact.each do |item|
+  [quan_bom, section_part, connection_part, brace_part_left, brace_part_right].compact.each do |item|
     next unless item
     lpt = label_builder.send(:text_insertion_pdf, item)
     mpt = mesh_builder.send(:mesh_text_insertion_pdf, item)
@@ -472,49 +494,50 @@ else
 
   if quan_bom
     qx, qy, _ = label_builder.send(:text_insertion_pdf, quan_bom)
-    assert_near(qx, 1948.62, PDF_TOL, "PRIVATE-01 QUAN label X (got #{qx})")
-    assert_near(qy, 1656.59, PDF_TOL, "PRIVATE-01 QUAN label Y (got #{qy})")
+    assert_near(qx, 1948.62, PDF_TOL, "external-reference QUAN label X (got #{qx})")
+    assert_near(qy, 1656.59, PDF_TOL, "external-reference QUAN label Y (got #{qy})")
   end
 
-  if p1052
-    px, py, _ = label_builder.send(:text_insertion_pdf, p1052)
-    assert_near(px, p1052.bbox_x0.to_f, 0.05, "PRIVATE-01 p1052 label X (got #{px})")
-    assert_near(py, 686.15, PDF_TOL, "PRIVATE-01 p1052 label Y (got #{py})")
+  if section_part
+    px, py, _ = label_builder.send(:text_insertion_pdf, section_part)
+    assert_near(px, section_part.bbox_x0.to_f, 0.05, "section part-mark label X (got #{px})")
+    assert_near(py, 686.15, PDF_TOL, "section part-mark label Y (got #{py})")
   end
 
-  if w1023
-    wx, wy, wang = mesh_builder.send(:mesh_text_insertion_pdf, w1023)
-    assert_near(wx, 822.74, PDF_TOL, "PRIVATE-01 connection w1023 X left-anchored (got #{wx})")
-    assert_near(wy, 762.12, PDF_TOL, "PRIVATE-01 connection w1023 Y baseline (got #{wy})")
-    assert_near(wang, 0.0, PDF_TOL, "PRIVATE-01 connection w1023 stays horizontal per PDF angle (got #{wang})")
-    mesh_h = mesh_builder.send(:mesh_text_height_inches, w1023, wang, 792.0)
-    assert_true(mesh_h < 0.12, "PRIVATE-01 connection w1023 mesh height must not blow up (got #{mesh_h})")
+  if connection_part
+    wx, wy, wang = mesh_builder.send(:mesh_text_insertion_pdf, connection_part)
+    assert_near(wx, 822.74, PDF_TOL, "connection part-mark X left-anchored (got #{wx})")
+    assert_near(wy, 762.12, PDF_TOL, "connection part-mark Y baseline (got #{wy})")
+    assert_near(wang, 0.0, PDF_TOL, "connection part mark stays horizontal per PDF angle (got #{wang})")
+    mesh_h = mesh_builder.send(:mesh_text_height_inches, connection_part, wang, 792.0)
+    assert_true(mesh_h < 0.12, "connection part-mark mesh height must not blow up (got #{mesh_h})")
   end
 
-  if aa_a1006
-    ax, ay, aang = label_builder.send(:text_insertion_pdf, aa_a1006)
-    mx, my, mang = mesh_builder.send(:mesh_text_insertion_pdf, aa_a1006)
-    assert_near(ax, 782.16, PDF_TOL, "PRIVATE-01 SECTION A-A a1006 label X (got #{ax})")
-    assert_near(ay, 299.39, PDF_TOL, "PRIVATE-01 SECTION A-A a1006 label Y (got #{ay})")
-    assert_near(aang, 0.0, PDF_TOL, "PRIVATE-01 SECTION A-A a1006 label angle (got #{aang})")
-    assert_near(mx, ax, 0.01, "PRIVATE-01 a1006 X must match across modes")
-    assert_near(my, ay, 0.01, "PRIVATE-01 a1006 Y must match across modes")
-    assert_near(mang, aang, 0.01, "PRIVATE-01 a1006 angle must match across modes")
+  if brace_part_left
+    ax, ay, aang = label_builder.send(:text_insertion_pdf, brace_part_left)
+    mx, my, mang = mesh_builder.send(:mesh_text_insertion_pdf, brace_part_left)
+    assert_near(ax, 782.16, PDF_TOL, "left brace part-mark label X (got #{ax})")
+    assert_near(ay, 299.39, PDF_TOL, "left brace part-mark label Y (got #{ay})")
+    assert_near(aang, 0.0, PDF_TOL, "left brace part-mark label angle (got #{aang})")
+    assert_near(mx, ax, 0.01, 'left brace part-mark X must match across modes')
+    assert_near(my, ay, 0.01, 'left brace part-mark Y must match across modes')
+    assert_near(mang, aang, 0.01, 'left brace part-mark angle must match across modes')
   end
 
-  if aa_a1005
-    ax, ay, aang = label_builder.send(:text_insertion_pdf, aa_a1005)
-    mx, my, mang = mesh_builder.send(:mesh_text_insertion_pdf, aa_a1005)
-    assert_near(ax, 901.55, PDF_TOL, "PRIVATE-01 SECTION A-A a1005 label X (got #{ax})")
-    assert_near(ay, 298.32, PDF_TOL, "PRIVATE-01 SECTION A-A a1005 label Y (got #{ay})")
-    assert_near(aang, 0.0, PDF_TOL, "PRIVATE-01 SECTION A-A a1005 label angle (got #{aang})")
-    assert_near(mx, ax, 0.01, "PRIVATE-01 a1005 X must match across modes")
-    assert_near(my, ay, 0.01, "PRIVATE-01 a1005 Y must match across modes")
-    assert_near(mang, aang, 0.01, "PRIVATE-01 a1005 angle must match across modes")
+  if brace_part_right
+    ax, ay, aang = label_builder.send(:text_insertion_pdf, brace_part_right)
+    mx, my, mang = mesh_builder.send(:mesh_text_insertion_pdf, brace_part_right)
+    assert_near(ax, 901.55, PDF_TOL, "right brace part-mark label X (got #{ax})")
+    assert_near(ay, 298.32, PDF_TOL, "right brace part-mark label Y (got #{ay})")
+    assert_near(aang, 0.0, PDF_TOL, "right brace part-mark label angle (got #{aang})")
+    assert_near(mx, ax, 0.01, 'right brace part-mark X must match across modes')
+    assert_near(my, ay, 0.01, 'right brace part-mark Y must match across modes')
+    assert_near(mang, aang, 0.01, 'right brace part-mark angle must match across modes')
   end
 
   label_entities = DummyEntities.new
   mesh_entities = DummyEntities.new
+  label_failure_start = label_builder.text_delivery_failures.length
   items.each do |item|
     label_builder.send(:place_text, label_entities, item, 0.0, 0.0, 792.0, 'TextLayer')
     mesh_builder.send(:place_text, mesh_entities, item, 0.0, 0.0, 792.0, 'TextLayer')
@@ -525,9 +548,23 @@ else
              it.text.to_s.strip.split(/\s+/).length - 1 : 0)
   end
   expected_labels = items.length + extra_placements
-  label_total = label_entities.texts.length
-  assert_true(label_total == expected_labels,
-              "Labels mode should place #{expected_labels} native annotations (got #{label_total})")
+  label_total = label_entities.entities.count do |entity|
+    entity.respond_to?(:typename) && entity.typename.to_s == 'Text'
+  end
+  label_failures = label_builder.text_delivery_failures[label_failure_start..-1] || []
+  rotation_transitions = label_failures.select do |failure|
+    proof = failure[:transition_proof]
+    failure[:reason] == 'label_rotation_unsupported_by_host' &&
+      failure[:source_span_id].to_s =~ /\Atext_span:1:\d+\z/ &&
+      proof && proof[:source_span_id] == failure[:source_span_id] &&
+      proof[:affirmative_impossibility] == true &&
+      proof[:from_mode] == :labels && proof[:to_mode] == :text3d
+  end
+  assert_true(label_failures.length == rotation_transitions.length,
+              'every undelivered acceptance Label must have an item-bound rotation transition')
+  assert_true(label_total + rotation_transitions.length == expected_labels,
+              "Labels mode must place or prove the adjacent rotation transition for all #{expected_labels} " \
+              "annotations (got #{label_total} placements + #{rotation_transitions.length} proofs)")
   assert_true(label_entities.mesh_calls.empty?,
               "Labels mode should not create 3D text while native labels succeed (got #{label_entities.mesh_calls.length})")
   assert_true(mesh_entities.mesh_calls.length == items.length,
@@ -552,7 +589,8 @@ else
   assert_true(!label_stop_builder.text_delivery_failures.empty?,
               'Labels failure must be reported for the exact source span')
 
-  puts "  PRIVATE-01 PDF: labels=#{label_entities.texts.length}, mesh=#{mesh_entities.mesh_calls.length}, items=#{items.length}"
+  puts "  External reference: labels=#{label_total}, rotation_proofs=#{rotation_transitions.length}, " \
+       "mesh=#{mesh_entities.mesh_calls.length}, items=#{items.length}"
 end
 
 puts

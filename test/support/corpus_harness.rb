@@ -79,6 +79,12 @@ class CorpusDummyEntities
   end
 
   def add_text(text, point, vector = nil)
+    # SketchUp's documented two-argument add_text overload still exposes a
+    # concrete zero leader vector on the returned Text entity.  Mirror that
+    # host readback so the headless fidelity proof exercises the production
+    # two-argument crash-safe path instead of manufacturing a nil vector that
+    # cannot occur in the host.
+    vector ||= Geom::Vector3d.new(0, 0, 0)
     ent = CorpusDummyTextEntity.new(text, point, vector)
     @entities << ent
     @texts << [text, point, vector, ent]

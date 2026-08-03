@@ -22,12 +22,12 @@ class PartsBootstrapTest < Minitest::Test
       MockText.new('DESCRIPTION', 1, 220.0, header_y, 'h3'),
       # row 1
       MockText.new('2',           1, 50.0,  460.0, 'r1a'),
-      MockText.new('p1019',       1, 120.0, 460.0, 'r1b'),
-      MockText.new("PL1/2X8X2'-0\"", 1, 220.0, 460.0, 'r1c'),
+      MockText.new('p7302',         1, 120.0, 460.0, 'r1b'),
+      MockText.new("PL5/8X9X2'-6\"", 1, 220.0, 460.0, 'r1c'),
       # row 2
       MockText.new('1',           1, 50.0,  430.0, 'r2a'),
-      MockText.new('1017FR1',     1, 120.0, 430.0, 'r2b'),
-      MockText.new('W12X30',      1, 220.0, 430.0, 'r2c'),
+      MockText.new('7309FR4',     1, 120.0, 430.0, 'r2b'),
+      MockText.new('W10X22',      1, 220.0, 430.0, 'r2c'),
     ]
   end
 
@@ -54,48 +54,48 @@ class PartsBootstrapTest < Minitest::Test
     items = make_bom_page
     result = PB.build({ 1 => items })
     marks = result[:tables].first[:rows].map { |r| r[:piece_mark] }
-    assert_includes marks, 'p1019'
+    assert_includes marks, 'p7302'
   end
 
   def test_second_row_mark
     items = make_bom_page
     result = PB.build({ 1 => items })
     marks = result[:tables].first[:rows].map { |r| r[:piece_mark] }
-    assert_includes marks, '1017FR1'
+    assert_includes marks, '7309FR4'
   end
 
   def test_quantity_extracted
     items = make_bom_page
     result = PB.build({ 1 => items })
-    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == 'p1019' }
+    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == 'p7302' }
     assert_equal 2, row[:quantity]
   end
 
   def test_profile_hint_plate
     items = make_bom_page
     result = PB.build({ 1 => items })
-    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == 'p1019' }
+    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == 'p7302' }
     assert_equal 'PL', row[:profile_hint]
   end
 
   def test_profile_hint_wide_flange
     items = make_bom_page
     result = PB.build({ 1 => items })
-    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == '1017FR1' }
+    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == '7309FR4' }
     assert_equal 'W', row[:profile_hint]
   end
 
   def test_length_extracted_from_plate_description
     items = make_bom_page
     result = PB.build({ 1 => items })
-    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == 'p1019' }
-    assert_in_delta 24.0, row[:length_in].to_f, 0.01
+    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == 'p7302' }
+    assert_in_delta 30.0, row[:length_in].to_f, 0.01
   end
 
   def test_span_ids_populated
     items = make_bom_page
     result = PB.build({ 1 => items })
-    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == 'p1019' }
+    row = result[:tables].first[:rows].find { |r| r[:piece_mark] == 'p7302' }
     assert_kind_of Array, row[:span_ids]
     assert row[:span_ids].any? { |id| id.to_s.include?('r1') }
   end
@@ -136,7 +136,7 @@ class PartsBootstrapTest < Minitest::Test
   end
 
   def test_extract_length_nil_when_absent
-    assert_nil PB.extract_length('PL3/4X6')
+    assert_nil PB.extract_length('PL5/8X9')
   end
 
   def test_profile_hint_hss

@@ -233,13 +233,13 @@ pass.
 
 ### 7.2 Performance
 
-For the reference PDF on the current machine:
+For the synthetic performance reference on the current machine:
 
-- Direct 3D Text must be at least 2x faster than the 400.5-second baseline; 3x or
-  better is the target.
+- Direct 3D Text must be at least 2x faster than the separately recorded
+  baseline; 3x or better is the target.
 - The exact 3D fallback phase in Text mode must be at least 2x faster for the
   same rotated target set.
-- Full Text mode must not regress from the 131.3-second measured baseline.
+- Full Text mode must not regress from the separately recorded baseline.
 - Definition builds must be no greater than unique geometry cache keys and must
   be materially lower than physical glyph placements on repeated-glyph pages.
 

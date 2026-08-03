@@ -181,6 +181,7 @@ module BlueCollarSystems
               end
             end
 
+            raw_font_size = nil
             if anchor && anchor.size_pt > 0.05
               font_size = anchor.size_pt
               angle = anchor.angle_deg
@@ -194,6 +195,17 @@ module BlueCollarSystems
             else
               # Fallback (no anchor): horizontal-ish — use bbox height.
               font_size = bbox_h
+            end
+
+            # A near-horizontal, tall/narrow line whose reported size follows
+            # the AABB long side is an orientation ambiguity, not a giant font.
+            # Resolve its nominal glyph height to the short side here so every
+            # renderer can continue trusting TextItem#font_size (SIZE-1). Keep
+            # the scanner value as raw evidence for vertical-run inference.
+            if angle.to_f.abs < 12.0 && bbox_h > bbox_w * 1.5 &&
+               font_size.to_f > bbox_w * 1.5
+              raw_font_size = font_size.to_f
+              font_size = [bbox_w, bbox_h].min
             end
             font_size = [font_size, 1.0].max
 
@@ -211,7 +223,7 @@ module BlueCollarSystems
               font_size,
               angle,
               'pdftotext',
-              nil,
+              raw_font_size,
               bbox_x0,
               bbox_y0,
               bbox_x1,

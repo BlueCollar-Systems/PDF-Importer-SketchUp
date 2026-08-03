@@ -334,7 +334,7 @@ class MeshTextScalingTest < Minitest::Test
   def test_arch_d_same_height_as_letter
     b_letter = make_builder(LETTER)
     b_arch   = make_builder(ARCH_D)
-    item = bbox_item('W12X30', 10.0, 12.0)
+    item = bbox_item('W10X22', 10.0, 12.0)
     assert_in_delta(
       b_letter.send(:mesh_text_height_inches, item, 0.0, LETTER[3]),
       b_arch.send(:mesh_text_height_inches, item, 0.0, ARCH_D[3]),
@@ -346,7 +346,7 @@ class MeshTextScalingTest < Minitest::Test
   def test_no_bbox_uses_matrix_scaled_font_size
     b = make_builder(LETTER)
     # 8pt after Tm scale, no bbox
-    item = no_bbox_item('p1019', 8.0)
+    item = no_bbox_item('p7302', 8.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
     expected = sketchup_letter_height_in([8.0, 1.0].max)
     assert_in_delta expected, h, 0.001
@@ -366,9 +366,9 @@ class MeshTextScalingTest < Minitest::Test
   # ── raw_font_size must NOT affect output ───────────────────────────────────
   def test_raw_font_size_does_not_change_height_with_bbox
     b = make_builder(LETTER)
-    item_no_raw  = bbox_item('W12X30', 8.0, 10.0, raw_fs: nil)
-    item_big_raw = bbox_item('W12X30', 8.0, 10.0, raw_fs: 100.0)
-    item_tiny_raw = bbox_item('W12X30', 8.0, 10.0, raw_fs: 1.0)
+    item_no_raw  = bbox_item('W10X22', 8.0, 10.0, raw_fs: nil)
+    item_big_raw = bbox_item('W10X22', 8.0, 10.0, raw_fs: 100.0)
+    item_tiny_raw = bbox_item('W10X22', 8.0, 10.0, raw_fs: 1.0)
     h_no   = b.send(:mesh_text_height_inches, item_no_raw,   0.0, 792.0)
     h_big  = b.send(:mesh_text_height_inches, item_big_raw,  0.0, 792.0)
     h_tiny = b.send(:mesh_text_height_inches, item_tiny_raw, 0.0, 792.0)
@@ -433,7 +433,7 @@ class MeshTextScalingTest < Minitest::Test
   # ── Rotated item: angle param must not affect height ──────────────────────
   def test_angle_does_not_affect_height
     b = make_builder(LETTER)
-    item = bbox_item('a1006', 8.0, 10.0)
+    item = bbox_item('a7307', 8.0, 10.0)
     h0   = b.send(:mesh_text_height_inches, item,  0.0, 792.0)
     h90  = b.send(:mesh_text_height_inches, item, 90.0, 792.0)
     h270 = b.send(:mesh_text_height_inches, item, -90.0, 792.0)
@@ -499,7 +499,7 @@ class MeshTextScalingTest < Minitest::Test
 
   # ── Rotated page: mesh height must match unrotated page for same bbox ─────
   def test_rotated_page_same_mesh_height_as_portrait
-    item = bbox_item('p1052', 8.0, 10.0)
+    item = bbox_item('p7303', 8.0, 10.0)
     b_portrait = make_builder(LETTER, scale: 1.0)
     b_rotated = GB.new(
       Object.new, [], [], LETTER, scale_factor: 1.0,
@@ -511,11 +511,11 @@ class MeshTextScalingTest < Minitest::Test
                     'page /Rotate must not change 3D text height for identical bbox'
   end
 
-  # ── Existing golden: w1023 height must not blow up ────────────────────────
-  def test_w1023_like_item_preserves_source_height
+  # ── Synthetic regression: part-mark height must not blow up ──────────────
+  def test_part_mark_like_item_preserves_source_height
     b = make_builder(LETTER)
-    # w1023: pdftotext item, bbox ~8pt tall
-    item = bbox_item('w1023', 7.0, 8.5)
+    # Synthetic pdftotext part mark with an approximately 8-point bbox.
+    item = bbox_item('w7304', 7.0, 8.5)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
     assert_in_delta sketchup_letter_height_in(7.0), h, 1.0e-12
   end
@@ -524,7 +524,7 @@ class MeshTextScalingTest < Minitest::Test
     # Microscopic pdftotext bbox (1.5pt tall, 3pt wide) must not shrink 8pt nominal.
     # SIZE-1: mesh_text_height_inches uses nominal PDF pt only — no bbox-fit shrink.
     b = make_builder(LETTER)
-    item = bbox_item('W12X30', 8.0, 1.5, bbox_w: 3.0)
+    item = bbox_item('W10X22', 8.0, 1.5, bbox_w: 3.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, 792.0)
     assert_in_delta sketchup_letter_height_in(8.0), h, 1.0e-12,
                     'bbox dimensions must not override the source text height'
@@ -554,7 +554,7 @@ class MeshTextScalingTest < Minitest::Test
   def test_nominal_font_size_not_shrunk_by_microscopic_pdftotext_bbox
     b = make_builder(ANSI_D)
     item = identified_text_item(
-      'W12X30', 50.0, 100.0, 10.0, 0.0, 'pdftotext',
+      'W10X22', 50.0, 100.0, 10.0, 0.0, 'pdftotext',
       nil, 50.0, 100.0, 120.0, 101.5
     )
     h = b.send(:mesh_text_height_inches, item, 0.0, ANSI_D[3])
@@ -590,7 +590,7 @@ class MeshTextScalingTest < Minitest::Test
   # there if any post-2.2 API sneaks back into the height path.
   def test_ruby22_canary_12pt_height_is_faithful_not_min
     b = make_builder(ARCH_D)
-    item = bbox_item('W12X30', 12.0, 14.0)
+    item = bbox_item('W10X22', 12.0, 14.0)
     h = b.send(:mesh_text_height_inches, item, 0.0, ARCH_D[3])
     assert_in_delta sketchup_letter_height_in(12.0), h, 0.0001,
       "12pt must yield 0.1667\" (got #{h} — 0.01 means the rescue floor engaged)"
@@ -621,7 +621,7 @@ class MeshTextScalingTest < Minitest::Test
   # declared width, source height, placement, and rotation.
   def test_place_mesh_text_verifies_exact_post_transform_visual_fidelity
     b = make_builder(ANSI_D)
-    item = bbox_item('W12X30', 8.0, 10.0, bbox_w: 50.0)
+    item = bbox_item('W10X22', 8.0, 10.0, bbox_w: 50.0)
     ents = DummyTransformEntities.new
     assert b.send(:place_mesh_text, ents, item, 0.0, 0.0, nil)
 

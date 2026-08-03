@@ -631,17 +631,17 @@ Required checks:
 - every rotated span records Text -> Labels -> 3D Text;
 - rotated placement indices equal their direct-3D-Text placement indices;
 - no rotated source item is completed as an unrotated native Label;
-- full import does not exceed the measured 131.3-second baseline;
+- full import does not regress against the separately recorded reference baseline;
 - the exact-3D fallback phase is at least 2x faster than its pre-cache phase.
 
 - [ ] **Step 3: Visually inspect the reported defect area**
 
 At equal zoom, compare Acrobat, direct 3D Text, and Text output around:
 
-- `7 3/4`;
-- `10 7/16`;
-- `8 13/16`;
-- `a1020`;
+- `6 5/8`;
+- `9 3/16`;
+- `11 7/8`;
+- `a7310`;
 - stacked fractions and nearby leader annotations.
 
 Reject the release if rotation, baseline, fraction composition, or alignment is

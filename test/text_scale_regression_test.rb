@@ -32,8 +32,9 @@ builder = BlueCollarSystems::PDFVectorImporter::GeometryBuilder.new(
 item_class = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem
 pt_to_in = BlueCollarSystems::PDFVectorImporter::GeometryBuilder::PDF_POINT_TO_INCH
 
+# Independent synthetic designation and geometry; no corpus row is represented.
 undersized_bbox = item_class.new(
-  'W12X30', 100.0, 200.0, 6.0, 0.0, 'Helvetica', 6.0,
+  'W14X48', 100.0, 200.0, 6.0, 0.0, 'Helvetica', 6.0,
   100.0, 190.0, 160.0, 204.0
 )
 assert_near(

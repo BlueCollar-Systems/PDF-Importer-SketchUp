@@ -9,16 +9,12 @@ require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/svg_text_rend
 class SvgTextMultiPageGateTest < Minitest::Test
   R = BlueCollarSystems::PDFVectorImporter::SvgTextRenderer
   Runner = BlueCollarSystems::PDFVectorImporter::CommandRunner
-  TARGET_PDF = 'PRIVATE-10.pdf'.freeze
-  FALLBACK_PDF = 'private/user/PRIVATE-10.pdf'.freeze
-
   def test_available_svg_renderers_handle_non_page_one_text
-    pdf_path = ENV['BCS_SVG_TEXT_GATE_PDF'].to_s
-    if pdf_path.empty?
-      pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(TARGET_PDF).to_s
-      pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths.resolve_corpus_pdf(FALLBACK_PDF).to_s unless File.file?(pdf_path)
-    end
-    skip "Set BCS_SVG_TEXT_GATE_PDF or add #{TARGET_PDF}/#{FALLBACK_PDF} to the corpus" unless File.file?(pdf_path)
+    pdf_path = BlueCollarSystems::PDFVectorImporter::CorpusPaths
+               .resolve_acceptance_pdf(
+                 'svg-multipage', 'BCS_SVG_TEXT_GATE_PDF'
+               )
+    skip 'Set BCS_PRIVATE_VALIDATION_ROOT or BCS_SVG_TEXT_GATE_PDF' unless pdf_path
 
     renderers = available_renderers
     skip 'No SVG text renderer found' if renderers.empty?

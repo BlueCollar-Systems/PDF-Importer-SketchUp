@@ -8,6 +8,8 @@ module BlueCollarSystems
     module CorpusPaths
       DEFAULT_CORPUS_ROOTS = [].freeze
 
+      class AcceptanceInputError < StandardError; end
+
       # Scan profiles for private validation CI (phase 1). Earlier entries win on
       # duplicate corpus_key collisions.
       CORPUS_SCAN_PROFILES = [
@@ -30,6 +32,32 @@ module BlueCollarSystems
           return File.expand_path(path) if File.directory?(path)
         end
         nil
+      end
+
+      def configured_private_validation_root
+        values = [
+          ENV['BCS_PRIVATE_VALIDATION_ROOT'],
+          ENV['PDF_PRIVATE_VALIDATION_ROOT']
+        ].compact.map { |value| value.to_s.strip }.reject { |value| value.empty? }
+        return nil if values.empty?
+
+        paths = values.map { |value| File.expand_path(value) }
+        comparison_paths = if File::ALT_SEPARATOR
+                             paths.map { |path| path.downcase }
+                           else
+                             paths
+                           end
+        if comparison_paths.uniq.length > 1
+          raise AcceptanceInputError,
+                'Configured private validation roots are ambiguous'
+        end
+
+        path = paths.first
+        unless File.directory?(path)
+          raise AcceptanceInputError,
+                'Configured private validation root does not exist or is not a directory'
+        end
+        path
       end
 
       def resolve_corpus_pdf(relative_name, subdir: '')
@@ -147,6 +175,18 @@ module BlueCollarSystems
         JSON.parse(File.read(manifest_path))
       end
 
+      def load_acceptance_manifest(root)
+        manifest_path = File.join(root, 'manifest.json')
+        unless File.file?(manifest_path)
+          raise AcceptanceInputError,
+                'Configured private validation root manifest.json is missing'
+        end
+        JSON.parse(File.read(manifest_path))
+      rescue JSON::ParserError, IOError, SystemCallError => e
+        raise AcceptanceInputError,
+              "Configured private validation manifest.json is malformed: #{e.class}"
+      end
+
       def resolve_manifest_pdf(entry_id, root = nil)
         manifest = load_manifest(root)
         return nil unless manifest
@@ -161,6 +201,63 @@ module BlueCollarSystems
           return found if found
         end
         nil
+      end
+
+      def resolve_acceptance_pdf(acceptance_key, override_env = nil)
+        root = configured_private_validation_root
+        entries = nil
+        if root
+          manifest = load_acceptance_manifest(root)
+          entries = manifest.is_a?(Hash) ? manifest['entries'] : nil
+          unless entries.is_a?(Array)
+            raise AcceptanceInputError,
+                  'Configured private validation manifest.json entries must be an array'
+          end
+          unless entries.all? { |candidate| candidate.is_a?(Hash) }
+            raise AcceptanceInputError,
+                  'Configured private validation manifest.json entries must contain objects'
+          end
+        end
+
+        override_value = override_env ? ENV[override_env.to_s].to_s.strip : ''
+        unless override_value.empty?
+          override_path = File.expand_path(override_value)
+          is_pdf = File.extname(override_path).casecmp('.pdf').zero?
+          unless is_pdf && File.file?(override_path) && File.readable?(override_path)
+            raise AcceptanceInputError,
+                  "Configured #{override_env} does not resolve to a readable PDF"
+          end
+          return override_path
+        end
+        return nil unless root
+
+        matches = entries.select do |candidate|
+          candidate['acceptance_key'].to_s == acceptance_key.to_s
+        end
+        if matches.empty?
+          raise AcceptanceInputError,
+                "Required acceptance_key #{acceptance_key.inspect} was not found in manifest.json"
+        end
+        if matches.length > 1
+          raise AcceptanceInputError,
+                "Required acceptance_key #{acceptance_key.inspect} is ambiguous in manifest.json"
+        end
+        entry = matches.first
+
+        relative_path = entry['local_path'].to_s.tr('\\/', File::SEPARATOR)
+        if relative_path.strip.empty?
+          raise AcceptanceInputError,
+                "Required acceptance_key #{acceptance_key.inspect} has no local_path"
+        end
+        path = File.expand_path(File.join(root, relative_path))
+        root_prefix = File.expand_path(root) + File::SEPARATOR
+        inside_root = path.downcase.start_with?(root_prefix.downcase)
+        is_pdf = File.extname(path).casecmp('.pdf').zero?
+        unless inside_root && is_pdf && File.file?(path) && File.readable?(path)
+          raise AcceptanceInputError,
+                "Required acceptance_key #{acceptance_key.inspect} does not resolve to a readable PDF"
+        end
+        path
       end
     end
   end

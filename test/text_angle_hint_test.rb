@@ -23,16 +23,16 @@ end
 ti = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem
 
 external = [
-  ti.new('w1023', 822.0, 760.0, 33.0, 0.0, 'pdftotext', nil,
-         822.0, 760.0, 833.0, 794.0, nil),
-  ti.new('p1016', 868.0, 703.0, 11.0, 0.0, 'pdftotext', nil,
-         868.0, 703.0, 900.0, 714.0, nil)
+  ti.new('w7304', 622.0, 540.0, 33.0, 0.0, 'pdftotext', nil,
+         622.0, 540.0, 633.0, 574.0, nil),
+  ti.new('p7301', 705.0, 485.0, 11.0, 0.0, 'pdftotext', nil,
+         705.0, 485.0, 737.0, 496.0, nil)
 ]
 
 internal = [
-  ti.new('w1023', 831.0, 760.0, 11.0, -90.0, 'F1', 1.0,
+  ti.new('w7304', 631.0, 540.0, 11.0, -90.0, 'F1', 1.0,
          nil, nil, nil, nil, nil),
-  ti.new('p1016', 868.0, 703.0, 11.0, 41.0, 'F1', 1.0,
+  ti.new('p7301', 705.0, 485.0, 11.0, 41.0, 'F1', 1.0,
          nil, nil, nil, nil, nil)
 ]
 
@@ -42,9 +42,9 @@ merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hints(
 
 assert_near(merged[0].angle, -90.0, 0.01,
             'near matching internal angle should enrich external bbox item')
-assert_near(merged[0].x, 831.0, 0.01,
+assert_near(merged[0].x, 631.0, 0.01,
             'angle enrichment should adopt internal text-matrix X origin')
-assert_near(merged[0].y, 760.0, 0.01,
+assert_near(merged[0].y, 540.0, 0.01,
             'angle enrichment should adopt internal text-matrix Y origin')
 assert_near(merged[0].font_size, 11.0, 0.01,
             'angle enrichment should adopt internal nominal text size')
@@ -72,7 +72,7 @@ assert_near(horizontal_merged[0].angle, 0.0, 0.01,
             'horizontal nominal size enrichment should preserve horizontal angle')
 
 far_internal = [
-  ti.new('w1023', 1800.0, 1600.0, 11.0, -90.0, 'F1', 1.0,
+  ti.new('w7304', 1500.0, 1300.0, 11.0, -90.0, 'F1', 1.0,
          nil, nil, nil, nil, nil)
 ]
 far_merged = BlueCollarSystems::PDFVectorImporter.apply_internal_text_angle_hints(
