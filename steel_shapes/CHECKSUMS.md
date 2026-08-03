@@ -9,8 +9,8 @@ a digest from a different tag.
 
 PowerShell:
 
-`Get-FileHash .\Structural-Steel-SU-Shapes-v1.0.1.zip -Algorithm SHA256`
+`Get-FileHash .\Structural-Steel-SU-Shapes-v1.0.2.zip -Algorithm SHA256`
 
 macOS / Linux:
 
-`shasum -a 256 Structural-Steel-SU-Shapes-v1.0.1.zip`
+`shasum -a 256 Structural-Steel-SU-Shapes-v1.0.2.zip`

@@ -55,4 +55,4 @@ Always verify final design/fabrication decisions with qualified engineering revi
 ## Integrity Verification
 
 - Checksums are published in [CHECKSUMS.md](CHECKSUMS.md).
-- New tagged releases (`v*`) automatically publish ZIP + `SHA256SUMS.txt` via GitHub Actions.
+- New tagged releases (`steel-v*`) automatically publish ZIP + `SHA256SUMS.txt` via GitHub Actions.

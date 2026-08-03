@@ -17,6 +17,8 @@ TAG_RE = re.compile(r"^steel-v\d+\.\d+\.\d+$")
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 FORBIDDEN_ARTIFACT_SUFFIXES = {".pdf", ".dxf", ".dwg", ".fcstd", ".blend"}
 MACHINE_PATH_MARKERS = (b"c:\\users\\", b"c:/users/")
+TEXT_METADATA_NAMES = {"copying", "license", "notice"}
+TEXT_METADATA_SUFFIXES = {".md", ".txt"}
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,26 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _release_member_bytes(path: Path) -> bytes:
+    content = path.read_bytes()
+    if (
+        path.name.casefold() in TEXT_METADATA_NAMES
+        or path.suffix.casefold() in TEXT_METADATA_SUFFIXES
+    ):
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RuntimeError(
+                f"steel release member is not valid UTF-8 text metadata: {path.name}"
+            ) from error
+        if "\x00" in text:
+            raise RuntimeError(
+                f"steel release text metadata contains a NUL byte: {path.name}"
+            )
+        return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+    return content
+
+
 def _source_files(source_dir: Path) -> tuple[Path, ...]:
     source = source_dir.resolve(strict=True)
     candidates = sorted(
@@ -48,7 +70,7 @@ def _source_files(source_dir: Path) -> tuple[Path, ...]:
         relative = candidate.relative_to(source)
         if candidate.suffix.casefold() in FORBIDDEN_ARTIFACT_SUFFIXES:
             raise RuntimeError("steel release payload contains a private CAD/PDF artifact extension")
-        content = candidate.read_bytes()
+        content = _release_member_bytes(candidate)
         folded = content.lower()
         if any(marker in folded for marker in MACHINE_PATH_MARKERS):
             raise RuntimeError("steel release payload contains a machine-bound path")
@@ -84,7 +106,7 @@ def build(source_dir: Path, out_dir: Path, tag: str) -> BuildArtifacts:
             info.create_system = 3
             info.external_attr = 0o100644 << 16
             info.compress_type = zipfile.ZIP_DEFLATED
-            archive.writestr(info, path.read_bytes(), compresslevel=9)
+            archive.writestr(info, _release_member_bytes(path), compresslevel=9)
 
     shutil.copyfile(versioned, latest)
     digest = _sha256(versioned)
