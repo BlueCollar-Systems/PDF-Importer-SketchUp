@@ -653,11 +653,30 @@ module SketchupHostLauncher
     tag = git_output!(
       root, ['rev-list', '-n', '1', "refs/tags/#{job[:git_tag]}"]
     ).downcase
-    unless head == job[:git_commit] && tag == job[:git_commit]
+    unless head == job[:git_commit]
       raise LaunchError,
-            'release repository commit/tag identity does not match the job'
+            'release repository HEAD does not match the job commit'
+    end
+    # The acceptance harness lives in tools/, which ships in no release package
+    # (0 of the RBZ's entries). A harness fix therefore cannot be delivered by a
+    # product release, and pinning HEAD == tag froze the harness at the tagged
+    # commit forever. Requiring the tag to be an ANCESTOR of HEAD keeps the
+    # product identity exact -- the tag still names the released commit, and the
+    # RBZ SHA-256 is verified separately -- while letting the harness advance
+    # along the same history. It can move forward; it can never diverge.
+    unless head == tag || git_ancestor?(root, tag, head)
+      raise LaunchError,
+            'release repository HEAD is not a descendant of the release tag'
     end
     true
+  end
+
+  def git_ancestor?(root, ancestor, descendant)
+    return false if ancestor.to_s.empty? || descendant.to_s.empty?
+    system(
+      'git', '-C', root, 'merge-base', '--is-ancestor', ancestor, descendant,
+      [:out, :err] => File::NULL
+    )
   end
 
   def git_output!(root, arguments)
