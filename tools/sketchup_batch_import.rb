@@ -269,6 +269,17 @@ module SketchupBatchImport
       SketchupBatchImport.write_progress!(job, binding, 'reopen_verified')
 
       {
+        # Emitted on BOTH completion paths. finish_skp_export_only! records
+        # 'skp_export_only' => true, but this path recorded nothing, and
+        # sketchup_full_corpus_sweep.rb::resumable_result asserts
+        #   acceptance['skp_export_only'] == @skp_export_only
+        # In full-acceptance mode that compared nil == false, which is false, so
+        # every cell failed strict recertification through a silent `return nil`
+        # -- reported as "strict release/canonical recertification failed" with an
+        # EMPTY certification_errors list. Export-only mode passed because its
+        # branch did emit the key. Absence was never evidence of false; it has to
+        # be stated.
+        'skp_export_only' => false,
         'plugins_disabled_verified' => true,
         'source_root_verified' => true,
         'source_root' => expected_root,
