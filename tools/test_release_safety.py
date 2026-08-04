@@ -600,14 +600,32 @@ class ReleaseSafetyTest:
         assert "--clobber" not in workflow
 
     def test_steel_shapes_release_never_overwrites_existing_assets(self):
+        # The invariant is unchanged -- publishing must never clobber an asset
+        # that already exists -- but the mechanism was replaced in ce2b0d6. The
+        # workflow no longer uses softprops/action-gh-release with
+        # overwrite_files: false; it now calls tools/complete_github_release.py,
+        # which refuses on size or digest conflict. That commit carried
+        # [skip release], so this gate never ran against it and the stale
+        # assertion sat green until the next release-bearing push tripped it on
+        # `ValueError: substring not found`. Assert the mechanism actually in use.
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "steel-shapes-release.yml"
         ).read_text(encoding="utf-8")
-        publish_at = workflow.index("- name: Publish GitHub release")
+        publish_at = workflow.index(
+            "- name: Publish exact non-product-latest release"
+        )
         publish_block = workflow[publish_at:]
-        assert "uses: softprops/action-gh-release@v2" in publish_block
-        assert re.search(
-            r"^\s+overwrite_files:\s*false\s*$", publish_block, re.MULTILINE
+        assert "python tools/complete_github_release.py" in publish_block
+        assert "--clobber" not in publish_block
+        assert "softprops/action-gh-release" not in publish_block
+
+        completer = (
+            REPO_ROOT / "tools" / "complete_github_release.py"
+        ).read_text(encoding="utf-8")
+        assert "refusing overwrite" in completer, (
+            "complete_github_release.py must refuse to replace an existing "
+            "asset; it is the only thing standing between a re-run and a "
+            "silently rewritten published release"
         )
 
     def test_acknowledge_rejects_past_deferral(self):
