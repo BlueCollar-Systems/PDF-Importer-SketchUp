@@ -17,7 +17,7 @@ import json
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUPPORT = REPO_ROOT / "extracted" / "sketchup_ext" / "bc_pdf_vector_importer"
@@ -94,8 +94,17 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Bundled by us alongside Poppler, but NOT part of the pinned Poppler asset.
+# Categorised separately so the manifest never implies these came from upstream.
+MSVC_RUNTIME_DLLS = frozenset(
+    {"vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"}
+)
+
+
 def category_for(rel: str) -> str:
     if rel.startswith("Library/bin/") and rel.lower().endswith((".exe", ".dll")):
+        if PurePosixPath(rel).name.lower() in MSVC_RUNTIME_DLLS:
+            return "msvc_runtime"
         return "binary"
     if rel.startswith("Library/licenses/") or rel in (
         "Library/THIRD_PARTY_NOTICES.txt",

@@ -1,10 +1,16 @@
 THIRD-PARTY NOTICES -- PDF Vector Importer for SketchUp
-Bundled Poppler runtime
+Bundled Poppler runtime, and the Microsoft C/C++ runtime it requires
 ========================================================================
 
 This extension bundles an unmodified redistribution of the Poppler Windows
 build listed below, together with its binary dependencies. Each component,
 its licence, and the file containing that licence's full text are listed.
+
+It ALSO bundles three Microsoft Visual C++ runtime DLLs, which are NOT part
+of the Poppler redistribution and are covered separately under "MICROSOFT
+VISUAL C++ RUNTIME" near the end of this file. The Poppler binaries listed
+in the component inventory below import those DLLs and cannot load without
+them; they are not present on a clean Windows installation.
 
 The bundled helpers are invoked as SEPARATE PROCESSES (pdftocairo.exe,
 pdftotext.exe, pdffonts.exe). They are not statically linked into, and do not
@@ -171,6 +177,38 @@ Binaries  : Library/bin/zstd.dll
 Licence text: Library/licenses/zstd-LICENSE
   retrieved from: https://raw.githubusercontent.com/facebook/zstd/dev/LICENSE
   sha256: 7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8
+
+MICROSOFT VISUAL C++ RUNTIME
+------------------------------------------------------------------------
+  NOT part of the Poppler redistribution above. Listed separately because it
+  originates from Microsoft, under different terms, and was added by us.
+
+Component : Microsoft Visual C++ Runtime (x64)
+Binaries  : Library/bin/vcruntime140.dll
+            Library/bin/vcruntime140_1.dll
+            Library/bin/msvcp140.dll
+Version   : 14.51.36247.0
+Basis     : Redistributed as permitted for the Visual C++ Redistributable
+            Files under the Microsoft Visual Studio licence terms, which allow
+            application-local deployment of these files alongside the
+            application that requires them.
+            Terms: https://visualstudio.microsoft.com/license-terms/
+  No separate licence text file is shipped for this component. Unlike the
+  copyleft and BSD/MIT components above, Microsoft's redistribution grant does
+  not require distributing a licence file with the binaries, so fabricating one
+  here -- or citing a retrieval URL and hash we did not verify -- would be
+  inaccurate rather than more compliant.
+
+  WHY THESE ARE BUNDLED
+  Every Poppler helper in Library/bin imports vcruntime140.dll, and
+  pdftocairo.exe, pdftotext.exe, pdffonts.exe, poppler.dll, cairo.dll and
+  Lerc.dll additionally import vcruntime140_1.dll and/or msvcp140.dll. These
+  DLLs ship with a Visual C++ Redistributable, not with Windows -- ucrtbase.dll
+  is part of the OS, but the vcruntime/msvcp pair is not -- and SketchUp itself
+  installs no C++ runtime. Without them the helpers fail to load with
+  STATUS_DLL_NOT_FOUND (0xC0000135) before main() and produce no output at all.
+  test/bundled_runtime_completeness_test.rb enforces that every DLL imported by
+  a bundled binary is itself bundled or supplied by Windows.
 
 POPPLER DATA
 ------------------------------------------------------------------------

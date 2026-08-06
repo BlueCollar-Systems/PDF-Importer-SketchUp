@@ -30,10 +30,10 @@
       "sha256": "8992b89077be7aee78758ed1a287d9c1d673b0fdd7edadd372f74ccebb3c7bca"
     },
     {
-      "bytes": 8302,
+      "bytes": 10536,
       "category": "notice",
       "path": "Library/THIRD_PARTY_NOTICES.txt",
-      "sha256": "dc6ca295f5803013f6aa8422f257c5613bc9c63dc78698120d96be435c936ccc"
+      "sha256": "7117bec475de3577ffa7c372c4f6ee9f724209653ffb5a255a979daf0ad05475"
     },
     {
       "bytes": 540672,
@@ -114,6 +114,12 @@
       "sha256": "1563642bed85fcb68fdcf3c8d2c23c742e95aa5dbb11234b2ba5d7a634775327"
     },
     {
+      "bytes": 643512,
+      "category": "msvc_runtime",
+      "path": "Library/bin/msvcp140.dll",
+      "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
+    },
+    {
       "bytes": 360448,
       "category": "binary",
       "path": "Library/bin/openjp2.dll",
@@ -154,6 +160,18 @@
       "category": "binary",
       "path": "Library/bin/tiff.dll",
       "sha256": "57ad7d27c81d140cfe9b16a6b1e75ce7fa360d613add138dcdc8a61ba0872459"
+    },
+    {
+      "bytes": 178616,
+      "category": "msvc_runtime",
+      "path": "Library/bin/vcruntime140.dll",
+      "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
+    },
+    {
+      "bytes": 50112,
+      "category": "msvc_runtime",
+      "path": "Library/bin/vcruntime140_1.dll",
+      "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
     },
     {
       "bytes": 90624,
@@ -1956,5 +1974,5 @@
       "sha256": "41d788d5b7c7e8cee377f633dffec6514afcb82e84a377a48154a908d6afaf49"
     }
   ],
-  "member_inventory_sha256": "8cc4d5f99b214a2fd4d615357175b8b5ecf6d508964f4ec24b969c9ebf27fb77"
+  "member_inventory_sha256": "b21c01736d399b3b88b8f1b6cf74b6cf5619d13959433463ad820c94f81379a3"
 }

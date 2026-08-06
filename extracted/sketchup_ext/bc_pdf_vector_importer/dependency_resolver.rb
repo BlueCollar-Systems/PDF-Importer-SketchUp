@@ -13,7 +13,7 @@ module BlueCollarSystems
       PREF_KEY = 'bc_pdf_vector_importer'.freeze
       PREF_NOTICE = 'dependency_notice_shown'.freeze
       PINNED_MEMBER_INVENTORY_SHA256 =
-        '8cc4d5f99b214a2fd4d615357175b8b5ecf6d508964f4ec24b969c9ebf27fb77'.freeze
+        'b21c01736d399b3b88b8f1b6cf74b6cf5619d13959433463ad820c94f81379a3'.freeze
       RUNTIME_MEMBER_KEYS = %w[bytes category path sha256].freeze
 
       DOWNLOADS = {
@@ -370,10 +370,59 @@ module BlueCollarSystems
           digest.hexdigest
         end
 
+        # Windows loader failures. The process is created and then killed before
+        # main() runs, so there is no stdout, no stderr and no Ruby exception --
+        # which is why an existence-only check reports a helper as available
+        # right up until it cannot start.
+        LOADER_FAILURE_EXIT_CODES = {
+          3221225781 => 'a required DLL was not found (STATUS_DLL_NOT_FOUND)',
+          3221225785 => 'a required DLL entry point was missing ' \
+                        '(STATUS_ENTRYPOINT_NOT_FOUND)',
+          3221225794 => 'a required DLL failed to initialise ' \
+                        '(STATUS_DLL_INIT_FAILED)'
+        }.freeze
+
         def bundled_executable(name)
           return nil unless bundled_bin_ready?
           path = File.join(bundled_bin_dir, name)
-          File.file?(path) ? path : nil
+          return nil unless File.file?(path)
+          bundled_executable_launchable?(path) ? path : nil
+        end
+
+        # Existing on disk is not the same as being able to run. Probe once per
+        # path and cache, so this costs one short process per helper per session.
+        #
+        # Deliberately fail-safe: only a Windows LOADER failure marks a helper
+        # unusable. Any other outcome -- non-zero exit, timeout, unparsable
+        # status, probe raising -- is treated as launchable, because wrongly
+        # disabling a working helper would be worse than the check it replaces.
+        def bundled_executable_launchable?(path)
+          @bundled_launch_probe ||= {}
+          key = path.to_s
+          return @bundled_launch_probe[key] if @bundled_launch_probe.key?(key)
+
+          launchable = true
+          begin
+            result = CommandRunner.run([path, '-v'],
+              timeout_s: 10,
+              context: 'DependencyResolver.bundled_launch_probe')
+            code = result[:exitstatus]
+            reason = code.nil? ? nil : LOADER_FAILURE_EXIT_CODES[code.to_i]
+            if reason
+              launchable = false
+              safe_warn('DependencyResolver',
+                "bundled helper #{File.basename(path)} cannot start: #{reason}. " \
+                'The bundled Visual C++ runtime DLLs are missing or unusable; ' \
+                'reinstall the extension.')
+            end
+          rescue StandardError => e
+            safe_warn('DependencyResolver',
+              "launch probe for #{File.basename(path)} did not complete " \
+              "(#{e.message}); treating it as available")
+          end
+
+          @bundled_launch_probe[key] = launchable
+          launchable
         end
 
         def find_executable(exe_names, env_var:, extra_candidates: [], path_probe: nil)
