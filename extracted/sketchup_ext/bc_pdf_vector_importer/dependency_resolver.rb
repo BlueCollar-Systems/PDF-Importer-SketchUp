@@ -54,39 +54,96 @@ module BlueCollarSystems
           File.join(support_dir, 'Library', 'bin')
         end
 
+        # Why the bundled runtime was last refused, or nil when it is usable.
+        # Every rejection below used to be a bare `return false`, so the entire
+        # Poppler runtime could switch off and leave the user -- and the
+        # Compatibility Report -- with nothing to go on. Adding a file to
+        # Library/bin without regenerating the manifest does exactly that.
+        def bundled_runtime_unavailable_reason
+          @bundled_runtime_unavailable_reason
+        end
+
+        def bundled_runtime_unavailable(reason)
+          # Warn once per distinct reason: this runs before every helper
+          # selection, so an unconditional warn would flood the console.
+          if @bundled_runtime_unavailable_reason != reason
+            @bundled_runtime_unavailable_reason = reason
+            safe_warn('DependencyResolver',
+              "bundled Poppler runtime unavailable: #{reason}")
+          end
+          false
+        end
+
         def bundled_bin_ready?
-          return false unless windows?
+          unless windows?
+            return bundled_runtime_unavailable(
+              'the bundled runtime ships Windows binaries only')
+          end
 
           root = File.expand_path(support_dir)
           unless runtime_trust_paths_symlink_free?(root)
             @verified_bundled_runtime_root = nil
-            return false
+            return bundled_runtime_unavailable(
+              "a symlink was found on the runtime trust path under #{root}")
           end
           return true if @verified_bundled_runtime_root == root
 
           manifest = bundled_runtime_manifest
-          return false unless manifest
+          unless manifest
+            return bundled_runtime_unavailable(
+              'poppler-runtime-manifest.json is missing or unreadable')
+          end
           layout = manifest['layout']
           review = manifest['license_review']
-          return false unless manifest['schema'] == 1
-          return false unless layout.is_a?(Hash)
-          return false unless layout['bin'] == 'Library/bin'
-          return false unless layout['data'] == 'share/poppler'
-          return false unless layout['manifest'] ==
-                              'poppler-runtime-manifest.json'
-          return false unless review.is_a?(Hash) &&
-                              review['status'] == 'approved'
-          return false unless Array(review['missing']).empty?
-          return false if review['reviewer'].to_s.strip.empty?
-          return false if review['evidence'].to_s.strip.empty?
+          unless manifest['schema'] == 1
+            return bundled_runtime_unavailable(
+              "manifest schema is #{manifest['schema'].inspect}, expected 1")
+          end
+          unless layout.is_a?(Hash)
+            return bundled_runtime_unavailable('manifest has no layout section')
+          end
+          unless layout['bin'] == 'Library/bin'
+            return bundled_runtime_unavailable(
+              "manifest layout.bin is #{layout['bin'].inspect}, expected 'Library/bin'")
+          end
+          unless layout['data'] == 'share/poppler'
+            return bundled_runtime_unavailable(
+              "manifest layout.data is #{layout['data'].inspect}, expected 'share/poppler'")
+          end
+          unless layout['manifest'] == 'poppler-runtime-manifest.json'
+            return bundled_runtime_unavailable(
+              "manifest layout.manifest is #{layout['manifest'].inspect}")
+          end
+          unless review.is_a?(Hash) && review['status'] == 'approved'
+            return bundled_runtime_unavailable(
+              'manifest license_review status is not approved')
+          end
+          unless Array(review['missing']).empty?
+            return bundled_runtime_unavailable(
+              "license review lists missing items: #{Array(review['missing']).join(', ')}")
+          end
+          if review['reviewer'].to_s.strip.empty?
+            return bundled_runtime_unavailable('license review records no reviewer')
+          end
+          if review['evidence'].to_s.strip.empty?
+            return bundled_runtime_unavailable('license review records no evidence')
+          end
           reviewed_at = review['reviewed_at'].to_s
-          return false unless reviewed_at =~
-                              /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/
-          return false unless bundled_runtime_integrity_valid?(root, manifest)
+          unless reviewed_at =~ /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/
+            return bundled_runtime_unavailable(
+              "license review timestamp #{reviewed_at.inspect} is not ISO-8601 UTC")
+          end
+          unless bundled_runtime_integrity_valid?(root, manifest)
+            return bundled_runtime_unavailable(
+              'the bundled runtime tree does not match its integrity manifest ' \
+              '(a file was added, removed or changed without regenerating ' \
+              'poppler-runtime-manifest.json and PINNED_MEMBER_INVENTORY_SHA256)')
+          end
 
           # Cache only a successful full verification. The cheap symlink trust
           # boundary above is still rechecked before every helper selection.
           @verified_bundled_runtime_root = root
+          @bundled_runtime_unavailable_reason = nil
           ensure_poppler_datadir!(root)
           true
         end
