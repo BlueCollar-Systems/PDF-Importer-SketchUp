@@ -13,6 +13,14 @@
 # Binary assets - never normalize
 *.png binary
 *.jpg binary
+
+# Bundled native runtime. These were relying on `text=auto` detection alone.
+# Every byte is hashed into poppler-runtime-manifest.json and checked at load
+# time by DependencyResolver.bundled_runtime_integrity_valid?, so any
+# line-ending rewrite would silently take the whole Poppler runtime offline.
+*.dll binary
+*.exe binary
+*.pyd binary
 *.jpeg binary
 *.gif binary
 *.pdf binary
