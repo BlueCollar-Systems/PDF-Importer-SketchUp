@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import re
 import sys
 import tempfile
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
@@ -397,6 +398,180 @@ class ReleaseSafetyTest:
     def test_release_safety_helper_is_not_a_product_path(self):
         assert not rs.is_product_path("tools/release_safety.py")
         assert not rs.is_product_path("scripts/release_safety.py")
+
+    def test_existing_tag_without_release_builds_and_mints_from_tag(self):
+        plan = rs.plan_release_completion(
+            version="1.0.76",
+            head_sha="b" * 40,
+            tag_sha="a" * 40,
+            release_exists=False,
+        )
+        assert plan == {
+            "action": "complete_existing_tag",
+            "tag": "v1.0.76",
+            "build_ref": "a" * 40,
+            "release_target": "a" * 40,
+        }
+
+    def test_existing_release_is_verify_only_and_never_uploads(self):
+        plan = rs.plan_release_completion(
+            version="1.0.76",
+            head_sha="b" * 40,
+            tag_sha="a" * 40,
+            release_exists=True,
+        )
+        assert plan["action"] == "verify_existing_release"
+        assert plan["build_ref"] == "a" * 40
+
+    def test_new_tag_builds_and_mints_from_head(self):
+        plan = rs.plan_release_completion(
+            version="1.0.76",
+            head_sha="b" * 40,
+            tag_sha=None,
+            release_exists=False,
+        )
+        assert plan["action"] == "mint_new_tag"
+        assert plan["build_ref"] == "b" * 40
+
+    def test_draft_release_is_resumed_from_existing_tag(self):
+        plan = rs.plan_release_completion(
+            version="1.0.76",
+            head_sha="b" * 40,
+            tag_sha="a" * 40,
+            release_exists=True,
+            release_is_draft=True,
+        )
+        assert plan["action"] == "complete_draft_release"
+        assert plan["build_ref"] == "a" * 40
+
+    def test_release_discovery_includes_drafts_and_binds_numeric_id(self):
+        release = rs.discover_release_by_tag(
+            [
+                {"id": 12, "tag_name": "v1.0.75", "draft": False},
+                {"id": 34, "tag_name": "v1.0.76", "draft": True},
+            ],
+            "v1.0.76",
+        )
+        assert release == {
+            "release_state": "draft",
+            "release_id": "34",
+        }
+
+        try:
+            rs.discover_release_by_tag(
+                [
+                    {"id": 34, "tag_name": "v1.0.76", "draft": True},
+                    {"id": 35, "tag_name": "v1.0.76", "draft": False},
+                ],
+                "v1.0.76",
+            )
+        except ValueError as exc:
+            assert "exactly one" in str(exc)
+        else:
+            raise AssertionError("duplicate tag-bound releases were accepted")
+
+    def test_release_discovery_cli_emits_machine_readable_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            releases_path = Path(tmp) / "releases.json"
+            releases_path.write_text(
+                json.dumps(
+                    [
+                        {"id": 34, "tag_name": "v1.0.76", "draft": True},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                code = rs.main(
+                    [
+                        "discover-release",
+                        "--releases-json",
+                        str(releases_path),
+                        "--tag",
+                        "v1.0.76",
+                    ]
+                )
+            assert code == 0
+            assert json.loads(stdout.getvalue()) == {
+                "release_state": "draft",
+                "release_id": "34",
+            }
+
+    def test_release_asset_verification_is_idempotent_and_digest_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset = Path(tmp) / "package.zip"
+            asset.write_bytes(b"immutable package")
+            digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+            verified = rs.verify_release_assets(
+                [asset],
+                [{"name": asset.name, "size": asset.stat().st_size, "digest": f"sha256:{digest}"}],
+            )
+            assert verified == [{"name": asset.name, "size": 17, "sha256": digest}]
+
+            try:
+                rs.verify_release_assets(
+                    [asset],
+                    [{"name": asset.name, "size": asset.stat().st_size, "digest": "sha256:" + "0" * 64}],
+                )
+            except ValueError as exc:
+                assert "digest" in str(exc).lower()
+            else:
+                raise AssertionError("a mismatched immutable release asset was accepted")
+
+    def test_plan_release_cli_writes_stable_github_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github-output.txt"
+            code = rs.main([
+                "plan-release",
+                "--version", "1.0.76",
+                "--head-sha", "b" * 40,
+                "--tag-sha", "a" * 40,
+                "--release-state", "missing",
+                "--github-output", str(output),
+            ])
+            assert code == 0
+            assert output.read_text(encoding="utf-8").splitlines() == [
+                "action=complete_existing_tag",
+                "tag=v1.0.76",
+                "build_ref=" + "a" * 40,
+                "release_target=" + "a" * 40,
+            ]
+
+    def test_verify_release_assets_cli_writes_machine_readable_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            asset = root / "package.zip"
+            release_json = root / "release.json"
+            output = root / "verified.json"
+            asset.write_bytes(b"immutable package")
+            digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+            release_json.write_text(
+                json.dumps({
+                    "assets": [{
+                        "name": asset.name,
+                        "size": asset.stat().st_size,
+                        "digest": f"sha256:{digest}",
+                    }]
+                }),
+                encoding="utf-8",
+            )
+
+            code = rs.main([
+                "verify-release-assets",
+                "--release-json", str(release_json),
+                "--asset", str(asset),
+                "--output", str(output),
+            ])
+
+            assert code == 0
+            assert json.loads(output.read_text(encoding="utf-8")) == {
+                "verified_assets": [{
+                    "name": asset.name,
+                    "size": asset.stat().st_size,
+                    "sha256": digest,
+                }]
+            }
 
     def test_collect_delta_accepts_explicit_head(self):
         git = fake_git_factory(
