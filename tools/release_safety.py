@@ -30,6 +30,7 @@ import argparse
 import copy
 import datetime
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -62,6 +63,7 @@ DEFAULT_EXCLUDES = [
 ]
 
 # ISO 8601 timestamp with timezone.
+_HEX_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _ISO_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})$")
 _SEMVER_NUMBER = r"(?:0|[1-9][0-9]*)"
 _SEMVER_PRERELEASE_ID = rf"(?:{_SEMVER_NUMBER}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -122,6 +124,102 @@ class _Completed:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+def plan_release_completion(
+    *,
+    version: str,
+    head_sha: str,
+    tag_sha: str | None,
+    release_exists: bool,
+    release_is_draft: bool = False,
+) -> dict[str, str]:
+    """Select immutable source bytes before any release build starts."""
+    tag = f"v{version}"
+    head = str(head_sha or "").strip().lower()
+    tagged = str(tag_sha or "").strip().lower()
+    if not _HEX_COMMIT_RE.fullmatch(head):
+        raise ValueError("head_sha must be a full 40-character hexadecimal SHA")
+    if tagged and not _HEX_COMMIT_RE.fullmatch(tagged):
+        raise ValueError("tag_sha must be a full 40-character hexadecimal SHA")
+    if release_exists and not tagged:
+        raise ValueError("an existing release must have a resolvable immutable tag")
+    if release_exists and release_is_draft:
+        action = "complete_draft_release"
+        build_ref = tagged
+    elif release_exists:
+        action = "verify_existing_release"
+        build_ref = tagged
+    elif tagged:
+        action = "complete_existing_tag"
+        build_ref = tagged
+    else:
+        action = "mint_new_tag"
+        build_ref = head
+    return {
+        "action": action,
+        "tag": tag,
+        "build_ref": build_ref,
+        "release_target": build_ref,
+    }
+
+
+def discover_release_by_tag(releases: Sequence[dict], tag: str) -> dict[str, str]:
+    """Find one release, including drafts, and bind later operations to its ID."""
+    if not isinstance(tag, str) or not tag.strip():
+        raise ValueError("tag must be a nonempty string")
+    matches: list[dict] = []
+    for release in releases:
+        if not isinstance(release, dict):
+            raise ValueError("release discovery JSON must contain only objects")
+        if release.get("tag_name") == tag:
+            matches.append(release)
+    if len(matches) > 1:
+        raise ValueError(f"expected exactly one release for tag {tag}; found {len(matches)}")
+    if not matches:
+        return {"release_state": "missing", "release_id": ""}
+
+    release = matches[0]
+    release_id = release.get("id")
+    if isinstance(release_id, bool) or not isinstance(release_id, int) or release_id <= 0:
+        raise ValueError(f"release for tag {tag} has an invalid numeric id")
+    draft = release.get("draft")
+    if not isinstance(draft, bool):
+        raise ValueError(f"release for tag {tag} has an invalid draft state")
+    return {
+        "release_state": "draft" if draft else "published",
+        "release_id": str(release_id),
+    }
+
+
+def verify_release_assets(
+    local_assets: Sequence[Path],
+    release_assets: Sequence[dict],
+) -> list[dict[str, object]]:
+    """Verify an existing/draft release has exactly matching desired bytes."""
+    by_name: dict[str, list[dict]] = {}
+    for asset in release_assets:
+        by_name.setdefault(str(asset.get("name") or ""), []).append(dict(asset))
+    verified = []
+    for path_value in local_assets:
+        path = Path(path_value)
+        if not path.is_file():
+            raise ValueError(f"local release asset is missing: {path}")
+        matches = by_name.get(path.name, [])
+        if len(matches) != 1:
+            raise ValueError(
+                f"release must contain exactly one asset named {path.name}; found {len(matches)}"
+            )
+        remote = matches[0]
+        size = path.stat().st_size
+        if int(remote.get("size", -1)) != size:
+            raise ValueError(f"release asset size mismatch for {path.name}")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        remote_digest = str(remote.get("digest") or "").strip().lower()
+        if remote_digest != f"sha256:{digest}":
+            raise ValueError(f"release asset digest mismatch for {path.name}")
+        verified.append({"name": path.name, "size": size, "sha256": digest})
+    return verified
 
 
 def _run_git(
@@ -530,6 +628,48 @@ def _main_acknowledge(args: argparse.Namespace) -> int:
     return 0
 
 
+def _main_plan_release(args: argparse.Namespace) -> int:
+    plan = plan_release_completion(
+        version=args.version,
+        head_sha=args.head_sha,
+        tag_sha=args.tag_sha or None,
+        release_exists=args.release_state != "missing",
+        release_is_draft=args.release_state == "draft",
+    )
+    target = Path(args.github_output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        for key in ("action", "tag", "build_ref", "release_target"):
+            handle.write(f"{key}={plan[key]}\n")
+    print(json.dumps(plan, sort_keys=True))
+    return 0
+
+
+def _main_discover_release(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.releases_json).read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("release discovery JSON must be an array")
+    print(json.dumps(discover_release_by_tag(payload, args.tag), sort_keys=True))
+    return 0
+
+
+def _main_verify_release_assets(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.release_json).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("assets"), list):
+        raise ValueError("release JSON must contain an assets array")
+    result = {
+        "verified_assets": verify_release_assets(
+            [Path(value) for value in args.asset], payload["assets"]
+        )
+    }
+    serialized = json.dumps(result, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        Path(args.output).write_text(serialized, encoding="utf-8")
+    else:
+        print(serialized, end="")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="release_safety.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -556,11 +696,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     group.add_argument("--version-bump-plan", help="planned version that will ship the stranded changes")
     group.add_argument("--release-deferred-until", help="ISO-8601 date until which the release is deferred")
 
+    plan = subparsers.add_parser(
+        "plan-release",
+        help="select the immutable source ref and idempotent completion action",
+    )
+    plan.add_argument("--version", required=True)
+    plan.add_argument("--head-sha", required=True)
+    plan.add_argument("--tag-sha", default="")
+    plan.add_argument(
+        "--release-state",
+        choices=("missing", "draft", "published"),
+        required=True,
+    )
+    plan.add_argument("--github-output", required=True)
+
+    discover = subparsers.add_parser(
+        "discover-release",
+        help="discover a published or draft release and return its numeric ID",
+    )
+    discover.add_argument("--releases-json", required=True)
+    discover.add_argument("--tag", required=True)
+
+    verify = subparsers.add_parser(
+        "verify-release-assets",
+        help="prove that release assets exactly match locally rebuilt bytes",
+    )
+    verify.add_argument("--release-json", required=True)
+    verify.add_argument("--asset", action="append", required=True)
+    verify.add_argument("--output", default=None)
+
     args = parser.parse_args(argv)
     if args.command == "audit-existing-tag":
         return _main_audit(args)
     if args.command == "acknowledge":
         return _main_acknowledge(args)
+    if args.command == "plan-release":
+        return _main_plan_release(args)
+    if args.command == "discover-release":
+        return _main_discover_release(args)
+    if args.command == "verify-release-assets":
+        return _main_verify_release_assets(args)
     return 2
 
 

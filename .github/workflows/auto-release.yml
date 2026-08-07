@@ -209,6 +209,67 @@ jobs:
           test "${#RELEASE_TARGET}" -eq 40
           echo "RELEASE_TARGET=$RELEASE_TARGET" >> "$GITHUB_ENV"
 
+      # Decide the completion action before touching a published release, using
+      # the same planner Blender uses (tools/release_safety.py plan-release).
+      #
+      # Without this the job always ran "Create or update release" against the
+      # committed version. Once main advanced past a published tag, it rebuilt
+      # the RBZ from the new HEAD and tried to attach it to the existing
+      # release, which correctly refused:
+      #
+      #   release completion failed: asset size conflict for
+      #   SketchUp-PDF-Importer_v3.7.128.rbz; refusing overwrite
+      #
+      # That guard is right -- a published artifact is immutable and must never
+      # be silently replaced with different bytes. The defect was attempting it
+      # at all. An already-published version now yields a stranded-release
+      # warning and a green run, exactly as it does in the Blender pipeline.
+      - name: Plan release completion
+        id: release_plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ steps.version.outputs.version }}"
+          TAG_SHA="$(git rev-list -n 1 "$TAG^{commit}" 2>/dev/null || true)"
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          DISCOVERY="$(python tools/release_safety.py discover-release \
+            --releases-json "$RUNNER_TEMP/releases.json" --tag "$TAG")"
+          RELEASE_STATE="$(printf '%s' "$DISCOVERY" | python -c 'import json,sys; print(json.load(sys.stdin)["release_state"])')"
+          python tools/release_safety.py plan-release \
+            --version "${{ steps.version.outputs.version }}" \
+            --head-sha "$GITHUB_SHA" \
+            --tag-sha "$TAG_SHA" \
+            --release-state "$RELEASE_STATE" \
+            --github-output "$GITHUB_OUTPUT"
+
+      # An already-published version is a normal state for a product commit, not
+      # a failure. Record the stranded delta so it is visible and acknowledgeable
+      # instead of silently forgotten.
+      - name: Warn about a stranded release instead of overwriting it
+        if: steps.release_plan.outputs.action == 'verify_existing_release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "::notice::v${{ steps.version.outputs.version }} is already published; not rebuilding or overwriting it. Product commits since that release are reported below. To ship them, bump the version and push."
+          # Same invocation Blender uses: the push boundary makes the reported
+          # delta the real product commits, --summary surfaces it on the run
+          # page, and --warnings-file records it under the tracked
+          # .release-safety/ so it can be acknowledged rather than forgotten.
+          # --release-mode is deliberately omitted: it exits 2 once a stranded
+          # deadline expires, and escalating to a hard failure is a policy
+          # decision, not something to switch on silently here.
+          python tools/release_safety.py audit-existing-tag \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "${{ steps.release_plan.outputs.tag }}" \
+            --before "${{ github.event.before }}" \
+            --head "$GITHUB_SHA" \
+            --session-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --mode release \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --warnings-file .release-safety/warnings.json
+
       - name: Smoke RBZ structure
         run: |
           python - <<'PY'
@@ -269,6 +330,10 @@ jobs:
 
       - name: Create or update release
         id: mint
+        # Never run against an already-published release; see "Plan release
+        # completion" above. The three permitted actions all either mint a new
+        # release or finish an incomplete one.
+        if: steps.release_plan.outputs.action != 'verify_existing_release'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
