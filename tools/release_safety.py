@@ -72,6 +72,7 @@ _VERSION_RE = re.compile(
     rf"(?:-{_SEMVER_PRERELEASE_ID}(?:\.{_SEMVER_PRERELEASE_ID})*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
+_SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _now() -> datetime.datetime:
@@ -197,28 +198,69 @@ def verify_release_assets(
     release_assets: Sequence[dict],
 ) -> list[dict[str, object]]:
     """Verify an existing/draft release has exactly matching desired bytes."""
-    by_name: dict[str, list[dict]] = {}
-    for asset in release_assets:
-        by_name.setdefault(str(asset.get("name") or ""), []).append(dict(asset))
-    verified = []
-    for path_value in local_assets:
-        path = Path(path_value)
+    local_paths = [Path(path_value) for path_value in local_assets]
+    local_by_name: dict[str, Path] = {}
+    for path in local_paths:
         if not path.is_file():
             raise ValueError(f"local release asset is missing: {path}")
-        matches = by_name.get(path.name, [])
-        if len(matches) != 1:
+        if path.name in local_by_name:
+            raise ValueError(f"duplicate local release asset name: {path.name}")
+        local_by_name[path.name] = path
+
+    remote_by_name: dict[str, dict] = {}
+    for index, asset in enumerate(release_assets):
+        if not isinstance(asset, dict):
             raise ValueError(
-                f"release must contain exactly one asset named {path.name}; found {len(matches)}"
+                f"remote release asset record {index} must be a JSON object"
             )
-        remote = matches[0]
+        name = asset.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"remote release asset record {index} has an invalid name"
+            )
+        size = asset.get("size")
+        if type(size) is not int or size < 0:
+            raise ValueError(
+                f"remote release asset {name} has an invalid integer size"
+            )
+        remote_digest = asset.get("digest")
+        if (
+            not isinstance(remote_digest, str)
+            or not _SHA256_DIGEST_RE.fullmatch(remote_digest)
+        ):
+            raise ValueError(
+                f"remote release asset {name} has no valid SHA-256 digest; "
+                "an authenticated download source was not provided, so "
+                "verification fails closed"
+            )
+        if name in remote_by_name:
+            raise ValueError(f"duplicate remote release asset name: {name}")
+        remote_by_name[name] = asset
+
+    local_names = set(local_by_name)
+    remote_names = set(remote_by_name)
+    if local_names != remote_names:
+        missing = sorted(local_names - remote_names)
+        extra = sorted(remote_names - local_names)
+        raise ValueError(
+            "release asset name closure mismatch: "
+            f"missing={missing!r}, extra={extra!r}"
+        )
+
+    verified = []
+    for path in local_paths:
+        remote = remote_by_name[path.name]
         size = path.stat().st_size
-        if int(remote.get("size", -1)) != size:
+        if remote["size"] != size:
             raise ValueError(f"release asset size mismatch for {path.name}")
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        remote_digest = str(remote.get("digest") or "").strip().lower()
-        if remote_digest != f"sha256:{digest}":
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        hexdigest = digest.hexdigest()
+        if remote["digest"] != f"sha256:{hexdigest}":
             raise ValueError(f"release asset digest mismatch for {path.name}")
-        verified.append({"name": path.name, "size": size, "sha256": digest})
+        verified.append({"name": path.name, "size": size, "sha256": hexdigest})
     return verified
 
 

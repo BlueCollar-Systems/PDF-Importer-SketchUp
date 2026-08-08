@@ -28,23 +28,129 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      action: ${{ steps.plan.outputs.action }}
+      tag: ${{ steps.plan.outputs.tag }}
+      build_ref: ${{ steps.plan.outputs.build_ref }}
+      release_target: ${{ steps.plan.outputs.release_target }}
+      release_state: ${{ steps.plan.outputs.release_state }}
+      release_id: ${{ steps.plan.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Verify current release control plane
+        run: |
+          python tools/test_release_safety.py
+          python -m unittest tools.test_complete_github_release tools.test_workflow_release_identity_contract
+      - name: Read committed version
+        id: version
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          loader = pathlib.Path("extracted/sketchup_ext/bc_pdf_vector_importer.rb")
+          metadata = pathlib.Path("extracted/sketchup_ext/bc_pdf_vector_importer/metadata.rb")
+          readme = pathlib.Path("README.md")
+          loader_match = re.search(
+              r"PLUGIN_VERSION\s*=\s*'(\d+\.\d+\.\d+)'",
+              loader.read_text(encoding="utf-8"),
+          )
+          metadata_match = re.search(
+              r"VERSION\s*=\s*'(\d+\.\d+\.\d+)'",
+              metadata.read_text(encoding="utf-8"),
+          )
+          readme_match = re.search(
+              r"Version-(\d+\.\d+\.\d+)-(?:green|blue)\.svg",
+              readme.read_text(encoding="utf-8"),
+          )
+          if not loader_match:
+              raise SystemExit("Could not read the committed SketchUp version")
+          version = loader_match.group(1)
+          if not metadata_match or metadata_match.group(1) != version:
+              raise SystemExit("Loader and metadata versions differ")
+          if not readme_match or readme_match.group(1) != version:
+              raise SystemExit("Loader and README versions differ")
+          with pathlib.Path(os.environ["GITHUB_OUTPUT"]).open(
+              "a", encoding="utf-8", newline="\n"
+          ) as handle:
+              handle.write(f"version={version}\n")
+          PY
+      - name: Discover and plan immutable release
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ steps.version.outputs.version }}"
+          TAG_SHA="$(git rev-list -n 1 "$TAG^{commit}" 2>/dev/null || true)"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            > "$RUNNER_TEMP/release-pages.json"
+          python - "$RUNNER_TEMP/release-pages.json" "$RUNNER_TEMP/releases.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+              raise SystemExit("Paginated release discovery did not return arrays")
+          releases = [release for page in pages for release in page]
+          pathlib.Path(sys.argv[2]).write_text(
+              json.dumps(releases, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          DISCOVERY="$(python tools/release_safety.py discover-release \
+            --releases-json "$RUNNER_TEMP/releases.json" --tag "$TAG")"
+          RELEASE_STATE="$(printf '%s' "$DISCOVERY" | python -c 'import json,sys; print(json.load(sys.stdin)["release_state"])')"
+          RELEASE_ID="$(printf '%s' "$DISCOVERY" | python -c 'import json,sys; print(json.load(sys.stdin)["release_id"])')"
+          python tools/release_safety.py plan-release \
+            --version "${{ steps.version.outputs.version }}" \
+            --head-sha "$GITHUB_SHA" \
+            --tag-sha "$TAG_SHA" \
+            --release-state "$RELEASE_STATE" \
+            --github-output "$GITHUB_OUTPUT"
+          echo "release_state=$RELEASE_STATE" >> "$GITHUB_OUTPUT"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
   ruby22-exact-parse:
+    needs: release-plan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-plan.outputs.build_ref }}
+      - name: Assert immutable release source
+        run: test "$(git rev-parse HEAD)" = "${{ needs.release-plan.outputs.build_ref }}"
       - name: Install exact-Ruby source build prerequisites
         run: sudo apt-get update && sudo apt-get install -y build-essential curl
       - name: Exact Ruby 2.2.4-p230 parse gate — every shipped extension file
         run: bash tools/run_ruby22_exact_source.sh --parse
 
   source-only-build-windows:
-    needs: ruby22-exact-parse
+    needs: [release-plan, ruby22-exact-parse]
     runs-on: windows-latest
     outputs:
       publication_ready: ${{ steps.publication.outputs.publication_ready }}
       rbz_sha256: ${{ steps.artifact_identity.outputs.rbz_sha256 }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-plan.outputs.build_ref }}
+      - name: Assert immutable release source
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${{ needs.release-plan.outputs.build_ref }}"
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -91,11 +197,11 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [ruby22-exact-parse, source-only-build-windows]
+    needs: [release-plan, ruby22-exact-parse, source-only-build-windows]
     if: "needs.source-only-build-windows.outputs.publication_ready == 'true' && !startsWith(github.event.head_commit.message, 'chore: bump version to') && !contains(github.event.head_commit.message, 'automation/version-bump') && !contains(github.event.head_commit.message, '[skip release]')"
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout current release control plane
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -103,6 +209,19 @@ jobs:
           # GITHUB_TOKEN always authenticates checkout; RELEASE_BUMP_TOKEN is used
           # only when pushing the version-bump commit past branch protection.
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Preserve current release control plane
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-control"
+          cp tools/release_safety.py "$RUNNER_TEMP/release-control/release_safety.py"
+          cp tools/complete_github_release.py "$RUNNER_TEMP/release-control/complete_github_release.py"
+
+      - name: Checkout immutable release source
+        run: |
+          set -euo pipefail
+          git checkout --detach "${{ needs.release-plan.outputs.build_ref }}"
+          test "$(git rev-parse HEAD)" = "${{ needs.release-plan.outputs.build_ref }}"
 
       - name: Download approved Windows RBZ
         uses: actions/download-artifact@v8
@@ -162,11 +281,9 @@ jobs:
           sudo apt-get install -y build-essential curl zlib1g-dev libyaml-dev libffi-dev
           bash tools/run_ruby22_exact_source.sh --smoke
 
-      - name: Read committed version
-        id: version
+      - name: Assert selected source version
         run: |
           python - <<'PY'
-          import os
           import pathlib
           import re
 
@@ -192,83 +309,12 @@ jobs:
           if not readme_match or readme_match.group(1) != version:
               raise SystemExit(f"Version mismatch: loader={version} readme={readme_match.group(1) if readme_match else 'missing'}")
 
-          out = pathlib.Path(os.environ["GITHUB_OUTPUT"])
-          out.write_text(f"version={version}\n", encoding="utf-8")
+          expected = "${{ needs.release-plan.outputs.version }}"
+          if version != expected:
+              raise SystemExit(
+                  f"Selected release source version mismatch: {version} != {expected}"
+              )
           PY
-
-      - name: Set release target
-        run: |
-          set -e
-          TAG="v${{ steps.version.outputs.version }}"
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
-            RELEASE_TARGET=$(git rev-list -n 1 "refs/tags/$TAG")
-          else
-            RELEASE_TARGET=$(git rev-parse HEAD)
-          fi
-          test "${#RELEASE_TARGET}" -eq 40
-          echo "RELEASE_TARGET=$RELEASE_TARGET" >> "$GITHUB_ENV"
-
-      # Decide the completion action before touching a published release, using
-      # the same planner Blender uses (tools/release_safety.py plan-release).
-      #
-      # Without this the job always ran "Create or update release" against the
-      # committed version. Once main advanced past a published tag, it rebuilt
-      # the RBZ from the new HEAD and tried to attach it to the existing
-      # release, which correctly refused:
-      #
-      #   release completion failed: asset size conflict for
-      #   SketchUp-PDF-Importer_v3.7.128.rbz; refusing overwrite
-      #
-      # That guard is right -- a published artifact is immutable and must never
-      # be silently replaced with different bytes. The defect was attempting it
-      # at all. An already-published version now yields a stranded-release
-      # warning and a green run, exactly as it does in the Blender pipeline.
-      - name: Plan release completion
-        id: release_plan
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG="v${{ steps.version.outputs.version }}"
-          TAG_SHA="$(git rev-list -n 1 "$TAG^{commit}" 2>/dev/null || true)"
-          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
-          DISCOVERY="$(python tools/release_safety.py discover-release \
-            --releases-json "$RUNNER_TEMP/releases.json" --tag "$TAG")"
-          RELEASE_STATE="$(printf '%s' "$DISCOVERY" | python -c 'import json,sys; print(json.load(sys.stdin)["release_state"])')"
-          python tools/release_safety.py plan-release \
-            --version "${{ steps.version.outputs.version }}" \
-            --head-sha "$GITHUB_SHA" \
-            --tag-sha "$TAG_SHA" \
-            --release-state "$RELEASE_STATE" \
-            --github-output "$GITHUB_OUTPUT"
-
-      # An already-published version is a normal state for a product commit, not
-      # a failure. Record the stranded delta so it is visible and acknowledgeable
-      # instead of silently forgotten.
-      - name: Warn about a stranded release instead of overwriting it
-        if: steps.release_plan.outputs.action == 'verify_existing_release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          echo "::notice::v${{ steps.version.outputs.version }} is already published; not rebuilding or overwriting it. Product commits since that release are reported below. To ship them, bump the version and push."
-          # Same invocation Blender uses: the push boundary makes the reported
-          # delta the real product commits, --summary surfaces it on the run
-          # page, and --warnings-file records it under the tracked
-          # .release-safety/ so it can be acknowledged rather than forgotten.
-          # --release-mode is deliberately omitted: it exits 2 once a stranded
-          # deadline expires, and escalating to a hard failure is a policy
-          # decision, not something to switch on silently here.
-          python tools/release_safety.py audit-existing-tag \
-            --repo "$GITHUB_REPOSITORY" \
-            --tag "${{ steps.release_plan.outputs.tag }}" \
-            --before "${{ github.event.before }}" \
-            --head "$GITHUB_SHA" \
-            --session-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --mode release \
-            --summary "$GITHUB_STEP_SUMMARY" \
-            --warnings-file .release-safety/warnings.json
 
       - name: Smoke RBZ structure
         run: |
@@ -328,22 +374,23 @@ jobs:
           )
           PY
 
-      - name: Create or update release
+      - name: Complete or verify immutable release
         id: mint
-        # Never run against an already-published release; see "Plan release
-        # completion" above. The three permitted actions all either mint a new
-        # release or finish an incomplete one.
-        if: steps.release_plan.outputs.action != 'verify_existing_release'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
-          TAG="v${{ steps.version.outputs.version }}"
-          RBZ="approved-windows-rbz-download/SketchUp-PDF-Importer_v${{ steps.version.outputs.version }}.rbz"
+          set -euo pipefail
+          ACTION="${{ needs.release-plan.outputs.action }}"
+          TAG="${{ needs.release-plan.outputs.tag }}"
+          RELEASE_ID="${{ needs.release-plan.outputs.release_id }}"
+          RELEASE_TARGET="${{ needs.release-plan.outputs.release_target }}"
+          CONTROL="$RUNNER_TEMP/release-control"
+          RBZ="approved-windows-rbz-download/SketchUp-PDF-Importer_v${{ needs.release-plan.outputs.version }}.rbz"
           SOURCE_CHECKSUMS_INPUT="third_party/sources/SHA256SUMS.txt"
           SOURCE_CHECKSUMS="approved-windows-rbz-download/SOURCE_SHA256SUMS.txt"
           RELEASE_CHECKSUMS="approved-windows-rbz-download/SHA256SUMS.txt"
           RELEASE_NOTES="approved-windows-rbz-download/RELEASE_NOTES.md"
+          RELEASE_JSON="$RUNNER_TEMP/release.json"
           test -f "$SOURCE_CHECKSUMS_INPUT"
           ACTUAL_SHA256=$(sha256sum "$RBZ" | cut -d' ' -f1)
           printf '%s  %s\n' "$ACTUAL_SHA256" "$(basename "$RBZ")" > "$RELEASE_CHECKSUMS"
@@ -353,22 +400,82 @@ jobs:
             sha256sum --check SHA256SUMS.txt
           )
           printf '%s\n\n%s\n' \
-            'Automated release from the exact main commit.' \
+            "Automated release from immutable source commit $RELEASE_TARGET." \
             '**Install:** Download the RBZ below, then in SketchUp use Window > Extension Manager > Install Extension.' \
             > "$RELEASE_NOTES"
-          python tools/complete_github_release.py \
+
+          if [ "$ACTION" = "verify_existing_release" ]; then
+            test -n "$RELEASE_ID"
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" > "$RELEASE_JSON"
+            jq -e --arg tag "$TAG" --argjson id "$RELEASE_ID" \
+              '.id == $id and .tag_name == $tag' "$RELEASE_JSON" >/dev/null
+            jq -e '.draft == false' "$RELEASE_JSON" >/dev/null
+            jq -e '.immutable == true' "$RELEASE_JSON" >/dev/null
+            python "$CONTROL/release_safety.py" verify-release-assets \
+              --release-json "$RELEASE_JSON" \
+              --asset "$RBZ" \
+              --asset "$RELEASE_CHECKSUMS" \
+              --asset "$SOURCE_CHECKSUMS" \
+              --output "$RUNNER_TEMP/verified-release-assets.json"
+            echo "completed=true" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "published_now=false" >> "$GITHUB_OUTPUT"
+            echo "action=verified_existing_release" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG is already published and its exact immutable assets were verified. Product commits after the tag require a version bump."
+            python "$CONTROL/release_safety.py" audit-existing-tag \
+              --repo "$GITHUB_REPOSITORY" \
+              --tag "$TAG" \
+              --before "${{ github.event.before }}" \
+              --head "$GITHUB_SHA" \
+              --session-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              --mode release \
+              --summary "$GITHUB_STEP_SUMMARY" \
+              --warnings-file .release-safety/warnings.json
+            exit 0
+          fi
+
+          EXPECTED_ID_ARGS=()
+          if [ -n "$RELEASE_ID" ]; then
+            EXPECTED_ID_ARGS=(--expected-release-id "$RELEASE_ID")
+          fi
+          python "$CONTROL/complete_github_release.py" \
             --repo "$GITHUB_REPOSITORY" \
             --tag "$TAG" \
-            --target "${RELEASE_TARGET:-$GITHUB_SHA}" \
+            --target "$RELEASE_TARGET" \
             --title "$TAG — PDF Vector Importer for SketchUp" \
             --notes-file "$RELEASE_NOTES" \
             --latest \
+            "${EXPECTED_ID_ARGS[@]}" \
             --asset "$RBZ" \
             --asset "$RELEASE_CHECKSUMS" \
             --asset "$SOURCE_CHECKSUMS"
 
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+            > "$RUNNER_TEMP/release-by-tag.json"
+          POST_ID="$(jq -er '.id | select(type == "number" and . > 0)' "$RUNNER_TEMP/release-by-tag.json")"
+          if [ -n "$RELEASE_ID" ]; then
+            test "$POST_ID" = "$RELEASE_ID"
+          fi
+          for attempt in 1 2 3 4 5; do
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${POST_ID}" > "$RELEASE_JSON"
+            if jq -e '.draft == false and .immutable == true' "$RELEASE_JSON" >/dev/null; then
+              break
+            fi
+            sleep $((attempt * 2))
+          done
+          jq -e --arg tag "$TAG" --argjson id "$POST_ID" \
+            '.id == $id and .tag_name == $tag' "$RELEASE_JSON" >/dev/null
+          jq -e '.draft == false' "$RELEASE_JSON" >/dev/null
+          jq -e '.immutable == true' "$RELEASE_JSON" >/dev/null
+          python "$CONTROL/release_safety.py" verify-release-assets \
+            --release-json "$RELEASE_JSON" \
+            --asset "$RBZ" \
+            --asset "$RELEASE_CHECKSUMS" \
+            --asset "$SOURCE_CHECKSUMS" \
+            --output "$RUNNER_TEMP/verified-published-assets.json"
+
       - name: Check website dispatch token secret
-        if: steps.mint.outputs.completed == 'true' && steps.mint.outputs.changed == 'true'
+        if: steps.mint.outputs.published_now == 'true'
         id: website_dispatch_token
         env:
           WEBSITE_DISPATCH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN || secrets.BLUECOLLAR_WEBSITE_DISPATCH_TOKEN || secrets.REPO_DISPATCH_TOKEN }}
@@ -380,12 +487,12 @@ jobs:
           fi
 
       - name: Dispatch website release update
-        if: steps.mint.outputs.completed == 'true' && steps.mint.outputs.changed == 'true' && steps.website_dispatch_token.outputs.has_token == 'true'
+        if: steps.mint.outputs.published_now == 'true' && steps.website_dispatch_token.outputs.has_token == 'true'
         uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.WEBSITE_DISPATCH_TOKEN || secrets.BLUECOLLAR_WEBSITE_DISPATCH_TOKEN || secrets.REPO_DISPATCH_TOKEN }}
           script: |
-            const tag = 'v${{ steps.version.outputs.version }}';
+            const tag = '${{ needs.release-plan.outputs.tag }}';
             const payload = {
               source_repo: context.repo.owner + '/' + context.repo.repo,
               source_event: 'auto-release',
@@ -406,7 +513,7 @@ jobs:
             core.info('Dispatched product-release to BlueCollar-Website');
 
       - name: Warn when website dispatch token is missing
-        if: steps.mint.outputs.completed == 'true' && steps.mint.outputs.changed == 'true' && steps.website_dispatch_token.outputs.has_token != 'true'
+        if: steps.mint.outputs.published_now == 'true' && steps.website_dispatch_token.outputs.has_token != 'true'
         run: |
           echo "::warning::Skipping website dispatch because no valid dispatch token secret is configured."
           echo "Set WEBSITE_DISPATCH_TOKEN (or BLUECOLLAR_WEBSITE_DISPATCH_TOKEN / REPO_DISPATCH_TOKEN) to enable cross-repo dispatch."

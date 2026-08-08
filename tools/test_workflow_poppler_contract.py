@@ -6,7 +6,6 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -78,25 +77,24 @@ class WorkflowPopplerContractTest(unittest.TestCase):
         self.assertIn('"$SOURCE_CHECKSUMS"', text)
         self.assertLess(
             text.index("python build_release.py"),
-            text.index("python tools/complete_github_release.py"),
+            text.index('python "$CONTROL/complete_github_release.py"'),
         )
 
-    def test_existing_tag_is_peeled_as_the_release_target(self):
+    def test_existing_tag_is_peeled_and_selected_before_build(self):
         text = (
             ROOT / ".github" / "workflows" / "auto-release.yml"
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            'git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"',
+            'TAG_SHA="$(git rev-list -n 1 "$TAG^{commit}"',
             text,
         )
-        self.assertIn(
-            'RELEASE_TARGET=$(git rev-list -n 1 "refs/tags/$TAG")',
-            text,
-        )
+        self.assertIn('--tag-sha "$TAG_SHA"', text)
+        self.assertIn("release_target: ${{ steps.plan.outputs.release_target }}", text)
+        self.assertIn("ref: ${{ needs.release-plan.outputs.build_ref }}", text)
         self.assertLess(
-            text.index('RELEASE_TARGET=$(git rev-list'),
-            text.index("python tools/complete_github_release.py"),
+            text.index('TAG_SHA="$(git rev-list'),
+            text.index("python build_release.py"),
         )
 
     def test_release_checksum_names_and_verifies_the_published_rbz(self):
