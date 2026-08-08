@@ -3,13 +3,13 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.128-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.129-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.128)
+### Recent fixes (v3.7.129)
 
 - **Privacy-safe, fail-closed acceptance gates**: private reference PDFs are selected by non-sensitive semantic manifest keys. An unconfigured private corpus skips only opt-in gates; malformed, missing, ambiguous, or unreadable configured inputs fail visibly without embedding customer identifiers in the repository or release.
 - **Exact drawing-text placement**: tall/narrow runs retain raw orientation evidence while using their true nominal glyph height; calibrated dimension widths, stacked-digit centering, BOM headers, and vertical mixed fractions now match their verified source anchors without changing ordinary digit placement.
