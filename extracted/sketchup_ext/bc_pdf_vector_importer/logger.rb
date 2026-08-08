@@ -2,8 +2,8 @@
 # Centralized logging — replaces bare rescue blocks.
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
-require 'tmpdir'
 require 'fileutils'
+require File.join(File.dirname(__FILE__), 'safe_temp')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -27,7 +27,7 @@ module BlueCollarSystems
         # Previous log is overwritten each import so it stays small.
         candidate_dirs = []
         begin
-          candidate_dirs << File.join(Dir.tmpdir, 'bc_pdf_importer')
+          candidate_dirs << SafeTemp.join('bc_pdf_importer')
         rescue StandardError
           # continue with env/home fallbacks below
         end

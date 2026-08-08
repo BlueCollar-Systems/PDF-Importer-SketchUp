@@ -8,7 +8,7 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
-require 'tmpdir'
+require File.join(File.dirname(__FILE__), 'safe_temp')
 require File.join(File.dirname(__FILE__), 'command_runner')
 require File.join(File.dirname(__FILE__), 'logger')
 require File.join(File.dirname(__FILE__), 'dependency_resolver')
@@ -720,7 +720,10 @@ module BlueCollarSystems
       end
 
       def self.temp_svg_path
-        File.join(Dir.tmpdir,
+        # SafeTemp, never the profile temp: this path is the pdftocairo OUTPUT
+        # argument, and the bundled helpers cannot write through a non-ASCII
+        # path component such as an accented account name.
+        SafeTemp.join(
           "bc_svg_#{Process.pid}_#{Time.now.to_i}_#{rand(100000)}")
       end
 
@@ -1243,7 +1246,7 @@ module BlueCollarSystems
         key = cache_key(pdf_path)
         cached = @embed_cache[key]
         return cached if cached && File.exist?(cached)
-        out = File.join(Dir.tmpdir,
+        out = SafeTemp.join(
           "bc_embed_#{Process.pid}_#{Time.now.to_i}_#{rand(100000)}.pdf")
         begin
           run = CommandRunner.run(ghostscript_embed_args(gs, pdf_path, out),

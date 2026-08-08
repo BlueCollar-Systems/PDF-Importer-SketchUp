@@ -7,6 +7,7 @@ require 'json'
 require 'digest'
 require 'fileutils'
 require 'time'
+require File.join(File.dirname(__FILE__), 'safe_temp')
 require File.join(File.dirname(__FILE__), 'metadata')
 require File.join(File.dirname(__FILE__), 'model_3d_extruder')
 require File.join(File.dirname(__FILE__), 'model_3d_intent')
@@ -157,7 +158,7 @@ module BlueCollarSystems
 
       def default_output_path(pdf_path)
         base = File.basename(pdf_path.to_s, '.pdf')
-        File.join(Dir.tmpdir, "#{base}_import_report.json")
+        SafeTemp.join("#{base}_import_report.json")
       end
 
       def input_block(pdf_path, stats)

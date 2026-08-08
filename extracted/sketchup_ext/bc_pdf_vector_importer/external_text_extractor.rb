@@ -5,7 +5,7 @@
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
 require 'cgi'
-require 'tmpdir'
+require File.join(File.dirname(__FILE__), 'safe_temp')
 require File.join(File.dirname(__FILE__), 'command_runner')
 require File.join(File.dirname(__FILE__), 'dependency_resolver')
 require File.join(File.dirname(__FILE__), 'poppler_result_validator')
@@ -22,8 +22,9 @@ module BlueCollarSystems
           exe = pdftotext_executable
           return [] unless exe && File.exist?(pdf_path.to_s)
 
-          out_html = File.join(
-            Dir.tmpdir,
+          # SafeTemp: this is the pdftotext -bbox-layout OUTPUT path; the
+          # bundled helper cannot write through a non-ASCII component.
+          out_html = SafeTemp.join(
             "bc_pdf_text_bbox_#{Process.pid}_#{Time.now.to_i}_#{rand(100000)}.html"
           )
 

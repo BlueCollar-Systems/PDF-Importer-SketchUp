@@ -24,8 +24,8 @@
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
 require 'zlib'
-require 'tmpdir'
 require 'fileutils'
+require File.join(File.dirname(__FILE__), 'safe_temp')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -462,7 +462,7 @@ module BlueCollarSystems
 
       def self.temp_path(name, page_num, ext)
         safe = name.to_s.gsub(/[^A-Za-z0-9_-]/, '_')
-        File.join(Dir.tmpdir, "bc_img_p#{page_num}_#{safe}_#{Process.pid}.#{ext}")
+        SafeTemp.join("bc_img_p#{page_num}_#{safe}_#{Process.pid}.#{ext}")
       end
 
       def self.channels_for_colorspace(cs)
