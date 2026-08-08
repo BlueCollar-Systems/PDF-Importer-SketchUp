@@ -13,9 +13,9 @@
 #
 # Ruby 2.2 compatible (SketchUp Make 2017).
 
-require 'tmpdir'
 require 'fileutils'
 require 'open3'
+require File.join(File.dirname(__FILE__), 'safe_temp')
 require File.join(File.dirname(__FILE__), 'poppler_result_validator')
 
 module BlueCollarSystems
@@ -137,10 +137,15 @@ module BlueCollarSystems
             log_warn("cannot salvage (#{reason}): pdftocairo unavailable")
             return nil
           end
-          out = File.join(Dir.tmpdir,
+          # SafeTemp root AND a sanitised basename: this is the pdftocairo
+          # OUTPUT path, and folding the customer's own PDF filename into it
+          # meant a damaged 'Détail_acier.pdf' failed salvage on a plain ASCII
+          # machine -- silently, because poppler's byte-oriented fopen wrote a
+          # mojibake leaf the caller then couldn't find.
+          out = SafeTemp.join(
                           'bc_salvaged_' + Process.pid.to_s + '_' +
                           Time.now.to_i.to_s + '_' + rand(100000).to_s + '_' +
-                          File.basename(pdf_path))
+                          SafeTemp.ascii_component(File.basename(pdf_path), 'doc.pdf'))
           begin
             File.delete(out) if File.file?(out)
             accepted = false

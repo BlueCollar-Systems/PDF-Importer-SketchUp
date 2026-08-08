@@ -14,6 +14,7 @@ module BlueCollarSystems
 
     dir = File.dirname(__FILE__)
     # Core Engine
+    require File.join(dir, 'safe_temp')
     require File.join(dir, 'import_config')
     require File.join(dir, 'import_run_control')
     require File.join(dir, 'import_bounds')
@@ -2302,10 +2303,13 @@ module BlueCollarSystems
       return configured unless configured.empty?
 
       base = File.basename(pdf_path.to_s, '.pdf')
-      base = 'pdf' if base.empty?
-      File.join(Dir.tmpdir, "bc_pdf_embedded_images_#{base}_#{session_id}")
+      # SafeTemp + sanitised basename: this directory is handed to the bundled
+      # image extractor as an OUTPUT root, which cannot write through the
+      # customer's alphabet.
+      base = SafeTemp.ascii_component(base, 'pdf')
+      SafeTemp.join("bc_pdf_embedded_images_#{base}_#{session_id}")
     rescue StandardError
-      File.join(Dir.tmpdir, "bc_pdf_embedded_images_#{Process.pid}")
+      SafeTemp.join("bc_pdf_embedded_images_#{Process.pid}")
     end
 
     def self.apply_internal_text_angle_hints(text_items, angle_items)
@@ -5295,7 +5299,7 @@ module BlueCollarSystems
       raw_path = nil
       owned_temp_dir = nil
       fetch_item_raster_page_cache!(opts, key) do
-        owned_temp_dir = Dir.mktmpdir("bc_item_page_p#{page_num}_")
+        owned_temp_dir = SafeTemp.mktmpdir("bc_item_page_p#{page_num}_")
         png_path = File.join(owned_temp_dir, 'page.png')
         raw_path = File.join(owned_temp_dir, 'page.rgba')
         base_path = png_path.sub(/\.png\z/, '')
@@ -5416,7 +5420,7 @@ module BlueCollarSystems
       crop = item_raster_crop_geometry(
         item, media_box, page_rotation, page_render[:dpi]
       )
-      owned_crop_dir = Dir.mktmpdir("bc_item_crop_p#{page_num}_")
+      owned_crop_dir = SafeTemp.mktmpdir("bc_item_crop_p#{page_num}_")
       png_path = File.join(owned_crop_dir, 'crop.png')
       crop_proof = PngCropper.crop_rgba!(
         page_render, crop[:pixel_crop], png_path
@@ -5561,7 +5565,7 @@ module BlueCollarSystems
       use_cropbox = distinct_page_box?(render_box, media_box)
 
       # Render page to PNG
-      owned_page_dir = Dir.mktmpdir("bc_page_raster_p#{page_num}_")
+      owned_page_dir = SafeTemp.mktmpdir("bc_page_raster_p#{page_num}_")
       png_path = File.join(owned_page_dir, 'page.png')
       candidates = [png_path,
        png_path.sub(/\.png$/, "-#{page_num}.png"),

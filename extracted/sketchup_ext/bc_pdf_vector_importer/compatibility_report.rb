@@ -3,8 +3,8 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
-require 'tmpdir'
 require 'rbconfig'
+require File.join(File.dirname(__FILE__), 'safe_temp')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -190,7 +190,7 @@ module BlueCollarSystems
         end
 
         def save_report(report)
-          dir = File.join(Dir.tmpdir, 'bc_pdf_importer')
+          dir = SafeTemp.join('bc_pdf_importer')
           begin
             Dir.mkdir(dir) unless File.directory?(dir)
           rescue StandardError
