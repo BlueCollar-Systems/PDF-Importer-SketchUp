@@ -10,6 +10,16 @@
       "responsible_session": "WS-WEEK-SU-LETTERHEIGHT",
       "version_bump_plan": "3.7.98",
       "acknowledged_at": "2026-07-17T20:36:37.333935+00:00"
+    },
+    {
+      "repo": "BlueCollar-Systems/PDF-Importer-SketchUp",
+      "tag": "v3.7.129",
+      "first_seen": "2026-08-08T10:01:36-05:00",
+      "first_seen_sha": "9e948af29a09543179ff6cef2e81d623beb07e1c",
+      "deadline": "2026-08-09T10:01:36-05:00",
+      "responsible_session": "phase3-ascii-temp-root",
+      "version_bump_plan": "3.7.130",
+      "acknowledged_at": "2026-08-08T16:20:27.555183+00:00"
     }
   ]
 }
