@@ -34,7 +34,8 @@
 # name) go through ascii_component, because an ASCII root does not help if the
 # leaf re-imports the customer's alphabet.
 #
-# Ruby 2.2 compatible (SketchUp 2017 ships 2.2.4): no &., no <<~ heredocs.
+# Ruby 2.2 compatible (SketchUp 2017 ships 2.2.4): avoids safe navigation and
+# squiggly heredocs.
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
