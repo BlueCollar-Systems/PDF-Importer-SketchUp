@@ -148,6 +148,12 @@ class WorkflowReleaseIdentityContractTest(unittest.TestCase):
             "published_now=false",
         ):
             self.assertIn(required, completion)
+        verify_branch = completion.split(
+            'if [ "$ACTION" = "verify_existing_release" ]; then', 1
+        )[1].split("exit 0", 1)[0]
+        self.assertIn('python "$CONTROL/complete_github_release.py"', verify_branch)
+        self.assertIn('--target "$RELEASE_TARGET"', verify_branch)
+        self.assertIn('--expected-release-id "$RELEASE_ID"', verify_branch)
         self.assertNotIn("--clobber", completion)
 
     def test_website_dispatch_only_follows_this_run_publishing(self):

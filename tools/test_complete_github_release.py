@@ -22,13 +22,14 @@ class FakeGitHub:
         self.calls = []
         self.downloads = {}
         self.race_on_create = False
-        self.created_release_is_draft = False
-        self.created_release_is_immutable = True
+        self.created_release_is_draft = True
+        self.created_release_is_immutable = False
         self.get_by_id_calls = []
         self.race_on_upload = False
         self.race_on_publish = False
         self.upload_visibility_lag = 0
         self.publish_visibility_lag = 0
+        self.publish_makes_immutable = True
         self.stale_release_views = []
 
     def get_tag_target(self, _tag):
@@ -83,7 +84,7 @@ class FakeGitHub:
             raise AssertionError("attempted to publish a different release")
         stale = copy.deepcopy(self.release_data)
         self.release_data["draft"] = False
-        self.release_data["immutable"] = True
+        self.release_data["immutable"] = self.publish_makes_immutable
         self.stale_release_views.extend(
             copy.deepcopy(stale) for _ in range(self.publish_visibility_lag)
         )
@@ -178,7 +179,7 @@ class CompleteGitHubReleaseTest(unittest.TestCase):
             target_index = captured[0].index("--target")
             self.assertEqual("a" * 40, captured[0][target_index + 1])
 
-    def test_gh_nonproduct_release_is_explicitly_not_latest(self):
+    def test_gh_new_release_is_created_as_draft_before_publication(self):
         with tempfile.TemporaryDirectory() as tmp:
             assets = self.make_assets(Path(tmp))
             github = release.GhClient("owner/repo")
@@ -187,7 +188,9 @@ class CompleteGitHubReleaseTest(unittest.TestCase):
             github.create_release(
                 "steel-v1.0.1", "a" * 40, "title", "notes", assets, False
             )
-            self.assertIn("--latest=false", captured[0])
+            self.assertIn("--draft", captured[0])
+            self.assertNotIn("--latest", captured[0])
+            self.assertNotIn("--latest=false", captured[0])
 
     def test_partial_mutable_release_uploads_only_missing_asset(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -472,7 +475,7 @@ class CompleteGitHubReleaseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             assets = self.make_assets(Path(tmp))
             github = FakeGitHub()
-            github.created_release_is_immutable = False
+            github.publish_makes_immutable = False
 
             with self.assertRaisesRegex(release.ReleaseConflict, "not immutable"):
                 release.complete_release(

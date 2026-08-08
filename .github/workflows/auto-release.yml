@@ -417,6 +417,20 @@ jobs:
               --asset "$RELEASE_CHECKSUMS" \
               --asset "$SOURCE_CHECKSUMS" \
               --output "$RUNNER_TEMP/verified-release-assets.json"
+            # Re-resolve and peel the tag immediately before acceptance. This
+            # closes a plan/verify race where the tag could be force-moved after
+            # the upstream plan selected its immutable source commit.
+            python "$CONTROL/complete_github_release.py" \
+              --repo "$GITHUB_REPOSITORY" \
+              --tag "$TAG" \
+              --target "$RELEASE_TARGET" \
+              --expected-release-id "$RELEASE_ID" \
+              --title "$TAG — PDF Vector Importer for SketchUp" \
+              --notes-file "$RELEASE_NOTES" \
+              --latest \
+              --asset "$RBZ" \
+              --asset "$RELEASE_CHECKSUMS" \
+              --asset "$SOURCE_CHECKSUMS"
             echo "completed=true" >> "$GITHUB_OUTPUT"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "published_now=false" >> "$GITHUB_OUTPUT"

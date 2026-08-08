@@ -135,11 +135,10 @@ class GhClient:
         ]
         if target is not None:
             args.extend(["--target", target])
-        args.extend(["--title", title, "--notes", notes])
-        if latest:
-            args.append("--latest")
-        else:
-            args.append("--latest=false")
+        # Assemble every asset behind a draft boundary. Publication is a
+        # separate ID-bound operation after exact verification, so an
+        # interrupted upload cannot freeze an incomplete public release.
+        args.extend(["--title", title, "--notes", notes, "--draft"])
         args.extend(str(asset.path) for asset in assets)
         self._run(args)
 
