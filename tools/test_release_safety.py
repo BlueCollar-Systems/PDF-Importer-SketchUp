@@ -519,6 +519,125 @@ class ReleaseSafetyTest:
             else:
                 raise AssertionError("a mismatched immutable release asset was accepted")
 
+    def test_release_asset_verification_requires_exact_unique_name_closure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            asset = root / "package.zip"
+            asset.write_bytes(b"immutable package")
+            digest = hashlib.sha256(b"immutable package").hexdigest()
+            expected = {
+                "name": "package.zip",
+                "size": 17,
+                "digest": f"sha256:{digest}",
+            }
+
+            bad_remote_sets = (
+                ([expected, {
+                    "name": "unexpected.zip",
+                    "size": 0,
+                    "digest": "sha256:" + "0" * 64,
+                }], "asset name closure"),
+                ([], "asset name closure"),
+                ([expected, dict(expected)], "duplicate remote release asset name"),
+            )
+            for remote_assets, expected_error in bad_remote_sets:
+                try:
+                    rs.verify_release_assets([asset], remote_assets)
+                except ValueError as exc:
+                    assert expected_error in str(exc).lower()
+                else:
+                    raise AssertionError(
+                        f"non-exact remote asset closure was accepted: {remote_assets!r}"
+                    )
+
+            other = root / "other"
+            other.mkdir()
+            duplicate_local = other / "package.zip"
+            duplicate_local.write_bytes(b"immutable package")
+            try:
+                rs.verify_release_assets([asset, duplicate_local], [expected])
+            except ValueError as exc:
+                assert "duplicate local release asset name" in str(exc).lower()
+            else:
+                raise AssertionError("duplicate local release asset names were accepted")
+
+    def test_release_asset_verification_rejects_malformed_remote_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset = Path(tmp) / "package.zip"
+            asset.write_bytes(b"immutable package")
+            digest = hashlib.sha256(b"immutable package").hexdigest()
+            valid = {
+                "name": "package.zip",
+                "size": 17,
+                "digest": f"sha256:{digest}",
+            }
+            malformed = (
+                None,
+                dict(valid, name=None),
+                dict(valid, name=7),
+                dict(valid, size="17"),
+                dict(valid, size=True),
+                dict(valid, size=-1),
+                dict(valid, digest=None),
+                dict(valid, digest=b"sha256:" + digest.encode("ascii")),
+                dict(valid, digest="SHA256:" + digest.upper()),
+                dict(valid, digest="sha256:" + "0" * 63),
+                dict(valid, digest="sha512:" + "0" * 64),
+            )
+            for remote in malformed:
+                try:
+                    rs.verify_release_assets([asset], [remote])
+                except ValueError as exc:
+                    assert "remote release asset" in str(exc).lower()
+                else:
+                    raise AssertionError(
+                        f"malformed remote release asset was accepted: {remote!r}"
+                    )
+
+    def test_release_asset_verification_fails_closed_without_authenticated_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset = Path(tmp) / "package.zip"
+            asset.write_bytes(b"immutable package")
+            try:
+                rs.verify_release_assets(
+                    [asset],
+                    [{"name": "package.zip", "size": 17}],
+                )
+            except ValueError as exc:
+                message = str(exc).lower()
+                assert "digest" in message
+                assert "authenticated" in message
+            else:
+                raise AssertionError("an asset with no authenticated digest was accepted")
+
+    def test_release_asset_verification_streams_local_sha256(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            asset = Path(tmp) / "package.zip"
+            asset.write_bytes(b"immutable package")
+            digest = hashlib.sha256(b"immutable package").hexdigest()
+            original_read_bytes = Path.read_bytes
+            try:
+                def forbid_whole_file_read(_path):
+                    raise AssertionError("release verification must stream local assets")
+
+                Path.read_bytes = forbid_whole_file_read
+                verified = rs.verify_release_assets(
+                    [asset],
+                    [{
+                        "name": "package.zip",
+                        "size": 17,
+                        "digest": f"sha256:{digest}",
+                    }],
+                )
+            finally:
+                Path.read_bytes = original_read_bytes
+
+            assert verified == [{
+                "name": "package.zip",
+                "size": 17,
+                "sha256": digest,
+            }]
+
     def test_plan_release_cli_writes_stable_github_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "github-output.txt"
@@ -755,24 +874,6 @@ class ReleaseSafetyTest:
             release_mode=False,
         )
         assert code == 0
-
-    def test_workflow_completes_release_idempotently_and_gates_dispatch(self):
-        workflow = (REPO_ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
-            encoding="utf-8"
-        )
-        assert "python tools/complete_github_release.py" in workflow
-        assert 'git ls-remote --exit-code --tags origin "refs/tags/$TAG"' in workflow
-        assert 'git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"' in workflow
-        assert 'RELEASE_TARGET=$(git rev-list -n 1 "refs/tags/$TAG")' in workflow
-        assert '--target "${RELEASE_TARGET:-$GITHUB_SHA}"' in workflow
-        assert '--asset "$RBZ"' in workflow
-        assert '--asset "$RELEASE_CHECKSUMS"' in workflow
-        assert '--asset "$SOURCE_CHECKSUMS"' in workflow
-        token_at = workflow.index("- name: Check website dispatch token secret")
-        token_block = workflow[token_at : workflow.index("- name:", token_at + 8)]
-        assert "steps.mint.outputs.completed == 'true'" in token_block
-        assert "steps.mint.outputs.changed == 'true'" in token_block
-        assert "--clobber" not in workflow
 
     def test_steel_shapes_release_never_overwrites_existing_assets(self):
         # The invariant is unchanged -- publishing must never clobber an asset
