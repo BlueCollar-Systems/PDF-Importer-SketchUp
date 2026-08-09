@@ -304,15 +304,19 @@ class VerifiedDownloadTests(unittest.TestCase):
             finally:
                 self._restore_swapped_parent(parent, displaced)
 
+    @unittest.skipUnless(os.name == "nt", "Windows junction race contract")
     def test_windows_entry_parent_swap_before_temp_creation_cannot_escape(self) -> None:
         self._assert_windows_entry_swap_is_contained("pre_temp")
 
+    @unittest.skipUnless(os.name == "nt", "Windows junction race contract")
     def test_windows_entry_parent_swap_during_publish_cannot_escape(self) -> None:
         self._assert_windows_entry_swap_is_contained("publish")
 
+    @unittest.skipUnless(os.name == "nt", "Windows junction race contract")
     def test_windows_entry_parent_swap_during_winner_read_cannot_escape(self) -> None:
         self._assert_windows_entry_swap_is_contained("winner_read")
 
+    @unittest.skipUnless(os.name == "nt", "Windows junction race contract")
     def test_windows_entry_parent_swap_during_cleanup_cannot_escape(self) -> None:
         self._assert_windows_entry_swap_is_contained("cleanup")
 
