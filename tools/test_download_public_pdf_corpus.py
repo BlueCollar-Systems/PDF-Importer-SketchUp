@@ -711,6 +711,7 @@ class LockPublicationTests(unittest.TestCase):
             self.assertEqual(candidate, lock_path.read_bytes())
             self.assertEqual([], list(lock_parent.glob("*.part*")))
 
+    @unittest.skipUnless(os.name == "nt", "Windows junction race contract")
     def test_parent_swap_before_revalidation_never_redirects_cleanup(self) -> None:
         candidate = b'{"schema":"synthetic","race":"revalidate"}\n'
         foreign = b"foreign same-name temp"
@@ -776,6 +777,7 @@ class LockPublicationTests(unittest.TestCase):
             finally:
                 self._restore_swapped_parent(parent, displaced)
 
+    @unittest.skipUnless(os.name == "nt", "Windows junction race contract")
     def test_parent_swap_inside_no_replace_publish_cannot_escape_root(self) -> None:
         candidate = b'{"schema":"synthetic","race":"publish"}\n'
         foreign = b"foreign same-name source"
@@ -1478,7 +1480,7 @@ print(json.dumps({
         real_open = corpus.os.open
 
         def reject_otmpfile(path, flags, *args, **kwargs):
-            if flags & os.O_TMPFILE:
+            if (flags & os.O_TMPFILE) == os.O_TMPFILE:
                 raise OSError(errno.EOPNOTSUPP, "private unsupported filesystem")
             return real_open(path, flags, *args, **kwargs)
 
