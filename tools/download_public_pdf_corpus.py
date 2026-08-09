@@ -396,7 +396,14 @@ def _windows_temp_file_object(handle: int):
     except Exception:
         _close_windows_handle(duplicate)
         raise
-    return os.fdopen(descriptor, "w+b")
+    try:
+        return os.fdopen(descriptor, "w+b")
+    except BaseException as original:
+        try:
+            os.close(descriptor)
+        except BaseException as close_error:
+            raise close_error from original
+        raise
 
 
 def _windows_read_file_object(handle: int):
@@ -408,7 +415,14 @@ def _windows_read_file_object(handle: int):
     except Exception:
         _close_windows_handle(duplicate)
         raise
-    return os.fdopen(descriptor, "rb")
+    try:
+        return os.fdopen(descriptor, "rb")
+    except BaseException as original:
+        try:
+            os.close(descriptor)
+        except BaseException as close_error:
+            raise close_error from original
+        raise
 
 
 def _posix_linkat_function():
@@ -1469,8 +1483,15 @@ def _read_entry_destination_digest(
                     _close_windows_handle(handle)
                 else:
                     os.close(handle)
-            except OSError:
-                pass
+            except OSError as close_error:
+                try:
+                    if parent.windows:
+                        _close_windows_handle(handle)
+                    else:
+                        os.close(handle)
+                except OSError as retry_error:
+                    raise CorpusDownloadError("publish_readback_io_error") from retry_error
+                raise CorpusDownloadError("publish_readback_io_error") from close_error
 
 
 def _dispose_entry_temp_capability(temp: _TempCapability) -> None:
