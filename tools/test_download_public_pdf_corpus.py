@@ -204,6 +204,30 @@ class RootBoundaryTests(unittest.TestCase):
 
 
 class LockPublicationTests(unittest.TestCase):
+    def test_posix_parent_capability_ignores_mutable_directory_metadata(self) -> None:
+        path = Path("/synthetic/corpus/web-acquired")
+        opened = type(
+            "SyntheticStat",
+            (),
+            {"st_mode": 0o40700, "st_ino": 91, "st_dev": 7, "st_nlink": 2, "st_size": 4096},
+        )()
+        after_temp_create = type(
+            "SyntheticStat",
+            (),
+            {"st_mode": 0o40700, "st_ino": 91, "st_dev": 7, "st_nlink": 3, "st_size": 8192},
+        )()
+        capability = corpus._LockParentCapability(
+            path=path,
+            handle=123,
+            identity=corpus._stat_identity(opened),
+            windows=False,
+        )
+
+        with mock.patch.object(corpus.os, "lstat", return_value=after_temp_create), mock.patch.object(
+            corpus.os, "fstat", return_value=after_temp_create
+        ):
+            corpus._validate_lock_parent_capability(capability)
+
     def _link_or_skip(self, link: Path, target: Path, *, directory: bool) -> None:
         try:
             link.symlink_to(target, target_is_directory=directory)
