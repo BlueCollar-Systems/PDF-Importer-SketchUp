@@ -102,9 +102,15 @@ class SketchupHostLauncherTest < Minitest::Test
       @commands = []
     end
 
-    def run(command)
+    def status(command)
       @commands << command
-      @results.shift == true
+      result = @results.shift
+      return result if result.is_a?(Integer)
+      result == true ? 0 : 1
+    end
+
+    def run(command)
+      status(command) == 0
     end
   end
 
@@ -244,6 +250,28 @@ class SketchupHostLauncherTest < Minitest::Test
     assert_equal [
       ['taskkill.exe', '/PID', '4242', '/T', '/F']
     ], runner.commands
+  end
+
+  def test_windows_process_backend_treats_taskkill_already_gone_as_success
+    runner = FakeCommandRunner.new([128])
+    backend = SketchupHostLauncher::ProcessBackend.new(
+      :windows => true, :command_runner => runner
+    )
+
+    assert backend.kill(4242)
+    assert_equal [
+      ['taskkill.exe', '/PID', '4242', '/T', '/F']
+    ], runner.commands
+  end
+
+  def test_windows_process_backend_still_fails_real_taskkill_errors
+    runner = FakeCommandRunner.new([1])
+    backend = SketchupHostLauncher::ProcessBackend.new(
+      :windows => true, :command_runner => runner
+    )
+
+    err = assert_raises(SketchupHostLauncher::LaunchError) { backend.kill(4242) }
+    assert_match(/failed to terminate SketchUp process tree 4242/, err.message)
   end
 
   def test_default_timeout_allows_large_verified_model_persistence
