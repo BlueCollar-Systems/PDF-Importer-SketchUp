@@ -150,6 +150,8 @@ readonly SMOKE_TESTS=(
   test/smoke_test.rb
   test/ruby22_compat_test.rb
   test/import_health_test.rb
+  test/compatibility_report_test.rb
+  test/corpus_harness_test.rb
   test/arc_fitter_test.rb
   test/unit_parser_test.rb
   test/mesh_text_scaling_test.rb

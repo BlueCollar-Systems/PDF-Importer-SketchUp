@@ -22,13 +22,21 @@ module BlueCollarSystems
           lines << "Compatibility report generated."
           lines << ""
           lines << "Clipboard: #{copied ? 'Copied' : 'Not available'}"
-          lines << "Report file: #{saved_path || 'Not available'}"
+          report_file = if saved_path
+                          'Saved locally (path hidden for privacy)'
+                        else
+                          'Not available'
+                        end
+          lines << "Report file: #{report_file}"
           lines << ""
-          lines << "Full report also printed to Ruby Console."
+          lines << "Use the clipboard or Ruby Console to access the full report."
           UI.messagebox(lines.join("\n"))
         rescue StandardError => e
           Logger.error("CompatibilityReport", "show failed", e)
-          UI.messagebox("Compatibility report failed:\n#{e.message}")
+          UI.messagebox(
+            "Compatibility report failed.\n" \
+            'See the local importer log for diagnostic details, then retry.'
+          )
         end
 
         def build_report
