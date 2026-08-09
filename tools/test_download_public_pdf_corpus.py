@@ -136,6 +136,60 @@ class ManifestContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "local_path"):
                     self._load(_manifest_entry(local_path=local_path))
 
+    def test_trailing_separators_are_rejected_before_any_activity(self) -> None:
+        for separator in ("/", "\\"):
+            with self.subTest(separator=repr(separator)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    work = Path(tmp)
+                    root = work / "corpus"
+                    manifest = work / "manifest.json"
+                    _write_manifest(
+                        manifest,
+                        [
+                            _manifest_entry(
+                                local_path=f"web-acquired/example.pdf{separator}"
+                            )
+                        ],
+                    )
+
+                    with mock.patch.object(
+                        corpus.urllib.request,
+                        "urlopen",
+                        side_effect=AssertionError(
+                            "trailing separator must fail before network"
+                        ),
+                    ) as urlopen:
+                        with self.assertRaisesRegex(SystemExit, "local_path"):
+                            corpus.main(
+                                ["--manifest", str(manifest), "--root", str(root)]
+                            )
+
+                    urlopen.assert_not_called()
+                    self.assertFalse(root.exists())
+                    self.assertEqual(
+                        [manifest.name], sorted(item.name for item in work.iterdir())
+                    )
+
+    def test_plain_and_trailing_separator_spellings_cannot_coexist(self) -> None:
+        plain_path = "web-acquired/example.pdf"
+        for separator in ("/", "\\"):
+            with self.subTest(separator=repr(separator)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    manifest = Path(tmp) / "manifest.json"
+                    _write_manifest(
+                        manifest,
+                        [
+                            _manifest_entry(id="plain", local_path=plain_path),
+                            _manifest_entry(
+                                id="alias",
+                                local_path=f"{plain_path}{separator}",
+                            ),
+                        ],
+                    )
+
+                    with self.assertRaisesRegex(SystemExit, "local_path"):
+                        corpus.load_manifest(manifest)
+
     @unittest.skipUnless(os.name == "nt", "Windows ADS residue contract")
     def test_windows_ads_is_rejected_before_root_network_temp_target_or_lock(self) -> None:
         payload = b"synthetic bytes that must never be requested"
