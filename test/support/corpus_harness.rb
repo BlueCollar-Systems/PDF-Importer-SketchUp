@@ -256,6 +256,12 @@ module CorpusHarness
         parser.parse
         result[:pages] = parser.page_count
         result[:heavy] = heavy_pdf?(pdf_path, parser.page_count)
+        if parser.page_count.to_i <= 0
+          result[:status] = 'FAIL'
+          result[:error] = 'PDF parser returned zero pages'
+          parser.release
+          next
+        end
 
         total_paths = 0
         text_source = nil

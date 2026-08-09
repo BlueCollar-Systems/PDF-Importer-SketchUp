@@ -53,11 +53,22 @@ Baseline fields per PDF:
 ## Thresholds
 
 - Parser failure or timeout fails the private validation gate.
+- A parser result with zero or fewer pages is `FAIL`; the headless corpus
+  harness does not run production salvage or external Poppler.
 - Placement rate below 95% fails when text exists.
 - Vector sheets with strong bbox coverage require 100% simulated placement.
 - Baseline field mismatches fail unless baseline update mode is explicit.
 - Expected bad-PDF refusals pass only when the importer reports the matching
   refusal reason.
+
+### Public zero-page diagnostics
+
+Direct production-path probes independently confirmed that
+`annotation-border-styles.pdf` and `xref_command_missing.pdf` are each salvaged
+to one page with `salvaged via poppler (zero pages)`, without host interaction.
+`Pages-tree-refs.pdf` parses directly as one page without salvage. The zero-page
+finding therefore exposed a corpus-harness false success, not a production
+importer failure; no product behavior change is warranted.
 
 ## CI Workflow
 
