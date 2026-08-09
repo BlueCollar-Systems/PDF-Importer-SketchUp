@@ -166,13 +166,15 @@ class VerifiedDownloadTests(unittest.TestCase):
         ):
             target = Path(tmp) / "case.pdf"
             downloader = self._downloader()
-            real_publish = corpus.os.link
+            real_publish = corpus._publish_entry_temp_no_replace
 
-            def race_publish(source: object, destination: object) -> None:
+            def race_publish(temp: object, parent: object, destination: object) -> None:
                 Path(destination).write_bytes(winner)
-                real_publish(source, destination)
+                real_publish(temp, parent, destination)
 
-            with mock.patch.object(corpus.os, "link", side_effect=race_publish):
+            with mock.patch.object(
+                corpus, "_publish_entry_temp_no_replace", side_effect=race_publish
+            ):
                 with self.assertRaisesRegex(Exception, "publish_conflict"):
                     downloader("https://example.invalid/case.pdf", target, 1, expected)
 
@@ -864,6 +866,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import threading
 from unittest import mock
@@ -903,13 +906,40 @@ def writer(payload):
     else:
         outcomes.append("ok")
 
-baseline = handles()
-with mock.patch.object(corpus, "_publish_lock_temp_no_replace", side_effect=synchronized_publish):
-    with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+    warmed = [executor.submit(lambda: barrier.wait(timeout=5)) for _ in payloads]
+    for future in warmed:
+        future.result(timeout=10)
+    del future
+    warmed.clear()
+    warm_root = root.parent / "warm-corpus"
+    warm_parent = warm_root / "web-acquired"
+    warm_parent.mkdir(parents=True)
+    corpus.publish_lock_bytes(
+        warm_root,
+        warm_parent / corpus.LOCK_NAME,
+        b'{"warm":true}\n',
+    )
+    shutil.rmtree(warm_root)
+    baseline = handles()
+    with mock.patch.object(
+        corpus,
+        "_publish_lock_temp_no_replace",
+        side_effect=synchronized_publish,
+    ) as observed_publish:
         futures = [executor.submit(writer, payload) for payload in payloads]
         for future in futures:
             future.result(timeout=15)
-after = handles()
+        del future
+        futures.clear()
+    observed_publish.reset_mock(return_value=True, side_effect=True)
+    del observed_publish
+    drained = [executor.submit(lambda: barrier.wait(timeout=5)) for _ in payloads]
+    for future in drained:
+        future.result(timeout=10)
+    del future
+    drained.clear()
+    after = handles()
 print(json.dumps({
     "outcomes": outcomes,
     "winner": destination.read_bytes().hex() if destination.is_file() else None,
@@ -1090,7 +1120,9 @@ print(json.dumps({
         self.assertEqual(71, kwargs["dir_fd"])
         self.assertTrue(args[1] & os.O_CREAT)
         self.assertTrue(args[1] & os.O_EXCL)
-        self.assertTrue(args[1] & getattr(os, "O_NOFOLLOW", 0))
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if nofollow:
+            self.assertTrue(args[1] & nofollow)
         self.assertIs(fake_file, temp.handle)
 
     def test_posix_owned_link_requires_two_then_one_exact_links(self) -> None:
