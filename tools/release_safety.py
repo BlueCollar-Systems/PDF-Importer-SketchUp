@@ -105,17 +105,43 @@ def _match_path(path: str, pattern: str) -> bool:
     return _recurse(path_parts, pat_parts)
 
 
-def is_product_path(path: str, *, exclude_patterns: Sequence[str] = DEFAULT_EXCLUDES) -> bool:
+def is_product_path(
+    path: str,
+    *,
+    exclude_patterns: Sequence[str] = DEFAULT_EXCLUDES,
+    product_roots: Sequence[str] | None = None,
+    build_tools: Sequence[str] | None = None,
+) -> bool:
     """Return True if [path] is a product-affecting file.
 
-    Excludes docs, tests, workflow-only changes, and CI metadata.  Keeps
-    packaging/build tools (build_release.py, scripts/smoke_*.py, tools/*.py
-    except test_*.py) in the product delta because those can change shipped bytes.
+    Two modes:
+
+    * Denylist (default, ``product_roots`` is None): everything is product
+      unless it matches an exclude pattern. Conservative -- keeps packaging/build
+      tools in the delta because they can change shipped bytes. This is the
+      original behaviour and is what every repo without a product-scope config
+      still uses.
+
+    * Positive scope (``product_roots`` given): a path is product only if it
+      lives under one of the packaged-tree roots OR is a named byte-affecting
+      build tool -- AND is not excluded. This lets a repo whose shipped artifact
+      is a known subtree (e.g. SketchUp's RBZ = extracted/sketchup_ext/**)
+      declare that harness, host runners, probes, gates and the release
+      publisher -- none of which enter the artifact -- do not strand a release.
+      Build tools stay product by explicit list, so a change that really can
+      alter shipped bytes still strands.
     """
     for pat in exclude_patterns:
         if _match_path(path, pat):
             return False
-    return True
+    if product_roots is None:
+        return True
+    normalized = path.replace("\\", "/")
+    for root in product_roots:
+        root = root.replace("\\", "/").rstrip("/") + "/"
+        if normalized.startswith(root):
+            return True
+    return normalized in {t.replace("\\", "/") for t in (build_tools or ())}
 
 
 class _Completed:
@@ -356,6 +382,8 @@ def collect_delta(
     exclude_patterns: Sequence[str] | None = None,
     repo_root: Path | None = None,
     git_command: Callable[..., _Completed] = subprocess.run,
+    product_roots: Sequence[str] | None = None,
+    build_tools: Sequence[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return (product_files, product_commits) in [base]..[head]."""
     exclude_patterns = exclude_patterns if exclude_patterns is not None else DEFAULT_EXCLUDES
@@ -363,14 +391,44 @@ def collect_delta(
     files = _git_names(base, head, repo_root, git_command)
     commits = _git_commits(base, head, repo_root, git_command)
 
-    product_files = [f for f in files if is_product_path(f, exclude_patterns=exclude_patterns)]
+    def _is_product(name: str) -> bool:
+        return is_product_path(
+            name,
+            exclude_patterns=exclude_patterns,
+            product_roots=product_roots,
+            build_tools=build_tools,
+        )
+
+    product_files = [f for f in files if _is_product(f)]
     product_commits: list[str] = []
     for sha, subject in commits:
         names = _git_commit_files(sha, repo_root, git_command)
-        if any(is_product_path(n, exclude_patterns=exclude_patterns) for n in names):
+        if any(_is_product(n) for n in names):
             product_commits.append(f"{sha} {subject}")
 
     return product_files, product_commits
+
+
+def load_product_scope(repo_root: Path) -> tuple[list[str] | None, list[str] | None]:
+    """Read an optional per-repo product-scope config.
+
+    Absent -> (None, None) -> is_product_path stays in denylist mode, so repos
+    that never add this file behave exactly as before. Present -> the positive
+    scope described in is_product_path. The file lives under .release-safety/
+    (already excluded from the delta), so editing it never strands a release.
+    """
+    path = repo_root / ".release-safety" / "product-scope.json"
+    if not path.is_file():
+        return (None, None)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return (None, None)
+    roots = data.get("product_roots")
+    tools = data.get("build_tools")
+    roots = [str(r) for r in roots] if isinstance(roots, list) else None
+    tools = [str(t) for t in tools] if isinstance(tools, list) else None
+    return (roots, tools)
 
 
 def _parse_iso(value: str) -> datetime.datetime:
@@ -489,7 +547,6 @@ def evaluate_warning(
     """Return (exit_code, summary, updated_record)."""
     record = copy.deepcopy(record)
     warnings = record.setdefault("warnings", [])
-    key = (repo, tag)
     existing = None
     for w in warnings:
         if w.get("repo") == repo and w.get("tag") == tag:
@@ -584,11 +641,14 @@ def _main_audit(args: argparse.Namespace) -> int:
 
     head = args.head or "HEAD"
     before = _effective_before(args.before, tag, repo_root)
+    product_roots, build_tools = load_product_scope(repo_root)
     total_files, total_commits = collect_delta(
         tag,
         head=head,
         exclude_patterns=args.exclude,
         repo_root=repo_root,
+        product_roots=product_roots,
+        build_tools=build_tools,
     )
 
     record = load_warning_record(
@@ -602,6 +662,8 @@ def _main_audit(args: argparse.Namespace) -> int:
         head=head,
         exclude_patterns=args.exclude,
         repo_root=repo_root,
+        product_roots=product_roots,
+        build_tools=build_tools,
     )
     if not current_files:
         _emit_summary(
@@ -619,6 +681,8 @@ def _main_audit(args: argparse.Namespace) -> int:
             head=before,
             exclude_patterns=args.exclude,
             repo_root=repo_root,
+            product_roots=product_roots,
+            build_tools=build_tools,
         )
 
     opening = prior_commits or total_commits

@@ -1,0 +1,13 @@
+{
+  "_comment": "Scopes the stranded-release audit to what the RBZ actually ships. The RBZ is packaged solely from extracted/sketchup_ext/ (build_release.py: SUPPORT_DIR.rglob). A commit strands a release only if it changes that packaged tree or a named byte-affecting build tool. Harness, host runners, probes, gates, corpus tooling and the release publisher never enter the RBZ, so they must not strand. Byte-affecting build tools are listed explicitly so a change that really can alter shipped bytes still strands. Guarded by tools/test_release_safety.py.",
+  "product_roots": [
+    "extracted/sketchup_ext/"
+  ],
+  "build_tools": [
+    "build_release.py",
+    "tools/build_release.py",
+    "tools/build_poppler_runtime_manifest.py",
+    "tools/prune_poppler_bundle.py",
+    "tools/build_steel_shapes_release.py"
+  ]
+}

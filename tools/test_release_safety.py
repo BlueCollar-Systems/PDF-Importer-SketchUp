@@ -6,7 +6,6 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
-import re
 import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
@@ -68,6 +67,79 @@ class ReleaseSafetyTest:
         assert not rs.is_product_path("tools/test_release_safety.py")
         assert not rs.is_product_path(".gitignore")
         assert not rs.is_product_path(".cursor/rules/text-mode-fidelity.mdc")
+
+    # --- positive product scope (packaged tree + byte-affecting build tools) ---
+
+    ROOTS = ["extracted/sketchup_ext/"]
+    TOOLS = [
+        "build_release.py",
+        "tools/build_release.py",
+        "tools/build_poppler_runtime_manifest.py",
+        "tools/prune_poppler_bundle.py",
+        "tools/build_steel_shapes_release.py",
+    ]
+
+    def test_scope_packaged_tree_is_product(self):
+        assert rs.is_product_path(
+            "extracted/sketchup_ext/bc_pdf_vector_importer/main.rb",
+            product_roots=self.ROOTS, build_tools=self.TOOLS,
+        )
+        assert rs.is_product_path(
+            "extracted/sketchup_ext/bc_pdf_vector_importer/Library/bin/pdftocairo.exe",
+            product_roots=self.ROOTS, build_tools=self.TOOLS,
+        )
+
+    def test_scope_keeps_byte_affecting_build_tools_product(self):
+        # THE FOOTGUN GUARD: these change shipped bytes and must still strand.
+        for tool in self.TOOLS:
+            assert rs.is_product_path(
+                tool, product_roots=self.ROOTS, build_tools=self.TOOLS
+            ), f"{tool} must remain product under positive scope"
+
+    def test_scope_harness_and_publisher_do_not_strand(self):
+        # The exact files that caused the false stranding, plus their families.
+        for harness in (
+            "tools/sketchup_host_launcher.rb",
+            "tools/sketchup_batch_import.rb",
+            "tools/sketchup_full_corpus_sweep.rb",
+            "tools/complete_github_release.py",
+            "tools/check_release_publication.py",
+            "tools/glyph_perf_probe.rb",
+            "tools/su_batch_cli.rb",
+        ):
+            assert not rs.is_product_path(
+                harness, product_roots=self.ROOTS, build_tools=self.TOOLS
+            ), f"{harness} does not enter the RBZ and must not strand a release"
+
+    def test_scope_still_honours_excludes_first(self):
+        # An excluded path is non-product even if it sits under a product root.
+        assert not rs.is_product_path(
+            "extracted/sketchup_ext/whatever_test.rb",
+            product_roots=self.ROOTS, build_tools=self.TOOLS,
+        )
+
+    def test_default_mode_unchanged_without_scope(self):
+        # No scope -> denylist behaviour identical to before (other repos).
+        assert rs.is_product_path("tools/sketchup_host_launcher.rb")
+        assert rs.is_product_path("tools/complete_github_release.py")
+
+    def test_load_product_scope_reads_repo_config(self):
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".release-safety").mkdir()
+            (root / ".release-safety" / "product-scope.json").write_text(
+                json.dumps({"product_roots": ["x/"], "build_tools": ["b.py"]}),
+                encoding="utf-8",
+            )
+            roots, tools = rs.load_product_scope(root)
+            assert roots == ["x/"] and tools == ["b.py"]
+
+    def test_load_product_scope_absent_is_none(self):
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as d:
+            roots, tools = rs.load_product_scope(Path(d))
+            assert roots is None and tools is None
 
     def test_collect_delta_filters_commits_by_files(self):
         git = fake_git_factory(
