@@ -174,5 +174,17 @@ class VerifiedDownloadTests(unittest.TestCase):
             self.assertEqual([], list(target.parent.glob("*.part*")))
 
 
+class RootBoundaryTests(unittest.TestCase):
+    def test_unconfigured_placeholder_refuses_before_creating_a_repo_local_root(self) -> None:
+        manifest = {"default_root": "__private_validation_assets_not_configured__"}
+        with mock.patch.dict(
+            corpus.os.environ,
+            {"BCS_PRIVATE_VALIDATION_ROOT": "", "PDF_PRIVATE_VALIDATION_ROOT": ""},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(SystemExit, "explicit --root"):
+                corpus.resolve_root(manifest, None)
+
+
 if __name__ == "__main__":
     unittest.main()
