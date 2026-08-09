@@ -13,7 +13,7 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 
 | Host | Status |
 |------|--------|
-| SketchUp Make 2017 | ✅ Verified — Ruby 2.2.4 live-host gate (use **v3.7.90+**, latest **v3.7.100**) |
+| SketchUp Make 2017 | ✅ Verified for the v3.7.100 live-host gate; current source passes exact Ruby 2.2.4 CI parse/smoke (use **v3.7.90+**) |
 | SketchUp 2018–2023 | ⚠️ Expected |
 | Current SketchUp Pro | ⚠️ Expected |
 
@@ -52,7 +52,7 @@ The Windows **RBZ** installs without internet. Core vector import and bundled Po
 
 ## Enterprise / multi-user
 
-Install RBZ **per Windows user** per SketchUp year. Avoid roaming only the Plugins folder across mismatched SketchUp versions. **Compatibility Report** logs the extension directory.
+Install RBZ **per Windows user** per SketchUp year. Avoid roaming only the Plugins folder across mismatched SketchUp versions. **Compatibility Report** records extension/helper capability status while redacting local extension and executable paths.
 
 ## Preflight command
 
@@ -74,7 +74,8 @@ SketchUp Make 2017 is **not redistributed** from bluecollar-systems.com — obta
 | 2024 | 3.2.2 | ⚠️ Expected |
 | 2020–2023 | 2.7.x | ⚠️ Expected |
 | 2018–2019 | 2.5.x | ⚠️ Expected |
-| Make / Pro 2017 | 2.2.4 | ⚠️ Expected (CI syntax-checked) |
+| Make 2017 | 2.2.4 | ✅ Verified for the v3.7.100 live-host gate; current source passes exact Ruby 2.2.4 CI parse/smoke |
+| Pro 2017 | 2.2.4 | ⚠️ Expected — exact Ruby 2.2.4 CI parse/smoke, no dedicated Pro host evidence |
 | 2014–2016 | 2.0.x | ⚠️ Expected only after dedicated host verification |
 | 2013 and earlier | | ❌ Not supported |
 
@@ -82,7 +83,10 @@ See also [HOST_COMPATIBILITY.md](HOST_COMPATIBILITY.md) for helper policy and te
 
 ## CI coverage
 
-GitHub Actions: `ruby -c` under Ruby **2.2, 2.7, 3.2**; `ruby22_syntax_check.rb`; smoke tests under **2.2, 2.7, 3.0, 3.2** (Docker for 2.2).
+GitHub Actions builds exact Ruby **2.2.4-p230** from official source for the
+shipped-extension parse gate and smoke test; `ruby22_syntax_check.rb` provides a
+separate static guard. Extension syntax also runs on Ruby **2.7 / 3.2**, with
+smoke tests on **2.7 / 3.0 / 3.2**.
 
 ---
 

@@ -14,7 +14,7 @@ UI / code names from `ImportDialog::TEXT_MODE_CHOICES` / symbols `:text`, `:labe
 
 | Requested mode | Required first attempt | Finite closest fallback after affirmative item proof |
 |----------------|------------------------|-----------------------------------------------------|
-| **Text** | Distinct flat editable model Text; never a Label alias | Labels → 3D Text → Glyphs → Geometry → item Raster |
+| **Text** | Distinct flat editable model Text; never a Label alias | 3D Text → Glyphs → Geometry → item Raster |
 | **Labels** | Native `Sketchup::Text` Label | 3D Text → Glyphs → Geometry → item Raster |
 | **3D Text** | Source-glyph solid text with positive Z depth | Glyphs → Geometry → item Raster |
 | **Glyphs** | Source glyph outlines | Geometry → item Raster |
