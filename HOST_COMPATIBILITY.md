@@ -12,7 +12,8 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 | 2024 | 3.2.2 | ⚠️ Expected |
 | 2020–2023 | 2.7.x | ⚠️ Expected |
 | 2018–2019 | 2.5.x | ⚠️ Expected |
-| Make / Pro 2017 | 2.2.4 | ⚠️ Expected (CI syntax-checked) |
+| Make 2017 | 2.2.4 | ✅ Verified for the v3.7.100 live-host gate; current source passes exact Ruby 2.2.4 CI parse/smoke |
+| Pro 2017 | 2.2.4 | ⚠️ Expected — exact Ruby 2.2.4 CI parse/smoke, no dedicated Pro host evidence |
 | 2014–2016 | 2.0.x | ⚠️ Expected only after dedicated host verification |
 | 2013 and earlier | | ❌ Not supported |
 
@@ -41,7 +42,7 @@ representation.
 
 | Option | SketchUp result |
 |--------|-----------------|
-| **Text** | Distinct flat editable model text when the host exposes a constructor; SketchUp 2017 does not, so an exact item-bound capability proof may advance only to Labels |
+| **Text** | Distinct flat editable model text when the host exposes a constructor; SketchUp 2017 does not, so an exact item-bound capability proof advances only to source-outline 3D Text (Labels are a separate requested mode) |
 | **Labels** | Editable `Sketchup::Text` when the host can represent the item; nonzero glyph rotation enters the verified closest fallback ladder |
 | **3D Text** | Source-glyph solid text with verified positive Z depth; preserves model-space size and PDF rotation |
 | **Glyphs** | Per-glyph edges; high-fidelity outline path when exact geometry is preferred |
@@ -98,4 +99,9 @@ available as overrides.
 
 ## CI coverage
 
-GitHub Actions: `ruby -c` on extension sources under Ruby **2.2, 2.7, 3.2**; smoke tests under **2.2, 2.7, 3.0, 3.2** (Docker for 2.2). Graceful degradation paths exist for SU 2017 (line_styles absent, zoom extents fallback, UI.inputbox dialog fallback).
+GitHub Actions builds exact Ruby **2.2.4-p230** from official source for the
+shipped-extension parse gate and smoke test. It also checks extension syntax on
+Ruby **2.7 / 3.2** and runs smoke tests on **2.7 / 3.0 / 3.2**. These runtime
+lanes do not replace named SketchUp host evidence. Graceful degradation paths
+exist for SU 2017 (line_styles absent, zoom extents fallback, UI.inputbox dialog
+fallback).

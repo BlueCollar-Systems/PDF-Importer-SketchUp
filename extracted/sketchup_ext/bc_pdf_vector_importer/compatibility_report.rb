@@ -9,6 +9,8 @@ require File.join(File.dirname(__FILE__), 'safe_temp')
 module BlueCollarSystems
   module PDFVectorImporter
     module CompatibilityReport
+      REDACTED_PATH_DETAIL = '[path redacted]'.freeze
+
       class << self
         def show
           report = build_report
@@ -20,13 +22,21 @@ module BlueCollarSystems
           lines << "Compatibility report generated."
           lines << ""
           lines << "Clipboard: #{copied ? 'Copied' : 'Not available'}"
-          lines << "Report file: #{saved_path || 'Not available'}"
+          report_file = if saved_path
+                          'Saved locally (path hidden for privacy)'
+                        else
+                          'Not available'
+                        end
+          lines << "Report file: #{report_file}"
           lines << ""
-          lines << "Full report also printed to Ruby Console."
+          lines << "Use the clipboard or Ruby Console to access the full report."
           UI.messagebox(lines.join("\n"))
         rescue StandardError => e
           Logger.error("CompatibilityReport", "show failed", e)
-          UI.messagebox("Compatibility report failed:\n#{e.message}")
+          UI.messagebox(
+            "Compatibility report failed.\n" \
+            'See the local importer log for diagnostic details, then retry.'
+          )
         end
 
         def build_report
@@ -54,7 +64,7 @@ module BlueCollarSystems
           lines << "Ruby Platform: #{RUBY_PLATFORM}"
           lines << "Host OS: #{safe_call { RbConfig::CONFIG['host_os'] } || 'unknown'}"
           lines << "Plugin Version: #{defined?(PLUGIN_VERSION) ? PLUGIN_VERSION : 'unknown'}"
-          lines << "Extension Directory: #{File.dirname(__FILE__)}"
+          lines << "Extension Directory: #{REDACTED_PATH_DETAIL}"
           lines << ""
           lines << "[Capabilities]"
           lines << capability_line("UI::HtmlDialog available", html_dialog_supported?)
@@ -65,12 +75,12 @@ module BlueCollarSystems
           lines << capability_line("Entities#add_image available", entities_responds?(entities, :add_image))
           lines << capability_line("Entities#add_3d_text available", entities_responds?(entities, :add_3d_text))
           lines << capability_line("Model#line_styles available", line_styles_supported?(model))
-          lines << capability_line("Bundled bin folder ready", status[:bundled_bin], DependencyResolver.bundled_bin_dir)
-          lines << capability_line("pdftocairo found", !pdftocairo.nil?, pdftocairo)
-          lines << capability_line("mutool found", !mutool.nil?, mutool)
-          lines << capability_line("pdftotext found", !pdftotext.nil?, pdftotext)
-          lines << capability_line("pdffonts found", !pdffonts.nil?, pdffonts)
-          lines << capability_line("Ghostscript found", !ghostscript.nil?, ghostscript)
+          lines << path_capability_line("Bundled bin folder ready", status[:bundled_bin], DependencyResolver.bundled_bin_dir)
+          lines << path_capability_line("pdftocairo found", !pdftocairo.nil?, pdftocairo)
+          lines << path_capability_line("mutool found", !mutool.nil?, mutool)
+          lines << path_capability_line("pdftotext found", !pdftotext.nil?, pdftotext)
+          lines << path_capability_line("pdffonts found", !pdffonts.nil?, pdffonts)
+          lines << path_capability_line("Ghostscript found", !ghostscript.nil?, ghostscript)
           lines << ""
           lines << "[Feature Impact]"
           lines.concat(feature_impact_lines(model, entities, pdftocairo, mutool, pdftotext, pdffonts, ghostscript))
@@ -83,7 +93,7 @@ module BlueCollarSystems
           lines << ""
           lines << "[Notes]"
           lines << "- This report is safe to share for support diagnostics."
-          lines << "- It includes environment versions and local executable paths."
+          lines << "- Local executable and extension paths are redacted."
           lines << "- Test PDFs are regression examples; importer behavior should generalize to supported PDFs on any supported PC."
 
           lines.join("\n")
@@ -132,6 +142,13 @@ module BlueCollarSystems
           else
             "#{label}: #{state}"
           end
+        end
+
+        def path_capability_line(label, ok, detail)
+          redacted = if detail && !detail.to_s.empty?
+                       REDACTED_PATH_DETAIL
+                     end
+          capability_line(label, ok, redacted)
         end
 
         def feature_impact_lines(model, entities, pdftocairo, mutool, pdftotext, pdffonts, ghostscript)

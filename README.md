@@ -125,7 +125,8 @@ assets, checksums, license, and notes.
   impossible. They therefore cannot enter or skip through the fallback ladder.
 
   When an exact item-specific source/host inventory affirmatively proves the
-  current representation impossible, only these requested-specific ladders apply:
+  current representation impossible, only these requested-specific ladders apply;
+  Text advances directly to 3D Text and never through Labels:
 
   - Text → 3D Text → Glyphs → Geometry → item Raster
   - Labels → 3D Text → Glyphs → Geometry → item Raster
@@ -182,7 +183,7 @@ Install the latest `.rbz` from Releases via Extension Manager (overwrites the pr
 
 ## Enterprise / multi-user installs
 
-Install the RBZ **per Windows user** on each PC where SketchUp runs. Avoid roaming only the `Plugins` folder across PCs with different SketchUp years. **Compatibility Report** logs the extension directory for IT support tickets.
+Install the RBZ **per Windows user** on each PC where SketchUp runs. Avoid roaming only the `Plugins` folder across PCs with different SketchUp years. **Compatibility Report** records extension/helper capability status while redacting local extension and executable paths, so the copied report is safe to share in IT support tickets.
 
 ## External Helpers / Any-PC Behavior
 
@@ -373,8 +374,8 @@ See **[HOST_COMPATIBILITY.md](HOST_COMPATIBILITY.md)** (SketchUp hosts) and **[C
 
 | SketchUp Version | Ruby Version | Status |
 |-----------------|-------------|--------|
-| Make 2017 | 2.2.4 | ⚠️ Expected (CI syntax-checked, not host-verified) |
-| Pro 2017 | 2.2.4 | ⚠️ Expected |
+| Make 2017 | 2.2.4 | ✅ Verified for the v3.7.100 live-host gate; current source passes exact Ruby 2.2.4 CI parse/smoke |
+| Pro 2017 | 2.2.4 | ⚠️ Expected — exact Ruby 2.2.4 CI parse/smoke, no dedicated Pro host evidence |
 | 2018–2019 | 2.5.x | ⚠️ Expected |
 | 2020–2023 | 2.7.x | ⚠️ Expected |
 | 2024 | 3.2.2 | ⚠️ Expected |
@@ -383,8 +384,10 @@ See **[HOST_COMPATIBILITY.md](HOST_COMPATIBILITY.md)** (SketchUp hosts) and **[C
 | 2014–2016 | 2.0.x | ⚠️ Expected only after dedicated host verification |
 
 Evidence levels:
-- `✅ Verified`: host-run validation evidence captured.
-- `⚠️ Expected`: syntax/runtime compatible but no host-run evidence yet.
+- `✅ Verified`: named host/version validation evidence captured; later source
+  revisions still rely on their stated CI evidence until that host is rerun.
+- `⚠️ Expected`: exact-runtime CI or syntax compatibility exists, but no named
+  host-run evidence has been captured.
 - `❌ Not supported`: outside maintained/tested compatibility scope.
 
 ---
