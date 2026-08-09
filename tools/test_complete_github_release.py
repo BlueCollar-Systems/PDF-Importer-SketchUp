@@ -36,7 +36,18 @@ class FakeGitHub:
         return self.tag_target
 
     def get_release(self, _tag):
+        # Model the real API: GET /releases/tags/{tag} NEVER returns a draft
+        # (a draft has no tag ref yet). The old fake returned drafts here,
+        # which is exactly how the "not observable after creation" defect got
+        # past this suite while creating real dangling drafts.
+        if self.release_data is not None and self.release_data.get("draft"):
+            return None
         return self.release_data
+
+    def list_releases(self):
+        # Drafts ARE visible in the release list, which is how the tool must
+        # discover them.
+        return [] if self.release_data is None else [self.release_data]
 
     def get_release_by_id(self, release_id):
         self.get_by_id_calls.append(release_id)

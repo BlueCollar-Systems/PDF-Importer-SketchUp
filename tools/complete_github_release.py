@@ -129,6 +129,14 @@ class GhClient:
             f"repos/{self.repo}/releases/{release_id}", allow_not_found=True
         )
 
+    def list_releases(self):
+        # The by-tag endpoint never returns drafts (a draft has no tag ref
+        # yet), so draft discovery must go through the list. One page of 100
+        # is far beyond this repository's release count; the workflow's
+        # release-plan step paginates independently for its own discovery.
+        listing = self._json(f"repos/{self.repo}/releases?per_page=100")
+        return listing if isinstance(listing, list) else []
+
     def create_release(self, tag, target, title, notes, assets, latest):
         args = [
             "release", "create", tag, "--repo", self.repo,
@@ -261,9 +269,35 @@ def _release_state(release_data, tag, *, expected_release_id=None):
     return release_id, draft, immutable
 
 
+def _find_release_by_tag(github, tag):
+    """Find a release for the tag, INCLUDING drafts.
+
+    GET /releases/tags/{tag} only ever returns a published release: a draft
+    has no tag ref yet. This tool now creates releases as drafts, so both the
+    just-created draft and a pre-existing one must be discovered through the
+    release list, or creation appears to have vanished ("not observable after
+    creation") and a rerun would mint a duplicate draft.
+    """
+    published = github.get_release(tag)
+    if published is not None:
+        return published
+    list_releases = getattr(github, "list_releases", None)
+    if not callable(list_releases):
+        return None
+    matches = [
+        release for release in list_releases()
+        if isinstance(release, dict) and release.get("tag_name") == tag
+    ]
+    if len(matches) > 1:
+        raise ReleaseConflict(
+            f"expected at most one release for tag {tag}; found {len(matches)}"
+        )
+    return matches[0] if matches else None
+
+
 def _get_release(github, tag, expected_release_id=None):
     if expected_release_id is None:
-        return github.get_release(tag)
+        return _find_release_by_tag(github, tag)
     current = github.get_release_by_id(expected_release_id)
     if current is None:
         raise ReleaseConflict(
@@ -293,7 +327,7 @@ def _poll_release_by_tag(github, tag):
     for delay in _POLL_DELAYS:
         if delay:
             _poll_sleep(delay)
-        current = github.get_release(tag)
+        current = _find_release_by_tag(github, tag)
         if current is not None:
             return current
     raise ReleaseConflict(f"release for tag {tag} was not observable after creation")
