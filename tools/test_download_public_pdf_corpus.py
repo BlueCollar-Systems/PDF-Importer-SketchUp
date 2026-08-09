@@ -553,7 +553,9 @@ class LockPublicationTests(unittest.TestCase):
                     )
                 else:
                     patcher = mock.patch.object(
-                        corpus.os, "link", side_effect=OSError(private)
+                        corpus,
+                        "_publish_lock_temp_no_replace",
+                        side_effect=OSError(private),
                     )
                 with patcher:
                     with self.assertRaises(Exception) as raised:
