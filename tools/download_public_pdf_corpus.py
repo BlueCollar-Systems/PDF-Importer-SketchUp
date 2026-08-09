@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
@@ -20,7 +21,6 @@ from pathlib import Path
 import re
 import stat
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -55,7 +55,7 @@ class _ParentCapability:
 
 @dataclass
 class _TempCapability:
-    path: Path
+    path: Path | None
     handle: object
     identity: tuple[int, ...]
     parent: _ParentCapability
@@ -92,6 +92,13 @@ _FILE_NON_DIRECTORY_FILE = 0x00000040
 _FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 _FILE_OPEN_REPARSE_POINT = 0x00200000
 _OBJ_CASE_INSENSITIVE = 0x00000040
+_AT_EMPTY_PATH = 0x1000
+_WINDOWS_FORBIDDEN_PATH_CHARACTERS = frozenset('<>:"|?*')
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{number}" for number in range(1, 10)}
+    | {f"lpt{number}" for number in range(1, 10)}
+)
 
 
 def _stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
@@ -404,6 +411,67 @@ def _windows_read_file_object(handle: int):
     return os.fdopen(descriptor, "rb")
 
 
+def _posix_linkat_function():
+    """Return Linux linkat only when anonymous handle publication is available."""
+    if not sys.platform.startswith("linux") or not getattr(os, "O_TMPFILE", 0):
+        raise OSError(errno.ENOTSUP, "anonymous_temp_unavailable")
+    try:
+        function = ctypes.CDLL(None, use_errno=True).linkat
+    except (AttributeError, OSError) as exc:
+        raise OSError(errno.ENOTSUP, "anonymous_publish_unavailable") from exc
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    return function
+
+
+def _link_posix_anonymous_temp_no_replace(
+    source_fd: int, parent_fd: int, destination_name: str
+) -> None:
+    if (
+        not destination_name
+        or Path(destination_name).name != destination_name
+        or "/" in destination_name
+        or "\\" in destination_name
+        or "\x00" in destination_name
+    ):
+        raise OSError(errno.EINVAL, "anonymous_publish_name_invalid")
+    function = _posix_linkat_function()
+    ctypes.set_errno(0)
+    result = int(
+        function(
+            int(source_fd),
+            b"",
+            int(parent_fd),
+            os.fsencode(destination_name),
+            _AT_EMPTY_PATH,
+        )
+    )
+    if result == 0:
+        return
+    error = int(ctypes.get_errno()) or errno.EIO
+    if error == errno.EEXIST:
+        raise FileExistsError(error, "anonymous_publish_conflict")
+    raise OSError(error, "anonymous_publish_failed")
+
+
+def _posix_duplicate_file_object(handle: int, mode: str):
+    duplicate = os.dup(handle)
+    try:
+        return os.fdopen(duplicate, mode)
+    except BaseException as original:
+        try:
+            os.close(duplicate)
+        except BaseException as close_error:
+            raise close_error from original
+        raise
+
+
 def _mark_windows_handle_for_deletion(handle: int) -> None:
     from ctypes import wintypes
 
@@ -426,6 +494,22 @@ def _mark_windows_handle_for_deletion(handle: int) -> None:
         ctypes.sizeof(information),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _manifest_path_component_is_unsafe(component: str) -> bool:
+    if not component or component in {".", ".."}:
+        return True
+    if component.endswith((".", " ")):
+        return True
+    if any(
+        character in _WINDOWS_FORBIDDEN_PATH_CHARACTERS
+        or ord(character) < 32
+        or 0x7F <= ord(character) <= 0x9F
+        for character in component
+    ):
+        return True
+    device_stem = component.split(".", 1)[0].casefold()
+    return device_stem in _WINDOWS_DEVICE_NAMES
 
 
 def load_manifest(path: Path) -> dict:
@@ -457,9 +541,14 @@ def load_manifest(path: Path) -> dict:
         if not isinstance(url, str) or not isinstance(rel, str) or not rel:
             raise SystemExit("Invalid manifest: url/local_path must be strings")
         normalized_rel = rel.replace("\\", "/")
-        parts = normalized_rel.split("/")
-        if rel.startswith(("/", "\\")) or ":" in parts[0] or ".." in parts:
-            raise SystemExit("Invalid manifest: local_path must stay relative")
+        component_rel = (
+            normalized_rel[:-1] if normalized_rel.endswith("/") else normalized_rel
+        )
+        parts = component_rel.split("/")
+        if rel.startswith(("/", "\\")) or any(
+            _manifest_path_component_is_unsafe(part) for part in parts
+        ):
+            raise SystemExit("Invalid manifest: local_path contains an unsafe component")
         folded_rel = normalized_rel.casefold()
         if folded_rel in seen_paths:
             raise SystemExit("Invalid manifest: duplicate local_path")
@@ -698,29 +787,24 @@ def _create_temp_capability(
                 native_handle=native_handle,
             )
 
+        _posix_linkat_function()
+        otmpfile = getattr(os, "O_TMPFILE", 0)
+        if not otmpfile:
+            raise OSError(errno.ENOTSUP, "anonymous_temp_unavailable")
         flags = (
             os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
+            | otmpfile
+            | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_BINARY", 0)
         )
-        for _attempt in range(32):
-            name = f"{prefix}{uuid.uuid4().hex}.part"
-            try:
-                descriptor = os.open(name, flags, 0o600, dir_fd=parent.handle)
-                break
-            except FileExistsError:
-                continue
-        if descriptor is None:
-            raise CorpusDownloadError(temp_io_error)
+        descriptor = os.open(".", flags, 0o600, dir_fd=parent.handle)
         file_handle = os.fdopen(descriptor, "w+b")
         descriptor = None
         identity = _stat_identity(os.fstat(file_handle.fileno()))
-        if identity[2] != stat.S_IFREG or identity[3] != 1:
+        if identity[2] != stat.S_IFREG or identity[3] != 0:
             raise CorpusDownloadError(path_unsafe_error)
         validate_parent(parent)
-        return _TempCapability(parent.path / name, file_handle, identity, parent)
+        return _TempCapability(None, file_handle, identity, parent)
     except Exception as exc:
         if file_handle is not None:
             try:
@@ -739,13 +823,6 @@ def _create_temp_capability(
                 pass
             try:
                 _close_windows_handle(native_handle)
-            except Exception:
-                pass
-        elif name is not None:
-            try:
-                metadata = os.stat(name, dir_fd=parent.handle, follow_symlinks=False)
-                if identity is None or _immutable_stat_identity(metadata) == identity[:3]:
-                    os.unlink(name, dir_fd=parent.handle)
             except Exception:
                 pass
         if isinstance(exc, CorpusDownloadError):
@@ -893,13 +970,28 @@ def _publish_temp_no_replace(
                 raise ctypes.WinError(error)
             return
 
-        os.link(
-            temp.path.name,
+        before = _stat_identity(os.fstat(temp.handle.fileno()))
+        if (
+            before[:3] != temp.identity[:3]
+            or before[2] != stat.S_IFREG
+            or before[3] != 0
+            or before[4] != temp.identity[4]
+        ):
+            raise CorpusDownloadError(path_unsafe_error)
+        _link_posix_anonymous_temp_no_replace(
+            temp.handle.fileno(),
+            parent.handle,
             destination.name,
-            src_dir_fd=parent.handle,
-            dst_dir_fd=parent.handle,
-            follow_symlinks=False,
         )
+        after = _stat_identity(os.fstat(temp.handle.fileno()))
+        if (
+            after[:3] != before[:3]
+            or after[2] != stat.S_IFREG
+            or after[3] != 1
+            or after[4] != before[4]
+        ):
+            raise CorpusDownloadError(path_unsafe_error)
+        temp.identity = after
     except FileExistsError:
         raise
     except CorpusDownloadError:
@@ -924,7 +1016,7 @@ def _publish_lock_temp_no_replace(
 
 
 def _dispose_temp_capability(temp: _TempCapability, *, cleanup_io_error: str) -> None:
-    """Delete only the current run's already-open temp through its file handle."""
+    """Dispose only the current run's already-open anonymous/native temp."""
     if temp.closed:
         return
     failure: BaseException | None = None
@@ -949,26 +1041,10 @@ def _dispose_temp_capability(temp: _TempCapability, *, cleanup_io_error: str) ->
             finally:
                 temp.native_handle = None
         else:
-            name = temp.path.name
-            try:
-                metadata = os.stat(
-                    name,
-                    dir_fd=temp.parent.handle,
-                    follow_symlinks=False,
-                )
-                if (
-                    _immutable_stat_identity(metadata) != temp.identity[:3]
-                    or not stat.S_ISREG(metadata.st_mode)
-                ):
-                    raise CorpusDownloadError(cleanup_io_error)
-                os.unlink(name, dir_fd=temp.parent.handle)
-            except BaseException as exc:
-                failure = exc
             try:
                 temp.handle.close()
             except BaseException as exc:
-                if failure is None:
-                    failure = exc
+                failure = exc
         temp.closed = failure is None
         if failure is not None:
             if isinstance(failure, CorpusDownloadError):
@@ -1001,17 +1077,6 @@ def _force_close_temp_capability(temp: _TempCapability) -> None:
         except Exception:
             pass
         temp.native_handle = None
-    elif not temp.parent.windows:
-        try:
-            metadata = os.stat(
-                temp.path.name,
-                dir_fd=temp.parent.handle,
-                follow_symlinks=False,
-            )
-            if _immutable_stat_identity(metadata) == temp.identity[:3]:
-                os.unlink(temp.path.name, dir_fd=temp.parent.handle)
-        except Exception:
-            pass
     temp.closed = True
 
 
@@ -1082,7 +1147,7 @@ def _read_existing_lock_bytes(
                 )
             ):
                 raise CorpusDownloadError("lock_path_unsafe")
-            with os.fdopen(os.dup(handle), "rb") as reader:
+            with _posix_duplicate_file_object(handle, "rb") as reader:
                 return reader.read()
         finally:
             os.close(handle)
@@ -1165,7 +1230,11 @@ def publish_lock_bytes(root: Path, lock_path: Path, payload: bytes) -> None:
                     expected_identity=(
                         temp_capability.identity if linked_current_temp else None
                     ),
-                    expected_links=(2 if linked_current_temp else (1, 2)),
+                    expected_links=(
+                        (2 if parent_capability.windows else 1)
+                        if linked_current_temp
+                        else (1, 2)
+                    ),
                 )
                 if winner != payload:
                     raise CorpusDownloadError("lock_published_bytes_invalid")
@@ -1383,7 +1452,7 @@ def _read_entry_destination_digest(
                 )
             ):
                 raise CorpusDownloadError("entry_path_unsafe")
-            reader = os.fdopen(os.dup(handle), "rb")
+            reader = _posix_duplicate_file_object(handle, "rb")
 
         digest = hashlib.sha256()
         with reader:
@@ -1494,7 +1563,11 @@ def download_verified(url: str, target: Path, timeout: int, expected_sha256: str
                     parent,
                     target,
                     expected_identity=(temp.identity if linked_current_temp else None),
-                    expected_links=(2 if linked_current_temp else (1, 2)),
+                    expected_links=(
+                        (2 if parent.windows else 1)
+                        if linked_current_temp
+                        else (1, 2)
+                    ),
                 )
             except CorpusDownloadError:
                 raise
