@@ -1211,6 +1211,231 @@ print(json.dumps({
                 self.assertEqual([], result["temps"])
                 self.assertEqual(0, result["handle_delta"])
 
+    @unittest.skipUnless(os.name == "nt", "native Windows descriptor ownership contract")
+    def test_windows_fdopen_failures_close_exact_lock_and_entry_descriptors_without_gc(
+        self,
+    ) -> None:
+        cases = (
+            ("lock_temp", "lock_publish_io_error"),
+            ("entry_temp", "download_temp_io_error"),
+            ("lock_readback", "lock_publish_io_error"),
+            ("entry_readback", "publish_readback_io_error"),
+        )
+        for case, token in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                parent_path = Path(tmp) / "web-acquired"
+                parent_path.mkdir()
+                script = r'''
+import ctypes
+import errno
+import json
+import msvcrt
+import os
+from pathlib import Path
+import sys
+from unittest import mock
+from ctypes import wintypes
+from tools import download_public_pdf_corpus as corpus
+
+def handles():
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+    value = wintypes.DWORD()
+    if not kernel32.GetProcessHandleCount(kernel32.GetCurrentProcess(), ctypes.byref(value)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(value.value)
+
+parent_path = Path(sys.argv[1])
+case = sys.argv[2]
+private_path = r"C:\private\customer\fdopen"
+destination = parent_path / (corpus.LOCK_NAME if case.startswith("lock_") else "case.pdf")
+if case.endswith("readback"):
+    destination.write_bytes(b"synthetic readback bytes")
+parent = (
+    corpus._open_lock_parent_capability(parent_path)
+    if case.startswith("lock_")
+    else corpus._open_entry_parent_capability(destination)
+)
+baseline = handles()
+real_open_osfhandle = msvcrt.open_osfhandle
+descriptors = []
+temp = None
+
+def recorded_open_osfhandle(handle, flags):
+    descriptor = real_open_osfhandle(handle, flags)
+    descriptors.append(descriptor)
+    return descriptor
+
+outcome = None
+with mock.patch.object(msvcrt, "open_osfhandle", side_effect=recorded_open_osfhandle), \
+     mock.patch.object(corpus.os, "fdopen", side_effect=OSError(private_path)):
+    try:
+        if case == "lock_temp":
+            temp = corpus._create_lock_temp_capability(parent)
+        elif case == "entry_temp":
+            temp = corpus._create_entry_temp_capability(parent, destination)
+        elif case == "lock_readback":
+            corpus._read_existing_lock_bytes(parent, destination)
+        else:
+            corpus._read_entry_destination_digest(parent, destination)
+    except BaseException as exc:
+        outcome = str(exc)
+
+descriptor_open = []
+for descriptor in descriptors:
+    try:
+        os.fstat(descriptor)
+    except OSError as exc:
+        descriptor_open.append(exc.errno != errno.EBADF)
+    else:
+        descriptor_open.append(True)
+after = handles()
+temps = sorted(item.name for item in parent_path.glob("*.part*"))
+for descriptor, opened in zip(descriptors, descriptor_open):
+    if opened:
+        os.close(descriptor)
+if temp is not None:
+    if case == "lock_temp":
+        corpus._force_close_lock_temp_capability(temp)
+    else:
+        corpus._force_close_entry_temp_capability(temp)
+corpus._close_lock_parent_capability(parent)
+print(json.dumps({
+    "outcome": outcome,
+    "descriptors": len(descriptors),
+    "descriptor_open": descriptor_open,
+    "handle_delta": after - baseline,
+    "temps": temps,
+}))
+'''
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-B",
+                        "-c",
+                        script,
+                        str(parent_path),
+                        case,
+                    ],
+                    cwd=Path(__file__).resolve().parents[1],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=15,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                result = json.loads(completed.stdout.strip().splitlines()[-1])
+                self.assertEqual(token, result["outcome"])
+                self.assertNotIn("private", result["outcome"].lower())
+                self.assertEqual(1, result["descriptors"])
+                self.assertEqual([False], result["descriptor_open"])
+                self.assertEqual(0, result["handle_delta"])
+                self.assertEqual([], result["temps"])
+
+    @unittest.skipUnless(os.name == "nt", "native Windows readback ownership contract")
+    def test_windows_entry_readback_close_failure_is_terminal_and_leak_free(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent_path = Path(tmp) / "web-acquired"
+            parent_path.mkdir()
+            script = r'''
+import ctypes
+import json
+from pathlib import Path
+import sys
+from unittest import mock
+from ctypes import wintypes
+from tools import download_public_pdf_corpus as corpus
+
+def handles():
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+    value = wintypes.DWORD()
+    if not kernel32.GetProcessHandleCount(kernel32.GetCurrentProcess(), ctypes.byref(value)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(value.value)
+
+parent_path = Path(sys.argv[1])
+destination = parent_path / "case.pdf"
+payload = b"synthetic readback bytes"
+destination.write_bytes(payload)
+sentinel = parent_path / "foreign-sentinel.bin"
+sentinel.write_bytes(b"foreign bytes")
+parent = corpus._open_entry_parent_capability(destination)
+baseline = handles()
+real_open = corpus._open_windows_file_relative
+real_close = corpus._close_windows_handle
+opened = []
+failed_once = False
+
+def recorded_open(parent_handle, name):
+    handle = real_open(parent_handle, name)
+    opened.append(handle)
+    return handle
+
+def fail_first_exact_close(handle):
+    global failed_once
+    if opened and handle == opened[0] and not failed_once:
+        failed_once = True
+        raise OSError(r"C:\private\customer\readback-close")
+    return real_close(handle)
+
+outcome = None
+with mock.patch.object(corpus, "_open_windows_file_relative", side_effect=recorded_open), \
+     mock.patch.object(corpus, "_close_windows_handle", side_effect=fail_first_exact_close):
+    try:
+        digest = corpus._read_entry_destination_digest(parent, destination)
+        outcome = "success:" + str(digest)
+    except BaseException as exc:
+        outcome = str(exc)
+
+exact_open = False
+if opened:
+    try:
+        corpus._windows_handle_identity(opened[0])
+    except OSError:
+        exact_open = False
+    else:
+        exact_open = True
+after = handles()
+result = {
+    "outcome": outcome,
+    "failed_once": failed_once,
+    "opened": len(opened),
+    "exact_open": exact_open,
+    "handle_delta": after - baseline,
+    "destination": destination.read_bytes().hex(),
+    "sentinel": sentinel.read_bytes().hex(),
+    "temps": sorted(item.name for item in parent_path.glob("*.part*")),
+}
+if exact_open:
+    real_close(opened[0])
+corpus._close_lock_parent_capability(parent)
+print(json.dumps(result))
+'''
+            completed = subprocess.run(
+                [sys.executable, "-B", "-c", script, str(parent_path)],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            result = json.loads(completed.stdout.strip().splitlines()[-1])
+            self.assertEqual("publish_readback_io_error", result["outcome"])
+            self.assertNotIn("private", result["outcome"].lower())
+            self.assertTrue(result["failed_once"])
+            self.assertEqual(1, result["opened"])
+            self.assertFalse(result["exact_open"])
+            self.assertEqual(0, result["handle_delta"])
+            self.assertEqual(b"synthetic readback bytes".hex(), result["destination"])
+            self.assertEqual(b"foreign bytes".hex(), result["sentinel"])
+            self.assertEqual([], result["temps"])
+
     def test_posix_temp_creation_uses_anonymous_inode_from_retained_dirfd(self) -> None:
         parent = corpus._LockParentCapability(
             path=Path("/synthetic/web-acquired"),
@@ -1631,6 +1856,70 @@ print(json.dumps({
 
                 self.assertTrue(duplicate_closed, "the exact os.dup descriptor leaked")
                 self.assertEqual(baseline, after, "descriptor count drifted without GC")
+
+    @unittest.skipIf(os.name == "nt", "native POSIX readback ownership contract")
+    def test_native_posix_entry_readback_close_failure_is_terminal_and_leak_free(
+        self,
+    ) -> None:
+        private_path = "/private/customer/readback-close"
+        payload = b"synthetic readback bytes"
+        foreign = b"foreign bytes"
+        with tempfile.TemporaryDirectory() as tmp:
+            parent_path = Path(tmp) / "web-acquired"
+            parent_path.mkdir()
+            destination = parent_path / "case.pdf"
+            destination.write_bytes(payload)
+            sentinel = parent_path / "foreign-sentinel.bin"
+            sentinel.write_bytes(foreign)
+            parent = corpus._open_entry_parent_capability(destination)
+            baseline = len(os.listdir("/proc/self/fd"))
+            real_open = corpus.os.open
+            real_close = corpus.os.close
+            opened: list[int] = []
+            failed_once = False
+
+            def recorded_open(path, flags, *args, **kwargs):
+                descriptor = real_open(path, flags, *args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
+
+            def fail_first_exact_close(descriptor: int) -> None:
+                nonlocal failed_once
+                if opened and descriptor == opened[0] and not failed_once:
+                    failed_once = True
+                    raise OSError(private_path)
+                real_close(descriptor)
+
+            exact_open = False
+            try:
+                with mock.patch.object(
+                    corpus.os, "open", side_effect=recorded_open
+                ), mock.patch.object(
+                    corpus.os, "close", side_effect=fail_first_exact_close
+                ):
+                    with self.assertRaises(corpus.CorpusDownloadError) as raised:
+                        corpus._read_entry_destination_digest(parent, destination)
+
+                self.assertEqual("publish_readback_io_error", str(raised.exception))
+                self.assertNotIn("private", str(raised.exception).lower())
+                self.assertTrue(failed_once)
+                self.assertEqual(1, len(opened))
+                try:
+                    os.fstat(opened[0])
+                except OSError as exc:
+                    exact_open = exc.errno != errno.EBADF
+                else:
+                    exact_open = True
+                after = len(os.listdir("/proc/self/fd"))
+                self.assertFalse(exact_open, "the exact readback descriptor leaked")
+                self.assertEqual(baseline, after, "descriptor count drifted without GC")
+                self.assertEqual(payload, destination.read_bytes())
+                self.assertEqual(foreign, sentinel.read_bytes())
+                self.assertEqual([], list(parent_path.glob("*.part*")))
+            finally:
+                if exact_open:
+                    real_close(opened[0])
+                corpus._close_lock_parent_capability(parent)
 
     @unittest.skipIf(os.name == "nt", "native POSIX descriptor test")
     def test_native_posix_parent_rename_preserves_foreign_same_name_and_leaks_nothing(self) -> None:
