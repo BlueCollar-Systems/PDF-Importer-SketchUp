@@ -215,6 +215,13 @@ class LockPublicationTests(unittest.TestCase):
         self.assertTrue(callable(publisher), "publish_lock_bytes API is required")
         return publisher
 
+    def _no_replace_publisher(self):
+        publisher = getattr(corpus, "_publish_lock_temp_no_replace", None)
+        self.assertTrue(
+            callable(publisher), "handle-bound no-replace publisher API is required"
+        )
+        return publisher
+
     def _make_junction(self, link: Path, target: Path) -> None:
         if os.name != "nt":
             self.skipTest("Windows junction race contract")
@@ -332,13 +339,15 @@ class LockPublicationTests(unittest.TestCase):
             lock_parent.mkdir(parents=True)
             lock_path = lock_parent / corpus.LOCK_NAME
             publisher = self._publisher()
-            real_publish = corpus.os.link
+            real_publish = self._no_replace_publisher()
 
-            def race_publish(source: object, destination: object) -> None:
+            def race_publish(temp_cap: object, parent_cap: object, destination: object) -> None:
                 Path(destination).write_bytes(winner)
-                real_publish(source, destination)
+                real_publish(temp_cap, parent_cap, destination)
 
-            with mock.patch.object(corpus.os, "link", side_effect=race_publish):
+            with mock.patch.object(
+                corpus, "_publish_lock_temp_no_replace", side_effect=race_publish
+            ):
                 with self.assertRaisesRegex(Exception, "lock_publish_conflict"):
                     publisher(root, lock_path, candidate)
 
@@ -355,21 +364,23 @@ class LockPublicationTests(unittest.TestCase):
             publisher = self._publisher()
             events: list[str] = []
             real_fsync = corpus.os.fsync
-            real_publish = corpus.os.link
+            real_publish = self._no_replace_publisher()
 
             def observed_fsync(fd: int) -> None:
                 events.append("fsync")
                 real_fsync(fd)
 
-            def observed_publish(source: object, destination: object) -> None:
+            def observed_publish(
+                temp_cap: object, parent_cap: object, destination: object
+            ) -> None:
                 events.append("publish")
-                self.assertEqual(candidate, Path(source).read_bytes())
+                self.assertEqual(candidate, Path(temp_cap.path).read_bytes())
                 self.assertFalse(Path(destination).exists())
-                real_publish(source, destination)
+                real_publish(temp_cap, parent_cap, destination)
 
             with mock.patch.object(corpus.os, "fsync", side_effect=observed_fsync), mock.patch.object(
-                corpus.os,
-                "link",
+                corpus,
+                "_publish_lock_temp_no_replace",
                 side_effect=observed_publish,
             ):
                 publisher(root, lock_path, candidate)
@@ -456,31 +467,35 @@ class LockPublicationTests(unittest.TestCase):
             outside.mkdir()
             lock_path = parent / corpus.LOCK_NAME
             publisher = self._publisher()
-            real_link = corpus.os.link
+            real_publish = self._no_replace_publisher()
             attempted = False
             swapped = False
             blocked = False
             foreign_temp: Path | None = None
 
-            def attacked_link(source: object, destination: object) -> None:
+            def attacked_link(
+                temp_cap: object, parent_cap: object, destination: object
+            ) -> None:
                 nonlocal attempted, swapped, blocked, foreign_temp
                 attempted = True
-                source_name = Path(source).name
+                source_name = Path(temp_cap.path).name
                 try:
                     os.replace(parent, displaced)
                 except OSError:
                     blocked = True
-                    real_link(source, destination)
+                    real_publish(temp_cap, parent_cap, destination)
                     return
                 swapped = True
                 self._make_junction(parent, outside)
                 foreign_temp = outside / source_name
                 foreign_temp.write_bytes(foreign)
-                real_link(source, destination)
+                real_publish(temp_cap, parent_cap, destination)
 
             outcome = None
             try:
-                with mock.patch.object(corpus.os, "link", side_effect=attacked_link):
+                with mock.patch.object(
+                    corpus, "_publish_lock_temp_no_replace", side_effect=attacked_link
+                ):
                     try:
                         publisher(root, lock_path, candidate)
                     except corpus.CorpusDownloadError as exc:
