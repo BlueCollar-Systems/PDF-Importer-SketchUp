@@ -45,6 +45,21 @@ def _manifest_entry(**overrides: object) -> dict:
     return entry
 
 
+def _write_manifest(path: Path, entries: list[dict]) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "bcs.public_pdf_corpus/1.1",
+                "updated": "2026-08-09",
+                "default_root": "__private_validation_assets_not_configured__",
+                "description": "Synthetic test manifest.",
+                "entries": entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class ManifestContractTests(unittest.TestCase):
     def _load(self, entry: dict) -> dict:
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,6 +199,160 @@ class RootBoundaryTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(SystemExit, "explicit --root"):
                 corpus.resolve_root(manifest, None)
+
+
+class LockPublicationTests(unittest.TestCase):
+    def _link_or_skip(self, link: Path, target: Path, *, directory: bool) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=directory)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"filesystem links unavailable: {type(exc).__name__}")
+
+    def _publisher(self):
+        publisher = getattr(corpus, "publish_lock_bytes", None)
+        self.assertTrue(callable(publisher), "publish_lock_bytes API is required")
+        return publisher
+
+    def test_parent_link_outside_root_fails_before_network_or_lock_write(self) -> None:
+        payload = b"%PDF-1.7\nsynthetic\n%%EOF\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            root = work / "corpus"
+            outside = work / "outside"
+            root.mkdir()
+            outside.mkdir()
+            sentinel = outside / "sentinel.bin"
+            sentinel.write_bytes(b"outside sentinel")
+            self._link_or_skip(root / "web-acquired", outside, directory=True)
+            manifest = work / "manifest.json"
+            _write_manifest(
+                manifest,
+                [_manifest_entry(expected_sha256=_digest(payload))],
+            )
+
+            with mock.patch.object(
+                corpus.urllib.request,
+                "urlopen",
+                return_value=_Response(payload),
+            ) as urlopen:
+                result = corpus.main(
+                    ["--manifest", str(manifest), "--root", str(root)]
+                )
+
+            self.assertEqual(1, result)
+            urlopen.assert_not_called()
+            self.assertEqual(b"outside sentinel", sentinel.read_bytes())
+            self.assertFalse((outside / corpus.LOCK_NAME).exists())
+            self.assertTrue((root / "web-acquired").is_symlink())
+
+    def test_leaf_link_and_broken_link_fail_closed_without_touching_referent(self) -> None:
+        for broken in (False, True):
+            with self.subTest(broken=broken), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                root = work / "corpus"
+                lock_parent = root / "web-acquired"
+                lock_parent.mkdir(parents=True)
+                referent = work / "outside.lock"
+                if not broken:
+                    referent.write_bytes(b"foreign lock referent")
+                lock_path = lock_parent / corpus.LOCK_NAME
+                self._link_or_skip(lock_path, referent, directory=False)
+                manifest = work / "manifest.json"
+                _write_manifest(manifest, [])
+
+                result = corpus.main(
+                    ["--manifest", str(manifest), "--root", str(root)]
+                )
+
+                self.assertEqual(1, result)
+                self.assertTrue(lock_path.is_symlink())
+                if broken:
+                    self.assertFalse(referent.exists())
+                else:
+                    self.assertEqual(b"foreign lock referent", referent.read_bytes())
+
+    def test_foreign_regular_lock_blocks_before_network_and_target_creation(self) -> None:
+        payload = b"%PDF-1.7\nsynthetic\n%%EOF\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            root = work / "corpus"
+            lock_parent = root / "web-acquired"
+            lock_parent.mkdir(parents=True)
+            lock_path = lock_parent / corpus.LOCK_NAME
+            foreign = b"worker-owned lock bytes"
+            lock_path.write_bytes(foreign)
+            manifest = work / "manifest.json"
+            entry = _manifest_entry(expected_sha256=_digest(payload))
+            _write_manifest(manifest, [entry])
+
+            with mock.patch.object(
+                corpus.urllib.request,
+                "urlopen",
+                return_value=_Response(payload),
+            ) as urlopen:
+                result = corpus.main(
+                    ["--manifest", str(manifest), "--root", str(root)]
+                )
+
+            self.assertEqual(1, result)
+            urlopen.assert_not_called()
+            self.assertEqual(foreign, lock_path.read_bytes())
+            self.assertFalse((root / entry["local_path"]).exists())
+
+    def test_lock_race_winner_is_preserved_and_current_temp_is_removed(self) -> None:
+        candidate = b'{"schema":"synthetic"}\n'
+        winner = b"foreign race winner"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "corpus"
+            lock_parent = root / "web-acquired"
+            lock_parent.mkdir(parents=True)
+            lock_path = lock_parent / corpus.LOCK_NAME
+            publisher = self._publisher()
+            real_publish = corpus.os.link
+
+            def race_publish(source: object, destination: object) -> None:
+                Path(destination).write_bytes(winner)
+                real_publish(source, destination)
+
+            with mock.patch.object(corpus.os, "link", side_effect=race_publish):
+                with self.assertRaisesRegex(Exception, "lock_publish_conflict"):
+                    publisher(root, lock_path, candidate)
+
+            self.assertEqual(winner, lock_path.read_bytes())
+            self.assertEqual([], list(lock_parent.glob("*.part*")))
+
+    def test_new_lock_is_fsynced_before_atomic_no_replace_publication(self) -> None:
+        candidate = b'{"schema":"synthetic","complete":true}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "corpus"
+            lock_parent = root / "web-acquired"
+            lock_parent.mkdir(parents=True)
+            lock_path = lock_parent / corpus.LOCK_NAME
+            publisher = self._publisher()
+            events: list[str] = []
+            real_fsync = corpus.os.fsync
+            real_publish = corpus.os.link
+
+            def observed_fsync(fd: int) -> None:
+                events.append("fsync")
+                real_fsync(fd)
+
+            def observed_publish(source: object, destination: object) -> None:
+                events.append("publish")
+                self.assertEqual(candidate, Path(source).read_bytes())
+                self.assertFalse(Path(destination).exists())
+                real_publish(source, destination)
+
+            with mock.patch.object(corpus.os, "fsync", side_effect=observed_fsync), mock.patch.object(
+                corpus.os,
+                "link",
+                side_effect=observed_publish,
+            ):
+                publisher(root, lock_path, candidate)
+
+            self.assertEqual(["fsync", "publish"], events)
+            self.assertEqual(candidate, lock_path.read_bytes())
+            self.assertEqual([], list(lock_parent.glob("*.part*")))
 
 
 if __name__ == "__main__":
