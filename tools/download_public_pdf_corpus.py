@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -44,7 +45,7 @@ class CorpusDownloadError(RuntimeError):
 
 
 @dataclass
-class _LockParentCapability:
+class _ParentCapability:
     path: Path
     handle: int
     identity: tuple[int, ...]
@@ -53,13 +54,19 @@ class _LockParentCapability:
 
 
 @dataclass
-class _LockTempCapability:
+class _TempCapability:
     path: Path
     handle: object
     identity: tuple[int, ...]
-    parent: _LockParentCapability
+    parent: _ParentCapability
     native_handle: int | None = None
     closed: bool = False
+
+
+# Compatibility names retained for the focused lock-publication contract.  The
+# same verified capabilities now also protect downloaded corpus entries.
+_LockParentCapability = _ParentCapability
+_LockTempCapability = _TempCapability
 
 
 _FILE_LIST_DIRECTORY = 0x0001
@@ -79,6 +86,12 @@ _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_LINK_INFO_CLASS = 11
 _FILE_DISPOSITION_INFO_CLASS = 4
+_FILE_CREATE = 2
+_FILE_OPEN = 1
+_FILE_NON_DIRECTORY_FILE = 0x00000040
+_FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
+_FILE_OPEN_REPARSE_POINT = 0x00200000
+_OBJ_CASE_INSENSITIVE = 0x00000040
 
 
 def _stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
@@ -88,6 +101,22 @@ def _stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
         int(stat.S_IFMT(metadata.st_mode)),
         int(metadata.st_nlink),
         int(metadata.st_size),
+    )
+
+
+def _immutable_stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(stat.S_IFMT(metadata.st_mode)),
+    )
+
+
+def _immutable_windows_directory_identity(identity: tuple[int, ...]) -> tuple[int, ...]:
+    return (
+        identity[0],
+        identity[1],
+        identity[2] & (_FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT),
     )
 
 
@@ -195,37 +224,129 @@ def _open_windows_lock_parent(path: Path) -> int:
     return int(handle)
 
 
-def _create_windows_lock_temp(path: Path) -> int:
+def _nt_relative_file_handle(
+    parent_handle: int,
+    name: str,
+    *,
+    create: bool,
+    desired_access: int,
+    share_access: int,
+) -> int:
     from ctypes import wintypes
 
-    function = _windows_kernel32().CreateFileW
+    if not name or Path(name).name != name or "/" in name or "\\" in name:
+        raise CorpusDownloadError("lock_path_unsafe")
+
+    class _UNICODE_STRING(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class _OBJECT_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(_UNICODE_STRING)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class _IO_STATUS_BLOCK(ctypes.Structure):
+        _fields_ = [
+            ("Status", ctypes.c_void_p),
+            ("Information", ctypes.c_size_t),
+        ]
+
+    buffer = ctypes.create_unicode_buffer(name)
+    encoded_length = len(name.encode("utf-16-le"))
+    unicode_name = _UNICODE_STRING(
+        encoded_length,
+        encoded_length + 2,
+        ctypes.cast(buffer, wintypes.LPWSTR),
+    )
+    attributes = _OBJECT_ATTRIBUTES(
+        ctypes.sizeof(_OBJECT_ATTRIBUTES),
+        wintypes.HANDLE(parent_handle),
+        ctypes.pointer(unicode_name),
+        _OBJ_CASE_INSENSITIVE,
+        None,
+        None,
+    )
+    io_status = _IO_STATUS_BLOCK()
+    handle = wintypes.HANDLE()
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    function = ntdll.NtCreateFile
     function.argtypes = [
-        wintypes.LPCWSTR,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(_OBJECT_ATTRIBUTES),
+        ctypes.POINTER(_IO_STATUS_BLOCK),
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
         wintypes.DWORD,
         wintypes.DWORD,
         wintypes.LPVOID,
         wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
     ]
-    function.restype = wintypes.HANDLE
-    handle = function(
-        str(path),
-        _GENERIC_READ
-        | _GENERIC_WRITE
-        | _DELETE
-        | _FILE_READ_ATTRIBUTES
-        | _SYNCHRONIZE,
-        _FILE_SHARE_READ,
+    function.restype = ctypes.c_long
+    status = int(function(
+        ctypes.byref(handle),
+        desired_access,
+        ctypes.byref(attributes),
+        ctypes.byref(io_status),
         None,
-        _CREATE_NEW,
-        _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+        _FILE_ATTRIBUTE_NORMAL,
+        share_access,
+        _FILE_CREATE if create else _FILE_OPEN,
+        _FILE_NON_DIRECTORY_FILE
+        | _FILE_SYNCHRONOUS_IO_NONALERT
+        | _FILE_OPEN_REPARSE_POINT,
         None,
+        0,
+    ))
+    if status < 0:
+        converter = ntdll.RtlNtStatusToDosError
+        converter.argtypes = [ctypes.c_long]
+        converter.restype = wintypes.ULONG
+        error = int(converter(status))
+        if create and error in (80, 183):
+            raise FileExistsError(error, "verified_temp_conflict")
+        if not create and error in (2, 3):
+            raise FileNotFoundError(error, "verified_file_missing")
+        raise ctypes.WinError(error)
+    if handle.value is None:
+        raise OSError("verified_native_handle_missing")
+    return int(handle.value)
+
+
+def _create_windows_temp_relative(parent_handle: int, name: str) -> int:
+    return _nt_relative_file_handle(
+        parent_handle,
+        name,
+        create=True,
+        desired_access=(
+            _GENERIC_READ
+            | _GENERIC_WRITE
+            | _DELETE
+            | _FILE_READ_ATTRIBUTES
+            | _SYNCHRONIZE
+        ),
+        share_access=_FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
     )
-    invalid = wintypes.HANDLE(-1).value
-    if handle == invalid:
-        raise ctypes.WinError(ctypes.get_last_error())
-    return int(handle)
+
+
+def _open_windows_file_relative(parent_handle: int, name: str) -> int:
+    return _nt_relative_file_handle(
+        parent_handle,
+        name,
+        create=False,
+        desired_access=_GENERIC_READ | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+        share_access=_FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+    )
 
 
 def _duplicate_windows_handle(handle: int) -> int:
@@ -271,6 +392,18 @@ def _windows_temp_file_object(handle: int):
     return os.fdopen(descriptor, "w+b")
 
 
+def _windows_read_file_object(handle: int):
+    import msvcrt
+
+    duplicate = _duplicate_windows_handle(handle)
+    try:
+        descriptor = msvcrt.open_osfhandle(duplicate, os.O_BINARY | os.O_RDONLY)
+    except Exception:
+        _close_windows_handle(duplicate)
+        raise
+    return os.fdopen(descriptor, "rb")
+
+
 def _mark_windows_handle_for_deletion(handle: int) -> None:
     from ctypes import wintypes
 
@@ -293,14 +426,6 @@ def _mark_windows_handle_for_deletion(handle: int) -> None:
         ctypes.sizeof(information),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def load_manifest(path: Path) -> dict:
@@ -421,27 +546,32 @@ def _contained_lock_parent(root: Path, *, create: bool) -> Path:
     return parent
 
 
-def _open_lock_parent_capability(parent: Path) -> _LockParentCapability:
-    """Pin one verified real directory while omitting delete sharing."""
+def _open_parent_capability(
+    parent: Path,
+    *,
+    path_io_error: str,
+    path_unsafe_error: str,
+) -> _ParentCapability:
+    """Pin one verified real directory while omitting Windows delete sharing."""
     try:
         metadata = os.lstat(parent)
         if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-            raise CorpusDownloadError("lock_path_unsafe")
+            raise CorpusDownloadError(path_unsafe_error)
         if os.name == "nt":
             handle = _open_windows_lock_parent(parent)
             try:
-                identity = _windows_handle_identity(handle)
-                attributes = identity[2]
+                raw_identity = _windows_handle_identity(handle)
+                identity = _immutable_windows_directory_identity(raw_identity)
+                attributes = raw_identity[2]
                 if (
                     not attributes & _FILE_ATTRIBUTE_DIRECTORY
                     or attributes & FILE_ATTRIBUTE_REPARSE_POINT
                     or not _same_windows_path(_windows_final_path(handle), parent)
                 ):
-                    raise CorpusDownloadError("lock_path_unsafe")
-                path_identity = _stat_identity(metadata)
-                if path_identity[1] != identity[1]:
-                    raise CorpusDownloadError("lock_path_unsafe")
-                return _LockParentCapability(parent, handle, identity, True)
+                    raise CorpusDownloadError(path_unsafe_error)
+                if int(metadata.st_ino) != identity[1]:
+                    raise CorpusDownloadError(path_unsafe_error)
+                return _ParentCapability(parent, handle, identity, True)
             except Exception:
                 try:
                     _close_windows_handle(handle)
@@ -453,43 +583,64 @@ def _open_lock_parent_capability(parent: Path) -> _LockParentCapability:
         handle = os.open(parent, flags)
         try:
             identity = _stat_identity(os.fstat(handle))
-            if identity != _stat_identity(metadata):
-                raise CorpusDownloadError("lock_path_unsafe")
-            return _LockParentCapability(parent, handle, identity, False)
+            if identity[:3] != _immutable_stat_identity(metadata):
+                raise CorpusDownloadError(path_unsafe_error)
+            return _ParentCapability(parent, handle, identity, False)
         except Exception:
             os.close(handle)
             raise
     except CorpusDownloadError:
         raise
     except OSError as exc:
-        raise CorpusDownloadError("lock_path_io_error") from exc
+        raise CorpusDownloadError(path_io_error) from exc
 
 
-def _validate_lock_parent_capability(capability: _LockParentCapability) -> None:
-    if not isinstance(capability, _LockParentCapability) or capability.closed:
-        raise CorpusDownloadError("lock_path_unsafe")
+def _open_lock_parent_capability(parent: Path) -> _LockParentCapability:
+    return _open_parent_capability(
+        parent,
+        path_io_error="lock_path_io_error",
+        path_unsafe_error="lock_path_unsafe",
+    )
+
+
+def _validate_parent_capability(
+    capability: _ParentCapability,
+    *,
+    path_io_error: str,
+    path_unsafe_error: str,
+) -> None:
+    if not isinstance(capability, _ParentCapability) or capability.closed:
+        raise CorpusDownloadError(path_unsafe_error)
     try:
-        metadata = os.lstat(capability.path)
-        if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-            raise CorpusDownloadError("lock_path_unsafe")
         if capability.windows:
+            metadata = os.lstat(capability.path)
+            if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+                raise CorpusDownloadError(path_unsafe_error)
+            current = _immutable_windows_directory_identity(
+                _windows_handle_identity(capability.handle)
+            )
             if (
-                _windows_handle_identity(capability.handle) != capability.identity
+                current != capability.identity
                 or not _same_windows_path(
                     _windows_final_path(capability.handle), capability.path
                 )
-                or _stat_identity(metadata)[1] != capability.identity[1]
+                or int(metadata.st_ino) != capability.identity[1]
             ):
-                raise CorpusDownloadError("lock_path_unsafe")
-        elif (
-            _stat_identity(os.fstat(capability.handle))[:3] != capability.identity[:3]
-            or _stat_identity(metadata)[:3] != capability.identity[:3]
-        ):
-            raise CorpusDownloadError("lock_path_unsafe")
+                raise CorpusDownloadError(path_unsafe_error)
+        elif _immutable_stat_identity(os.fstat(capability.handle)) != capability.identity[:3]:
+            raise CorpusDownloadError(path_unsafe_error)
     except CorpusDownloadError:
         raise
     except OSError as exc:
-        raise CorpusDownloadError("lock_path_io_error") from exc
+        raise CorpusDownloadError(path_io_error) from exc
+
+
+def _validate_lock_parent_capability(capability: _LockParentCapability) -> None:
+    _validate_parent_capability(
+        capability,
+        path_io_error="lock_path_io_error",
+        path_unsafe_error="lock_path_unsafe",
+    )
 
 
 def _close_lock_parent_capability(capability: _LockParentCapability) -> None:
@@ -504,69 +655,117 @@ def _close_lock_parent_capability(capability: _LockParentCapability) -> None:
         capability.closed = True
 
 
-def _create_lock_temp_capability(
-    parent: _LockParentCapability,
-) -> _LockTempCapability:
-    _validate_lock_parent_capability(parent)
+def _create_temp_capability(
+    parent: _ParentCapability,
+    *,
+    prefix: str,
+    validate_parent,
+    path_unsafe_error: str,
+    temp_io_error: str,
+) -> _TempCapability:
+    native_handle: int | None = None
+    file_handle = None
+    descriptor: int | None = None
+    name: str | None = None
+    identity: tuple[int, ...] | None = None
     try:
         if parent.windows:
-            native_handle = None
             for _attempt in range(32):
-                path = parent.path / (
-                    f".{LOCK_NAME}.{uuid.uuid4().hex}.part"
-                )
+                name = f"{prefix}{uuid.uuid4().hex}.part"
                 try:
-                    native_handle = _create_windows_lock_temp(path)
+                    native_handle = _create_windows_temp_relative(parent.handle, name)
                     break
                 except FileExistsError:
                     continue
             if native_handle is None:
-                raise CorpusDownloadError("lock_publish_conflict")
-            try:
-                identity = _windows_handle_identity(native_handle)
-                attributes = identity[2]
-                if (
-                    attributes & (_FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
-                    or identity[3] != 1
-                    or not _same_windows_path(_windows_final_path(native_handle), path)
-                ):
-                    raise CorpusDownloadError("lock_path_unsafe")
-                handle = _windows_temp_file_object(native_handle)
-                if int(os.fstat(handle.fileno()).st_ino) != identity[1]:
-                    raise CorpusDownloadError("lock_path_unsafe")
-                _validate_lock_parent_capability(parent)
-                return _LockTempCapability(
-                    path, handle, identity, parent, native_handle=native_handle
-                )
-            except Exception:
-                try:
-                    _mark_windows_handle_for_deletion(native_handle)
-                except Exception:
-                    pass
-                try:
-                    _close_windows_handle(native_handle)
-                except Exception:
-                    pass
-                raise
+                raise CorpusDownloadError(temp_io_error)
+            identity = _windows_handle_identity(native_handle)
+            attributes = identity[2]
+            if (
+                attributes & (_FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                or identity[3] != 1
+            ):
+                raise CorpusDownloadError(path_unsafe_error)
+            file_handle = _windows_temp_file_object(native_handle)
+            if int(os.fstat(file_handle.fileno()).st_ino) != identity[1]:
+                raise CorpusDownloadError(path_unsafe_error)
+            validate_parent(parent)
+            return _TempCapability(
+                parent.path / name,
+                file_handle,
+                identity,
+                parent,
+                native_handle=native_handle,
+            )
 
-        handle = tempfile.NamedTemporaryFile(
-            mode="w+b",
-            dir=str(parent.path),
-            prefix=f".{LOCK_NAME}.",
-            suffix=".part",
-            delete=True,
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0)
         )
-        path = Path(handle.name)
-        identity = _stat_identity(os.fstat(handle.fileno()))
+        for _attempt in range(32):
+            name = f"{prefix}{uuid.uuid4().hex}.part"
+            try:
+                descriptor = os.open(name, flags, 0o600, dir_fd=parent.handle)
+                break
+            except FileExistsError:
+                continue
+        if descriptor is None:
+            raise CorpusDownloadError(temp_io_error)
+        file_handle = os.fdopen(descriptor, "w+b")
+        descriptor = None
+        identity = _stat_identity(os.fstat(file_handle.fileno()))
         if identity[2] != stat.S_IFREG or identity[3] != 1:
-            handle.close()
-            raise CorpusDownloadError("lock_path_unsafe")
-        _validate_lock_parent_capability(parent)
-        return _LockTempCapability(path, handle, identity, parent)
-    except CorpusDownloadError:
+            raise CorpusDownloadError(path_unsafe_error)
+        validate_parent(parent)
+        return _TempCapability(parent.path / name, file_handle, identity, parent)
+    except Exception as exc:
+        if file_handle is not None:
+            try:
+                file_handle.close()
+            except Exception:
+                pass
+        elif descriptor is not None:
+            try:
+                os.close(descriptor)
+            except Exception:
+                pass
+        if native_handle is not None:
+            try:
+                _mark_windows_handle_for_deletion(native_handle)
+            except Exception:
+                pass
+            try:
+                _close_windows_handle(native_handle)
+            except Exception:
+                pass
+        elif name is not None:
+            try:
+                metadata = os.stat(name, dir_fd=parent.handle, follow_symlinks=False)
+                if identity is None or _immutable_stat_identity(metadata) == identity[:3]:
+                    os.unlink(name, dir_fd=parent.handle)
+            except Exception:
+                pass
+        if isinstance(exc, CorpusDownloadError):
+            raise
+        if isinstance(exc, OSError):
+            raise CorpusDownloadError(temp_io_error) from exc
         raise
-    except OSError as exc:
-        raise CorpusDownloadError("lock_publish_io_error") from exc
+
+
+def _create_lock_temp_capability(
+    parent: _LockParentCapability,
+) -> _LockTempCapability:
+    _validate_lock_parent_capability(parent)
+    return _create_temp_capability(
+        parent,
+        prefix=f".{LOCK_NAME}.",
+        validate_parent=_validate_lock_parent_capability,
+        path_unsafe_error="lock_path_unsafe",
+        temp_io_error="lock_publish_io_error",
+    )
 
 
 def _write_lock_temp_capability(temp: _LockTempCapability, payload: bytes) -> None:
@@ -627,15 +826,19 @@ def _windows_file_handle_from_temp(temp: _LockTempCapability) -> int:
     return temp.native_handle
 
 
-def _publish_lock_temp_no_replace(
-    temp: _LockTempCapability,
-    parent: _LockParentCapability,
+def _publish_temp_no_replace(
+    temp: _TempCapability,
+    parent: _ParentCapability,
     destination: Path,
+    *,
+    validate_parent,
+    path_unsafe_error: str,
+    publish_io_error: str,
 ) -> None:
     """Create the final hard link from the retained source handle, never replacing."""
-    _validate_lock_parent_capability(parent)
-    if destination != parent.path / LOCK_NAME or temp.parent is not parent:
-        raise CorpusDownloadError("lock_path_unsafe")
+    validate_parent(parent)
+    if destination.parent != parent.path or temp.parent is not parent:
+        raise CorpusDownloadError(path_unsafe_error)
     try:
         if parent.windows:
             from ctypes import wintypes
@@ -702,33 +905,86 @@ def _publish_lock_temp_no_replace(
     except CorpusDownloadError:
         raise
     except OSError as exc:
-        raise CorpusDownloadError("lock_publish_io_error") from exc
+        raise CorpusDownloadError(publish_io_error) from exc
 
 
-def _dispose_lock_temp_capability(temp: _LockTempCapability) -> None:
+def _publish_lock_temp_no_replace(
+    temp: _LockTempCapability,
+    parent: _LockParentCapability,
+    destination: Path,
+) -> None:
+    _publish_temp_no_replace(
+        temp,
+        parent,
+        destination,
+        validate_parent=_validate_lock_parent_capability,
+        path_unsafe_error="lock_path_unsafe",
+        publish_io_error="lock_publish_io_error",
+    )
+
+
+def _dispose_temp_capability(temp: _TempCapability, *, cleanup_io_error: str) -> None:
     """Delete only the current run's already-open temp through its file handle."""
     if temp.closed:
         return
+    failure: BaseException | None = None
     try:
         if temp.parent.windows:
             if temp.native_handle is None:
-                raise CorpusDownloadError("lock_cleanup_io_error")
-            temp.handle.close()
-            _mark_windows_handle_for_deletion(temp.native_handle)
-            _close_windows_handle(temp.native_handle)
-            temp.native_handle = None
+                raise CorpusDownloadError(cleanup_io_error)
+            try:
+                temp.handle.close()
+            except BaseException as exc:
+                failure = exc
+            try:
+                _mark_windows_handle_for_deletion(temp.native_handle)
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            try:
+                _close_windows_handle(temp.native_handle)
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            finally:
+                temp.native_handle = None
         else:
-            temp.handle.close()
-        temp.closed = True
-        if temp.path.exists():
-            raise CorpusDownloadError("lock_cleanup_io_error")
+            name = temp.path.name
+            try:
+                metadata = os.stat(
+                    name,
+                    dir_fd=temp.parent.handle,
+                    follow_symlinks=False,
+                )
+                if (
+                    _immutable_stat_identity(metadata) != temp.identity[:3]
+                    or not stat.S_ISREG(metadata.st_mode)
+                ):
+                    raise CorpusDownloadError(cleanup_io_error)
+                os.unlink(name, dir_fd=temp.parent.handle)
+            except BaseException as exc:
+                failure = exc
+            try:
+                temp.handle.close()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+        temp.closed = failure is None
+        if failure is not None:
+            if isinstance(failure, CorpusDownloadError):
+                raise failure
+            raise CorpusDownloadError(cleanup_io_error) from failure
     except CorpusDownloadError:
         raise
-    except OSError as exc:
-        raise CorpusDownloadError("lock_cleanup_io_error") from exc
+    except BaseException as exc:
+        raise CorpusDownloadError(cleanup_io_error) from exc
 
 
-def _force_close_lock_temp_capability(temp: _LockTempCapability) -> None:
+def _dispose_lock_temp_capability(temp: _LockTempCapability) -> None:
+    _dispose_temp_capability(temp, cleanup_io_error="lock_cleanup_io_error")
+
+
+def _force_close_temp_capability(temp: _TempCapability) -> None:
     if temp.closed:
         return
     try:
@@ -737,47 +993,30 @@ def _force_close_lock_temp_capability(temp: _LockTempCapability) -> None:
         pass
     if temp.native_handle is not None:
         try:
+            _mark_windows_handle_for_deletion(temp.native_handle)
+        except Exception:
+            pass
+        try:
             _close_windows_handle(temp.native_handle)
         except Exception:
             pass
         temp.native_handle = None
+    elif not temp.parent.windows:
+        try:
+            metadata = os.stat(
+                temp.path.name,
+                dir_fd=temp.parent.handle,
+                follow_symlinks=False,
+            )
+            if _immutable_stat_identity(metadata) == temp.identity[:3]:
+                os.unlink(temp.path.name, dir_fd=temp.parent.handle)
+        except Exception:
+            pass
     temp.closed = True
 
 
-def _open_windows_lock_file(path: Path, *, share_all: bool = False) -> int:
-    from ctypes import wintypes
-
-    function = _windows_kernel32().CreateFileW
-    function.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
-    ]
-    function.restype = wintypes.HANDLE
-    handle = function(
-        str(path),
-        _GENERIC_READ | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
-        (
-            _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
-            if share_all
-            else _FILE_SHARE_READ
-        ),
-        None,
-        _OPEN_EXISTING,
-        _FILE_FLAG_OPEN_REPARSE_POINT,
-        None,
-    )
-    invalid = wintypes.HANDLE(-1).value
-    if handle == invalid:
-        error = ctypes.get_last_error()
-        if error in (2, 3):
-            raise FileNotFoundError(error, "lock_missing")
-        raise ctypes.WinError(error)
-    return int(handle)
+def _force_close_lock_temp_capability(temp: _LockTempCapability) -> None:
+    _force_close_temp_capability(temp)
 
 
 def _read_existing_lock_bytes(
@@ -785,24 +1024,36 @@ def _read_existing_lock_bytes(
     destination: Path,
     *,
     expected_identity: tuple[int, ...] | None = None,
+    expected_links: int | tuple[int, ...] = 1,
 ) -> bytes | None:
     _validate_lock_parent_capability(parent)
+    allowed_links = (
+        (expected_links,) if isinstance(expected_links, int) else tuple(expected_links)
+    )
     try:
-        metadata = _lstat_or_none(destination)
-        if metadata is None:
-            return None
-        if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
-            raise CorpusDownloadError("lock_path_unsafe")
         if parent.windows:
-            handle = _open_windows_lock_file(
-                destination, share_all=expected_identity is not None
-            )
+            metadata = _lstat_or_none(destination)
+            if metadata is None:
+                return None
+            if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
+                raise CorpusDownloadError("lock_path_unsafe")
+            handle = None
+            for attempt in range(50):
+                try:
+                    handle = _open_windows_file_relative(parent.handle, destination.name)
+                    break
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) not in (32, 33) or attempt == 49:
+                        raise
+                    time.sleep(0.01)
+            if handle is None:
+                raise CorpusDownloadError("lock_publish_io_error")
             try:
                 identity = _windows_handle_identity(handle)
                 attributes = identity[2]
                 if (
                     attributes & (_FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
-                    or identity[3] != (2 if expected_identity is not None else 1)
+                    or identity[3] not in allowed_links
                     or not _same_windows_path(_windows_final_path(handle), destination)
                     or (
                         expected_identity is not None
@@ -810,8 +1061,9 @@ def _read_existing_lock_bytes(
                     )
                 ):
                     raise CorpusDownloadError("lock_path_unsafe")
-                with destination.open("rb") as reader:
-                    if int(os.fstat(reader.fileno()).st_ino) != identity[1]:
+                with _windows_read_file_object(handle) as reader:
+                    opened = os.fstat(reader.fileno())
+                    if int(opened.st_ino) != identity[1]:
                         raise CorpusDownloadError("lock_path_unsafe")
                     return reader.read()
             finally:
@@ -821,7 +1073,14 @@ def _read_existing_lock_bytes(
         handle = os.open(destination.name, flags, dir_fd=parent.handle)
         try:
             opened = os.fstat(handle)
-            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink not in allowed_links
+                or (
+                    expected_identity is not None
+                    and _immutable_stat_identity(opened) != expected_identity[:3]
+                )
+            ):
                 raise CorpusDownloadError("lock_path_unsafe")
             with os.fdopen(os.dup(handle), "rb") as reader:
                 return reader.read()
@@ -856,12 +1115,15 @@ def publish_lock_bytes(root: Path, lock_path: Path, payload: bytes) -> None:
     primary_error: CorpusDownloadError | None = None
     cleanup_error: CorpusDownloadError | None = None
     published = False
+    owned_link_identity: tuple[int, ...] | None = None
     try:
         parent = _contained_lock_parent(root, create=False)
         if lock_path != parent / LOCK_NAME:
             raise CorpusDownloadError("lock_path_unsafe")
         parent_capability = _open_lock_parent_capability(parent)
-        existing = _read_existing_lock_bytes(parent_capability, lock_path)
+        existing = _read_existing_lock_bytes(
+            parent_capability, lock_path, expected_links=(1, 2)
+        )
         if existing is not None:
             if existing != payload:
                 raise CorpusDownloadError("lock_publish_conflict")
@@ -876,7 +1138,9 @@ def publish_lock_bytes(root: Path, lock_path: Path, payload: bytes) -> None:
                 raise CorpusDownloadError("lock_path_unsafe")
             _validate_lock_parent_capability(parent_capability)
 
-            existing = _read_existing_lock_bytes(parent_capability, lock_path)
+            existing = _read_existing_lock_bytes(
+                parent_capability, lock_path, expected_links=(1, 2)
+            )
             if existing is not None:
                 if existing != payload:
                     raise CorpusDownloadError("lock_publish_conflict")
@@ -888,8 +1152,11 @@ def publish_lock_bytes(root: Path, lock_path: Path, payload: bytes) -> None:
                         temp_capability, parent_capability, lock_path
                     )
                     linked_current_temp = True
+                    owned_link_identity = temp_capability.identity
                 except FileExistsError:
-                    winner = _read_existing_lock_bytes(parent_capability, lock_path)
+                    winner = _read_existing_lock_bytes(
+                        parent_capability, lock_path, expected_links=(1, 2)
+                    )
                     if winner != payload:
                         raise CorpusDownloadError("lock_publish_conflict") from None
                 winner = _read_existing_lock_bytes(
@@ -898,6 +1165,7 @@ def publish_lock_bytes(root: Path, lock_path: Path, payload: bytes) -> None:
                     expected_identity=(
                         temp_capability.identity if linked_current_temp else None
                     ),
+                    expected_links=(2 if linked_current_temp else (1, 2)),
                 )
                 if winner != payload:
                     raise CorpusDownloadError("lock_published_bytes_invalid")
@@ -919,7 +1187,12 @@ def publish_lock_bytes(root: Path, lock_path: Path, payload: bytes) -> None:
         if parent_capability is not None:
             if published and cleanup_error is None:
                 try:
-                    if _read_existing_lock_bytes(parent_capability, lock_path) != payload:
+                    if _read_existing_lock_bytes(
+                        parent_capability,
+                        lock_path,
+                        expected_identity=owned_link_identity,
+                        expected_links=(1 if owned_link_identity is not None else (1, 2)),
+                    ) != payload:
                         raise CorpusDownloadError("lock_published_bytes_invalid")
                 except CorpusDownloadError as exc:
                     primary_error = exc
@@ -931,76 +1204,376 @@ def publish_lock_bytes(root: Path, lock_path: Path, payload: bytes) -> None:
                     cleanup_error.__cause__ = exc
 
     if cleanup_error is not None:
-        raise cleanup_error from cleanup_error.__cause__
+        token = str(cleanup_error)
+        cause = cleanup_error.__cause__
+        cleanup_error = None
+        raise CorpusDownloadError(token) from cause
     if primary_error is not None:
-        raise primary_error from primary_error.__cause__
+        token = str(primary_error)
+        cause = primary_error.__cause__
+        primary_error = None
+        raise CorpusDownloadError(token) from cause
     if not published:
         raise CorpusDownloadError("lock_publish_io_error")
 
 
+def _validate_entry_parent_capability(parent: _ParentCapability) -> None:
+    _validate_parent_capability(
+        parent,
+        path_io_error="entry_path_io_error",
+        path_unsafe_error="entry_path_unsafe",
+    )
+
+
+def _open_entry_parent_capability(target: Path) -> _ParentCapability:
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise CorpusDownloadError("entry_path_io_error") from exc
+    return _open_parent_capability(
+        target.parent,
+        path_io_error="entry_path_io_error",
+        path_unsafe_error="entry_path_unsafe",
+    )
+
+
+def _create_entry_temp_capability(
+    parent: _ParentCapability, target: Path
+) -> _TempCapability:
+    if target.parent != parent.path:
+        raise CorpusDownloadError("entry_path_unsafe")
+    _validate_entry_parent_capability(parent)
+    return _create_temp_capability(
+        parent,
+        prefix=f".{target.name}.",
+        validate_parent=_validate_entry_parent_capability,
+        path_unsafe_error="entry_path_unsafe",
+        temp_io_error="download_temp_io_error",
+    )
+
+
+def _write_entry_temp_from_url(
+    temp: _TempCapability,
+    request: urllib.request.Request,
+    timeout: int,
+) -> str:
+    digest = hashlib.sha256()
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+        raise CorpusDownloadError("download_network_error") from exc
+    try:
+        with response:
+            while True:
+                try:
+                    chunk = response.read(1024 * 1024)
+                except (OSError, urllib.error.URLError, TimeoutError) as exc:
+                    raise CorpusDownloadError("download_network_error") from exc
+                if not chunk:
+                    break
+                try:
+                    temp.handle.write(chunk)
+                except OSError as exc:
+                    raise CorpusDownloadError("download_write_io_error") from exc
+                digest.update(chunk)
+    except CorpusDownloadError:
+        raise
+    except OSError as exc:
+        raise CorpusDownloadError("download_network_error") from exc
+    return digest.hexdigest()
+
+
+def _fsync_entry_temp_capability(temp: _TempCapability) -> str:
+    try:
+        temp.handle.flush()
+        os.fsync(temp.handle.fileno())
+        current = temp.handle.tell()
+        temp.handle.seek(0)
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: temp.handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+        temp.handle.seek(current)
+        if temp.parent.windows:
+            if temp.native_handle is None:
+                raise CorpusDownloadError("download_fsync_io_error")
+            identity = _windows_handle_identity(temp.native_handle)
+            if identity[:4] != temp.identity[:4]:
+                raise CorpusDownloadError("entry_path_unsafe")
+        else:
+            identity = _stat_identity(os.fstat(temp.handle.fileno()))
+            if identity[:4] != temp.identity[:4]:
+                raise CorpusDownloadError("entry_path_unsafe")
+        temp.identity = identity
+        return digest.hexdigest()
+    except CorpusDownloadError:
+        raise
+    except OSError as exc:
+        raise CorpusDownloadError("download_fsync_io_error") from exc
+
+
+def _publish_entry_temp_no_replace(
+    temp: _TempCapability,
+    parent: _ParentCapability,
+    destination: Path,
+) -> None:
+    _publish_temp_no_replace(
+        temp,
+        parent,
+        destination,
+        validate_parent=_validate_entry_parent_capability,
+        path_unsafe_error="entry_path_unsafe",
+        publish_io_error="publish_io_error",
+    )
+
+
+def _read_entry_destination_digest(
+    parent: _ParentCapability,
+    destination: Path,
+    *,
+    expected_identity: tuple[int, ...] | None = None,
+    expected_links: int | tuple[int, ...] = (1, 2),
+) -> str | None:
+    _validate_entry_parent_capability(parent)
+    if destination.parent != parent.path:
+        raise CorpusDownloadError("entry_path_unsafe")
+    allowed_links = (
+        (expected_links,) if isinstance(expected_links, int) else tuple(expected_links)
+    )
+    handle: int | None = None
+    try:
+        if parent.windows:
+            try:
+                metadata = os.lstat(destination)
+            except FileNotFoundError:
+                return None
+            if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
+                raise CorpusDownloadError("entry_path_unsafe")
+            for attempt in range(50):
+                try:
+                    handle = _open_windows_file_relative(parent.handle, destination.name)
+                    break
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) not in (32, 33) or attempt == 49:
+                        raise
+                    time.sleep(0.01)
+            if handle is None:
+                raise CorpusDownloadError("publish_readback_io_error")
+            identity = _windows_handle_identity(handle)
+            if (
+                identity[2] & (_FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                or identity[3] not in allowed_links
+                or not _same_windows_path(_windows_final_path(handle), destination)
+                or (
+                    expected_identity is not None
+                    and identity[:2] != expected_identity[:2]
+                )
+            ):
+                raise CorpusDownloadError("entry_path_unsafe")
+            reader = _windows_read_file_object(handle)
+        else:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            handle = os.open(destination.name, flags, dir_fd=parent.handle)
+            opened = os.fstat(handle)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink not in allowed_links
+                or (
+                    expected_identity is not None
+                    and _immutable_stat_identity(opened) != expected_identity[:3]
+                )
+            ):
+                raise CorpusDownloadError("entry_path_unsafe")
+            reader = os.fdopen(os.dup(handle), "rb")
+
+        digest = hashlib.sha256()
+        with reader:
+            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except FileNotFoundError:
+        return None
+    except CorpusDownloadError:
+        raise
+    except OSError as exc:
+        raise CorpusDownloadError("publish_readback_io_error") from exc
+    finally:
+        if handle is not None:
+            try:
+                if parent.windows:
+                    _close_windows_handle(handle)
+                else:
+                    os.close(handle)
+            except OSError:
+                pass
+
+
+def _dispose_entry_temp_capability(temp: _TempCapability) -> None:
+    _dispose_temp_capability(temp, cleanup_io_error="download_cleanup_io_error")
+
+
+def _force_close_entry_temp_capability(temp: _TempCapability) -> None:
+    _force_close_temp_capability(temp)
+
+
 def download_verified(url: str, target: Path, timeout: int, expected_sha256: str) -> str:
-    """Acquire one expected byte sequence and publish it without replacement."""
+    """Acquire one expected byte sequence through retained object capabilities."""
     if not isinstance(expected_sha256, str) or not SHA256_RE.fullmatch(expected_sha256):
         raise CorpusDownloadError("invalid_expected_sha256")
 
-    if target.exists():
-        if target.is_file() and sha256_file(target) == expected_sha256:
-            return expected_sha256
-        raise CorpusDownloadError("existing_digest_mismatch")
-
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = None
-    digest = hashlib.sha256()
+    parent: _ParentCapability | None = None
+    temp: _TempCapability | None = None
+    primary_error: CorpusDownloadError | None = None
+    cleanup_error: CorpusDownloadError | None = None
+    result: str | None = None
+    owned_link_identity: tuple[int, ...] | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="xb",
-            dir=str(target.parent),
-            prefix=f".{target.name}.",
-            suffix=".part",
-            delete=False,
-        ) as handle:
-            tmp_path = Path(handle.name)
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    digest.update(chunk)
-            handle.flush()
-            os.fsync(handle.fileno())
-
-        actual = digest.hexdigest()
-        if actual != expected_sha256:
-            raise CorpusDownloadError("download_digest_mismatch")
+        try:
+            parent = _open_entry_parent_capability(target)
+        except CorpusDownloadError:
+            raise
+        except OSError as exc:
+            raise CorpusDownloadError("entry_path_io_error") from exc
 
         try:
-            os.link(tmp_path, target)
-        except FileExistsError:
-            if target.is_file() and sha256_file(target) == expected_sha256:
-                return expected_sha256
-            raise CorpusDownloadError("publish_conflict")
+            existing = _read_entry_destination_digest(parent, target)
+        except CorpusDownloadError:
+            raise
         except OSError as exc:
-            raise CorpusDownloadError("publish_io_error") from exc
-
-        if sha256_file(target) != expected_sha256:
-            raise CorpusDownloadError("published_digest_mismatch")
-        return expected_sha256
-    finally:
-        if tmp_path is not None:
+            raise CorpusDownloadError("publish_readback_io_error") from exc
+        if existing is not None:
+            if existing != expected_sha256:
+                raise CorpusDownloadError("existing_digest_mismatch")
+            result = expected_sha256
+        else:
             try:
-                tmp_path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                # The verified target, if any, is never removed by cleanup.
-                pass
+                request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            except (OSError, ValueError) as exc:
+                raise CorpusDownloadError("download_network_error") from exc
+            try:
+                temp = _create_entry_temp_capability(parent, target)
+            except CorpusDownloadError:
+                raise
+            except OSError as exc:
+                raise CorpusDownloadError("download_temp_io_error") from exc
+            try:
+                streamed_digest = _write_entry_temp_from_url(temp, request, timeout)
+            except CorpusDownloadError:
+                raise
+            except OSError as exc:
+                raise CorpusDownloadError("download_write_io_error") from exc
+            try:
+                exact_digest = _fsync_entry_temp_capability(temp)
+            except CorpusDownloadError:
+                raise
+            except OSError as exc:
+                raise CorpusDownloadError("download_fsync_io_error") from exc
+            if streamed_digest != exact_digest or exact_digest != expected_sha256:
+                raise CorpusDownloadError("download_digest_mismatch")
+
+            linked_current_temp = False
+            try:
+                _publish_entry_temp_no_replace(temp, parent, target)
+                linked_current_temp = True
+                owned_link_identity = temp.identity
+            except FileExistsError:
+                try:
+                    winner = _read_entry_destination_digest(parent, target)
+                except CorpusDownloadError:
+                    raise
+                except OSError as exc:
+                    raise CorpusDownloadError("publish_readback_io_error") from exc
+                if winner != expected_sha256:
+                    raise CorpusDownloadError("publish_conflict") from None
+            except CorpusDownloadError:
+                raise
+            except OSError as exc:
+                raise CorpusDownloadError("publish_io_error") from exc
+
+            try:
+                published_digest = _read_entry_destination_digest(
+                    parent,
+                    target,
+                    expected_identity=(temp.identity if linked_current_temp else None),
+                    expected_links=(2 if linked_current_temp else (1, 2)),
+                )
+            except CorpusDownloadError:
+                raise
+            except OSError as exc:
+                raise CorpusDownloadError("publish_readback_io_error") from exc
+            if published_digest != expected_sha256:
+                raise CorpusDownloadError("published_digest_mismatch")
+            result = expected_sha256
+    except CorpusDownloadError as exc:
+        primary_error = exc
+    except OSError as exc:
+        primary_error = CorpusDownloadError("entry_io_error")
+        primary_error.__cause__ = exc
+    finally:
+        if temp is not None:
+            try:
+                _dispose_entry_temp_capability(temp)
+            except Exception as exc:
+                cleanup_error = CorpusDownloadError("download_cleanup_io_error")
+                cleanup_error.__cause__ = exc
+            finally:
+                _force_close_entry_temp_capability(temp)
+        if parent is not None:
+            if result is not None and cleanup_error is None:
+                try:
+                    final_digest = _read_entry_destination_digest(
+                        parent,
+                        target,
+                        expected_identity=owned_link_identity,
+                        expected_links=(
+                            1 if owned_link_identity is not None else (1, 2)
+                        ),
+                    )
+                    if final_digest != expected_sha256:
+                        raise CorpusDownloadError("published_digest_mismatch")
+                except CorpusDownloadError as exc:
+                    primary_error = exc
+            try:
+                _close_lock_parent_capability(parent)
+            except OSError as exc:
+                if cleanup_error is None:
+                    cleanup_error = CorpusDownloadError("download_cleanup_io_error")
+                    cleanup_error.__cause__ = exc
+
+    if cleanup_error is not None:
+        token = str(cleanup_error)
+        cause = cleanup_error.__cause__
+        cleanup_error = None
+        raise CorpusDownloadError(token) from cause
+    if primary_error is not None:
+        token = str(primary_error)
+        cause = primary_error.__cause__
+        primary_error = None
+        raise CorpusDownloadError(token) from cause
+    if result is None:
+        raise CorpusDownloadError("entry_io_error")
+    return result
 
 
 def download(url: str, target: Path, timeout: int, expected_sha256: str) -> str:
     """Verified public entry point; the expected hash is mandatory."""
     return download_verified(url, target, timeout, expected_sha256)
+
+
+def _safe_url_for_evidence(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme.lower() != "https" or not parsed.hostname:
+            return "redacted_url"
+        host = parsed.hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            return "redacted_url"
+        if port is not None:
+            host = f"{host}:{port}"
+        return urllib.parse.urlunsplit(("https", host, parsed.path, "", ""))
+    except (TypeError, ValueError):
+        return "redacted_url"
 
 
 def main(argv: list[str]) -> int:
@@ -1076,11 +1649,20 @@ def main(argv: list[str]) -> int:
                 digest = download_verified(url, target, args.timeout, expected)
                 print(f"OK   {entry_id}: exists {target} sha256={digest[:12]}")
             else:
-                print(f"GET  {entry_id}: {url}")
+                print(f"GET  {entry_id}")
                 start = time.time()
                 digest = download_verified(url, target, args.timeout, expected)
                 elapsed = time.time() - start
-                print(f"OK   {entry_id}: {target.stat().st_size} bytes in {elapsed:.1f}s sha256={digest[:12]}")
+                try:
+                    size_bytes = target.stat().st_size
+                except OSError as exc:
+                    raise CorpusDownloadError("entry_result_io_error") from exc
+                print(f"OK   {entry_id}: {size_bytes} bytes in {elapsed:.1f}s sha256={digest[:12]}")
+
+            try:
+                size_bytes = target.stat().st_size
+            except OSError as exc:
+                raise CorpusDownloadError("entry_result_io_error") from exc
 
             lock_entries.append(
                 {
@@ -1088,9 +1670,9 @@ def main(argv: list[str]) -> int:
                     "title": entry.get("title", ""),
                     "source_org": entry.get("source_org", ""),
                     "source_page": entry.get("source_page", ""),
-                    "url": url,
+                    "url": _safe_url_for_evidence(url),
                     "local_path": str(target),
-                    "size_bytes": target.stat().st_size,
+                    "size_bytes": size_bytes,
                     "expected_sha256": expected,
                     "sha256": digest,
                     "features": entry.get("features", []),
@@ -1099,16 +1681,16 @@ def main(argv: list[str]) -> int:
                     "status": "ok",
                 }
             )
-        except (
-            CorpusDownloadError,
-            OSError,
-            urllib.error.URLError,
-            urllib.error.HTTPError,
-            TimeoutError,
-        ) as exc:
-            failures.append((entry_id, str(exc)))
-            print(f"FAIL {entry_id}: {exc}", file=sys.stderr)
-            lock_entries.append({"id": entry_id, "status": "failed", "reason": str(exc)})
+        except CorpusDownloadError as exc:
+            reason = str(exc)
+            failures.append((entry_id, reason))
+            print(f"FAIL {entry_id}: {reason}", file=sys.stderr)
+            lock_entries.append({"id": entry_id, "status": "failed", "reason": reason})
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
+            reason = "entry_io_error"
+            failures.append((entry_id, reason))
+            print(f"FAIL {entry_id}: {reason}", file=sys.stderr)
+            lock_entries.append({"id": entry_id, "status": "failed", "reason": reason})
 
     lock = {
         "schema": "bcs.public_pdf_corpus.lock/1.1",
