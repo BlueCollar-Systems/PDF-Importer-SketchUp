@@ -1213,6 +1213,11 @@ print(json.dumps({
             windows=False,
         )
         destination = parent.path / corpus.LOCK_NAME
+        zero_link_stat = type(
+            "SyntheticStat",
+            (),
+            {"st_mode": stat.S_IFREG | 0o600, "st_ino": 92, "st_dev": 7, "st_nlink": 0, "st_size": len(payload)},
+        )()
         one_link_stat = type(
             "SyntheticStat",
             (),
@@ -1234,7 +1239,7 @@ print(json.dumps({
             "_link_posix_anonymous_temp_no_replace",
             create=True,
         ) as linked, mock.patch.object(
-            corpus.os, "fstat", return_value=one_link_stat
+            corpus.os, "fstat", side_effect=(zero_link_stat, one_link_stat)
         ), mock.patch.object(
             corpus.os,
             "link",
