@@ -146,18 +146,12 @@ module SketchupHostLauncher
     end
 
     def poll(pid)
-      # On Windows, Process.waitpid2 with WNOHANG can block while the child is
-      # still running, which prevents the launcher's timeout from firing. Use
-      # signal 0 as a lightweight "is the process alive?" probe first, then
-      # reap only when it has already exited.
-      begin
-        Process.kill(0, pid)
-        return { :state => :running }
-      rescue Errno::ESRCH, Errno::EPERM
-        # Process is gone; reap its exit status if we still own it.
-      end
+      # Reap with WNOHANG first. On Windows Ruby, Process.kill(0, pid) still
+      # succeeds for an exited-but-unreaped child, so a kill(0)-first probe
+      # permanently reports :running and never collects the exit code.
+      # Measured WNOHANG here returns immediately while the child is alive.
       waited, status = Process.waitpid2(pid, Process::WNOHANG)
-      return { :state => :exited, :exit_code => nil, :wait_error => 'ECHILD' } unless waited
+      return { :state => :running } unless waited
       {
         :state => :exited,
         :exit_code => status.exitstatus,

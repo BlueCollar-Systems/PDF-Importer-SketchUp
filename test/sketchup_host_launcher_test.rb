@@ -658,6 +658,36 @@ class SketchupHostLauncherTest < Minitest::Test
     backend.kill(pid) if pid && state && state[:state] == :running
   end
 
+  def test_process_backend_poll_does_not_trust_kill0_before_reap
+    # Windows Ruby: Process.kill(0, pid) can succeed after the child has exited
+    # until waitpid reaps it. A kill(0)-first poll would loop forever as
+    # :running; waitpid-first must collect the exit code on this platform.
+    backend = SketchupHostLauncher::ProcessBackend.new
+    pid = backend.spawn({}, [RbConfig.ruby, '-e', 'exit 3'])
+    state = nil
+    saw_kill0_success = false
+    200.times do
+      begin
+        Process.kill(0, pid)
+        saw_kill0_success = true
+      rescue Errno::ESRCH, Errno::EPERM
+        # already gone from the kernel's perspective
+      end
+      state = backend.poll(pid)
+      break if state[:state] == :exited
+      sleep 0.01
+    end
+
+    assert_equal :exited, state[:state]
+    assert_equal 3, state[:exit_code]
+    assert_equal true, saw_kill0_success
+  ensure
+    begin
+      Process.waitpid(pid) if pid
+    rescue Errno::ECHILD
+    end
+  end
+
   def test_welcome_advancer_is_exact_pid_title_scoped_and_throttled
     runner = FakeCommandRunner.new([false, true])
     advancer = SketchupHostLauncher::WelcomeWindowAdvancer.new(
