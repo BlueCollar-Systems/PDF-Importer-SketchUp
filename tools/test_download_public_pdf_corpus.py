@@ -166,7 +166,11 @@ class VerifiedDownloadTests(unittest.TestCase):
         ):
             target = Path(tmp) / "case.pdf"
             downloader = self._downloader()
-            real_publish = corpus._publish_entry_temp_no_replace
+            real_publish = getattr(corpus, "_publish_entry_temp_no_replace", None)
+            self.assertTrue(
+                callable(real_publish),
+                "verified entries require capability-bound publication",
+            )
 
             def race_publish(temp: object, parent: object, destination: object) -> None:
                 Path(destination).write_bytes(winner)
