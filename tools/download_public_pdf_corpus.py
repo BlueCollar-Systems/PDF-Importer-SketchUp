@@ -98,13 +98,22 @@ def load_manifest(path: Path) -> dict:
 
 
 def resolve_root(manifest: dict, explicit_root: str | None) -> Path:
-    root = (
-        explicit_root
-        or os.environ.get("BCS_PRIVATE_VALIDATION_ROOT")
-        or os.environ.get("PDF_PRIVATE_VALIDATION_ROOT")
-        or manifest.get("default_root")
-        or "__private_validation_assets_not_configured__"
+    candidates = (
+        explicit_root,
+        os.environ.get("BCS_PRIVATE_VALIDATION_ROOT"),
+        os.environ.get("PDF_PRIVATE_VALIDATION_ROOT"),
+        manifest.get("default_root"),
     )
+    root = next(
+        (
+            value.strip()
+            for value in candidates
+            if isinstance(value, str) and value.strip()
+        ),
+        None,
+    )
+    if root is None or root == "__private_validation_assets_not_configured__":
+        raise SystemExit("Corpus root is not configured; pass an explicit --root")
     return Path(root).expanduser().resolve()
 
 
