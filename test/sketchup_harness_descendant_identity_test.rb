@@ -25,16 +25,16 @@ class SketchupHarnessDescendantIdentityTest < Minitest::Test
       raise "git #{args.join(' ')} failed"
   end
 
-  def build_repo(dir)
+  def build_repo(dir, identity = 'primary')
     git(dir, 'init', '-q')
     git(dir, 'config', 'user.email', 'test@example.invalid')
     git(dir, 'config', 'user.name', 'Test')
-    File.write(File.join(dir, 'a.txt'), "one\n")
+    File.write(File.join(dir, 'a.txt'), "#{identity}: one\n")
     git(dir, 'add', '-A')
     git(dir, 'commit', '-q', '-m', 'first')
     tagged = `git -C #{dir} rev-parse HEAD`.strip.downcase
     git(dir, 'tag', 'v1.0.0')
-    File.write(File.join(dir, 'a.txt'), "two\n")
+    File.write(File.join(dir, 'a.txt'), "#{identity}: two\n")
     git(dir, 'add', '-A')
     git(dir, 'commit', '-q', '-m', 'harness fix')
     head = `git -C #{dir} rev-parse HEAD`.strip.downcase
@@ -61,7 +61,9 @@ class SketchupHarnessDescendantIdentityTest < Minitest::Test
     Dir.mktmpdir do |dir|
       tagged, _head = build_repo(dir)
       Dir.mktmpdir do |other|
-        _t2, other_head = build_repo(other)
+        _t2, other_head = build_repo(other, 'unrelated')
+        refute_equal tagged, other_head,
+                     'the fixture must create a genuinely unrelated commit'
         refute SketchupHostLauncher.git_ancestor?(dir, tagged, other_head),
                'a commit from unrelated history must never satisfy ancestry'
       end
