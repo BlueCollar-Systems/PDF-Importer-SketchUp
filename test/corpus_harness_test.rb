@@ -6,10 +6,12 @@ require_relative 'support/corpus_harness'
 
 class CorpusHarnessTest < Minitest::Test
   class ZeroPageParser
-    attr_reader :page_count
+    attr_reader :page_count, :release_count
 
-    def initialize
+    def initialize(forbidden_calls)
       @page_count = 0
+      @release_count = 0
+      @forbidden_calls = forbidden_calls
     end
 
     def parse
@@ -17,10 +19,12 @@ class CorpusHarnessTest < Minitest::Test
     end
 
     def page_data(_page_number)
-      nil
+      @forbidden_calls[:page_data] += 1
+      raise 'zero-page analysis must not request page data'
     end
 
     def release
+      @release_count += 1
       nil
     end
   end
@@ -67,20 +71,51 @@ class CorpusHarnessTest < Minitest::Test
 
   def test_zero_page_parser_result_is_a_harness_failure
     parser_class = BlueCollarSystems::PDFVectorImporter::PDFParser
-    parser_factory = lambda { |_path| ZeroPageParser.new }
+    forbidden_calls = {
+      :page_data => 0,
+      :extract_page_text => 0,
+      :helper_probe => 0
+    }
+    parsers = []
+    parser_factory = lambda do |_path|
+      parser = ZeroPageParser.new(forbidden_calls)
+      parsers << parser
+      parser
+    end
+    extract_tripwire = lambda do |*_args|
+      forbidden_calls[:extract_page_text] += 1
+      raise 'zero-page analysis must not extract text'
+    end
+    helper_tripwire = lambda do
+      forbidden_calls[:helper_probe] += 1
+      raise 'zero-page analysis must not probe external helpers'
+    end
 
     Tempfile.create(['zero-page', '.pdf']) do |file|
       parser_class.stub(:new, parser_factory) do
         CorpusHarness.stub(:geometry_builder, Object.new) do
-          result = CorpusHarness.analyze_pdf(
-            :corpus_key => 'synthetic-zero-page', :path => file.path
-          )
+          CorpusHarness.stub(:extract_page_text, extract_tripwire) do
+            CorpusHarness.stub(:pdftotext_available?, helper_tripwire) do
+              result = CorpusHarness.analyze_pdf(
+                :corpus_key => 'synthetic-zero-page', :path => file.path
+              )
 
-          assert_equal 0, result[:pages]
-          assert_equal 'FAIL', result[:status]
-          assert_equal 'PDF parser returned zero pages', result[:error]
+              assert_equal 0, result[:pages]
+              assert_equal 'FAIL', result[:status]
+              assert_equal 'PDF parser returned zero pages', result[:error]
+            end
+          end
         end
       end
     end
+
+    refute_empty parsers
+    assert_equal 1, parsers.last.release_count,
+                 'the analysis parser must be released exactly once'
+    assert parsers.all? { |parser| parser.release_count == 1 },
+           'page-count preflight and analysis parsers must both be released'
+    assert_equal 0, forbidden_calls[:page_data]
+    assert_equal 0, forbidden_calls[:extract_page_text]
+    assert_equal 0, forbidden_calls[:helper_probe]
   end
 end
