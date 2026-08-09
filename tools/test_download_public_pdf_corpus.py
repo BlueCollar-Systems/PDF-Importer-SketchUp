@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import io
+import inspect
 import json
 import os
 from pathlib import Path
 import subprocess
+import stat
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from tools import download_public_pdf_corpus as corpus
@@ -189,6 +193,228 @@ class VerifiedDownloadTests(unittest.TestCase):
             self.assertEqual(expected, actual)
             self.assertEqual(payload, target.read_bytes())
             self.assertEqual([], list(target.parent.glob("*.part*")))
+
+    def _make_junction(self, link: Path, target: Path) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows junction race contract")
+        result = subprocess.run(
+            ["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest("directory junctions are unavailable")
+
+    def _restore_swapped_parent(self, parent: Path, displaced: Path) -> None:
+        try:
+            metadata = os.lstat(parent)
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None and corpus._is_link_or_reparse(metadata):
+            os.rmdir(parent)
+        if displaced.exists() and not parent.exists():
+            os.replace(displaced, parent)
+
+    def _assert_windows_entry_swap_is_contained(self, seam: str) -> None:
+        payload = b"%PDF-1.7\nverified entry capability\n%%EOF\n"
+        expected = _digest(payload)
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            parent = work / "owned"
+            outside = work / "outside"
+            displaced = work / "displaced-owned"
+            parent.mkdir()
+            outside.mkdir()
+            target = parent / "case.pdf"
+            outside_target = outside / target.name
+            sentinel = outside / "sentinel.bin"
+            sentinel.write_bytes(b"foreign sentinel")
+            attempted = False
+            swapped = False
+            blocked = False
+            foreign_temp: Path | None = None
+
+            seam_name = {
+                "pre_temp": "_create_entry_temp_capability",
+                "publish": "_publish_entry_temp_no_replace",
+                "winner_read": "_read_entry_destination_digest",
+                "cleanup": "_dispose_entry_temp_capability",
+            }[seam]
+            real_seam = getattr(corpus, seam_name, None)
+
+            def attacked(*args, **kwargs):
+                nonlocal attempted, swapped, blocked, foreign_temp
+                if seam == "winner_read" and kwargs.get("expected_identity") is None:
+                    return real_seam(*args, **kwargs)
+                attempted = True
+                temp = args[0] if seam in {"publish", "cleanup"} else None
+                try:
+                    os.replace(parent, displaced)
+                except OSError:
+                    blocked = True
+                else:
+                    swapped = True
+                    self._make_junction(parent, outside)
+                    if temp is not None:
+                        foreign_temp = outside / Path(temp.path).name
+                        foreign_temp.write_bytes(b"foreign same-name temp")
+                return real_seam(*args, **kwargs)
+
+            outcome: Exception | None = None
+            try:
+                with mock.patch.object(
+                    corpus,
+                    seam_name,
+                    side_effect=attacked if callable(real_seam) else AssertionError(
+                        f"missing verified-entry seam {seam_name}"
+                    ),
+                    create=True,
+                ), mock.patch.object(
+                    corpus.urllib.request,
+                    "urlopen",
+                    return_value=_Response(payload),
+                ):
+                    try:
+                        self._downloader()(
+                            "https://example.invalid/case.pdf", target, 1, expected
+                        )
+                    except Exception as exc:  # the containment result may fail closed
+                        outcome = exc
+
+                self.assertTrue(attempted, f"verified entry did not use {seam_name}")
+                self.assertFalse(outside_target.exists())
+                self.assertEqual(b"foreign sentinel", sentinel.read_bytes())
+                if foreign_temp is not None:
+                    self.assertTrue(foreign_temp.exists())
+                    self.assertEqual(b"foreign same-name temp", foreign_temp.read_bytes())
+                owned_parent = displaced if swapped else parent
+                self.assertEqual([], list(owned_parent.glob("*.part*")))
+                if blocked:
+                    self.assertIsNone(outcome)
+                    self.assertEqual(payload, target.read_bytes())
+                elif swapped:
+                    self.assertIsInstance(outcome, corpus.CorpusDownloadError)
+            finally:
+                self._restore_swapped_parent(parent, displaced)
+
+    def test_windows_entry_parent_swap_before_temp_creation_cannot_escape(self) -> None:
+        self._assert_windows_entry_swap_is_contained("pre_temp")
+
+    def test_windows_entry_parent_swap_during_publish_cannot_escape(self) -> None:
+        self._assert_windows_entry_swap_is_contained("publish")
+
+    def test_windows_entry_parent_swap_during_winner_read_cannot_escape(self) -> None:
+        self._assert_windows_entry_swap_is_contained("winner_read")
+
+    def test_windows_entry_parent_swap_during_cleanup_cannot_escape(self) -> None:
+        self._assert_windows_entry_swap_is_contained("cleanup")
+
+    def _run_cli_failure_seam(self, seam: str) -> tuple[str, dict, Path]:
+        private_path = r"C:\private\customer\secret.part"
+        private_url = "https://private-user:private-password@example.invalid/case.pdf"
+        payload = b"%PDF-1.7\npath-free failure evidence\n%%EOF\n"
+        expected = _digest(payload)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        work = Path(tmp.name)
+        root = work / "corpus"
+        manifest = work / "manifest.json"
+        _write_manifest(
+            manifest,
+            [
+                _manifest_entry(
+                    url=private_url,
+                    expected_sha256=expected,
+                )
+            ],
+        )
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        expected_token = {
+            "preflight": "entry_path_io_error",
+            "temp": "download_temp_io_error",
+            "network": "download_network_error",
+            "write": "download_write_io_error",
+            "fsync": "download_fsync_io_error",
+            "publish": "publish_io_error",
+            "readback": "publish_readback_io_error",
+            "cleanup": "download_cleanup_io_error",
+        }[seam]
+
+        if seam == "network":
+            patches = [
+                mock.patch.object(
+                    corpus.urllib.request,
+                    "urlopen",
+                    side_effect=corpus.urllib.error.URLError(
+                        f"{private_path} {private_url}"
+                    ),
+                )
+            ]
+        else:
+            seam_name = {
+                "preflight": "_open_entry_parent_capability",
+                "temp": "_create_entry_temp_capability",
+                "write": "_write_entry_temp_from_url",
+                "fsync": "_fsync_entry_temp_capability",
+                "publish": "_publish_entry_temp_no_replace",
+                "readback": "_read_entry_destination_digest",
+                "cleanup": "_dispose_entry_temp_capability",
+            }[seam]
+            patches = [
+                mock.patch.object(
+                    corpus,
+                    seam_name,
+                    side_effect=OSError(f"{private_path} {private_url}"),
+                    create=True,
+                ),
+                mock.patch.object(
+                    corpus.urllib.request,
+                    "urlopen",
+                    return_value=_Response(payload),
+                ),
+            ]
+
+        entered = []
+        try:
+            for patcher in patches:
+                entered.append(patcher.start())
+            with redirect_stderr(stderr), redirect_stdout(stdout):
+                result = corpus.main(
+                    ["--manifest", str(manifest), "--root", str(root)]
+                )
+        finally:
+            for patcher in reversed(patches):
+                patcher.stop()
+
+        self.assertEqual(1, result, seam)
+        lock_path = root / "web-acquired" / corpus.LOCK_NAME
+        self.assertTrue(lock_path.is_file(), seam)
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        entry = lock["entries"][0]
+        self.assertEqual(expected_token, entry["reason"], seam)
+        evidence = stderr.getvalue() + json.dumps(lock, sort_keys=True)
+        self.assertNotIn("private-user", evidence)
+        self.assertNotIn("private-password", evidence)
+        self.assertNotIn("secret.part", evidence)
+        self.assertNotIn("C:\\private", evidence)
+        self.assertEqual([], list((root / "web-acquired").glob("*.part*")))
+        return stderr.getvalue(), lock, root
+
+    def test_download_failures_are_path_free_in_stderr_and_lock_evidence(self) -> None:
+        for seam in (
+            "preflight",
+            "temp",
+            "network",
+            "write",
+            "fsync",
+            "publish",
+            "readback",
+            "cleanup",
+        ):
+            with self.subTest(seam=seam):
+                self._run_cli_failure_seam(seam)
 
 
 class RootBoundaryTests(unittest.TestCase):
@@ -608,6 +834,378 @@ class LockPublicationTests(unittest.TestCase):
             self.assertEqual("lock_cleanup_io_error", str(raised.exception))
             self.assertNotIn("private", str(raised.exception).lower())
             self.assertEqual(candidate, lock_path.read_bytes())
+
+    def _windows_process_handle_count(self) -> int | None:
+        if os.name != "nt":
+            return None
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessHandleCount.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+        count = wintypes.DWORD()
+        if not kernel32.GetProcessHandleCount(
+            kernel32.GetCurrentProcess(), ctypes.byref(count)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return int(count.value)
+
+    def _run_lock_writer_probe(self, payloads: tuple[bytes, ...]) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "corpus"
+            script = r'''
+import ctypes
+from concurrent.futures import ThreadPoolExecutor
+import json
+import os
+from pathlib import Path
+import sys
+import threading
+from unittest import mock
+from tools import download_public_pdf_corpus as corpus
+
+def handles():
+    if os.name != "nt":
+        return None
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+    value = wintypes.DWORD()
+    if not kernel32.GetProcessHandleCount(kernel32.GetCurrentProcess(), ctypes.byref(value)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(value.value)
+
+root = Path(sys.argv[1])
+payloads = [bytes.fromhex(value) for value in sys.argv[2:]]
+parent = root / "web-acquired"
+parent.mkdir(parents=True)
+destination = parent / corpus.LOCK_NAME
+barrier = threading.Barrier(len(payloads))
+real_publish = corpus._publish_lock_temp_no_replace
+outcomes = []
+
+def synchronized_publish(*args, **kwargs):
+    barrier.wait(timeout=5)
+    return real_publish(*args, **kwargs)
+
+def writer(payload):
+    try:
+        corpus.publish_lock_bytes(root, destination, payload)
+    except BaseException as exc:
+        outcomes.append(str(exc))
+    else:
+        outcomes.append("ok")
+
+baseline = handles()
+with mock.patch.object(corpus, "_publish_lock_temp_no_replace", side_effect=synchronized_publish):
+    with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+        futures = [executor.submit(writer, payload) for payload in payloads]
+        for future in futures:
+            future.result(timeout=15)
+after = handles()
+print(json.dumps({
+    "outcomes": outcomes,
+    "winner": destination.read_bytes().hex() if destination.is_file() else None,
+    "temps": sorted(item.name for item in parent.glob("*.part*")),
+    "handle_delta": None if baseline is None else after - baseline,
+}))
+'''
+            completed = subprocess.run(
+                [sys.executable, "-B", "-c", script, str(root)]
+                + [payload.hex() for payload in payloads],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    def _run_identical_lock_writers(self, writer_count: int) -> None:
+        payload = b'{"schema":"synthetic","concurrent":"identical"}\n'
+        result = self._run_lock_writer_probe((payload,) * writer_count)
+        self.assertEqual(["ok"] * writer_count, sorted(result["outcomes"]))
+        self.assertEqual(payload.hex(), result["winner"])
+        self.assertEqual([], result["temps"])
+        if result["handle_delta"] is not None:
+            self.assertEqual(0, result["handle_delta"], "native handles leaked without GC")
+
+    def test_two_four_and_eight_identical_lock_writers_all_succeed_immediately(self) -> None:
+        for writer_count in (2, 4, 8):
+            with self.subTest(writer_count=writer_count):
+                self._run_identical_lock_writers(writer_count)
+
+    def test_differing_lock_winner_is_preserved_and_loser_conflicts(self) -> None:
+        payloads = (
+            b'{"schema":"synthetic","candidate":"alpha"}\n',
+            b'{"schema":"synthetic","candidate":"beta"}\n',
+        )
+        result = self._run_lock_writer_probe(payloads)
+        self.assertCountEqual(["ok", "lock_publish_conflict"], result["outcomes"])
+        self.assertIn(bytes.fromhex(result["winner"]), payloads)
+        self.assertEqual([], result["temps"])
+        if result["handle_delta"] is not None:
+            self.assertEqual(0, result["handle_delta"], "native handles leaked without GC")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows handle cleanup contract")
+    def test_windows_temp_capability_exceptions_close_every_exact_handle(self) -> None:
+        injection_points = ("identity", "file_object", "fstat", "revalidate")
+        for injection in injection_points:
+            with self.subTest(injection=injection), tempfile.TemporaryDirectory() as tmp:
+                parent_path = Path(tmp) / "web-acquired"
+                parent_path.mkdir()
+                script = r'''
+import ctypes
+import json
+import os
+from pathlib import Path
+import sys
+from unittest import mock
+from tools import download_public_pdf_corpus as corpus
+from ctypes import wintypes
+
+def handles():
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+    value = wintypes.DWORD()
+    if not kernel32.GetProcessHandleCount(kernel32.GetCurrentProcess(), ctypes.byref(value)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(value.value)
+
+parent_path = Path(sys.argv[1])
+injection = sys.argv[2]
+parent = corpus._open_lock_parent_capability(parent_path)
+baseline = handles()
+real_identity = corpus._windows_handle_identity
+real_file_object = corpus._windows_temp_file_object
+real_fstat = corpus.os.fstat
+real_validate = corpus._validate_lock_parent_capability
+identity_calls = 0
+validate_calls = 0
+
+def injected_identity(handle):
+    global identity_calls
+    if handle != parent.handle:
+        identity_calls += 1
+        if injection == "identity" and identity_calls == 1:
+            raise OSError("private identity failure")
+    return real_identity(handle)
+
+def injected_file_object(handle):
+    if injection == "file_object":
+        raise OSError("private duplicate failure")
+    return real_file_object(handle)
+
+def injected_fstat(fd):
+    if injection == "fstat":
+        raise OSError("private fstat failure")
+    return real_fstat(fd)
+
+def injected_validate(capability):
+    global validate_calls
+    validate_calls += 1
+    if injection == "revalidate" and validate_calls == 2:
+        raise corpus.CorpusDownloadError("lock_path_unsafe")
+    return real_validate(capability)
+
+outcome = None
+with mock.patch.object(corpus, "_windows_handle_identity", side_effect=injected_identity), \
+     mock.patch.object(corpus, "_windows_temp_file_object", side_effect=injected_file_object), \
+     mock.patch.object(corpus.os, "fstat", side_effect=injected_fstat), \
+     mock.patch.object(corpus, "_validate_lock_parent_capability", side_effect=injected_validate):
+    try:
+        corpus._create_lock_temp_capability(parent)
+    except BaseException as exc:
+        outcome = type(exc).__name__
+after = handles()
+print(json.dumps({
+    "outcome": outcome,
+    "temps": sorted(item.name for item in parent_path.glob("*.part*")),
+    "handle_delta": after - baseline,
+}))
+'''
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-B",
+                        "-c",
+                        script,
+                        str(parent_path),
+                        injection,
+                    ],
+                    cwd=Path(__file__).resolve().parents[1],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=15,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                result = json.loads(completed.stdout.strip().splitlines()[-1])
+                self.assertIsNotNone(result["outcome"])
+                self.assertEqual([], result["temps"])
+                self.assertEqual(0, result["handle_delta"])
+
+    def test_posix_temp_creation_uses_exclusive_nofollow_dirfd(self) -> None:
+        parent = corpus._LockParentCapability(
+            path=Path("/synthetic/web-acquired"),
+            handle=71,
+            identity=(7, 91, stat.S_IFDIR, 2, 4096),
+            windows=False,
+        )
+        opened = type(
+            "SyntheticStat",
+            (),
+            {"st_mode": stat.S_IFREG | 0o600, "st_ino": 92, "st_dev": 7, "st_nlink": 1, "st_size": 0},
+        )()
+        fake_file = mock.Mock()
+        fake_file.fileno.return_value = 72
+
+        with mock.patch.object(
+            corpus, "_validate_lock_parent_capability"
+        ), mock.patch.object(
+            corpus.tempfile,
+            "NamedTemporaryFile",
+            side_effect=AssertionError("pathname temp creation is forbidden"),
+        ), mock.patch.object(
+            corpus.os, "open", return_value=72
+        ) as opened_file, mock.patch.object(
+            corpus.os, "fdopen", return_value=fake_file
+        ), mock.patch.object(
+            corpus.os, "fstat", return_value=opened
+        ):
+            temp = corpus._create_lock_temp_capability(parent)
+
+        args, kwargs = opened_file.call_args
+        self.assertNotIn("/", args[0])
+        self.assertEqual(71, kwargs["dir_fd"])
+        self.assertTrue(args[1] & os.O_CREAT)
+        self.assertTrue(args[1] & os.O_EXCL)
+        self.assertTrue(args[1] & getattr(os, "O_NOFOLLOW", 0))
+        self.assertIs(fake_file, temp.handle)
+
+    def test_posix_owned_link_requires_two_then_one_exact_links(self) -> None:
+        payload = b'{"schema":"synthetic","posix":true}\n'
+        parent = corpus._LockParentCapability(
+            path=Path("/synthetic/web-acquired"),
+            handle=81,
+            identity=(7, 91, stat.S_IFDIR, 2, 4096),
+            windows=False,
+        )
+        destination = parent.path / corpus.LOCK_NAME
+        expected_identity = (7, 92, stat.S_IFREG, 1, len(payload))
+        path_stat = type(
+            "SyntheticStat",
+            (),
+            {"st_mode": stat.S_IFREG | 0o600, "st_ino": 92, "st_dev": 7, "st_nlink": 2, "st_size": len(payload)},
+        )()
+        one_link_stat = type(
+            "SyntheticStat",
+            (),
+            {"st_mode": stat.S_IFREG | 0o600, "st_ino": 92, "st_dev": 7, "st_nlink": 1, "st_size": len(payload)},
+        )()
+
+        def read_with(metadata, links: int) -> bytes:
+            if "expected_links" not in inspect.signature(
+                corpus._read_existing_lock_bytes
+            ).parameters:
+                self.fail("owned-link verification requires an explicit link-count law")
+            with mock.patch.object(
+                corpus, "_validate_lock_parent_capability"
+            ), mock.patch.object(
+                corpus, "_lstat_or_none", return_value=metadata
+            ), mock.patch.object(
+                corpus.os, "open", return_value=82
+            ) as opened, mock.patch.object(
+                corpus.os, "fstat", return_value=metadata
+            ), mock.patch.object(
+                corpus.os, "dup", return_value=83
+            ), mock.patch.object(
+                corpus.os, "fdopen", return_value=io.BytesIO(payload)
+            ), mock.patch.object(corpus.os, "close"):
+                result = corpus._read_existing_lock_bytes(
+                    parent,
+                    destination,
+                    expected_identity=expected_identity,
+                    expected_links=links,
+                )
+            self.assertEqual(81, opened.call_args.kwargs["dir_fd"])
+            return result
+
+        self.assertEqual(payload, read_with(path_stat, 2))
+        self.assertEqual(payload, read_with(one_link_stat, 1))
+
+    def test_posix_cleanup_unlinks_only_exact_inode_relative_to_dirfd(self) -> None:
+        parent = corpus._LockParentCapability(
+            path=Path("/synthetic/web-acquired"),
+            handle=91,
+            identity=(7, 101, stat.S_IFDIR, 2, 4096),
+            windows=False,
+        )
+        opened = type(
+            "SyntheticStat",
+            (),
+            {"st_mode": stat.S_IFREG | 0o600, "st_ino": 102, "st_dev": 7, "st_nlink": 2, "st_size": 10},
+        )()
+        fake_file = mock.Mock()
+        temp = corpus._LockTempCapability(
+            path=parent.path / ".owned.part",
+            handle=fake_file,
+            identity=(7, 102, stat.S_IFREG, 2, 10),
+            parent=parent,
+        )
+        with mock.patch.object(
+            corpus.os, "stat", return_value=opened
+        ) as stat_call, mock.patch.object(corpus.os, "unlink") as unlink_call:
+            try:
+                corpus._dispose_lock_temp_capability(temp)
+            except corpus.CorpusDownloadError as exc:
+                self.fail(f"POSIX cleanup was not descriptor-relative: {exc}")
+
+        fake_file.close.assert_called_once_with()
+        stat_call.assert_called_once_with(
+            ".owned.part", dir_fd=91, follow_symlinks=False
+        )
+        unlink_call.assert_called_once_with(".owned.part", dir_fd=91)
+        self.assertTrue(temp.closed)
+
+    @unittest.skipIf(os.name == "nt", "native POSIX descriptor test")
+    def test_native_posix_parent_rename_preserves_foreign_same_name_and_leaks_nothing(self) -> None:
+        payload = b'{"schema":"synthetic","native_posix":true}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            parent_path = work / "web-acquired"
+            displaced = work / "owned-parent"
+            replacement = work / "replacement"
+            parent_path.mkdir()
+            replacement.mkdir()
+            parent = corpus._open_lock_parent_capability(parent_path)
+            temp = corpus._create_lock_temp_capability(parent)
+            corpus._write_lock_temp_capability(temp, payload)
+            os.replace(parent_path, displaced)
+            os.replace(replacement, parent_path)
+            foreign = parent_path / temp.path.name
+            foreign.write_bytes(b"foreign same-name bytes")
+            try:
+                corpus._publish_lock_temp_no_replace(
+                    temp, parent, parent.path / corpus.LOCK_NAME
+                )
+                corpus._dispose_lock_temp_capability(temp)
+                self.assertEqual(payload, (displaced / corpus.LOCK_NAME).read_bytes())
+                self.assertEqual(b"foreign same-name bytes", foreign.read_bytes())
+                self.assertEqual([], list(displaced.glob("*.part*")))
+            finally:
+                corpus._force_close_lock_temp_capability(temp)
+                corpus._close_lock_parent_capability(parent)
 
 
 if __name__ == "__main__":
