@@ -185,7 +185,13 @@ def download(url: str, target: Path, timeout: int, expected_sha256: str) -> str:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
-    parser.add_argument("--root", help="Corpus root. Defaults to BCS_PRIVATE_VALIDATION_ROOT or __private_validation_assets_not_configured__.")
+    parser.add_argument(
+        "--root",
+        help=(
+            "Corpus root. Required unless BCS_PRIVATE_VALIDATION_ROOT, "
+            "PDF_PRIVATE_VALIDATION_ROOT, or a real manifest default is configured."
+        ),
+    )
     parser.add_argument("--id", action="append", dest="ids", help="Download only the named manifest id. Repeatable.")
     parser.add_argument("--include-disabled", action="store_true", help="Attempt entries marked enabled=false when they have a URL.")
     parser.add_argument("--timeout", type=int, default=120, help="Per-file HTTP timeout in seconds.")
