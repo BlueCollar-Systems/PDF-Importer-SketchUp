@@ -374,7 +374,7 @@ class LockPublicationTests(unittest.TestCase):
                 temp_cap: object, parent_cap: object, destination: object
             ) -> None:
                 events.append("publish")
-                self.assertEqual(candidate, Path(temp_cap.path).read_bytes())
+                self.assertEqual(candidate, corpus._read_lock_temp_capability(temp_cap))
                 self.assertFalse(Path(destination).exists())
                 real_publish(temp_cap, parent_cap, destination)
 
