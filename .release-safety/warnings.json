@@ -20,6 +20,16 @@
       "responsible_session": "phase3-ascii-temp-root",
       "version_bump_plan": "3.7.130",
       "acknowledged_at": "2026-08-08T16:20:27.555183+00:00"
+    },
+    {
+      "repo": "BlueCollar-Systems/PDF-Importer-SketchUp",
+      "tag": "v3.7.130",
+      "first_seen": "2026-08-09T07:50:41-05:00",
+      "first_seen_sha": "43d6ade8596a7ea6550a0ac7d2c4f66ecffc8337",
+      "deadline": "2026-08-10T07:50:41-05:00",
+      "responsible_session": "harness-only-delta-post-v3.7.130",
+      "version_bump_plan": "3.7.131",
+      "acknowledged_at": "2026-08-09T14:52:16.241789+00:00"
     }
   ]
 }
