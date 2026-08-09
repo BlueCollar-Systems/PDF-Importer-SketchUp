@@ -4,6 +4,8 @@
 The manifest is committed; downloaded PDFs are not. Every enabled download is
 bound to an expected SHA-256 before publication, keeping the local test set
 repeatable without redistributing third-party PDFs from this repository.
+Each corpus root receives one immutable no-replace lock; use a fresh root for a
+new acquisition run instead of overwriting prior evidence.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -26,6 +29,7 @@ DEFAULT_MANIFEST = SCRIPT_DIR / "public_pdf_corpus_manifest.json"
 LOCK_NAME = "PUBLIC_PDF_CORPUS.lock.json"
 USER_AGENT = "BlueCollarSystems-PDFImporter-TestCorpus/1.1"
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 RAW_GITHUB_PIN_RE = re.compile(
     r"\Ahttps://raw\.githubusercontent\.com/[^/]+/[^/]+/"
     r"[0-9a-f]{40}/.+\Z"
@@ -117,6 +121,129 @@ def resolve_root(manifest: dict, explicit_root: str | None) -> Path:
     return Path(root).expanduser().resolve()
 
 
+def _lstat_or_none(path: Path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def _is_link_or_reparse(metadata: object) -> bool:
+    mode = getattr(metadata, "st_mode", 0)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return bool(
+        stat.S_ISLNK(mode)
+        or (attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+    )
+
+
+def _contained_lock_parent(root: Path, *, create: bool) -> Path:
+    """Return the fixed lock directory only when it is a real contained directory."""
+    parent = root / "web-acquired"
+    metadata = _lstat_or_none(parent)
+    if metadata is None and create:
+        try:
+            os.mkdir(parent)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise CorpusDownloadError("lock_path_io_error") from exc
+        metadata = _lstat_or_none(parent)
+
+    if (
+        metadata is None
+        or _is_link_or_reparse(metadata)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        raise CorpusDownloadError("lock_path_unsafe")
+
+    try:
+        parent.resolve().relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise CorpusDownloadError("lock_path_unsafe") from exc
+    return parent
+
+
+def prepare_lock_destination(root: Path) -> Path:
+    """Preflight the one derived lock destination before any corpus publication."""
+    parent = _contained_lock_parent(root, create=True)
+    lock_path = parent / LOCK_NAME
+    metadata = _lstat_or_none(lock_path)
+    if metadata is not None:
+        if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
+            raise CorpusDownloadError("lock_path_unsafe")
+        raise CorpusDownloadError("lock_publish_conflict")
+    return lock_path
+
+
+def _existing_lock_matches(lock_path: Path, payload: bytes) -> bool:
+    metadata = _lstat_or_none(lock_path)
+    if (
+        metadata is None
+        or _is_link_or_reparse(metadata)
+        or not stat.S_ISREG(metadata.st_mode)
+    ):
+        return False
+    try:
+        return lock_path.read_bytes() == payload
+    except OSError:
+        return False
+
+
+def publish_lock_bytes(root: Path, lock_path: Path, payload: bytes) -> None:
+    """Publish complete derived metadata atomically without replacing any object."""
+    if not isinstance(payload, bytes):
+        raise CorpusDownloadError("lock_payload_invalid")
+    parent = _contained_lock_parent(root, create=False)
+    if lock_path != parent / LOCK_NAME:
+        raise CorpusDownloadError("lock_path_unsafe")
+    if _lstat_or_none(lock_path) is not None:
+        if _existing_lock_matches(lock_path, payload):
+            return
+        raise CorpusDownloadError("lock_publish_conflict")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="xb",
+            dir=str(parent),
+            prefix=f".{LOCK_NAME}.",
+            suffix=".part",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if _contained_lock_parent(root, create=False) != parent:
+            raise CorpusDownloadError("lock_path_unsafe")
+        if _lstat_or_none(lock_path) is not None:
+            if _existing_lock_matches(lock_path, payload):
+                return
+            raise CorpusDownloadError("lock_publish_conflict")
+
+        try:
+            os.link(tmp_path, lock_path)
+        except FileExistsError:
+            if _existing_lock_matches(lock_path, payload):
+                return
+            raise CorpusDownloadError("lock_publish_conflict")
+        except OSError as exc:
+            raise CorpusDownloadError("lock_publish_io_error") from exc
+
+        if not _existing_lock_matches(lock_path, payload):
+            raise CorpusDownloadError("lock_published_bytes_invalid")
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+
 def download_verified(url: str, target: Path, timeout: int, expected_sha256: str) -> str:
     """Acquire one expected byte sequence and publish it without replacement."""
     if not isinstance(expected_sha256, str) or not SHA256_RE.fullmatch(expected_sha256):
@@ -201,6 +328,11 @@ def main(argv: list[str]) -> int:
     manifest = load_manifest(manifest_path)
     root = resolve_root(manifest, args.root)
     root.mkdir(parents=True, exist_ok=True)
+    try:
+        lock_path = prepare_lock_destination(root)
+    except CorpusDownloadError as exc:
+        print(f"FAIL corpus-lock: {exc}", file=sys.stderr)
+        return 1
 
     selected_ids = set(args.ids or [])
     entries = []
@@ -286,17 +418,18 @@ def main(argv: list[str]) -> int:
 
     lock = {
         "schema": "bcs.public_pdf_corpus.lock/1.1",
+        "producer": "bcs.public_pdf_corpus_downloader/1.1",
         "manifest": str(manifest_path),
         "root": str(root),
-        "updated_unix": int(time.time()),
         "entries": lock_entries,
     }
-    lock_path = root / "web-acquired" / LOCK_NAME
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w", encoding="utf-8") as handle:
-        json.dump(lock, handle, indent=2)
-        handle.write("\n")
-    print(f"Lock file: {lock_path}")
+    lock_bytes = (json.dumps(lock, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        publish_lock_bytes(root, lock_path, lock_bytes)
+        print(f"Lock file: {lock_path}")
+    except CorpusDownloadError as exc:
+        failures.append(("corpus-lock", str(exc)))
+        print(f"FAIL corpus-lock: {exc}", file=sys.stderr)
 
     if failures:
         print("Failures:", file=sys.stderr)
