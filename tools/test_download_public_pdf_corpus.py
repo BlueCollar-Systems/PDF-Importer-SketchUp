@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -213,6 +215,28 @@ class LockPublicationTests(unittest.TestCase):
         self.assertTrue(callable(publisher), "publish_lock_bytes API is required")
         return publisher
 
+    def _make_junction(self, link: Path, target: Path) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows junction race contract")
+        result = subprocess.run(
+            ["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest("directory junctions are unavailable")
+
+    def _restore_swapped_parent(self, parent: Path, displaced: Path) -> None:
+        try:
+            metadata = os.lstat(parent)
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None and corpus._is_link_or_reparse(metadata):
+            os.rmdir(parent)
+        if displaced.exists() and not parent.exists():
+            os.replace(displaced, parent)
+
     def test_parent_link_outside_root_fails_before_network_or_lock_write(self) -> None:
         payload = b"%PDF-1.7\nsynthetic\n%%EOF\n"
         with tempfile.TemporaryDirectory() as tmp:
@@ -353,6 +377,197 @@ class LockPublicationTests(unittest.TestCase):
             self.assertEqual(["fsync", "publish"], events)
             self.assertEqual(candidate, lock_path.read_bytes())
             self.assertEqual([], list(lock_parent.glob("*.part*")))
+
+    def test_parent_swap_before_revalidation_never_redirects_cleanup(self) -> None:
+        candidate = b'{"schema":"synthetic","race":"revalidate"}\n'
+        foreign = b"foreign same-name temp"
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            root = work / "corpus"
+            parent = root / "web-acquired"
+            outside = work / "outside"
+            displaced = work / "owned-parent"
+            parent.mkdir(parents=True)
+            outside.mkdir()
+            lock_path = parent / corpus.LOCK_NAME
+            publisher = self._publisher()
+            real_check = corpus._contained_lock_parent
+            checks = 0
+            attempted = False
+            swapped = False
+            blocked = False
+            foreign_temp: Path | None = None
+
+            def attacked_check(root_arg: Path, *, create: bool) -> Path:
+                nonlocal checks, attempted, swapped, blocked, foreign_temp
+                checks += 1
+                if checks != 2:
+                    return real_check(root_arg, create=create)
+                attempted = True
+                temp_names = [item.name for item in parent.glob("*.part")]
+                self.assertEqual(1, len(temp_names))
+                try:
+                    os.replace(parent, displaced)
+                except OSError:
+                    blocked = True
+                    return real_check(root_arg, create=create)
+                swapped = True
+                self._make_junction(parent, outside)
+                foreign_temp = outside / temp_names[0]
+                foreign_temp.write_bytes(foreign)
+                return real_check(root_arg, create=create)
+
+            outcome = None
+            try:
+                with mock.patch.object(
+                    corpus, "_contained_lock_parent", side_effect=attacked_check
+                ):
+                    try:
+                        publisher(root, lock_path, candidate)
+                    except corpus.CorpusDownloadError as exc:
+                        outcome = str(exc)
+
+                self.assertTrue(attempted)
+                self.assertFalse((outside / corpus.LOCK_NAME).exists())
+                if swapped:
+                    self.assertIn(outcome, {"lock_path_unsafe", "lock_publish_io_error"})
+                    self.assertIsNotNone(foreign_temp)
+                    self.assertTrue(foreign_temp.exists())
+                    if foreign_temp.exists():
+                        self.assertEqual(foreign, foreign_temp.read_bytes())
+                    self.assertEqual([], list(displaced.glob("*.part")))
+                else:
+                    self.assertTrue(blocked)
+                    self.assertIsNone(outcome)
+                    self.assertEqual(candidate, lock_path.read_bytes())
+            finally:
+                self._restore_swapped_parent(parent, displaced)
+
+    def test_parent_swap_inside_no_replace_publish_cannot_escape_root(self) -> None:
+        candidate = b'{"schema":"synthetic","race":"publish"}\n'
+        foreign = b"foreign same-name source"
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            root = work / "corpus"
+            parent = root / "web-acquired"
+            outside = work / "outside"
+            displaced = work / "owned-parent"
+            parent.mkdir(parents=True)
+            outside.mkdir()
+            lock_path = parent / corpus.LOCK_NAME
+            publisher = self._publisher()
+            real_link = corpus.os.link
+            attempted = False
+            swapped = False
+            blocked = False
+            foreign_temp: Path | None = None
+
+            def attacked_link(source: object, destination: object) -> None:
+                nonlocal attempted, swapped, blocked, foreign_temp
+                attempted = True
+                source_name = Path(source).name
+                try:
+                    os.replace(parent, displaced)
+                except OSError:
+                    blocked = True
+                    real_link(source, destination)
+                    return
+                swapped = True
+                self._make_junction(parent, outside)
+                foreign_temp = outside / source_name
+                foreign_temp.write_bytes(foreign)
+                real_link(source, destination)
+
+            outcome = None
+            try:
+                with mock.patch.object(corpus.os, "link", side_effect=attacked_link):
+                    try:
+                        publisher(root, lock_path, candidate)
+                    except corpus.CorpusDownloadError as exc:
+                        outcome = str(exc)
+
+                self.assertTrue(attempted)
+                self.assertFalse((outside / corpus.LOCK_NAME).exists())
+                if swapped:
+                    self.assertIn(
+                        outcome,
+                        {"lock_path_unsafe", "lock_publish_io_error", "lock_cleanup_io_error"},
+                    )
+                    self.assertIsNotNone(foreign_temp)
+                    self.assertEqual(foreign, foreign_temp.read_bytes())
+                    self.assertEqual([], list(displaced.glob("*.part")))
+                else:
+                    self.assertTrue(blocked)
+                    self.assertIsNone(outcome)
+                    self.assertEqual(candidate, lock_path.read_bytes())
+            finally:
+                self._restore_swapped_parent(parent, displaced)
+
+    def test_lock_io_failures_use_closed_path_free_tokens(self) -> None:
+        candidate = b'{"schema":"synthetic"}\n'
+        private = r"C:\\private\\account\\lock.json"
+
+        with self.subTest(seam="lstat"), tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "corpus"
+            root.mkdir()
+            with mock.patch.object(
+                corpus.os, "lstat", side_effect=PermissionError(private)
+            ):
+                with self.assertRaises(Exception) as raised:
+                    corpus.prepare_lock_destination(root)
+            self.assertIsInstance(raised.exception, corpus.CorpusDownloadError)
+            self.assertEqual("lock_path_io_error", str(raised.exception))
+            self.assertNotIn("private", str(raised.exception).lower())
+
+        for seam in ("temp_create", "fsync", "link"):
+            with self.subTest(seam=seam), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "corpus"
+                parent = root / "web-acquired"
+                parent.mkdir(parents=True)
+                lock_path = parent / corpus.LOCK_NAME
+                if seam == "temp_create":
+                    patcher = mock.patch.object(
+                        corpus.tempfile,
+                        "NamedTemporaryFile",
+                        side_effect=PermissionError(private),
+                    )
+                elif seam == "fsync":
+                    patcher = mock.patch.object(
+                        corpus.os, "fsync", side_effect=OSError(private)
+                    )
+                else:
+                    patcher = mock.patch.object(
+                        corpus.os, "link", side_effect=OSError(private)
+                    )
+                with patcher:
+                    with self.assertRaises(Exception) as raised:
+                        self._publisher()(root, lock_path, candidate)
+                self.assertIsInstance(raised.exception, corpus.CorpusDownloadError)
+                self.assertEqual("lock_publish_io_error", str(raised.exception))
+                self.assertNotIn("private", str(raised.exception).lower())
+
+    def test_cleanup_failure_is_reported_without_deleting_foreign_bytes(self) -> None:
+        candidate = b'{"schema":"synthetic","cleanup":true}\n'
+        private = r"C:\\private\\account\\cleanup.part"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "corpus"
+            parent = root / "web-acquired"
+            parent.mkdir(parents=True)
+            lock_path = parent / corpus.LOCK_NAME
+            real_unlink = Path.unlink
+
+            def failed_cleanup(path: Path, *args: object, **kwargs: object) -> None:
+                if path.name.endswith(".part"):
+                    raise PermissionError(private)
+                real_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "unlink", new=failed_cleanup):
+                with self.assertRaises(corpus.CorpusDownloadError) as raised:
+                    self._publisher()(root, lock_path, candidate)
+
+            self.assertEqual("lock_cleanup_io_error", str(raised.exception))
+            self.assertNotIn("private", str(raised.exception).lower())
+            self.assertEqual(candidate, lock_path.read_bytes())
 
 
 if __name__ == "__main__":
