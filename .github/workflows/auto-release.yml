@@ -115,11 +115,18 @@ jobs:
             --releases-json "$RUNNER_TEMP/releases.json" --tag "$TAG")"
           RELEASE_STATE="$(printf '%s' "$DISCOVERY" | python -c 'import json,sys; print(json.load(sys.stdin)["release_state"])')"
           RELEASE_ID="$(printf '%s' "$DISCOVERY" | python -c 'import json,sys; print(json.load(sys.stdin)["release_id"])')"
+          # A draft has no tag ref until it is published, so its immutable
+          # source is its own recorded target commit; hand that to the planner.
+          DRAFT_TARGET=""
+          if [ "$RELEASE_STATE" = "draft" ] && [ -n "$RELEASE_ID" ]; then
+            DRAFT_TARGET="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.target_commitish // ""')"
+          fi
           python tools/release_safety.py plan-release \
             --version "${{ steps.version.outputs.version }}" \
             --head-sha "$GITHUB_SHA" \
             --tag-sha "$TAG_SHA" \
             --release-state "$RELEASE_STATE" \
+            --draft-target-sha "$DRAFT_TARGET" \
             --github-output "$GITHUB_OUTPUT"
           echo "release_state=$RELEASE_STATE" >> "$GITHUB_OUTPUT"
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"

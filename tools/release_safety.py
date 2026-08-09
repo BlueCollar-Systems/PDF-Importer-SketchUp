@@ -134,20 +134,33 @@ def plan_release_completion(
     tag_sha: str | None,
     release_exists: bool,
     release_is_draft: bool = False,
+    draft_target_sha: str | None = None,
 ) -> dict[str, str]:
     """Select immutable source bytes before any release build starts."""
     tag = f"v{version}"
     head = str(head_sha or "").strip().lower()
     tagged = str(tag_sha or "").strip().lower()
+    draft_target = str(draft_target_sha or "").strip().lower()
     if not _HEX_COMMIT_RE.fullmatch(head):
         raise ValueError("head_sha must be a full 40-character hexadecimal SHA")
     if tagged and not _HEX_COMMIT_RE.fullmatch(tagged):
         raise ValueError("tag_sha must be a full 40-character hexadecimal SHA")
-    if release_exists and not tagged:
-        raise ValueError("an existing release must have a resolvable immutable tag")
     if release_exists and release_is_draft:
+        # A draft has NO tag ref until it is published: releases are created
+        # draft-first, so an interrupted run leaves exactly this state behind.
+        # Its immutable source is the tag if one somehow exists, else the
+        # draft's own recorded target commit. Never a branch name: creation
+        # passes an exact SHA as --target, and anything else fails closed.
+        build_ref = tagged or draft_target
+        if not _HEX_COMMIT_RE.fullmatch(build_ref):
+            raise ValueError(
+                "a draft release must resolve an immutable source: no tag ref "
+                "exists and its target_commitish is not a full 40-character "
+                f"hexadecimal SHA ({draft_target!r})"
+            )
         action = "complete_draft_release"
-        build_ref = tagged
+    elif release_exists and not tagged:
+        raise ValueError("an existing release must have a resolvable immutable tag")
     elif release_exists:
         action = "verify_existing_release"
         build_ref = tagged
@@ -677,6 +690,7 @@ def _main_plan_release(args: argparse.Namespace) -> int:
         tag_sha=args.tag_sha or None,
         release_exists=args.release_state != "missing",
         release_is_draft=args.release_state == "draft",
+        draft_target_sha=args.draft_target_sha or None,
     )
     target = Path(args.github_output)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -745,6 +759,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     plan.add_argument("--version", required=True)
     plan.add_argument("--head-sha", required=True)
     plan.add_argument("--tag-sha", default="")
+    plan.add_argument(
+        "--draft-target-sha",
+        default="",
+        help="the draft release's target_commitish; a draft has no tag ref",
+    )
     plan.add_argument(
         "--release-state",
         choices=("missing", "draft", "published"),

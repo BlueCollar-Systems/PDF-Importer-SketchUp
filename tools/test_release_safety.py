@@ -444,6 +444,57 @@ class ReleaseSafetyTest:
         assert plan["action"] == "complete_draft_release"
         assert plan["build_ref"] == "a" * 40
 
+    def test_tagless_draft_plans_completion_from_its_own_target(self):
+        # Releases are created draft-first, and a draft has NO tag ref until
+        # it is published -- an interrupted run leaves exactly this state.
+        # The old precondition ("an existing release must have a resolvable
+        # immutable tag") crashed the planner on it, stranding the draft.
+        plan = rs.plan_release_completion(
+            version="1.0.76",
+            head_sha="b" * 40,
+            tag_sha="",
+            release_exists=True,
+            release_is_draft=True,
+            draft_target_sha="c" * 40,
+        )
+        assert plan["action"] == "complete_draft_release"
+        assert plan["build_ref"] == "c" * 40
+        assert plan["release_target"] == "c" * 40
+
+    def test_tagless_draft_with_branch_name_target_fails_closed(self):
+        # target_commitish may legally be a branch name on GitHub; ours is
+        # always an exact SHA because creation passes --target <sha>. A branch
+        # name is NOT an immutable source, so refuse it.
+        try:
+            rs.plan_release_completion(
+                version="1.0.76",
+                head_sha="b" * 40,
+                tag_sha="",
+                release_exists=True,
+                release_is_draft=True,
+                draft_target_sha="main",
+            )
+        except ValueError as exc:
+            assert "immutable source" in str(exc)
+        else:
+            raise AssertionError("a branch-name draft target was accepted")
+
+    def test_published_release_without_a_tag_still_fails_closed(self):
+        # Only DRAFTS may lack a tag ref; a published release without one is
+        # an inconsistency the planner must keep refusing.
+        try:
+            rs.plan_release_completion(
+                version="1.0.76",
+                head_sha="b" * 40,
+                tag_sha="",
+                release_exists=True,
+                release_is_draft=False,
+            )
+        except ValueError as exc:
+            assert "resolvable immutable tag" in str(exc)
+        else:
+            raise AssertionError("a tagless published release was accepted")
+
     def test_release_discovery_includes_drafts_and_binds_numeric_id(self):
         release = rs.discover_release_by_tag(
             [
