@@ -527,9 +527,10 @@ class LockPublicationTests(unittest.TestCase):
                 lock_path = parent / corpus.LOCK_NAME
                 if seam == "temp_create":
                     patcher = mock.patch.object(
-                        corpus.tempfile,
-                        "NamedTemporaryFile",
+                        corpus,
+                        "_create_lock_temp_capability",
                         side_effect=PermissionError(private),
+                        create=True,
                     )
                 elif seam == "fsync":
                     patcher = mock.patch.object(
@@ -554,14 +555,12 @@ class LockPublicationTests(unittest.TestCase):
             parent = root / "web-acquired"
             parent.mkdir(parents=True)
             lock_path = parent / corpus.LOCK_NAME
-            real_unlink = Path.unlink
-
-            def failed_cleanup(path: Path, *args: object, **kwargs: object) -> None:
-                if path.name.endswith(".part"):
-                    raise PermissionError(private)
-                real_unlink(path, *args, **kwargs)
-
-            with mock.patch.object(Path, "unlink", new=failed_cleanup):
+            with mock.patch.object(
+                corpus,
+                "_dispose_lock_temp_capability",
+                side_effect=PermissionError(private),
+                create=True,
+            ):
                 with self.assertRaises(corpus.CorpusDownloadError) as raised:
                     self._publisher()(root, lock_path, candidate)
 
