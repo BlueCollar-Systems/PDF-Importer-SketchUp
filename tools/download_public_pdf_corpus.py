@@ -541,10 +541,7 @@ def load_manifest(path: Path) -> dict:
         if not isinstance(url, str) or not isinstance(rel, str) or not rel:
             raise SystemExit("Invalid manifest: url/local_path must be strings")
         normalized_rel = rel.replace("\\", "/")
-        component_rel = (
-            normalized_rel[:-1] if normalized_rel.endswith("/") else normalized_rel
-        )
-        parts = component_rel.split("/")
+        parts = normalized_rel.split("/")
         if rel.startswith(("/", "\\")) or any(
             _manifest_path_component_is_unsafe(part) for part in parts
         ):

@@ -273,7 +273,7 @@
       "url": "",
       "source_page": "https://www.gwg.org/workflow-tools-downloads/test-suites/ghent-output-suite/",
       "source_org": "Ghent Workgroup",
-      "local_path": "web-acquired/ghent-output-suite-v5/",
+      "local_path": "web-acquired/ghent-output-suite-v5",
       "license_note": "Manual acquisition candidate. Keep local-only unless redistribution rights are confirmed.",
       "features": [
         "PDF/X workflow behavior",
