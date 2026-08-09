@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Acquire the public local-only PDF stress corpus.
 
-The manifest is committed; downloaded PDFs are not. This keeps the test set
+The manifest is committed; downloaded PDFs are not. Every enabled download is
+bound to an expected SHA-256 before publication, keeping the local test set
 repeatable without redistributing third-party PDFs from this repository.
 """
 
@@ -12,7 +13,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -21,7 +24,16 @@ import urllib.request
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = SCRIPT_DIR / "public_pdf_corpus_manifest.json"
 LOCK_NAME = "PUBLIC_PDF_CORPUS.lock.json"
-USER_AGENT = "BlueCollarSystems-PDFImporter-TestCorpus/1.0"
+USER_AGENT = "BlueCollarSystems-PDFImporter-TestCorpus/1.1"
+SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+RAW_GITHUB_PIN_RE = re.compile(
+    r"\Ahttps://raw\.githubusercontent\.com/[^/]+/[^/]+/"
+    r"[0-9a-f]{40}/.+\Z"
+)
+
+
+class CorpusDownloadError(RuntimeError):
+    """Closed, path-free failure from verified corpus acquisition."""
 
 
 def sha256_file(path: Path) -> str:
@@ -35,8 +47,53 @@ def sha256_file(path: Path) -> str:
 def load_manifest(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
-    if data.get("schema") != "bcs.public_pdf_corpus/1.0":
+    if data.get("schema") != "bcs.public_pdf_corpus/1.1":
         raise SystemExit(f"Unsupported manifest schema in {path}")
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        raise SystemExit("Invalid manifest: entries must be an array")
+
+    seen_ids = set()
+    seen_paths = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise SystemExit("Invalid manifest: every entry must be an object")
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str) or not entry_id:
+            raise SystemExit("Invalid manifest: entry id must be a nonempty string")
+        if entry_id in seen_ids:
+            raise SystemExit("Invalid manifest: duplicate entry id")
+        seen_ids.add(entry_id)
+
+        enabled = entry.get("enabled")
+        if type(enabled) is not bool:
+            raise SystemExit("Invalid manifest: enabled must be a boolean")
+        url = entry.get("url")
+        rel = entry.get("local_path")
+        if not isinstance(url, str) or not isinstance(rel, str) or not rel:
+            raise SystemExit("Invalid manifest: url/local_path must be strings")
+        normalized_rel = rel.replace("\\", "/")
+        parts = normalized_rel.split("/")
+        if rel.startswith(("/", "\\")) or ":" in parts[0] or ".." in parts:
+            raise SystemExit("Invalid manifest: local_path must stay relative")
+        folded_rel = normalized_rel.casefold()
+        if folded_rel in seen_paths:
+            raise SystemExit("Invalid manifest: duplicate local_path")
+        seen_paths.add(folded_rel)
+
+        if enabled and url:
+            expected = entry.get("expected_sha256")
+            if not isinstance(expected, str) or not SHA256_RE.fullmatch(expected):
+                raise SystemExit(
+                    "Invalid manifest: enabled download requires lowercase expected_sha256"
+                )
+            if (
+                url.startswith("https://raw.githubusercontent.com/")
+                and not RAW_GITHUB_PIN_RE.fullmatch(url)
+            ):
+                raise SystemExit(
+                    "Invalid manifest: raw GitHub URL must pin a full 40-character commit"
+                )
     return data
 
 
@@ -51,18 +108,69 @@ def resolve_root(manifest: dict, explicit_root: str | None) -> Path:
     return Path(root).expanduser().resolve()
 
 
-def download(url: str, target: Path, timeout: int) -> None:
+def download_verified(url: str, target: Path, timeout: int, expected_sha256: str) -> str:
+    """Acquire one expected byte sequence and publish it without replacement."""
+    if not isinstance(expected_sha256, str) or not SHA256_RE.fullmatch(expected_sha256):
+        raise CorpusDownloadError("invalid_expected_sha256")
+
+    if target.exists():
+        if target.is_file() and sha256_file(target) == expected_sha256:
+            return expected_sha256
+        raise CorpusDownloadError("existing_digest_mismatch")
+
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    tmp = target.with_suffix(target.suffix + ".part")
     target.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        with tmp.open("wb") as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-    tmp.replace(target)
+    tmp_path = None
+    digest = hashlib.sha256()
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="xb",
+            dir=str(target.parent),
+            prefix=f".{target.name}.",
+            suffix=".part",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    digest.update(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        actual = digest.hexdigest()
+        if actual != expected_sha256:
+            raise CorpusDownloadError("download_digest_mismatch")
+
+        try:
+            os.link(tmp_path, target)
+        except FileExistsError:
+            if target.is_file() and sha256_file(target) == expected_sha256:
+                return expected_sha256
+            raise CorpusDownloadError("publish_conflict")
+        except OSError as exc:
+            raise CorpusDownloadError("publish_io_error") from exc
+
+        if sha256_file(target) != expected_sha256:
+            raise CorpusDownloadError("published_digest_mismatch")
+        return expected_sha256
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # The verified target, if any, is never removed by cleanup.
+                pass
+
+
+def download(url: str, target: Path, timeout: int, expected_sha256: str) -> str:
+    """Verified public entry point; the expected hash is mandatory."""
+    return download_verified(url, target, timeout, expected_sha256)
 
 
 def main(argv: list[str]) -> int:
@@ -106,22 +214,31 @@ def main(argv: list[str]) -> int:
         entry_id = entry.get("id", "")
         url = entry.get("url", "")
         rel = entry.get("local_path", "")
+        expected = entry.get("expected_sha256", "")
         if not url or not rel or rel.endswith("/"):
             print(f"SKIP {entry_id}: no direct download URL")
             lock_entries.append({"id": entry_id, "status": "skipped", "reason": "no_direct_url"})
             continue
 
-        target = root / rel
+        target = (root / rel).resolve()
         try:
-            if target.exists() and target.stat().st_size > 0:
-                digest = sha256_file(target)
+            target.relative_to(root)
+        except ValueError:
+            failures.append((entry_id, "target_outside_root"))
+            print(f"FAIL {entry_id}: target_outside_root", file=sys.stderr)
+            lock_entries.append(
+                {"id": entry_id, "status": "failed", "reason": "target_outside_root"}
+            )
+            continue
+        try:
+            if target.exists():
+                digest = download_verified(url, target, args.timeout, expected)
                 print(f"OK   {entry_id}: exists {target} sha256={digest[:12]}")
             else:
                 print(f"GET  {entry_id}: {url}")
                 start = time.time()
-                download(url, target, args.timeout)
+                digest = download_verified(url, target, args.timeout, expected)
                 elapsed = time.time() - start
-                digest = sha256_file(target)
                 print(f"OK   {entry_id}: {target.stat().st_size} bytes in {elapsed:.1f}s sha256={digest[:12]}")
 
             lock_entries.append(
@@ -133,6 +250,7 @@ def main(argv: list[str]) -> int:
                     "url": url,
                     "local_path": str(target),
                     "size_bytes": target.stat().st_size,
+                    "expected_sha256": expected,
                     "sha256": digest,
                     "features": entry.get("features", []),
                     "test_intent": entry.get("test_intent", ""),
@@ -140,13 +258,19 @@ def main(argv: list[str]) -> int:
                     "status": "ok",
                 }
             )
-        except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+        except (
+            CorpusDownloadError,
+            OSError,
+            urllib.error.URLError,
+            urllib.error.HTTPError,
+            TimeoutError,
+        ) as exc:
             failures.append((entry_id, str(exc)))
             print(f"FAIL {entry_id}: {exc}", file=sys.stderr)
             lock_entries.append({"id": entry_id, "status": "failed", "reason": str(exc)})
 
     lock = {
-        "schema": "bcs.public_pdf_corpus.lock/1.0",
+        "schema": "bcs.public_pdf_corpus.lock/1.1",
         "manifest": str(manifest_path),
         "root": str(root),
         "updated_unix": int(time.time()),
