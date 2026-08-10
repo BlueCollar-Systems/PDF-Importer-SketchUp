@@ -56,19 +56,30 @@ module BlueCollarSystems
       # (determinism), and non-numeric timing values are dropped rather than coerced.
       def split_pipeline_performance(stats)
         collected = stats[:pipeline_performance]
-        return [{}, {}] unless collected.is_a?(Hash)
+        return [{}, {}, []] unless collected.is_a?(Hash)
 
         phases = {}
         counters = {}
+        aggregates = []
         collected.keys.sort_by(&:to_s).each do |key|
           value = collected[key]
-          if key.to_s.end_with?('_ms')
-            phases[key] = value.to_f.round(3) if value.is_a?(Numeric)
+          name = key.to_s
+          if name.end_with?('_ms')
+            next unless value.is_a?(Numeric)
+            phases[key] = value.to_f.round(3)
+            # `*_total_ms` keys (page_total_ms, raster_total_ms) are PARENTS that enclose
+            # the stages beside them. They are reported, but must not be summed as leaves:
+            # the first real canary summed page_total_ms with its own children, overshot
+            # total_ms, and the clamp reported unaccounted_ms as 0.0 -- claiming the
+            # breakdown explained 100% of a run where ~32% was unexplained. A suffix rule
+            # is used rather than a hand-listed set for the same reason `_ms` is: a list
+            # drifts as stages are added, a naming convention does not.
+            aggregates << key if name.end_with?('_total_ms')
           else
             counters[key] = value
           end
         end
-        [phases, counters]
+        [phases, counters, aggregates]
       end
 
       def build_from_stats(pdf_path, opts, stats)
@@ -113,9 +124,10 @@ module BlueCollarSystems
               elapsed_ms: elapsed_ms,
               peak_mb: stats[:peak_mb].to_f > 0.0 ? stats[:peak_mb].to_f.round(2) : sample_process_mb
             }
-            phases, counters = split_pipeline_performance(stats)
+            phases, counters, aggregates = split_pipeline_performance(stats)
             if elapsed_ms > 0 || !phases.empty?
-              measured = phases.values.inject(0.0) { |sum, ms| sum + ms }
+              measured = phases.reject { |key, _| aggregates.include?(key) }
+                               .values.inject(0.0) { |sum, ms| sum + ms }
               perf[:phases] = phases.merge(
                 total_ms: elapsed_ms,
                 # How much of the elapsed time the breakdown does NOT explain. Without
@@ -127,6 +139,9 @@ module BlueCollarSystems
               )
             end
             perf[:counters] = counters unless counters.empty?
+            # Declare which keys were treated as parents. Reinterpreting a key's meaning
+            # must be auditable rather than silent magic.
+            perf[:phase_aggregates] = aggregates unless aggregates.empty?
             perf
           end,
           fallback: fallback_block(stats, degraded_renderers),
