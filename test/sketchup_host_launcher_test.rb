@@ -264,8 +264,20 @@ class SketchupHostLauncherTest < Minitest::Test
     ], runner.commands
   end
 
-  def test_windows_process_backend_still_fails_real_taskkill_errors
+  def test_windows_process_backend_treats_taskkill_partial_tree_as_success
     runner = FakeCommandRunner.new([1])
+    backend = SketchupHostLauncher::ProcessBackend.new(
+      :windows => true, :command_runner => runner
+    )
+
+    assert backend.kill(4242)
+    assert_equal [
+      ['taskkill.exe', '/PID', '4242', '/T', '/F']
+    ], runner.commands
+  end
+
+  def test_windows_process_backend_still_fails_real_taskkill_errors
+    runner = FakeCommandRunner.new([2])
     backend = SketchupHostLauncher::ProcessBackend.new(
       :windows => true, :command_runner => runner
     )

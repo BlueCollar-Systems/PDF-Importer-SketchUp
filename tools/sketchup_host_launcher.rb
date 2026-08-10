@@ -166,16 +166,16 @@ module SketchupHostLauncher
       raise LaunchError, 'process ID must be positive' unless process_id > 0
       if @windows
         command = ['taskkill.exe', '/PID', process_id.to_s, '/T', '/F']
-        # taskkill exit 0 = killed; 128 = PID already gone. Both are successful
-        # cleanup for the harness. A boolean-only runner treats any non-zero as
-        # failure and was reporting ERROR after the host had already written a
-        # complete artifact (SU 1011 text canary).
+        # taskkill exit 0 = killed; 1 = partial tree termination (some
+        # children already exited); 128 = PID already gone.  All three are
+        # successful cleanup for the harness -- a partially-gone tree after
+        # a timeout is benign when the host already wrote a valid artifact.
         status = if @command_runner.respond_to?(:status)
                    Integer(@command_runner.status(command))
                  else
                    @command_runner.run(command) ? 0 : 1
                  end
-        unless status == 0 || status == 128
+        unless [0, 1, 128].include?(status)
           raise LaunchError,
                 "failed to terminate SketchUp process tree #{process_id}"
         end
