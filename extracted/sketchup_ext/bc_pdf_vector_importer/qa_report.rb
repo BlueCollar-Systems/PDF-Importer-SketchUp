@@ -42,6 +42,35 @@ module BlueCollarSystems
         0.0
       end
 
+      # Split the pipeline's accumulated measurements into durations and everything else.
+      #
+      # stats[:pipeline_performance] is a single flat bag holding both timings
+      # (commit_ms, item_delivery_ms, text3d_render_ms, the raster_*_ms family, ...) and
+      # non-durations (glyph_component_definition_count, raster_png_temp_bytes,
+      # commit_includes_source_binding_verification). Reporting a byte count as a phase
+      # would silently corrupt every later optimisation decision, so membership is decided
+      # by the `_ms` suffix rather than by a hand-maintained allow-list that would drift as
+      # new stages are instrumented.
+      #
+      # Keys are sorted so the same input yields the same key order on every run
+      # (determinism), and non-numeric timing values are dropped rather than coerced.
+      def split_pipeline_performance(stats)
+        collected = stats[:pipeline_performance]
+        return [{}, {}] unless collected.is_a?(Hash)
+
+        phases = {}
+        counters = {}
+        collected.keys.sort_by(&:to_s).each do |key|
+          value = collected[key]
+          if key.to_s.end_with?('_ms')
+            phases[key] = value.to_f.round(3) if value.is_a?(Numeric)
+          else
+            counters[key] = value
+          end
+        end
+        [phases, counters]
+      end
+
       def build_from_stats(pdf_path, opts, stats)
         elapsed_ms = ((stats[:elapsed_seconds] || 0).to_f * 1000.0).round(1)
         layers = Array(stats[:layers]).compact
@@ -84,7 +113,20 @@ module BlueCollarSystems
               elapsed_ms: elapsed_ms,
               peak_mb: stats[:peak_mb].to_f > 0.0 ? stats[:peak_mb].to_f.round(2) : sample_process_mb
             }
-            perf[:phases] = { total_ms: elapsed_ms } if elapsed_ms > 0
+            phases, counters = split_pipeline_performance(stats)
+            if elapsed_ms > 0 || !phases.empty?
+              measured = phases.values.inject(0.0) { |sum, ms| sum + ms }
+              perf[:phases] = phases.merge(
+                total_ms: elapsed_ms,
+                # How much of the elapsed time the breakdown does NOT explain. Without
+                # this a partial breakdown reads exactly like a complete one, which is
+                # the same false-completeness trap as a returncode-only PASS. Clamped at
+                # zero because stages can nest (a parent encloses a child), so the sum
+                # can legitimately exceed the wall clock.
+                unaccounted_ms: [(elapsed_ms - measured).round(3), 0.0].max
+              )
+            end
+            perf[:counters] = counters unless counters.empty?
             perf
           end,
           fallback: fallback_block(stats, degraded_renderers),
