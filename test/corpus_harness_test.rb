@@ -56,14 +56,18 @@ class CorpusHarnessTest < Minitest::Test
       begin
         klass = class << CorpusHarness; self; end
         original = CorpusHarness.method(:estimate_page_count)
-        klass.define_method(:estimate_page_count) do |_path|
+        # Module#define_method is PRIVATE on Ruby 2.2 (public only from 2.5), and
+        # SketchUp 2017 ships Ruby 2.2 -- so a bare klass.define_method raises
+        # NoMethodError on the runtime we actually target while passing on any
+        # modern Ruby. Route through send so the stub works on the floor.
+        klass.send(:define_method, :estimate_page_count) do |_path|
           raise 'estimate_page_count should not run for size-heavy PDFs'
         end
 
         assert_nil CorpusHarness.page_count_hint_for(f.path)
       ensure
         if klass && original
-          klass.define_method(:estimate_page_count) { |path| original.call(path) }
+          klass.send(:define_method, :estimate_page_count) { |path| original.call(path) }
         end
       end
     end
