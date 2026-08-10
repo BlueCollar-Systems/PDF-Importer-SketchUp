@@ -28,7 +28,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: SketchUp 2017 Ruby compatibility guard
-        run: python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext
+        # test/ is scanned too: those files are executed by the real Ruby
+        # 2.2.4-p230 smoke lane (tools/run_ruby22_exact_source.sh), so a 2.2
+        # incompatibility there fails CI just as hard as one in the shipped
+        # extension -- but this guard used to look only at extracted/. That gap let a
+        # receiver-form define_method reach main and turn the 2.2 job red.
+        run: python3 tools/check_su2017_ruby_compat.py extracted/sketchup_ext test
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}

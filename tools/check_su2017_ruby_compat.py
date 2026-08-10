@@ -45,6 +45,18 @@ INCOMPATIBLE_PATTERNS = [
     (re.compile(r"\[[^\]\n]*\.\.\s*\]"), "endless range requires Ruby 2.6+"),
     (re.compile(r"\[\s*\.\.[^\]\n]*\]"), "beginless range requires Ruby 2.7+"),
     (re.compile(r"\bdef\b[^\n]*\.\.\."), "argument forwarding requires Ruby 2.7+"),
+    # Module#define_method and friends were PRIVATE until Ruby 2.5 (Feature #14133),
+    # so an explicit receiver raises NoMethodError on SketchUp 2017's Ruby 2.2 while
+    # passing on every modern Ruby. This exact call turned main's 2.2 gate red on
+    # 2026-08-10 (corpus_harness_test.rb:59/:66). The send(:define_method, ...) form
+    # is correct and is deliberately not matched here.
+    (
+        re.compile(
+            r"\.\s*(?:define_method|alias_method|undef_method|remove_method)\b"
+        ),
+        "Module#define_method/alias_method/undef_method/remove_method are private "
+        "before Ruby 2.5; call via send(:define_method, ...) instead",
+    ),
 ]
 
 
