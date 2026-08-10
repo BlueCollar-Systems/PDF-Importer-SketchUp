@@ -19,8 +19,9 @@
 # PDFVectorImporter/pdfcadcore/outcome_accounting.py (FreeCAD canonical, embedded
 # byte-identical in Blender and LibreCAD). Vocabulary and laws must stay identical
 # across all four products or the cross-host matrix stops meaning anything.
-# Ruby 2.2 constraints observed: no safe navigation (&.), no Hash#dig, no
-# squiggly heredocs.
+# Written against the SketchUp 2017 Ruby 2.2 floor: this file deliberately uses
+# only constructs available in that release, so none of the post-2.2 conveniences
+# appear here.
 
 module BlueCollarSystems
   module PDFVectorImporter
