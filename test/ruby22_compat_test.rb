@@ -15,6 +15,13 @@ MODERN_METHOD_PATTERN =
   /&\.|(?<!\.)\.(?:match\?|positive\?|negative\?|dig|sum|then|yield_self|filter|filter_map|tally|transform_values|transform_keys|delete_prefix|delete_suffix|fetch_values|chunk_while|clamp|unpack1|digits|grep_v|bsearch_index)(?=[^A-Za-z0-9_]|$)/
 ENDLESS_RANGE_PATTERN   = /(^|[^.])\.\.(?!\.)\s*(?:[\]\)\}]|$)/
 BEGINLESS_RANGE_PATTERN = /(?:\[|\()\s*\.\.(?!\.)/
+# Module#define_method and friends were PRIVATE until Ruby 2.5 (Feature #14133), so
+# an explicit receiver raises NoMethodError on SketchUp 2017's Ruby 2.2 while passing
+# on every modern Ruby. This scanner already walked test/, but had no pattern for it,
+# so a receiver-form call reached main and turned the 2.2 job red on 2026-08-10.
+# The send(:define_method, ...) form is correct and deliberately not matched.
+RECEIVER_VISIBILITY_PATTERN =
+  /\.\s*(?:define_method|alias_method|undef_method|remove_method)\b/
 
 def strip_noise(line)
   stripped = line.strip
@@ -40,6 +47,9 @@ def collect_hits(root, label)
           hits << "#{label} #{rel}:#{idx + 1}: #{line.strip}"
         end
         if scan_line =~ ENDLESS_RANGE_PATTERN || scan_line =~ BEGINLESS_RANGE_PATTERN
+          hits << "#{label} #{rel}:#{idx + 1}: #{line.strip}"
+        end
+        if scan_line =~ RECEIVER_VISIBILITY_PATTERN
           hits << "#{label} #{rel}:#{idx + 1}: #{line.strip}"
         end
       end
