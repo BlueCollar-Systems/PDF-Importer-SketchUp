@@ -16,7 +16,10 @@ module BlueCollarSystems
 
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
-      GEOMETRY_STAGING_PATH_THRESHOLD = 500
+      # Stage into isolated groups before explode once path count is moderate.
+      # Live entities.add_* merge cost grows roughly with existing edge count;
+      # staging preserves identical exploded geometry with far less host work.
+      GEOMETRY_STAGING_PATH_THRESHOLD = 100
       GEOMETRY_STAGING_CHUNK_PATHS = 250
       SMALL_FACE_DIRECT_MAX_EXTENT = 0.002
       SMALL_FACE_CONSTRUCTION_SCALE = 1000.0

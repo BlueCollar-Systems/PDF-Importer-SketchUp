@@ -4176,10 +4176,18 @@ module BlueCollarSystems
           use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
             (a.to_f - b.to_f).abs > 0.01
           end
-          label_svg_document = CairoGlyphSource.render_page_svg(
-            path, page_num, :failure_info => label_svg_failure,
-            :use_cropbox => use_cropbox == true
-          )
+          # Reuse a page SVG already certified this import (Glyphs/3D/empty-page
+          # inspection). Re-running pdftocairo for Labels fallback is pure I/O
+          # waste and does not change the certified SVG payload.
+          label_svg_document = source_svg_document
+          if label_svg_document.nil? ||
+             label_svg_document[:svg].to_s.empty?
+            label_svg_document = CairoGlyphSource.render_page_svg(
+              path, page_num, :failure_info => label_svg_failure,
+              :use_cropbox => use_cropbox == true
+            )
+            source_svg_document = label_svg_document if label_svg_document
+          end
           unless label_svg_document &&
                  !label_svg_document[:svg].to_s.empty?
             raise RepresentationFidelity::ContractError,
@@ -5190,12 +5198,26 @@ module BlueCollarSystems
 
     def self.begin_source_pdf_render_binding!(opts, pdf_path)
       source_path = File.expand_path(pdf_path.to_s)
-      frozen_sha = cached_source_pdf_sha256!(opts, source_path)
       identity = source_pdf_file_identity!(source_path)
-      actual_sha = Digest::SHA256.file(source_path).hexdigest
-      unless actual_sha == frozen_sha
-        raise RepresentationFidelity::ContractError,
-              'source PDF content changed before page rendering began'
+      cache = opts[:source_pdf_digest_cache]
+      cache = {} unless cache.is_a?(Hash)
+      opts[:source_pdf_digest_cache] = cache
+      key = source_path.downcase
+      entry = cache[key]
+      if entry.is_a?(Hash) && entry[:sha256].to_s =~ /\A[0-9a-f]{64}\z/ &&
+         entry[:file_identity] == identity
+        # Warm cache: one content hash catches same-mtime/size rewrites.
+        # Cold path below hashes once while freezing the cache — do not hash
+        # twice for a file that cannot have changed between consecutive reads.
+        actual_sha = Digest::SHA256.file(source_path).hexdigest
+        unless actual_sha == entry[:sha256].to_s
+          raise RepresentationFidelity::ContractError,
+                'source PDF content changed before page rendering began'
+        end
+        frozen_sha = actual_sha
+      else
+        frozen_sha = cached_source_pdf_sha256!(opts, source_path)
+        identity = source_pdf_file_identity!(source_path)
       end
       {
         :source_pdf_path => source_path,
@@ -5212,6 +5234,8 @@ module BlueCollarSystems
       end
       source_path = File.expand_path(binding[:source_pdf_path].to_s)
       identity = source_pdf_file_identity!(source_path)
+      # Same-mtime content swaps are in-scope (see contract tests). Always
+      # re-hash at the post-render gate even when identity looks unchanged.
       sha256 = Digest::SHA256.file(source_path).hexdigest
       unless identity == binding[:file_identity] &&
              sha256 == binding[:source_pdf_sha256].to_s
@@ -5231,6 +5255,7 @@ module BlueCollarSystems
         end
         path = File.expand_path(entry[:source_pdf_path].to_s)
         identity = source_pdf_file_identity!(path)
+        # Commit gate must re-hash: identity alone cannot prove content.
         sha256 = Digest::SHA256.file(path).hexdigest
         unless identity == entry[:file_identity] && sha256 == entry[:sha256].to_s
           raise RepresentationFidelity::ContractError,
