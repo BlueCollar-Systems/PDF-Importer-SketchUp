@@ -148,6 +148,89 @@ class QAReportStageTimingTest < Minitest::Test
     assert_equal 791, timed[:text_entities]
   end
 
+  # --- aggregate (parent) stages must not be summed as leaves ---------------
+  #
+  # Found by running the real thing. The first leased canary on 1011/text reported
+  # unaccounted_ms = 0.0, implying the breakdown explained 100% of the runtime. It did
+  # not: page_total_ms is a PARENT that encloses the child stages, so summing every
+  # *_ms key exceeded total_ms and the clamp drove the remainder to zero. That is the
+  # exact false-completeness failure unaccounted_ms exists to prevent, so the clamp was
+  # hiding the very thing the field is for.
+  #
+  # Aggregates are identified by the `_total_ms` suffix rather than a hand-listed set,
+  # for the same reason phases are identified by `_ms`: a list would drift as stages are
+  # added, a naming rule cannot. Both known aggregates (page_total_ms, raster_total_ms)
+  # already follow it.
+
+  # Exact values from the 2026-08-10 leased canary, 1011 (1 OF 2) - Rev 0 / text.
+  REAL_CANARY_STAGES = {
+    page_total_ms: 72_522.0,          # aggregate: encloses everything below
+    text3d_render_ms: 21_014.8,
+    text3d_record_ms: 13_470.3,
+    post_build_ms: 5_256.3,
+    commit_ms: 5_023.8,
+    text_extract_ms: 4_738.4,
+    content_stream_parse_ms: 937.7,
+    embedded_image_scan_ms: 822.2,
+    prebuild_analysis_ms: 565.6,
+    svg_source_render_ms: 522.4,
+    view_fit_ms: 197.6,
+    text3d_transform_ms: 7.8,
+    xobject_expand_ms: 3.5,
+    page_data_ms: 3.5,
+    post_commit_cleanup_ms: 0.0,
+    entity_diff_ms: 0.0
+  }.freeze
+
+  def test_real_canary_remainder_is_not_falsely_zero
+    stats = base_stats(elapsed_seconds: 77.6,
+                       pipeline_performance: REAL_CANARY_STAGES.dup)
+    phases = build(stats)[:performance][:phases]
+
+    # Leaves sum to 52,563.9 ms of a 77,600 ms run.
+    assert_in_delta 25_036.1, phases[:unaccounted_ms], 0.2,
+                    'page_total_ms is a parent, not a leaf; counting it made the ' \
+                    'breakdown look 100% complete when ~32% was unexplained'
+    refute_equal 0.0, phases[:unaccounted_ms]
+  end
+
+  def test_aggregate_stages_are_still_reported_just_not_summed
+    stats = base_stats(elapsed_seconds: 77.6,
+                       pipeline_performance: REAL_CANARY_STAGES.dup)
+    phases = build(stats)[:performance][:phases]
+    assert_equal 72_522.0, phases[:page_total_ms],
+                 'an aggregate is useful information; exclude it from the sum, not the report'
+  end
+
+  def test_which_keys_were_treated_as_aggregates_is_declared
+    stats = base_stats(elapsed_seconds: 77.6,
+                       pipeline_performance: REAL_CANARY_STAGES.dup)
+    perf = build(stats)[:performance]
+    assert_equal ['page_total_ms'], Array(perf[:phase_aggregates]).map(&:to_s),
+                 'reinterpreting a key must be auditable, never silent magic'
+  end
+
+  def test_raster_total_ms_is_also_an_aggregate
+    stats = base_stats(elapsed_seconds: 10.0, pipeline_performance: {
+      raster_total_ms: 9_000.0, raster_render_ms: 6_000.0,
+      raster_verify_ms: 2_000.0, raster_cleanup_ms: 1_000.0
+    })
+    phases = build(stats)[:performance][:phases]
+    assert_equal 1_000.0, phases[:unaccounted_ms],
+                 '10000 total - 9000 of raster leaves = 1000; the raster aggregate ' \
+                 'must not be double-counted'
+  end
+
+  def test_flat_stage_set_without_aggregates_is_unaffected
+    stats = base_stats(pipeline_performance: {
+      item_delivery_ms: 40_000.0, commit_ms: 6_800.0
+    })
+    perf = build(stats)[:performance]
+    assert_equal 50_000.0, perf[:phases][:unaccounted_ms]
+    assert_nil perf[:phase_aggregates],
+               'nothing to declare when no aggregate is present'
+  end
+
   def test_report_is_json_serializable_with_phases_and_counters
     stats = base_stats(pipeline_performance: {
       commit_ms: 1.5, glyph_component_definition_count: 7
