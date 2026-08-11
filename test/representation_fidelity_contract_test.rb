@@ -2267,6 +2267,29 @@ class RepresentationFidelityContractTest < Minitest::Test
     File.delete(pdf) if pdf && File.exist?(pdf)
   end
 
+  def test_cold_render_binding_begin_hashes_source_pdf_once
+    pdf = File.join(Dir.tmpdir, "bc_digest_once_#{Process.pid}.pdf")
+    File.binwrite(pdf, "%PDF-1.4\nsource-a\n%%EOF\n")
+    calls = 0
+    original = Digest::SHA256.method(:file)
+    Digest::SHA256.define_singleton_method(:file) do |path|
+      calls += 1
+      original.call(path)
+    end
+    opts = {}
+    expected = original.call(pdf).hexdigest
+
+    binding = IMP.begin_source_pdf_render_binding!(opts, pdf)
+
+    assert_equal true, binding[:pre_render_verified]
+    assert_equal expected, binding[:source_pdf_sha256]
+    # Cold begin freezes the digest cache with one content hash (no double-read).
+    assert_equal 1, calls
+  ensure
+    Digest::SHA256.define_singleton_method(:file, original) if original
+    File.delete(pdf) if pdf && File.exist?(pdf)
+  end
+
   def test_full_page_raster_production_binding_decodes_visual_pixels
     png = File.join(Dir.tmpdir, "bc_raster_pixels_#{Process.pid}.png")
     pdf = File.join(Dir.tmpdir, "bc_raster_pixels_#{Process.pid}.pdf")
