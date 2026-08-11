@@ -10,6 +10,14 @@ module BlueCollarSystems
     class ContentStreamParser
       MAX_TOKENS_PER_STREAM = 1_000_000
 
+      # Fast character-class lookup tables used by the hot-path tokenizer.
+      # Matches prior /[\s\x00]/ and /[\s\[\]<>(){}\/\%]/ classes exactly
+      # (Ruby \s = space, tab, LF, VT, FF, CR) so the token stream is unchanged.
+      WHITESPACE_CHARS = "\x00\t\n\v\f\r ".freeze
+      # Delimiter set intentionally omits NUL — old regex did too; NUL is only
+      # skipped via the whitespace check above.
+      DELIMITER_CHARS = "\t\n\v\f\r []<>(){}/%".freeze
+
       # A VectorPath represents one complete path with its sub-paths
       VectorPath = Struct.new(
         :subpaths,       # Array of SubPath
@@ -141,6 +149,31 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Content stream tokenizer
       # ---------------------------------------------------------------
+      # Fast manual numeric-literal check matching /\A[+-]?\d*\.?\d+\z/:
+      # trailing digit group is required, so "5." stays a keyword not a number.
+      def numeric_literal?(word)
+        return false if word.nil? || word.empty?
+        i = 0
+        len = word.length
+        i += 1 if word[i] == '+' || word[i] == '-'
+        while i < len && word[i] >= '0' && word[i] <= '9'
+          i += 1
+        end
+        if i < len && word[i] == '.'
+          i += 1
+          frac = 0
+          while i < len && word[i] >= '0' && word[i] <= '9'
+            i += 1
+            frac += 1
+          end
+          return false if frac == 0
+        end
+        # Without a trailing fractional group, require at least one digit overall
+        # (covers the regex backtracking of \d* into the mandatory \d+).
+        digit_start = (word[0] == '+' || word[0] == '-') ? 1 : 0
+        i == len && i > digit_start && word[digit_start] >= '0' && word[digit_start] <= '9'
+      end
+
       def tokenize_content_stream(stream)
         tokens = []
         i = 0
@@ -154,16 +187,20 @@ module BlueCollarSystems
 
           c = stream[i]
 
-          # Whitespace
-          if c =~ /[\s\x00]/
+          # Whitespace (PDF spec: null 0x00, tab, LF, FF, CR, space)
+          if WHITESPACE_CHARS.include?(c)
             i += 1
             next
           end
 
           # Comment
           if c == '%'
-            eol = stream.index(/[\r\n]/, i) || len
-            i = eol + 1
+            j = i + 1
+            while j < len && c != "\r" && c != "\n"
+              c = stream[j]
+              j += 1
+            end
+            i = j
             next
           end
 
@@ -240,7 +277,7 @@ module BlueCollarSystems
           # Name
           if c == '/'
             j = i + 1
-            while j < len && stream[j] !~ /[\s\[\]<>(){}\/\%]/
+            while j < len && !DELIMITER_CHARS.include?(stream[j])
               j += 1
             end
             tokens << { type: :name, value: stream[i...j] }
@@ -250,7 +287,7 @@ module BlueCollarSystems
 
           # Number or keyword
           j = i
-          while j < len && stream[j] !~ /[\s\[\]<>(){}\/\%]/
+          while j < len && !DELIMITER_CHARS.include?(stream[j])
             j += 1
           end
 
@@ -284,7 +321,7 @@ module BlueCollarSystems
             next
           end
 
-          if word =~ /\A[+-]?\d*\.?\d+\z/
+          if numeric_literal?(word)
             tokens << { type: :number, value: word.to_f }
           else
             tokens << { type: :operator, value: word }
