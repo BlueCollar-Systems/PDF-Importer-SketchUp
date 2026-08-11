@@ -187,10 +187,15 @@ class QAReportStageTimingTest < Minitest::Test
                        pipeline_performance: REAL_CANARY_STAGES.dup)
     phases = build(stats)[:performance][:phases]
 
-    # Leaves sum to 52,563.9 ms of a 77,600 ms run.
-    assert_in_delta 25_036.1, phases[:unaccounted_ms], 0.2,
-                    'page_total_ms is a parent, not a leaf; counting it made the ' \
-                    'breakdown look 100% complete when ~32% was unexplained'
+    # Leaves sum to 47,307.6 ms of a 77,600 ms run once BOTH parents are excluded.
+    #
+    # This expectation was originally 25,036.1, which still double-counted post_build_ms
+    # (5,256.3 ms) as a leaf -- the suffix rule only caught page_total_ms. The correction
+    # is exactly that stage's value, which is what confirmed post_build_ms encloses
+    # commit/cleanup/diff/fit/diagnostics rather than sitting beside them.
+    assert_in_delta 30_292.4, phases[:unaccounted_ms], 0.2,
+                    'both page_total_ms and post_build_ms are parents; counting either ' \
+                    'as a leaf understates how much of the run is unexplained'
     refute_equal 0.0, phases[:unaccounted_ms]
   end
 
@@ -206,7 +211,11 @@ class QAReportStageTimingTest < Minitest::Test
     stats = base_stats(elapsed_seconds: 77.6,
                        pipeline_performance: REAL_CANARY_STAGES.dup)
     perf = build(stats)[:performance]
-    assert_equal ['page_total_ms'], Array(perf[:phase_aggregates]).map(&:to_s),
+    # Both parents present in that stage set must be declared. Originally this expected
+    # only page_total_ms, because the suffix rule could not see that post_build_ms is
+    # also a parent.
+    assert_equal %w[page_total_ms post_build_ms],
+                 Array(perf[:phase_aggregates]).map(&:to_s).sort,
                  'reinterpreting a key must be auditable, never silent magic'
   end
 
@@ -229,6 +238,83 @@ class QAReportStageTimingTest < Minitest::Test
     assert_equal 50_000.0, perf[:phases][:unaccounted_ms]
     assert_nil perf[:phase_aggregates],
                'nothing to declare when no aggregate is present'
+  end
+
+  # --- parents are DECLARED, not inferred from names ------------------------
+  #
+  # The `_total_ms` suffix rule shipped in #29 was a generalisation from a sample of two
+  # (page_total_ms, raster_total_ms). The codebase does not follow that convention:
+  # main.rb spans show post_build_ms (line 4620 -> 4710) enclosing FIVE children --
+  # commit_ms (4622-4638), post_commit_cleanup_ms (4647-4659), entity_diff_ms
+  # (4671-4679), view_fit_ms (4687-4690) and diagnostics_ms (4700-4703). Their sum
+  # (7,157.9 ms) matches post_build_ms (7,200.4 ms) to within its own 42 ms of overhead.
+  #
+  # Because post_build_ms is not named `*_total_ms`, the suffix rule counted it AND its
+  # children, so the real canary reported unaccounted_ms = 2,027.4 ms (3.0% unexplained)
+  # when the truth is 9,227.8 ms (13.6%). Under-reporting incompleteness by 4.5x is the
+  # same false-completeness failure #29 was meant to end, arriving by a different route.
+  #
+  # Nesting is therefore an explicit declaration. A naming convention only works if the
+  # code follows it, and any *_ms key that is neither a declared parent nor a known leaf
+  # is surfaced in `phase_unclassified` so a new stage cannot be silently misattributed.
+
+  # Exact phases from the v3.7.131 leased canary, 1011 (1 OF 2) - Rev 0 / text.
+  V37131_PHASES = {
+    page_total_ms: 60_946.3,          # parent: the per-page loop
+    post_build_ms: 7_200.4,           # parent: encloses commit/cleanup/diff/fit/diagnostics
+    text3d_render_ms: 25_799.8,
+    text3d_record_ms: 16_187.2,
+    commit_ms: 6_908.4,               # child of post_build_ms
+    text_extract_ms: 5_720.7,
+    content_stream_parse_ms: 1_390.4,
+    embedded_image_scan_ms: 1_004.7,
+    prebuild_analysis_ms: 700.3,
+    svg_source_render_ms: 693.0,
+    view_fit_ms: 249.5,               # child of post_build_ms
+    text3d_transform_ms: 13.2,
+    page_data_ms: 3.0,
+    xobject_expand_ms: 2.0,
+    entity_diff_ms: 0.0,              # child of post_build_ms
+    post_commit_cleanup_ms: 0.0       # child of post_build_ms
+  }.freeze
+
+  def test_post_build_is_recognised_as_a_parent_despite_its_name
+    stats = base_stats(elapsed_seconds: 67.9, pipeline_performance: V37131_PHASES.dup)
+    perf = build(stats)[:performance]
+    assert_includes Array(perf[:phase_aggregates]).map(&:to_s), 'post_build_ms',
+                    'post_build_ms encloses five children; counting it as a leaf '                     'double-counts them'
+  end
+
+  def test_real_v37131_remainder_is_not_understated
+    stats = base_stats(elapsed_seconds: 67.9, pipeline_performance: V37131_PHASES.dup)
+    phases = build(stats)[:performance][:phases]
+    # Leaves sum to 58,672.2 ms of 67,900 ms once both parents are excluded.
+    assert_in_delta 9_227.8, phases[:unaccounted_ms], 0.5,
+                    'suffix-only classification reported 2,027.4 ms (3.0%); the real '                     'figure is 9,227.8 ms (13.6%)'
+  end
+
+  def test_all_three_known_parents_are_declared
+    stats = base_stats(elapsed_seconds: 100.0, pipeline_performance: {
+      page_total_ms: 50_000.0, post_build_ms: 20_000.0, raster_total_ms: 10_000.0,
+      commit_ms: 19_000.0, raster_render_ms: 9_000.0, text_extract_ms: 30_000.0
+    })
+    declared = Array(build(stats)[:performance][:phase_aggregates]).map(&:to_s).sort
+    assert_equal %w[page_total_ms post_build_ms raster_total_ms], declared
+  end
+
+  def test_an_unknown_stage_is_surfaced_not_silently_counted
+    stats = base_stats(pipeline_performance: {
+      commit_ms: 100.0, brand_new_stage_ms: 5_000.0
+    })
+    perf = build(stats)[:performance]
+    assert_includes Array(perf[:phase_unclassified]).map(&:to_s), 'brand_new_stage_ms',
+                    'a stage nobody classified must be flagged, because it may be a '                     'parent and silently double-count its children'
+  end
+
+  def test_known_stages_produce_no_unclassified_noise
+    stats = base_stats(elapsed_seconds: 67.9, pipeline_performance: V37131_PHASES.dup)
+    assert_nil build(stats)[:performance][:phase_unclassified],
+               'every stage in the real canary is classified; no false alarms'
   end
 
   def test_report_is_json_serializable_with_phases_and_counters

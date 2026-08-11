@@ -54,32 +54,64 @@ module BlueCollarSystems
       #
       # Keys are sorted so the same input yields the same key order on every run
       # (determinism), and non-numeric timing values are dropped rather than coerced.
+      # Stage timers that ENCLOSE other stage timers. Declared explicitly, from the
+      # measured spans in main.rb, because the codebase does not encode nesting in names:
+      #
+      #   page_total_ms  3444 -> 4594/3657  encloses the whole per-page loop
+      #   post_build_ms  4620 -> 4710       encloses commit_ms, post_commit_cleanup_ms,
+      #                                     entity_diff_ms, view_fit_ms, diagnostics_ms
+      #   raster_total_ms 5571 -> 5764      encloses the raster_* family
+      #
+      # An earlier version inferred parents from a `_total_ms` suffix. That was a
+      # generalisation from a sample of two, and post_build_ms breaks it: the real canary
+      # then reported 3.0% of its runtime unexplained when the true figure was 13.6%.
+      # Under-reporting incompleteness is the exact failure this accounting exists to
+      # prevent, so parentage is now stated rather than guessed.
+      PHASE_PARENTS = [:page_total_ms, :post_build_ms, :raster_total_ms].freeze
+
+      # Leaf stages currently written by the pipeline. Only used to detect drift: a new
+      # `*_ms` key that is neither a declared parent nor a known leaf is reported in
+      # `phase_unclassified` rather than silently summed, because an unclassified stage may
+      # itself be a parent and would double-count its children.
+      KNOWN_PHASE_LEAVES = [
+        :page_data_ms, :content_stream_parse_ms, :xobject_expand_ms,
+        :embedded_image_scan_ms, :text_extract_ms, :prebuild_analysis_ms,
+        :svg_source_render_ms, :text3d_render_ms, :text3d_transform_ms,
+        :text3d_record_ms, :item_page_inventory_ms, :item_delivery_ms,
+        :commit_ms, :post_commit_cleanup_ms, :entity_diff_ms, :view_fit_ms,
+        :diagnostics_ms, :raster_render_ms, :raster_verify_ms, :raster_add_image_ms,
+        :raster_cleanup_ms, :raster_pixel_proof_ms
+      ].freeze
+
       def split_pipeline_performance(stats)
         collected = stats[:pipeline_performance]
-        return [{}, {}, []] unless collected.is_a?(Hash)
+        return [{}, {}, [], []] unless collected.is_a?(Hash)
 
         phases = {}
         counters = {}
         aggregates = []
+        unclassified = []
         collected.keys.sort_by(&:to_s).each do |key|
           value = collected[key]
           name = key.to_s
-          if name.end_with?('_ms')
-            next unless value.is_a?(Numeric)
-            phases[key] = value.to_f.round(3)
-            # `*_total_ms` keys (page_total_ms, raster_total_ms) are PARENTS that enclose
-            # the stages beside them. They are reported, but must not be summed as leaves:
-            # the first real canary summed page_total_ms with its own children, overshot
-            # total_ms, and the clamp reported unaccounted_ms as 0.0 -- claiming the
-            # breakdown explained 100% of a run where ~32% was unexplained. A suffix rule
-            # is used rather than a hand-listed set for the same reason `_ms` is: a list
-            # drifts as stages are added, a naming convention does not.
-            aggregates << key if name.end_with?('_total_ms')
-          else
+          unless name.end_with?('_ms')
             counters[key] = value
+            next
+          end
+          next unless value.is_a?(Numeric)
+          phases[key] = value.to_f.round(3)
+          if PHASE_PARENTS.include?(key)
+            # Reported, but excluded from the leaf sum: summing a parent alongside its
+            # children double-counts them.
+            aggregates << key
+          elsif !KNOWN_PHASE_LEAVES.include?(key)
+            # Neither declared parent nor known leaf. Surfaced rather than assumed to be a
+            # leaf, because an unclassified stage may itself be a parent -- exactly how
+            # post_build_ms slipped through and understated the remainder by 4.5x.
+            unclassified << key
           end
         end
-        [phases, counters, aggregates]
+        [phases, counters, aggregates, unclassified]
       end
 
       def build_from_stats(pdf_path, opts, stats)
@@ -124,7 +156,8 @@ module BlueCollarSystems
               elapsed_ms: elapsed_ms,
               peak_mb: stats[:peak_mb].to_f > 0.0 ? stats[:peak_mb].to_f.round(2) : sample_process_mb
             }
-            phases, counters, aggregates = split_pipeline_performance(stats)
+            phases, counters, aggregates, unclassified =
+              split_pipeline_performance(stats)
             if elapsed_ms > 0 || !phases.empty?
               measured = phases.reject { |key, _| aggregates.include?(key) }
                                .values.inject(0.0) { |sum, ms| sum + ms }
@@ -142,6 +175,10 @@ module BlueCollarSystems
             # Declare which keys were treated as parents. Reinterpreting a key's meaning
             # must be auditable rather than silent magic.
             perf[:phase_aggregates] = aggregates unless aggregates.empty?
+            # Loud rather than silent: a stage nobody has classified might be a parent, and
+            # summing it as a leaf would double-count its children and understate the
+            # remainder -- the defect this field exists to make impossible to miss.
+            perf[:phase_unclassified] = unclassified unless unclassified.empty?
             perf
           end,
           fallback: fallback_block(stats, degraded_renderers),
