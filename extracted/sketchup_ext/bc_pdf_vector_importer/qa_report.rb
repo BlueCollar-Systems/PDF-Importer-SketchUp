@@ -83,6 +83,23 @@ module BlueCollarSystems
         :raster_cleanup_ms, :raster_pixel_proof_ms
       ].freeze
 
+      # Process CPU timings, sorted for determinism. Only numeric `*_cpu_ms` entries are
+      # emitted; anything else is dropped rather than coerced, so a stray value cannot be
+      # mistaken for a duration.
+      def cpu_phase_timings(stats)
+        collected = stats[:pipeline_cpu_performance]
+        return {} unless collected.is_a?(Hash)
+
+        out = {}
+        collected.keys.sort_by(&:to_s).each do |key|
+          value = collected[key]
+          next unless key.to_s.end_with?('_cpu_ms')
+          next unless value.is_a?(Numeric)
+          out[key] = value.to_f.round(3)
+        end
+        out
+      end
+
       def split_pipeline_performance(stats)
         collected = stats[:pipeline_performance]
         return [{}, {}, [], []] unless collected.is_a?(Hash)
@@ -179,6 +196,14 @@ module BlueCollarSystems
             # summing it as a leaf would double-count its children and understate the
             # remainder -- the defect this field exists to make impossible to miss.
             perf[:phase_unclassified] = unclassified unless unclassified.empty?
+            # CPU time in its own namespace. Wall stage timings on a contended machine
+            # varied 32.5% run-to-run, which made a 10% stage win unmeasurable; process CPU
+            # time removes contention noise. It is additional, never a substitute: CPU time
+            # excludes blocked work, so on its own it would hide a stage that is slow
+            # because it waits, and wall time is what the user experiences. Kept separate so
+            # a *_cpu_ms figure can never be summed into the wall-time leaves.
+            cpu_phases = cpu_phase_timings(stats)
+            perf[:cpu_phases] = cpu_phases unless cpu_phases.empty?
             perf
           end,
           fallback: fallback_block(stats, degraded_renderers),

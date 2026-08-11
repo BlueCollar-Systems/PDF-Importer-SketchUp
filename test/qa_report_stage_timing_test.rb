@@ -317,6 +317,61 @@ class QAReportStageTimingTest < Minitest::Test
                'every stage in the real canary is classified; no false alarms'
   end
 
+  # --- CPU time lives in its own block, never mixed with wall time -----------
+  #
+  # Three identical runs of the same page varied 32.5% on text3d_render_ms and 28.2% on
+  # text3d_record_ms. A 10% optimisation would have been invisible inside that, so stage
+  # targeting was unmeasurable. Process CPU time removes machine-contention noise.
+  #
+  # It is ADDED, not substituted. CPU time excludes blocked work (measured on this platform:
+  # `sleep 1` reports 0.0 ms of CPU), so it would hide a stage that is slow because it waits
+  # -- and wall time is what a user actually experiences. Reporting both also exposes the
+  # cpu/wall ratio, which says whether a stage is CPU-bound at all: at ratio 0.3 it is
+  # waiting, and no algorithmic change will help it.
+  #
+  # The two must never share a namespace. A `*_cpu_ms` key summed into the wall-time leaves
+  # would corrupt unaccounted_ms by adding two different units together.
+
+  def test_cpu_timings_are_reported_in_their_own_block
+    stats = base_stats(pipeline_cpu_performance: {
+      text3d_render_cpu_ms: 19_500.0, text3d_record_cpu_ms: 15_250.0
+    })
+    perf = build(stats)[:performance]
+    assert_equal 19_500.0, perf[:cpu_phases][:text3d_render_cpu_ms]
+    assert_equal 15_250.0, perf[:cpu_phases][:text3d_record_cpu_ms]
+  end
+
+  def test_cpu_timings_never_enter_wall_phases_or_the_leaf_sum
+    stats = base_stats(
+      pipeline_performance: { commit_ms: 6_800.0, item_delivery_ms: 40_000.0 },
+      pipeline_cpu_performance: { text3d_render_cpu_ms: 19_500.0 }
+    )
+    perf = build(stats)[:performance]
+    refute perf[:phases].key?(:text3d_render_cpu_ms),
+           'a CPU figure in the wall-time phases would add two different units together'
+    # unaccounted must be unchanged by the presence of CPU data: 96800 - 46800.
+    assert_equal 50_000.0, perf[:phases][:unaccounted_ms],
+                 'CPU timings must not perturb the wall-time remainder'
+  end
+
+  def test_cpu_keys_are_not_flagged_as_unclassified_wall_stages
+    stats = base_stats(pipeline_cpu_performance: { text3d_render_cpu_ms: 1.0 })
+    assert_nil build(stats)[:performance][:phase_unclassified],
+               'CPU keys live in a separate namespace and must not trip the wall-stage '                'drift guard'
+  end
+
+  def test_absent_cpu_data_omits_the_block_entirely
+    perf = build(base_stats(pipeline_performance: { commit_ms: 1.0 }))[:performance]
+    assert_nil perf[:cpu_phases],
+               'no CPU samples means no block -- never an empty or zeroed one implying '                'a measurement that did not happen'
+  end
+
+  def test_cpu_block_survives_json_round_trip
+    stats = base_stats(pipeline_cpu_performance: { text3d_record_cpu_ms: 15_250.0 })
+    rt = JSON.parse(JSON.generate(build(stats)))
+    assert_equal 15_250.0, rt['performance']['cpu_phases']['text3d_record_cpu_ms']
+  end
+
   def test_report_is_json_serializable_with_phases_and_counters
     stats = base_stats(pipeline_performance: {
       commit_ms: 1.5, glyph_component_definition_count: 7
