@@ -149,29 +149,65 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Content stream tokenizer
       # ---------------------------------------------------------------
-      # Fast manual numeric-literal check matching /\A[+-]?\d*\.?\d+\z/:
-      # trailing digit group is required, so "5." stays a keyword not a number.
+      # Fast manual numeric-literal check: optional sign, optional digits,
+      # optional single dot with optional digits. Replaces a hot-path regex.
       def numeric_literal?(word)
         return false if word.nil? || word.empty?
         i = 0
         len = word.length
         i += 1 if word[i] == '+' || word[i] == '-'
+        has_digits = false
         while i < len && word[i] >= '0' && word[i] <= '9'
           i += 1
+          has_digits = true
         end
         if i < len && word[i] == '.'
           i += 1
-          frac = 0
           while i < len && word[i] >= '0' && word[i] <= '9'
             i += 1
-            frac += 1
+            has_digits = true
           end
-          return false if frac == 0
         end
-        # Without a trailing fractional group, require at least one digit overall
-        # (covers the regex backtracking of \d* into the mandatory \d+).
-        digit_start = (word[0] == '+' || word[0] == '-') ? 1 : 0
-        i == len && i > digit_start && word[digit_start] >= '0' && word[digit_start] <= '9'
+        has_digits && i == len
+      end
+
+      # PDF inline image: BI ... ID <binary> EI
+      # We must skip the binary data without scanning it as tokens. The following
+      # helpers perform the same boundary-aware search the old regex did, but
+      # with character checks instead of a regex engine.
+      def whitespace?(ch)
+        ch == ' ' || ch == "\t" || ch == "\n" || ch == "\r" || ch == "\v" || ch == "\f" || ch == "\x00"
+      end
+
+      def inline_image_id_marker(stream, start)
+        len = stream.length
+        return nil if start + 3 > len
+        i = start
+        while i <= len - 3
+          if stream[i] == 'I' && stream[i + 1] == 'D' && whitespace?(stream[i - 1]) && whitespace?(stream[i + 2])
+            return i - 1  # position of leading whitespace, matching old regex semantics
+          end
+          i += 1
+        end
+        nil
+      end
+
+      def inline_image_ei_marker(stream, start)
+        len = stream.length
+        return nil if start + 3 > len
+        i = start
+        while i <= len - 3
+          if stream[i] == 'E' && stream[i + 1] == 'I'
+            if whitespace?(stream[i - 1])
+              nxt = stream[i + 2]
+              if whitespace?(nxt) || nxt == '/' || nxt == '[' || nxt == '<'
+                return i
+              end
+            end
+          end
+          i += 1
+        end
+        nil
       end
 
       def tokenize_content_stream(stream)
@@ -304,12 +340,12 @@ module BlueCollarSystems
           # When we see 'BI', skip forward past the binary data to 'EI'.
           if word == 'BI'
             # Find 'ID' marker (signals start of binary image data)
-            id_pos = stream.index(/\sID[\s\n\r]/, j)
+            id_pos = inline_image_id_marker(stream, j)
             if id_pos
               # Find 'EI' marker after the binary data.
               # EI must be preceded by whitespace to avoid false matches
               # inside the binary data.
-              ei_pos = stream.index(/[\s\n\r]EI(?=[\s\n\r\/\[<])/, id_pos + 3)
+              ei_pos = inline_image_ei_marker(stream, id_pos + 3)
               if ei_pos
                 i = ei_pos + 3  # skip past 'EI'
               else
