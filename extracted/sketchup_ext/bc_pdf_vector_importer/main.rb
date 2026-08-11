@@ -2994,6 +2994,42 @@ module BlueCollarSystems
       stats[:import_contract_ready]
     end
 
+    # Process CPU time (user + system) in milliseconds.
+    #
+    # Wall-clock stage timings on a contended machine proved too noisy to optimise
+    # against: three identical runs of the same page varied 32.5% on text3d_render_ms and
+    # 28.2% on text3d_record_ms, so a 10% improvement would have been invisible inside its
+    # own measurement error.
+    #
+    # Process.times is used rather than Process.clock_gettime(CLOCK_PROCESS_CPUTIME_ID),
+    # because that constant is NOT defined on Windows Ruby -- verified absent even on 3.4,
+    # and SketchUp 2017 ships 2.2. Process.times has existed since Ruby 1.8 and works here.
+    # Measured behaviour on this platform: a busy loop reports cpu ~= wall (ratio 0.98),
+    # `sleep 1` reports 0.0 ms of CPU, and the tick is ~16 ms -- i.e. 0.06% granularity on a
+    # 26-second stage, and useless for the sub-10 ms stages, which do not matter.
+    #
+    # NOTE this deliberately measures something different from wall time: work spent blocked
+    # (host API waits, I/O) does not appear here. That is the point for optimisation
+    # targeting, but it means CPU time must never replace the wall figure a user actually
+    # experiences. Both are reported, and their ratio reveals whether a stage is CPU-bound
+    # at all -- a stage at ratio 0.3 is waiting, and no algorithmic change will help it.
+    def self.pipeline_cpu_ms
+      times = Process.times
+      (times.utime.to_f + times.stime.to_f) * 1000.0
+    rescue StandardError
+      # Never let instrumentation break an import; absence is reported as absence.
+      nil
+    end
+
+    def self.record_pipeline_cpu_timing!(stats, key, started_cpu_ms)
+      return if started_cpu_ms.nil?
+      now = pipeline_cpu_ms
+      return if now.nil?
+      stats[:pipeline_cpu_performance] ||= {}
+      prior = stats[:pipeline_cpu_performance][key].to_f
+      stats[:pipeline_cpu_performance][key] = (prior + (now - started_cpu_ms)).round(3)
+    end
+
     def self.record_pipeline_timing!(stats, key, elapsed_ms)
       stats[:pipeline_performance] ||= {}
       prior = stats[:pipeline_performance][key].to_f
@@ -4280,6 +4316,7 @@ module BlueCollarSystems
           # symbol ink without a span identity still advances via the item
           # fallback ladder / transition proofs, not a second anonymous paint.
           text3d_render_started = Time.now
+          text3d_render_cpu_started = pipeline_cpu_ms
           text3d_result = Svg3DTextRenderer.render_svg(
             representation_parent, svg_document[:svg], media_box, text_items,
             :scale => opts[:scale],
@@ -4297,6 +4334,9 @@ module BlueCollarSystems
           )
           stats[:pipeline_performance][:text3d_render_ms] =
             ((Time.now - text3d_render_started) * 1000.0).round(3)
+          record_pipeline_cpu_timing!(
+            stats, :text3d_render_cpu_ms, text3d_render_cpu_started
+          )
 
           unless Array(text3d_result[:failures]).empty?
             failures = text3d_result[:failures].map do |failure|
@@ -4355,6 +4395,7 @@ module BlueCollarSystems
             end
             unless all_source_rows.empty?
               text3d_record_started = Time.now
+              text3d_record_cpu_started = pipeline_cpu_ms
               prior_attempts = if exact_3d_requested_mode == :text
                                  direct_flat_text_3d_attempts!(
                                    stats, page_num, delivered_items,
@@ -4370,6 +4411,9 @@ module BlueCollarSystems
               )
               stats[:pipeline_performance][:text3d_record_ms] =
                 ((Time.now - text3d_record_started) * 1000.0).round(3)
+              record_pipeline_cpu_timing!(
+                stats, :text3d_record_cpu_ms, text3d_record_cpu_started
+              )
             end
             # QA text_entities counts created host text-representation groups;
             # the placement count remains explicit in renderer/provenance data.

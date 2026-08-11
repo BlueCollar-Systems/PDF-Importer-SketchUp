@@ -10,6 +10,14 @@ module BlueCollarSystems
     class ContentStreamParser
       MAX_TOKENS_PER_STREAM = 1_000_000
 
+      # Fast character-class lookup tables used by the hot-path tokenizer.
+      # Matches prior /[\s\x00]/ and /[\s\[\]<>(){}\/\%]/ classes exactly
+      # (Ruby \s = space, tab, LF, VT, FF, CR) so the token stream is unchanged.
+      WHITESPACE_CHARS = "\x00\t\n\v\f\r ".freeze
+      # Delimiter set intentionally omits NUL — old regex did too; NUL is only
+      # skipped via the whitespace check above.
+      DELIMITER_CHARS = "\t\n\v\f\r []<>(){}/%".freeze
+
       # A VectorPath represents one complete path with its sub-paths
       VectorPath = Struct.new(
         :subpaths,       # Array of SubPath
@@ -141,6 +149,67 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Content stream tokenizer
       # ---------------------------------------------------------------
+      # Fast manual numeric-literal check: optional sign, optional digits,
+      # optional single dot with optional digits. Replaces a hot-path regex.
+      def numeric_literal?(word)
+        return false if word.nil? || word.empty?
+        i = 0
+        len = word.length
+        i += 1 if word[i] == '+' || word[i] == '-'
+        has_digits = false
+        while i < len && word[i] >= '0' && word[i] <= '9'
+          i += 1
+          has_digits = true
+        end
+        if i < len && word[i] == '.'
+          i += 1
+          while i < len && word[i] >= '0' && word[i] <= '9'
+            i += 1
+            has_digits = true
+          end
+        end
+        has_digits && i == len
+      end
+
+      # PDF inline image: BI ... ID <binary> EI
+      # We must skip the binary data without scanning it as tokens. The following
+      # helpers perform the same boundary-aware search the old regex did, but
+      # with character checks instead of a regex engine.
+      def whitespace?(ch)
+        ch == ' ' || ch == "\t" || ch == "\n" || ch == "\r" || ch == "\v" || ch == "\f" || ch == "\x00"
+      end
+
+      def inline_image_id_marker(stream, start)
+        len = stream.length
+        return nil if start + 3 > len
+        i = start
+        while i <= len - 3
+          if stream[i] == 'I' && stream[i + 1] == 'D' && whitespace?(stream[i - 1]) && whitespace?(stream[i + 2])
+            return i - 1  # position of leading whitespace, matching old regex semantics
+          end
+          i += 1
+        end
+        nil
+      end
+
+      def inline_image_ei_marker(stream, start)
+        len = stream.length
+        return nil if start + 3 > len
+        i = start
+        while i <= len - 3
+          if stream[i] == 'E' && stream[i + 1] == 'I'
+            if whitespace?(stream[i - 1])
+              nxt = stream[i + 2]
+              if whitespace?(nxt) || nxt == '/' || nxt == '[' || nxt == '<'
+                return i
+              end
+            end
+          end
+          i += 1
+        end
+        nil
+      end
+
       def tokenize_content_stream(stream)
         tokens = []
         i = 0
@@ -154,16 +223,20 @@ module BlueCollarSystems
 
           c = stream[i]
 
-          # Whitespace
-          if c =~ /[\s\x00]/
+          # Whitespace (PDF spec: null 0x00, tab, LF, FF, CR, space)
+          if WHITESPACE_CHARS.include?(c)
             i += 1
             next
           end
 
           # Comment
           if c == '%'
-            eol = stream.index(/[\r\n]/, i) || len
-            i = eol + 1
+            j = i + 1
+            while j < len && c != "\r" && c != "\n"
+              c = stream[j]
+              j += 1
+            end
+            i = j
             next
           end
 
@@ -240,7 +313,7 @@ module BlueCollarSystems
           # Name
           if c == '/'
             j = i + 1
-            while j < len && stream[j] !~ /[\s\[\]<>(){}\/\%]/
+            while j < len && !DELIMITER_CHARS.include?(stream[j])
               j += 1
             end
             tokens << { type: :name, value: stream[i...j] }
@@ -250,7 +323,7 @@ module BlueCollarSystems
 
           # Number or keyword
           j = i
-          while j < len && stream[j] !~ /[\s\[\]<>(){}\/\%]/
+          while j < len && !DELIMITER_CHARS.include?(stream[j])
             j += 1
           end
 
@@ -267,12 +340,12 @@ module BlueCollarSystems
           # When we see 'BI', skip forward past the binary data to 'EI'.
           if word == 'BI'
             # Find 'ID' marker (signals start of binary image data)
-            id_pos = stream.index(/\sID[\s\n\r]/, j)
+            id_pos = inline_image_id_marker(stream, j)
             if id_pos
               # Find 'EI' marker after the binary data.
               # EI must be preceded by whitespace to avoid false matches
               # inside the binary data.
-              ei_pos = stream.index(/[\s\n\r]EI(?=[\s\n\r\/\[<])/, id_pos + 3)
+              ei_pos = inline_image_ei_marker(stream, id_pos + 3)
               if ei_pos
                 i = ei_pos + 3  # skip past 'EI'
               else
@@ -284,7 +357,7 @@ module BlueCollarSystems
             next
           end
 
-          if word =~ /\A[+-]?\d*\.?\d+\z/
+          if numeric_literal?(word)
             tokens << { type: :number, value: word.to_f }
           else
             tokens << { type: :operator, value: word }
