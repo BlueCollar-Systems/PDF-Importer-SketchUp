@@ -108,6 +108,13 @@ module BlueCollarSystems
           diff_probes: collected[:diff_probes].to_i,
           max_snapshot_entities: collected[:max_snapshot_entities].to_i
         }
+        # Disambiguates "no snapshots happened" from "a reset landed after the work".
+        begin
+          out[:lifetime_snapshot_calls] = RepresentationFidelity.lifetime_snapshots
+          out[:bookkeeping_resets] = RepresentationFidelity.bookkeeping_resets
+        rescue StandardError
+          nil
+        end
         out[:avg_snapshot_entities] = (enumerated.to_f / calls).round(1) if calls > 0
         out[:first_snapshot_entities] = first.to_i unless first.nil?
         out[:last_snapshot_entities] = last.to_i unless last.nil?

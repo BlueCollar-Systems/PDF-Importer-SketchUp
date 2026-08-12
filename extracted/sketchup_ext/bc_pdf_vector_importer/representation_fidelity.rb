@@ -599,10 +599,34 @@ module BlueCollarSystems
       end
 
       def reset_bookkeeping_stats!
+        # Lifetime totals deliberately survive the reset. A per-import counter that
+        # reads zero is ambiguous: it can mean "no snapshots happened" or "a reset
+        # landed after the work". Keeping an un-resettable total plus a reset count
+        # tells those two apart from a single run instead of by guesswork.
+        @bookkeeping_lifetime_snapshots = lifetime_snapshots
+        @bookkeeping_resets = bookkeeping_resets + 1
         @bookkeeping_stats = new_bookkeeping_stats
       end
 
+      def lifetime_snapshots
+        @bookkeeping_lifetime_snapshots = 0 if @bookkeeping_lifetime_snapshots.nil?
+        @bookkeeping_lifetime_snapshots
+      end
+
+      def bookkeeping_resets
+        @bookkeeping_resets = 0 if @bookkeeping_resets.nil?
+        @bookkeeping_resets
+      end
+
+      def note_lifetime_snapshot!
+        @bookkeeping_lifetime_snapshots = lifetime_snapshots + 1
+        nil
+      rescue StandardError
+        nil
+      end
+
       def record_bookkeeping_snapshot!(count, ms)
+        note_lifetime_snapshot!
         stats = bookkeeping_stats
         stats[:snapshot_calls] += 1
         stats[:entities_enumerated] += count
