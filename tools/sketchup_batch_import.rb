@@ -609,7 +609,8 @@ module SketchupBatchImport
             SketchupBatchImport.write_progress!(
               job, binding, "pipeline_#{phase}", detail
             )
-          end
+          end,
+          :status_sink => lambda { |_snapshot| true }
         )
       end
       opts

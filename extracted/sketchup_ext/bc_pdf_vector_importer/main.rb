@@ -3347,6 +3347,14 @@ module BlueCollarSystems
             Sketchup.status_text = ImportDialog.progress_status(snapshot)
           end
         end
+        if defined?(BatchHostPolicy) &&
+           BatchHostPolicy.respond_to?(:noninteractive?) &&
+           BatchHostPolicy.noninteractive?
+          # Batch/host jobs already stream progress JSON. SketchUp 2017 can
+          # block for tens of minutes on status_text after huge solid-text
+          # models (Alvord Text→3D Text), so never touch the UI status bar.
+          status_sink = lambda { |_snapshot| true }
+        end
         controller = ImportRunControl::Controller.new(
           :model => model,
           :pages => pages,
@@ -3391,7 +3399,12 @@ module BlueCollarSystems
         stats[:resume_schema] = ImportRunControl::JOURNAL_SCHEMA
         stats[:resume_supported] = true
         stats[:log_path] = Logger.log_path
+        report_pipeline_progress(
+          opts, 'finalize_diagnostics_started',
+          "text_attempts=#{Array(stats[:text_attempts]).length}"
+        )
         finalize_import_diagnostics!(source_path, opts, stats)
+        report_pipeline_progress(opts, 'finalize_diagnostics_completed')
         stats
       ensure
         begin
