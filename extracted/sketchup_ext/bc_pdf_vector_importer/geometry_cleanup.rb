@@ -317,60 +317,31 @@ module BlueCollarSystems
 
         return 0 if open_verts.length < 2
 
-        # Spatial hash (same grid as merge_vertices). Pairing rule stays the
-        # prior first later-index match within max_gap — only the candidate
-        # search is narrowed from all-pairs to neighbor cells.
-        cell_size = max_gap * 2
-        vertex_map = {}
-        open_verts.each_with_index do |v, index|
-          next unless v.valid?
-          key = grid_key(v.position, cell_size)
-          vertex_map[key] ||= []
-          vertex_map[key] << [index, v]
-        end
-
+        # Try to bridge open vertices that are close
         used = {}
         open_verts.each_with_index do |v1, i|
           next if used[v1.object_id]
           next unless v1.valid?
 
-          p1 = v1.position
-          gx = (p1.x / cell_size).floor
-          gy = (p1.y / cell_size).floor
-          gz = (p1.z / cell_size).floor
-          best_index = nil
-          best_v2 = nil
+          open_verts.each_with_index do |v2, j|
+            next if j <= i
+            next if used[v2.object_id]
+            next unless v2.valid?
 
-          (-1..1).each do |dx|
-            (-1..1).each do |dy|
-              (-1..1).each do |dz|
-                neighbors = vertex_map["#{gx + dx}_#{gy + dy}_#{gz + dz}"]
-                next unless neighbors
-                neighbors.each do |j, v2|
-                  next if j <= i
-                  next if used[v2.object_id]
-                  next unless v2.valid?
-                  dist = p1.distance(v2.position)
-                  next unless dist > 0 && dist < max_gap
-                  if best_index.nil? || j < best_index
-                    best_index = j
-                    best_v2 = v2
-                  end
+            dist = v1.position.distance(v2.position)
+            if dist > 0 && dist < max_gap
+              begin
+                edge = entities.add_line(v1.position, v2.position)
+                if edge
+                  count += 1
+                  used[v1.object_id] = true
+                  used[v2.object_id] = true
+                  break
                 end
+              rescue StandardError => e
+                Logger.warn("GeometryCleanup", "close_face_gaps failed: #{e.message}")
               end
             end
-          end
-
-          next unless best_v2
-          begin
-            edge = entities.add_line(p1, best_v2.position)
-            if edge
-              count += 1
-              used[v1.object_id] = true
-              used[best_v2.object_id] = true
-            end
-          rescue StandardError => e
-            Logger.warn("GeometryCleanup", "close_face_gaps failed: #{e.message}")
           end
         end
 

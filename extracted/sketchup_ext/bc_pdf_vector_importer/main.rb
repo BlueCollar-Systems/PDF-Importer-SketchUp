@@ -2994,42 +2994,6 @@ module BlueCollarSystems
       stats[:import_contract_ready]
     end
 
-    # Process CPU time (user + system) in milliseconds.
-    #
-    # Wall-clock stage timings on a contended machine proved too noisy to optimise
-    # against: three identical runs of the same page varied 32.5% on text3d_render_ms and
-    # 28.2% on text3d_record_ms, so a 10% improvement would have been invisible inside its
-    # own measurement error.
-    #
-    # Process.times is used rather than Process.clock_gettime(CLOCK_PROCESS_CPUTIME_ID),
-    # because that constant is NOT defined on Windows Ruby -- verified absent even on 3.4,
-    # and SketchUp 2017 ships 2.2. Process.times has existed since Ruby 1.8 and works here.
-    # Measured behaviour on this platform: a busy loop reports cpu ~= wall (ratio 0.98),
-    # `sleep 1` reports 0.0 ms of CPU, and the tick is ~16 ms -- i.e. 0.06% granularity on a
-    # 26-second stage, and useless for the sub-10 ms stages, which do not matter.
-    #
-    # NOTE this deliberately measures something different from wall time: work spent blocked
-    # (host API waits, I/O) does not appear here. That is the point for optimisation
-    # targeting, but it means CPU time must never replace the wall figure a user actually
-    # experiences. Both are reported, and their ratio reveals whether a stage is CPU-bound
-    # at all -- a stage at ratio 0.3 is waiting, and no algorithmic change will help it.
-    def self.pipeline_cpu_ms
-      times = Process.times
-      (times.utime.to_f + times.stime.to_f) * 1000.0
-    rescue StandardError
-      # Never let instrumentation break an import; absence is reported as absence.
-      nil
-    end
-
-    def self.record_pipeline_cpu_timing!(stats, key, started_cpu_ms)
-      return if started_cpu_ms.nil?
-      now = pipeline_cpu_ms
-      return if now.nil?
-      stats[:pipeline_cpu_performance] ||= {}
-      prior = stats[:pipeline_cpu_performance][key].to_f
-      stats[:pipeline_cpu_performance][key] = (prior + (now - started_cpu_ms)).round(3)
-    end
-
     def self.record_pipeline_timing!(stats, key, elapsed_ms)
       stats[:pipeline_performance] ||= {}
       prior = stats[:pipeline_performance][key].to_f
@@ -4212,18 +4176,10 @@ module BlueCollarSystems
           use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
             (a.to_f - b.to_f).abs > 0.01
           end
-          # Reuse a page SVG already certified this import (Glyphs/3D/empty-page
-          # inspection). Re-running pdftocairo for Labels fallback is pure I/O
-          # waste and does not change the certified SVG payload.
-          label_svg_document = source_svg_document
-          if label_svg_document.nil? ||
-             label_svg_document[:svg].to_s.empty?
-            label_svg_document = CairoGlyphSource.render_page_svg(
-              path, page_num, :failure_info => label_svg_failure,
-              :use_cropbox => use_cropbox == true
-            )
-            source_svg_document = label_svg_document if label_svg_document
-          end
+          label_svg_document = CairoGlyphSource.render_page_svg(
+            path, page_num, :failure_info => label_svg_failure,
+            :use_cropbox => use_cropbox == true
+          )
           unless label_svg_document &&
                  !label_svg_document[:svg].to_s.empty?
             raise RepresentationFidelity::ContractError,
@@ -4316,7 +4272,6 @@ module BlueCollarSystems
           # symbol ink without a span identity still advances via the item
           # fallback ladder / transition proofs, not a second anonymous paint.
           text3d_render_started = Time.now
-          text3d_render_cpu_started = pipeline_cpu_ms
           text3d_result = Svg3DTextRenderer.render_svg(
             representation_parent, svg_document[:svg], media_box, text_items,
             :scale => opts[:scale],
@@ -4334,9 +4289,6 @@ module BlueCollarSystems
           )
           stats[:pipeline_performance][:text3d_render_ms] =
             ((Time.now - text3d_render_started) * 1000.0).round(3)
-          record_pipeline_cpu_timing!(
-            stats, :text3d_render_cpu_ms, text3d_render_cpu_started
-          )
 
           unless Array(text3d_result[:failures]).empty?
             failures = text3d_result[:failures].map do |failure|
@@ -4395,7 +4347,6 @@ module BlueCollarSystems
             end
             unless all_source_rows.empty?
               text3d_record_started = Time.now
-              text3d_record_cpu_started = pipeline_cpu_ms
               prior_attempts = if exact_3d_requested_mode == :text
                                  direct_flat_text_3d_attempts!(
                                    stats, page_num, delivered_items,
@@ -4411,9 +4362,6 @@ module BlueCollarSystems
               )
               stats[:pipeline_performance][:text3d_record_ms] =
                 ((Time.now - text3d_record_started) * 1000.0).round(3)
-              record_pipeline_cpu_timing!(
-                stats, :text3d_record_cpu_ms, text3d_record_cpu_started
-              )
             end
             # QA text_entities counts created host text-representation groups;
             # the placement count remains explicit in renderer/provenance data.
@@ -5242,26 +5190,12 @@ module BlueCollarSystems
 
     def self.begin_source_pdf_render_binding!(opts, pdf_path)
       source_path = File.expand_path(pdf_path.to_s)
+      frozen_sha = cached_source_pdf_sha256!(opts, source_path)
       identity = source_pdf_file_identity!(source_path)
-      cache = opts[:source_pdf_digest_cache]
-      cache = {} unless cache.is_a?(Hash)
-      opts[:source_pdf_digest_cache] = cache
-      key = source_path.downcase
-      entry = cache[key]
-      if entry.is_a?(Hash) && entry[:sha256].to_s =~ /\A[0-9a-f]{64}\z/ &&
-         entry[:file_identity] == identity
-        # Warm cache: one content hash catches same-mtime/size rewrites.
-        # Cold path below hashes once while freezing the cache — do not hash
-        # twice for a file that cannot have changed between consecutive reads.
-        actual_sha = Digest::SHA256.file(source_path).hexdigest
-        unless actual_sha == entry[:sha256].to_s
-          raise RepresentationFidelity::ContractError,
-                'source PDF content changed before page rendering began'
-        end
-        frozen_sha = actual_sha
-      else
-        frozen_sha = cached_source_pdf_sha256!(opts, source_path)
-        identity = source_pdf_file_identity!(source_path)
+      actual_sha = Digest::SHA256.file(source_path).hexdigest
+      unless actual_sha == frozen_sha
+        raise RepresentationFidelity::ContractError,
+              'source PDF content changed before page rendering began'
       end
       {
         :source_pdf_path => source_path,
@@ -5278,8 +5212,6 @@ module BlueCollarSystems
       end
       source_path = File.expand_path(binding[:source_pdf_path].to_s)
       identity = source_pdf_file_identity!(source_path)
-      # Same-mtime content swaps are in-scope (see contract tests). Always
-      # re-hash at the post-render gate even when identity looks unchanged.
       sha256 = Digest::SHA256.file(source_path).hexdigest
       unless identity == binding[:file_identity] &&
              sha256 == binding[:source_pdf_sha256].to_s
@@ -5299,7 +5231,6 @@ module BlueCollarSystems
         end
         path = File.expand_path(entry[:source_pdf_path].to_s)
         identity = source_pdf_file_identity!(path)
-        # Commit gate must re-hash: identity alone cannot prove content.
         sha256 = Digest::SHA256.file(path).hexdigest
         unless identity == entry[:file_identity] && sha256 == entry[:sha256].to_s
           raise RepresentationFidelity::ContractError,
