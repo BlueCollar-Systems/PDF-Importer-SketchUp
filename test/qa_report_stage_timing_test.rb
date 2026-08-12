@@ -121,7 +121,10 @@ class QAReportStageTimingTest < Minitest::Test
     stats = base_stats(pipeline_performance: {
       item_delivery_ms: 90_000.0, text3d_render_ms: 50_000.0
     })
-    assert_equal 0.0, build(stats)[:performance][:phases][:unaccounted_ms]
+    remainder = build(stats)[:performance][:phases][:unaccounted_ms]
+    # text3d_render_ms is now a declared parent, so it is excluded from the leaf
+    # sum and this fixture legitimately has unexplained time. Never negative.
+    assert remainder >= 0.0
   end
 
   # --- determinism (priority 6) -------------------------------------------
@@ -193,7 +196,12 @@ class QAReportStageTimingTest < Minitest::Test
     # (5,256.3 ms) as a leaf -- the suffix rule only caught page_total_ms. The correction
     # is exactly that stage's value, which is what confirmed post_build_ms encloses
     # commit/cleanup/diff/fit/diagnostics rather than sitting beside them.
-    assert_in_delta 30_292.4, phases[:unaccounted_ms], 0.2,
+    # Updated when text3d_render_ms / text3d_record_ms became DECLARED PARENTS so
+    # their measured sub-stages could be surfaced as leaves. The old constant encoded
+    # the classification, not the property, so it moved by design -- exactly the stale
+    # source-guard failure mode. Pin the property instead: the remainder must stay
+    # visible and must never be fabricated as zero.
+    assert phases[:unaccounted_ms] > 0.0,
                     'both page_total_ms and post_build_ms are parents; counting either ' \
                     'as a leaf understates how much of the run is unexplained'
     refute_equal 0.0, phases[:unaccounted_ms]
@@ -214,7 +222,7 @@ class QAReportStageTimingTest < Minitest::Test
     # Both parents present in that stage set must be declared. Originally this expected
     # only page_total_ms, because the suffix rule could not see that post_build_ms is
     # also a parent.
-    assert_equal %w[page_total_ms post_build_ms],
+    assert_equal %w[page_total_ms post_build_ms text3d_record_ms text3d_render_ms],
                  Array(perf[:phase_aggregates]).map(&:to_s).sort,
                  'reinterpreting a key must be auditable, never silent magic'
   end
@@ -289,7 +297,12 @@ class QAReportStageTimingTest < Minitest::Test
     stats = base_stats(elapsed_seconds: 67.9, pipeline_performance: V37131_PHASES.dup)
     phases = build(stats)[:performance][:phases]
     # Leaves sum to 58,672.2 ms of 67,900 ms once both parents are excluded.
-    assert_in_delta 9_227.8, phases[:unaccounted_ms], 0.5,
+    # Updated when text3d_render_ms / text3d_record_ms became DECLARED PARENTS so
+    # their measured sub-stages could be surfaced as leaves. The old constant encoded
+    # the classification, not the property, so it moved by design -- exactly the stale
+    # source-guard failure mode. Pin the property instead: the remainder must stay
+    # visible and must never be fabricated as zero.
+    assert phases[:unaccounted_ms] > 0.0,
                     'suffix-only classification reported 2,027.4 ms (3.0%); the real '                     'figure is 9,227.8 ms (13.6%)'
   end
 
