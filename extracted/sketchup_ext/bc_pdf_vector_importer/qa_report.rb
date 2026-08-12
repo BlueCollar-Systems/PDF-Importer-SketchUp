@@ -67,7 +67,19 @@ module BlueCollarSystems
       # then reported 3.0% of its runtime unexplained when the true figure was 13.6%.
       # Under-reporting incompleteness is the exact failure this accounting exists to
       # prevent, so parentage is now stated rather than guessed.
-      PHASE_PARENTS = [:page_total_ms, :post_build_ms, :raster_total_ms].freeze
+      PHASE_PARENTS = [
+        :page_total_ms, :post_build_ms, :raster_total_ms,
+        # Newly enclosing: their sub-stages are now surfaced as leaves below, so summing
+        # these as leaves too would double-count. text3d_render_ms and text3d_record_ms
+        # were the two largest leaves in the table (22.9 s and 14.6 s of a 60 s import);
+        # promoting them is what makes that 62% attributable instead of opaque.
+        :text3d_render_ms, :text3d_record_ms,
+        # geometry_explode_ms is recorded inside the geometry builder's own span, so the
+        # builder is treated as enclosing it. If the two are in fact siblings this
+        # under-attributes by their difference, which only makes unaccounted_ms larger --
+        # the safe direction. It can never manufacture a "fully attributed" report.
+        :geometry_builder_ms
+      ].freeze
 
       # Leaf stages currently written by the pipeline. Only used to detect drift: a new
       # `*_ms` key that is neither a declared parent nor a known leaf is reported in
@@ -80,8 +92,38 @@ module BlueCollarSystems
         :text3d_record_ms, :item_page_inventory_ms, :item_delivery_ms,
         :commit_ms, :post_commit_cleanup_ms, :entity_diff_ms, :view_fit_ms,
         :diagnostics_ms, :raster_render_ms, :raster_verify_ms, :raster_add_image_ms,
-        :raster_cleanup_ms, :raster_pixel_proof_ms
+        :raster_cleanup_ms, :raster_pixel_proof_ms,
+        # Sub-stages of text3d_render_ms / text3d_record_ms and of the geometry builder.
+        # All of these were ALREADY measured and already written to the report under
+        # extra.text_renderers[].performance and extra.geometry_staging[]; they were just
+        # never registered as phases, so the phase table showed one opaque 22.9 s stage
+        # and carried 8.8 s (14.6%) of unexplained remainder. Surfacing them is bookkeeping,
+        # not new instrumentation.
+        :text3d_parse_ms, :text3d_verification_ms, :text3d_match_ms,
+        :text3d_definition_build_ms, :text3d_instance_placement_ms,
+        :text3d_evidence_physical_ms, :text3d_evidence_bounds_ms,
+        :text3d_evidence_attach_ms,
+        :geometry_explode_ms
       ].freeze
+
+      # Sub-stage keys as written by Svg3DTextRenderer, mapped to the phase names above.
+      # Renaming at the boundary keeps the phase table self-describing: a bare `parse_ms`
+      # next to `content_stream_parse_ms` would be ambiguous about which parser it timed.
+      TEXT3D_SUBSTAGE_PHASES = {
+        :parse_ms => :text3d_parse_ms,
+        :verification_ms => :text3d_verification_ms,
+        :match_ms => :text3d_match_ms,
+        :definition_build_ms => :text3d_definition_build_ms,
+        :instance_placement_ms => :text3d_instance_placement_ms,
+        :evidence_physical_ms => :text3d_evidence_physical_ms,
+        :evidence_bounds_ms => :text3d_evidence_bounds_ms,
+        :evidence_attach_ms => :text3d_evidence_attach_ms
+      }.freeze
+
+      GEOMETRY_STAGING_PHASES = {
+        :builder_elapsed_ms => :geometry_builder_ms,
+        :explode_ms => :geometry_explode_ms
+      }.freeze
 
       # Process CPU timings, sorted for determinism. Only numeric `*_cpu_ms` entries are
       # emitted; anything else is dropped rather than coerced, so a stray value cannot be
@@ -138,9 +180,70 @@ module BlueCollarSystems
         out
       end
 
+      # Sum an already-measured sub-stage across every page/renderer record.
+      #
+      # These numbers are not new measurements. Svg3DTextRenderer and the geometry
+      # builder have been recording them all along into extra.text_renderers[] and
+      # extra.geometry_staging[], where nothing added them up and nothing related them to
+      # the phase table. The result was a report that showed text3d_render_ms as a single
+      # opaque 22.9 s stage while separately containing the breakdown of it.
+      #
+      # Accepts symbol or string keys because these records cross a JSON round trip in
+      # some paths, and reads defensively: a renderer that failed early may omit its
+      # performance hash entirely, and a missing sub-stage must read as absent rather
+      # than as zero.
+      def sum_recorded_substages(records, mapping, nested_key = nil)
+        totals = {}
+        Array(records).each do |record|
+          next unless record.is_a?(Hash)
+          source = if nested_key
+                     record[nested_key] || record[nested_key.to_s]
+                   else
+                     record
+                   end
+          next unless source.is_a?(Hash)
+          mapping.each do |from, to|
+            value = source[from]
+            value = source[from.to_s] if value.nil?
+            next unless value.is_a?(Numeric)
+            numeric = value.to_f
+            # A negative or non-finite duration cannot be real and must not be able to
+            # shrink a stage total.
+            next unless numeric >= 0.0 && numeric == numeric && numeric != Float::INFINITY
+            totals[to] = (totals[to] || 0.0) + numeric
+          end
+        end
+        totals
+      end
+
+      def derived_substage_phases(stats)
+        derived = {}
+        derived.merge!(
+          sum_recorded_substages(
+            stats[:text_renderers] || stats['text_renderers'],
+            TEXT3D_SUBSTAGE_PHASES, :performance
+          )
+        )
+        derived.merge!(
+          sum_recorded_substages(
+            stats[:geometry_staging] || stats['geometry_staging'],
+            GEOMETRY_STAGING_PHASES
+          )
+        )
+        derived
+      end
+
       def split_pipeline_performance(stats)
         collected = stats[:pipeline_performance]
         return [{}, {}, [], []] unless collected.is_a?(Hash)
+
+        # Derived sub-stages never overwrite a directly recorded phase: if the pipeline
+        # ever starts recording one of these itself, its own number wins.
+        derived = derived_substage_phases(stats)
+        unless derived.empty?
+          merged = derived.merge(collected)
+          collected = merged
+        end
 
         phases = {}
         counters = {}
