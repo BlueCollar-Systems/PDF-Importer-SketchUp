@@ -90,8 +90,9 @@ class TextWhitespaceBboxContractTest < Minitest::Test
     prepared = IMP.prepare_flat_text_fallback_controllers!([filled])
     assert prepared.key?('text_span:1:0')
     proof = prepared['text_span:1:0'][:proof]
-    assert_equal :text, proof[:from_mode] || proof.dig(:evidence, :requested_mode)
-    assert_equal 4, Array(proof.dig(:evidence, :source_bbox_pdf)).length
+    evidence = proof[:evidence] || {}
+    assert_equal :text, proof[:from_mode] || evidence[:requested_mode]
+    assert_equal 4, Array(evidence[:source_bbox_pdf]).length
   end
 
   def test_angle_hints_append_whitespace_with_complete_bbox
