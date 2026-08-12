@@ -16,12 +16,11 @@ module BlueCollarSystems
 
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
-      # Stage into isolated groups before explode once path count is moderate.
-      # Lowered from 100/250 → 40/200 because structural/CAD sheets commonly hit
-      # the old threshold and pay a large live-merge penalty. Final exploded
-      # geometry is identical; only host-side work is reduced.
-      GEOMETRY_STAGING_PATH_THRESHOLD = 40
-      GEOMETRY_STAGING_CHUNK_PATHS = 200
+      # Stage into isolated groups before explode once path count is high.
+      # Gate 0 REMEDIATE: restore reviewed 500/250/100 policy until a host
+      # explode/merge identity matrix certifies any lower threshold.
+      GEOMETRY_STAGING_PATH_THRESHOLD = 500
+      GEOMETRY_STAGING_CHUNK_PATHS = 250
       SMALL_FACE_DIRECT_MAX_EXTENT = 0.002
       SMALL_FACE_CONSTRUCTION_SCALE = 1000.0
 
@@ -120,9 +119,9 @@ module BlueCollarSystems
           :heavy_page => heavy_page
         )
         configure_geometry_staging!(heavy_page)
-        path_yield_every = heavy_page ? 40 : 0
+        path_yield_every = heavy_page ? 100 : 0
         @paths.each_with_index do |path, path_idx|
-          if (path_idx % 40).zero?
+          if (path_idx % 100).zero?
             run_checkpoint!(
               :geometry_path,
               :completed => path_idx,
