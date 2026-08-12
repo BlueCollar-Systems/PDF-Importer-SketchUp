@@ -385,9 +385,11 @@ end
 class Svg3DMaterial
   attr_reader :name
   attr_accessor :color
+  attr_accessor :alpha
 
   def initialize(name)
     @name = name
+    @alpha = 1.0
   end
 end
 
@@ -824,13 +826,32 @@ class SvgText3DRendererTest < Minitest::Test
     assert_match(/non-solid or unsupported fill color/, error.message)
   end
 
-  def test_translucent_source_fill_fails_closed_instead_of_becoming_opaque
+  def test_translucent_source_fill_applies_material_alpha
+    style = RENDERER.source_text_ink_style([
+      {
+        :glyph_id => 'glyph-0-0',
+        :fill_rgb => [0.2, 0.4, 0.6],
+        :fill_opacity => 0.5
+      }
+    ])
+    assert_equal [51, 102, 153], style[:rgb]
+    assert_in_delta 0.5, style[:opacity], 1.0e-12
+
+    model = Svg3DModel.new
+    group = Svg3DEntities.new(:model => model).add_group
+    assert_equal true,
+                 RENDERER.apply_source_text_ink!(group, style[:rgb], style[:opacity])
+    assert_equal 'PDF_51_102_153_a128', group.material.name
+    assert_in_delta 0.5, group.material.alpha, 1.0e-12
+  end
+
+  def test_out_of_range_source_fill_opacity_fails_closed
     error = assert_raises(RuntimeError) do
-      RENDERER.source_text_ink_rgb([
+      RENDERER.source_text_ink_style([
         {
           :glyph_id => 'glyph-0-0',
           :fill_rgb => [0.2, 0.4, 0.6],
-          :fill_opacity => 0.5
+          :fill_opacity => 1.5
         }
       ])
     end

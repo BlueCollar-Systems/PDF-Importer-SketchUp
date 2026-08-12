@@ -302,6 +302,9 @@ module BlueCollarSystems
       end
 
       def sketchup_instance_method_names(constant_name)
+        @sketchup_instance_method_name_cache ||= {}
+        cached = @sketchup_instance_method_name_cache[constant_name]
+        return cached if cached
         unless defined?(Sketchup) && Sketchup.const_defined?(constant_name)
           raise ContractError,
                 "SketchUp #{constant_name} API class is unavailable"
@@ -310,12 +313,18 @@ module BlueCollarSystems
         names = klass.instance_methods.map { |name| name.to_s }.uniq.sort
         raise ContractError,
               "SketchUp #{constant_name} API inventory is empty" if names.empty?
+        @sketchup_instance_method_name_cache[constant_name] = names
         names
       rescue ContractError
         raise
       rescue StandardError => e
         raise ContractError,
               "SketchUp #{constant_name} API inventory failed: #{e.message}"
+      end
+
+      def reset_sketchup_api_inventory_cache!
+        @sketchup_instance_method_name_cache = {}
+        nil
       end
 
       # SketchUp has an annotation entity named Sketchup::Text, created by

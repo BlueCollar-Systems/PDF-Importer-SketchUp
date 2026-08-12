@@ -2327,7 +2327,10 @@ module BlueCollarSystems
         if text_key.empty?
           if hint.respond_to?(:source_decode_complete) &&
              hint.source_decode_complete == true
-            semantic_whitespace << hint
+            # Internal whitespace spans have text-matrix origin/size but no
+            # pdftotext word bbox. Synthesize a complete source bbox so Text
+            # mode certification stays in-mode instead of raising incomplete.
+            semantic_whitespace << ensure_complete_source_text_bbox(hint)
           end
           next
         end
@@ -2351,6 +2354,69 @@ module BlueCollarSystems
     rescue StandardError => e
       Logger.warn("Pipeline", "apply internal text angle hints failed: #{e.message}")
       text_items
+    end
+
+    # True when all four PDF media-space bbox corners are present (may be 0.0).
+    def self.source_text_bbox_complete?(item)
+      return false unless item
+      names = [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1]
+      return false unless names.all? { |name| item.respond_to?(name) }
+      names.none? { |name| item.send(name).nil? }
+    rescue StandardError
+      false
+    end
+
+    # Build an axis-aligned source bbox from the PDF text-matrix origin and
+    # nominal font size. Used when Poppler emits no word element (whitespace
+    # operands) but the internal parser still recovered a complete decode.
+    def self.synthesize_source_text_bbox_pdf(item)
+      raise ArgumentError, 'text item is unavailable' unless item
+      x = Float(item.x)
+      y = Float(item.y)
+      fs = Float(item.respond_to?(:font_size) ? item.font_size : 0.0)
+      unless x.finite? && y.finite? && fs.finite? && fs > 0.0
+        raise ArgumentError, 'text origin/size cannot synthesize a source bbox'
+      end
+      chars = item.respond_to?(:text) ? item.text.to_s.length : 0
+      chars = 1 if chars < 1
+      # Half-em per character keeps a positive run width for space operands
+      # without inventing a visible glyph extent larger than the nominal size.
+      width = fs * 0.5 * chars
+      min_width = fs * 0.25
+      width = min_width if width < min_width
+      angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+      if angle.abs > 45.0 && angle.abs < 135.0
+        [x, y, x + fs, y + width]
+      else
+        [x, y, x + width, y + fs]
+      end
+    end
+
+    # Return the item unchanged when its source bbox is already complete;
+    # otherwise clone with a synthesized bbox from text-matrix origin/size.
+    def self.ensure_complete_source_text_bbox(item)
+      return item if source_text_bbox_complete?(item)
+      box = synthesize_source_text_bbox_pdf(item)
+      clone = TextParser::TextItem.new(
+        item.text,
+        item.x,
+        item.y,
+        item.font_size,
+        item.respond_to?(:angle) ? item.angle : 0.0,
+        item.respond_to?(:font_name) ? item.font_name : nil,
+        item.respond_to?(:raw_font_size) ? item.raw_font_size : nil,
+        box[0],
+        box[1],
+        box[2],
+        box[3],
+        item.respond_to?(:layer_name) ? item.layer_name : nil,
+        item.respond_to?(:source_span_id) ? item.source_span_id : nil
+      )
+      if clone.respond_to?(:source_decode_complete=) &&
+         item.respond_to?(:source_decode_complete)
+        clone.source_decode_complete = item.source_decode_complete
+      end
+      clone
     end
 
     def self.nearest_indexed_text_angle_hint(item, candidates)
@@ -3281,6 +3347,14 @@ module BlueCollarSystems
             Sketchup.status_text = ImportDialog.progress_status(snapshot)
           end
         end
+        if defined?(BatchHostPolicy) &&
+           BatchHostPolicy.respond_to?(:noninteractive?) &&
+           BatchHostPolicy.noninteractive?
+          # Batch/host jobs already stream progress JSON. SketchUp 2017 can
+          # block for tens of minutes on status_text after huge solid-text
+          # models (Alvord Text→3D Text), so never touch the UI status bar.
+          status_sink = lambda { |_snapshot| true }
+        end
         controller = ImportRunControl::Controller.new(
           :model => model,
           :pages => pages,
@@ -3325,7 +3399,12 @@ module BlueCollarSystems
         stats[:resume_schema] = ImportRunControl::JOURNAL_SCHEMA
         stats[:resume_supported] = true
         stats[:log_path] = Logger.log_path
+        report_pipeline_progress(
+          opts, 'finalize_diagnostics_started',
+          "text_attempts=#{Array(stats[:text_attempts]).length}"
+        )
         finalize_import_diagnostics!(source_path, opts, stats)
+        report_pipeline_progress(opts, 'finalize_diagnostics_completed')
         stats
       ensure
         begin
@@ -3824,6 +3903,12 @@ module BlueCollarSystems
         end
 
         if requested_text_mode == :text && !Array(text_items).empty?
+          # Internal-only extracts (and whitespace spans kept after angle hints)
+          # may lack pdftotext word bboxes. Fill from text-matrix origin/size so
+          # Text-mode impossibility proofs certify in-mode instead of aborting.
+          text_items = Array(text_items).map do |item|
+            ensure_complete_source_text_bbox(item)
+          end
           flat_text_fallbacks =
             prepare_flat_text_fallback_controllers!(text_items)
         end
@@ -4780,13 +4865,27 @@ module BlueCollarSystems
         opts, 'post_build_completed',
         "post_build_ms=#{stats[:pipeline_performance][:post_build_ms]}"
       )
-      Sketchup.status_text = if import_contract_ready?(stats)
-        "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text " \
-          "items — #{elapsed}s"
-      else
-        "PDF Import finished, but QA contract is NOT READY — " \
-          "#{stats[:edges]} edges, #{stats[:text]} text items"
+      # Batch/host jobs must not touch Sketchup.status_text after a large
+      # solid-text commit. SketchUp 2017 can spend tens of minutes redrawing
+      # the status bar / viewport and block Ruby before the pipeline returns,
+      # which looks like a host hang after text already certified (Alvord).
+      begin
+        interactive = !(defined?(BatchHostPolicy) &&
+                        BatchHostPolicy.respond_to?(:noninteractive?) &&
+                        BatchHostPolicy.noninteractive?)
+        if interactive && defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+          Sketchup.status_text = if import_contract_ready?(stats)
+            "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text " \
+              "items — #{elapsed}s"
+          else
+            "PDF Import finished, but QA contract is NOT READY — " \
+              "#{stats[:edges]} edges, #{stats[:text]} text items"
+          end
+        end
+      rescue StandardError
+        # Status text is advisory only.
       end
+      report_pipeline_progress(opts, 'pipeline_return_ready')
       stats
     rescue ImportRunControl::ImportCancelled
       operation_open =
@@ -4797,6 +4896,11 @@ module BlueCollarSystems
         abort_open_operation!(model, operation_open, 'Pipeline')
       raise e
     ensure
+      begin
+        report_pipeline_progress(opts, 'pipeline_ensure_started') if
+          defined?(opts) && opts.is_a?(Hash)
+      rescue StandardError
+      end
       cleanup_item_raster_page_cache!(opts) if
         defined?(opts) && opts.is_a?(Hash)
       Logger.flush_log
@@ -4804,6 +4908,11 @@ module BlueCollarSystems
          !(defined?(opts) && opts.is_a?(Hash) &&
            opts[:preserve_prepared_parser])
         PdfSalvage.cleanup(path)
+      end
+      begin
+        report_pipeline_progress(opts, 'pipeline_ensure_finished') if
+          defined?(opts) && opts.is_a?(Hash)
+      rescue StandardError
       end
     end
 
