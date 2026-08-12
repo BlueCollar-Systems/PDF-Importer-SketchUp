@@ -102,6 +102,19 @@ assert_true(semantic_merged[0].text == ' A ',
             'internal source text must restore exact leading/trailing spaces')
 assert_true(semantic_merged.any? { |item| item.text == '   ' },
             'whitespace-only internal source spans must not disappear')
+ws_only = semantic_merged.find { |item| item.text == '   ' }
+assert_true(!ws_only.nil?, 'whitespace-only span must remain after merge')
+assert_true(
+  [ws_only.bbox_x0, ws_only.bbox_y0, ws_only.bbox_x1, ws_only.bbox_y1]
+    .none?(&:nil?),
+  'whitespace-only spans must receive a complete synthesized source bbox'
+)
+assert_near(ws_only.bbox_x0, 130.0, 1.0e-6, 'synthesized bbox x0 follows text origin')
+assert_near(ws_only.bbox_y0, 200.0, 1.0e-6, 'synthesized bbox y0 follows text origin')
+assert_true(ws_only.bbox_x1 > ws_only.bbox_x0,
+            'synthesized bbox must have positive width')
+assert_true(ws_only.bbox_y1 > ws_only.bbox_y0,
+            'synthesized bbox must have positive height')
 
 # A decoder can recover only trailing spaces from an otherwise undecodable
 # painted source run.  If that internal anchor is already owned by Poppler's

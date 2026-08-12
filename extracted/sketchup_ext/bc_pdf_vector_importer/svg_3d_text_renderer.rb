@@ -445,6 +445,15 @@ module BlueCollarSystems
             group, entries, source_id, depth, source_kind, solid_cache
           )
         end
+        # Distinct source fills cannot share one span-group material. Build each
+        # fill-distinct glyph into its own nested owned group so Text → 3D Text
+        # stays in-mode for multi-color source spans (Alvord garden-map titles).
+        if Array(entries).length > 1 &&
+           homogeneous_source_ink_style(entries).nil?
+          return build_multi_fill_span_group(
+            group, entries, source_id, depth, source_kind
+          )
+        end
         faces = []
         construction_origin = construction_origin_for(entries)
         construction_scale = safe_construction_scale(entries, construction_origin)
@@ -526,8 +535,22 @@ module BlueCollarSystems
           width_ok && height_ok && position_ok
         raise 'extruded source glyph has no verified positive Z depth' unless depth_ok
 
-        source_ink_rgb = source_text_ink_rgb(entries)
-        ink_applied = apply_source_text_ink!(group, source_ink_rgb)
+        source_ink = homogeneous_source_ink_style(entries)
+        if source_ink
+          source_ink_rgb = source_ink[:rgb]
+          ink_applied = apply_source_text_ink!(
+            group, source_ink_rgb, source_ink[:opacity]
+          )
+          source_ink_material_name = material_name_for_rgb(
+            source_ink_rgb, source_ink[:opacity]
+          )
+        else
+          # Per-glyph solids already carry distinct source fills; leave the
+          # span group unpainted so those materials remain authoritative.
+          source_ink_rgb = nil
+          ink_applied = true
+          source_ink_material_name = nil
+        end
 
         matrices = entries.map { |entry| Array(entry[:svg_matrix]).map { |v| v.to_f } }
         ids = entries.map { |entry| entry[:glyph_id].to_s }
@@ -548,7 +571,7 @@ module BlueCollarSystems
           :extruded_face_count => extruded,
           :ink_applied => ink_applied,
           :source_ink_rgb => source_ink_rgb,
-          :source_ink_material_name => material_name_for_rgb(source_ink_rgb),
+          :source_ink_material_name => source_ink_material_name,
           :identity_verified => !ids.empty? && ids.none? { |id| id.empty? },
           :placement_verified => !placement_indices.empty? &&
             placement_indices.uniq.length == placement_indices.length,
@@ -600,6 +623,7 @@ module BlueCollarSystems
               :source_outline_vertex_count => row[:source_outline_vertex_count],
               :construction_scale => row[:construction_scale],
               :host_tolerance_adapted => row[:host_tolerance_adapted],
+              :ink_applied => row[:ink_applied] == true,
               :definition_group_entity_id => row[:group_entity_id]
             }
           end
@@ -635,8 +659,23 @@ module BlueCollarSystems
           raise 'cached source glyph has no verified positive Z depth'
         end
 
-        source_ink_rgb = source_text_ink_rgb(entries)
-        ink_applied = apply_source_text_ink!(group, source_ink_rgb)
+        source_ink = homogeneous_source_ink_style(entries)
+        if source_ink
+          source_ink_rgb = source_ink[:rgb]
+          ink_applied = apply_source_text_ink!(
+            group, source_ink_rgb, source_ink[:opacity]
+          )
+          source_ink_material_name = material_name_for_rgb(
+            source_ink_rgb, source_ink[:opacity]
+          )
+        else
+          source_ink_rgb = nil
+          ink_applied = definition_records.all? do |record|
+            metrics = record[:build_metrics]
+            metrics.is_a?(Hash) && metrics[:ink_applied] == true
+          end
+          source_ink_material_name = nil
+        end
         matrices = entries.map do |entry|
           Array(entry[:svg_matrix]).map { |value| value.to_f }
         end
@@ -676,7 +715,7 @@ module BlueCollarSystems
           :extruded_face_count => extruded_count,
           :ink_applied => ink_applied,
           :source_ink_rgb => source_ink_rgb,
-          :source_ink_material_name => material_name_for_rgb(source_ink_rgb),
+          :source_ink_material_name => source_ink_material_name,
           :identity_verified => !ids.empty? && ids.none? { |id| id.empty? },
           :placement_verified => !placement_indices.empty? &&
             placement_indices.uniq.length == placement_indices.length,
@@ -721,18 +760,23 @@ module BlueCollarSystems
       # lets every nil-material glyph face (caps and extrusion walls, nested
       # construction group included) inherit the renderer's source fill color.
       # SVG's default black is used only when no explicit fill is present.
+      # Source fill-opacity is preserved via SketchUp material alpha so garden-
+      # map / translucent PDF text stays in-mode for Text → 3D Text instead of
+      # aborting the page as a generic host exception.
       # Returns true only
       # when the host accepted the paint; callers record the outcome (R20-2 —
       # a headless host without materials reports ink_applied false, never a
       # silent claim).
-      def self.apply_source_text_ink!(group, rgb = TEXT_INK_RGB)
+      def self.apply_source_text_ink!(group, rgb = TEXT_INK_RGB, opacity = 1.0)
         return false unless group.respond_to?(:material=) &&
                             group.respond_to?(:model)
         model = group.model
         materials = model && model.respond_to?(:materials) ? model.materials : nil
         return false unless materials
         channels = normalize_source_ink_rgb(rgb) || TEXT_INK_RGB
-        material_name = material_name_for_rgb(channels)
+        alpha = normalize_source_ink_opacity(opacity)
+        return false if alpha.nil?
+        material_name = material_name_for_rgb(channels, alpha)
         mat = materials[material_name]
         unless mat
           mat = materials.add(material_name)
@@ -744,6 +788,9 @@ module BlueCollarSystems
           end
         end
         return false unless mat
+        if mat.respond_to?(:alpha=) && (alpha - 1.0).abs > 1.0e-12
+          mat.alpha = alpha
+        end
         group.material = mat
         true
       rescue StandardError => e
@@ -754,16 +801,116 @@ module BlueCollarSystems
         false
       end
 
-      def self.source_text_ink_rgb(entries)
-        unsupported_opacity = Array(entries).any? do |entry|
-          next false unless entry.is_a?(Hash) && entry.key?(:fill_opacity)
-          opacity = entry[:fill_opacity]
-          !opacity.is_a?(Numeric) || !opacity.to_f.finite? ||
-            (opacity.to_f - 1.0).abs > 1.0e-12
+      def self.homogeneous_source_ink_style(entries)
+        source_text_ink_style(entries)
+      rescue RuntimeError => e
+        message = e.message.to_s
+        if message.include?('multiple fill colors') ||
+           message.include?('multiple fill opacities')
+          return nil
         end
-        if unsupported_opacity
-          raise 'source text span has unsupported non-opaque fill opacity'
+        raise
+      end
+
+      def self.build_multi_fill_span_group(group, entries, source_id, depth,
+                                           source_kind)
+        child = group.entities
+        rows = []
+        Array(entries).each_with_index do |entry, index|
+          nested = child.add_group
+          raise 'multi-fill nested glyph group was not created' unless nested
+          rows << build_span_group(
+            nested, [entry], "#{source_id}#fill#{index}", depth,
+            source_kind, nil
+          )
         end
+        raise 'source span produced no multi-fill glyph group' if rows.empty?
+        expected = CairoGlyphSource.loops_extent(entries)
+        raise 'source outline extent is unavailable' unless expected
+        actual = bounds_hash(group)
+        expected_width = expected[2].to_f - expected[0].to_f
+        expected_height = expected[3].to_f - expected[1].to_f
+        actual_width = actual[:max_x] - actual[:min_x]
+        actual_height = actual[:max_y] - actual[:min_y]
+        actual_depth = actual[:max_z] - actual[:min_z]
+        position_ok = close_size?(actual[:min_x], expected[0]) &&
+          close_size?(actual[:min_y], expected[1]) &&
+          close_size?(actual[:max_x], expected[2]) &&
+          close_size?(actual[:max_y], expected[3]) &&
+          close_size?(actual[:min_z], 0.0) &&
+          close_size?(actual[:max_z], depth)
+        width_ok = close_size?(actual_width, expected_width)
+        height_ok = close_size?(actual_height, expected_height)
+        depth_ok = actual_depth > SIZE_TOLERANCE_INCHES &&
+          close_size?(actual_depth, depth)
+        raise 'extruded source glyph width/height verification failed' unless
+          width_ok && height_ok && position_ok
+        raise 'extruded source glyph has no verified positive Z depth' unless depth_ok
+        matrices = entries.map { |entry| Array(entry[:svg_matrix]).map { |v| v.to_f } }
+        ids = entries.map { |entry| entry[:glyph_id].to_s }
+        placement_indices = entries.map { |entry| entry[:placement_index].to_i }
+        {
+          :source_span_id => source_kind == :text_span ? source_id : nil,
+          :source_unit_id => source_id,
+          :source_kind => source_kind,
+          :group => group,
+          :group_entity_id => RepresentationFidelity.stable_entity_id(group),
+          :renderer => :svg_source_3d_text,
+          :glyph_ids => ids,
+          :placement_indices => placement_indices,
+          :source_matrices => matrices.uniq,
+          :source_extent => expected.map { |value| value.to_f },
+          :source_placement_count => placement_indices.length,
+          :face_count => rows.inject(0) { |sum, row| sum + row[:face_count].to_i },
+          :extruded_face_count => rows.inject(0) { |sum, row|
+            sum + row[:extruded_face_count].to_i
+          },
+          :ink_applied => rows.all? { |row| row[:ink_applied] == true },
+          :source_ink_rgb => nil,
+          :source_ink_material_name => nil,
+          :identity_verified => !ids.empty? && ids.none? { |id| id.empty? },
+          :placement_verified => !placement_indices.empty? &&
+            placement_indices.uniq.length == placement_indices.length,
+          :rotation_verified => matrices.length == entries.length &&
+            matrices.all? { |matrix| matrix.length >= 6 },
+          :size_verified => width_ok && height_ok,
+          :depth_verified => depth_ok,
+          :host_tolerance_adapted => rows.any? { |row|
+            row[:host_tolerance_adapted] == true
+          },
+          :construction_scale => rows.map { |row| row[:construction_scale].to_f }.max || 1.0,
+          :construction_origin => [
+            (expected[0].to_f + expected[2].to_f) * 0.5,
+            (expected[1].to_f + expected[3].to_f) * 0.5,
+            0.0
+          ],
+          :construction_group_entity_id => nil,
+          :collapsed_host_equal_vertices => 0,
+          :source_outline_vertex_count => rows.inject(0) { |sum, row|
+            sum + row[:source_outline_vertex_count].to_i
+          },
+          :width => actual_width,
+          :height => actual_height,
+          :depth => actual_depth,
+          :bounds => actual,
+          :expected_outline_extent => expected
+        }
+      end
+
+      def self.source_text_ink_style(entries)
+        opacities = Array(entries).map do |entry|
+          next 1.0 unless entry.is_a?(Hash) && entry.key?(:fill_opacity)
+          normalize_source_ink_opacity(entry[:fill_opacity])
+        end
+        if opacities.any?(&:nil?)
+          raise 'source text span has unsupported fill opacity'
+        end
+        opacities = opacities.uniq
+        if opacities.length > 1
+          raise 'source text span contains multiple fill opacities'
+        end
+        opacity = opacities.empty? ? 1.0 : opacities.first
+
         unsupported = Array(entries).any? do |entry|
           entry.is_a?(Hash) && entry.key?(:fill_rgb) && entry[:fill_rgb].nil?
         end
@@ -774,11 +921,25 @@ module BlueCollarSystems
           next nil unless entry.is_a?(Hash)
           normalize_source_ink_rgb(entry[:fill_rgb])
         end.compact.uniq
-        return TEXT_INK_RGB.dup if colors.empty?
+        rgb = colors.empty? ? TEXT_INK_RGB.dup : colors.first
         if colors.length > 1
           raise 'source text span contains multiple fill colors'
         end
-        colors.first
+        { :rgb => rgb, :opacity => opacity }
+      end
+
+      def self.source_text_ink_rgb(entries)
+        source_text_ink_style(entries)[:rgb]
+      end
+
+      def self.normalize_source_ink_opacity(value)
+        return 1.0 if value.nil?
+        opacity = Float(value)
+        return nil unless opacity.finite?
+        return nil if opacity < 0.0 || opacity > 1.0
+        opacity
+      rescue StandardError
+        nil
       end
 
       def self.normalize_source_ink_rgb(rgb)
@@ -803,11 +964,17 @@ module BlueCollarSystems
         nil
       end
 
-      def self.material_name_for_rgb(rgb)
+      def self.material_name_for_rgb(rgb, opacity = 1.0)
         channels = normalize_source_ink_rgb(rgb)
         channels ||= Array(rgb).first(3).map { |channel| channel.to_i }
         channels = TEXT_INK_RGB unless channels.length >= 3
-        "PDF_#{channels[0]}_#{channels[1]}_#{channels[2]}"
+        alpha = normalize_source_ink_opacity(opacity)
+        alpha = 1.0 if alpha.nil?
+        name = "PDF_#{channels[0]}_#{channels[1]}_#{channels[2]}"
+        if (alpha - 1.0).abs > 1.0e-12
+          name = "#{name}_a#{(alpha * 255.0).round}"
+        end
+        name
       rescue StandardError
         TEXT_INK_MATERIAL_NAME
       end

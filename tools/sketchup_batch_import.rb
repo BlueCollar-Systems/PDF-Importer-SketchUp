@@ -60,16 +60,23 @@ module SketchupBatchImport
       pipeline_options = import_options(importer, job, binding)
       stats = importer.run_pipeline(@model, job[:pdf_path], pipeline_options)
       raise 'run_pipeline returned nil' unless stats.is_a?(Hash)
+      SketchupBatchImport.write_progress!(job, binding, 'pipeline_returned')
       source_tree_sha256_after_import =
         SketchupHostEvidence.source_tree_sha256(plugin_root)
       verify_source_tree_sha256!(
         job, source_tree_sha256_after_import, 'after import'
       )
+      SketchupBatchImport.write_progress!(job, binding, 'source_tree_verified')
       stats[:source_tree_sha256_before_load] =
         source_tree_sha256_before_load
       stats[:source_tree_sha256_after_import] =
         source_tree_sha256_after_import
+      SketchupBatchImport.write_progress!(
+        job, binding, 'import_report_refresh_started',
+        "text_attempts=#{Array(stats[:text_attempts]).length}"
+      )
       refresh_import_report!(importer, job, pipeline_options, stats)
+      SketchupBatchImport.write_progress!(job, binding, 'import_report_refreshed')
       source_lineage = verified_source_lineage!(stats, job)
       SketchupBatchImport.write_progress!(job, binding, 'import_completed')
 
