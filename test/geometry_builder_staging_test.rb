@@ -53,7 +53,24 @@ module Geom
 end
 
 module Sketchup
-  def self.status_text=(_value); end
+  class << self
+    attr_accessor :status_history
+  end
+  self.status_history = []
+  def self.status_text=(value)
+    self.status_history << value
+  end
+end
+
+class RecordingController
+  attr_reader :checkpoints
+  def initialize
+    @checkpoints = []
+  end
+  def checkpoint!(stage, detail)
+    @checkpoints << [stage, detail.dup]
+    false
+  end
 end
 
 require 'bc_pdf_vector_importer/content_stream_parser'
@@ -238,6 +255,35 @@ class GeometryBuilderStagingTest < Minitest::Test
     def line_styles
       nil
     end
+  end
+
+  def test_499_paths_do_not_stage_or_emit_heavy_status
+    Sketchup.status_history = []
+    controller = RecordingController.new
+    builder = Builder.new(Model.new, 499.times.map { |i| line_path(i.to_f) }, [],
+      [0, 0, 612, 792], :group_per_page => false, :detect_arcs => false,
+      :run_controller => controller)
+    result = builder.build
+    assert_equal false, result[:geometry_staging][:enabled]
+    assert_equal 0, result[:geometry_staging][:batch_count]
+    assert_equal [], Sketchup.status_history
+    assert_equal [0, 100, 200, 300, 400, 499],
+      controller.checkpoints.select { |x| x[0] == :geometry_path }.map { |x| x[1][:completed] }
+  end
+
+  def test_500_paths_stage_250_chunks_emit_100_status_and_keep_checkpoints
+    Sketchup.status_history = []
+    controller = RecordingController.new
+    builder = Builder.new(Model.new, 500.times.map { |i| line_path(i.to_f) }, [],
+      [0, 0, 612, 792], :group_per_page => false, :detect_arcs => false,
+      :run_controller => controller)
+    result = builder.build
+    assert_equal true, result[:geometry_staging][:enabled]
+    assert_equal 250, result[:geometry_staging][:chunk_path_limit]
+    assert_equal 2, result[:geometry_staging][:batch_count]
+    assert_equal [0, 100, 200, 300, 400], Sketchup.status_history.map { |s| s[/\((\d+)\//, 1].to_i }
+    assert_equal [0, 100, 200, 300, 400, 500],
+      controller.checkpoints.select { |x| x[0] == :geometry_path }.map { |x| x[1][:completed] }
   end
 
   def test_heavy_page_builds_exact_geometry_in_bulk_exploded_batches

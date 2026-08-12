@@ -147,6 +147,9 @@ done < <(find extracted test -type f -name '*.rb' -print0)
 # Ensure smoke_test.rb subprocesses also use the exact source-built runtime.
 export PATH="${INSTALL_DIR}/bin:${PATH}"
 readonly SMOKE_TESTS=(
+  test/content_stream_tokenizer_test.rb
+  test/geometry_builder_staging_test.rb
+  test/ownership_bookkeeping_test.rb
   test/smoke_test.rb
   test/ruby22_compat_test.rb
   test/import_health_test.rb

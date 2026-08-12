@@ -185,6 +185,10 @@ FIXTURES = [
   "BI /W 1 /H 1 /BPC 8 /CS /RGB ID \x00\x01\x02 EI q",
   # EI immediately followed by a name must keep the leading '/' (offset parity).
   "BI /W 1 ID \x00\x01 EI/Name Do",
+  "BI /W 1\x00ID abc EI q",
+  "BI /W 1 ID\x00abc EI q",
+  "BI /W 1 ID abc\x00EI q",
+  "BI /W 1 ID abc EI\x00q",
 ].freeze
 
 FIXTURES.each_with_index do |stream, idx|
