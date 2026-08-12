@@ -3036,6 +3036,26 @@ module BlueCollarSystems
       stats[:pipeline_performance][key] = (prior + elapsed_ms.to_f).round(3)
     end
 
+    # Ownership-verification counters are accumulated inside RepresentationFidelity
+    # rather than passed down the call chain, because snapshots are taken from many
+    # call sites. Reset at the start of an import so the figures describe this import,
+    # and copy them into stats before the report is built. Failure here is swallowed:
+    # instrumentation must never be able to fail an import.
+    def self.reset_ownership_bookkeeping!
+      RepresentationFidelity.reset_bookkeeping_stats!
+      nil
+    rescue StandardError
+      nil
+    end
+
+    def self.collect_ownership_bookkeeping!(stats)
+      collected = RepresentationFidelity.bookkeeping_stats
+      stats[:ownership_bookkeeping] = collected.dup if collected.is_a?(Hash)
+      nil
+    rescue StandardError
+      nil
+    end
+
     def self.record_raster_performance!(stats, performance)
       metrics = performance || {}
       {
@@ -3061,6 +3081,7 @@ module BlueCollarSystems
     end
 
     def self.run_forced_raster_pipeline(model, path, opts)
+      reset_ownership_bookkeeping!
       dpi = opts[:raster_dpi] || 300
       Logger.info('Pipeline', "Explicit Raster mode at #{dpi} DPI")
       parser = PDFParser.new(path)
@@ -3470,6 +3491,9 @@ module BlueCollarSystems
       page_fit_bounds = Geom::BoundingBox.new
 
       import_start = Time.now
+      # Counters describe THIS import. Without a reset they would accumulate across
+      # successive imports in one SketchUp session and overstate the bookkeeping cost.
+      reset_ownership_bookkeeping!
       page_arrangement = normalize_page_arrangement(opts[:page_arrangement])
       page_gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
       running_y_offset = opts[:initial_y_offset].to_f

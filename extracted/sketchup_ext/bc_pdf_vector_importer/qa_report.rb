@@ -86,6 +86,44 @@ module BlueCollarSystems
       # Process CPU timings, sorted for determinism. Only numeric `*_cpu_ms` entries are
       # emitted; anything else is dropped rather than coerced, so a stray value cannot be
       # mistaken for a duration.
+      # Ownership-bookkeeping counters, plus the two derived figures that answer the
+      # question the raw totals cannot: avg_snapshot_entities shows how much of the
+      # model each verification re-reads, and snapshot_entities_growth compares the
+      # first snapshot against the last. A growth ratio near 1.0 means the cost is a
+      # flat per-item constant; a large ratio means verification cost rises as the
+      # model fills, i.e. the bookkeeping is quadratic in model size.
+      def ownership_bookkeeping(stats)
+        collected = stats[:ownership_bookkeeping]
+        return {} unless collected.is_a?(Hash)
+
+        calls = collected[:snapshot_calls].to_i
+        enumerated = collected[:entities_enumerated].to_i
+        first = collected[:first_snapshot_entities]
+        last = collected[:last_snapshot_entities]
+        out = {
+          snapshot_calls: calls,
+          entities_enumerated: enumerated,
+          snapshot_ms: collected[:snapshot_ms].to_f.round(3),
+          diff_calls: collected[:diff_calls].to_i,
+          diff_probes: collected[:diff_probes].to_i,
+          max_snapshot_entities: collected[:max_snapshot_entities].to_i
+        }
+        # Disambiguates "no snapshots happened" from "a reset landed after the work".
+        begin
+          out[:lifetime_snapshot_calls] = RepresentationFidelity.lifetime_snapshots
+          out[:bookkeeping_resets] = RepresentationFidelity.bookkeeping_resets
+        rescue StandardError
+          nil
+        end
+        out[:avg_snapshot_entities] = (enumerated.to_f / calls).round(1) if calls > 0
+        out[:first_snapshot_entities] = first.to_i unless first.nil?
+        out[:last_snapshot_entities] = last.to_i unless last.nil?
+        if !first.nil? && first.to_i > 0
+          out[:snapshot_entities_growth] = (last.to_f / first.to_i).round(2)
+        end
+        out
+      end
+
       def cpu_phase_timings(stats)
         collected = stats[:pipeline_cpu_performance]
         return {} unless collected.is_a?(Hash)
@@ -132,6 +170,19 @@ module BlueCollarSystems
       end
 
       def build_from_stats(pdf_path, opts, stats)
+        # Ownership counters accumulate inside RepresentationFidelity because snapshots
+        # are taken from many call sites, so they are harvested here -- the one point
+        # every report path passes through -- rather than threaded through each caller.
+        # A caller-supplied value always wins, and a failure to read them degrades to
+        # absence rather than breaking the report.
+        if stats[:ownership_bookkeeping].nil?
+          begin
+            collected = RepresentationFidelity.bookkeeping_stats
+            stats[:ownership_bookkeeping] = collected.dup if collected.is_a?(Hash)
+          rescue StandardError
+            nil
+          end
+        end
         elapsed_ms = ((stats[:elapsed_seconds] || 0).to_f * 1000.0).round(1)
         layers = Array(stats[:layers]).compact
         warnings = Array(stats[:failed_pages]).length
@@ -204,6 +255,13 @@ module BlueCollarSystems
             # a *_cpu_ms figure can never be summed into the wall-time leaves.
             cpu_phases = cpu_phase_timings(stats)
             perf[:cpu_phases] = cpu_phases unless cpu_phases.empty?
+            # Ownership-verification cost, reported separately from the stage timings
+            # because it is not a stage: it is work spread across the text paths that
+            # scales with MODEL size rather than with the item being processed. Without
+            # these counters a single text3d_render total cannot distinguish "each item
+            # is expensive" from "each item re-scans everything created so far".
+            bookkeeping = ownership_bookkeeping(stats)
+            perf[:ownership_bookkeeping] = bookkeeping unless bookkeeping.empty?
             perf
           end,
           fallback: fallback_block(stats, degraded_renderers),

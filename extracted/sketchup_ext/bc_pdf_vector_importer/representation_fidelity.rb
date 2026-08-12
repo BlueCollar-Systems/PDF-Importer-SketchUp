@@ -11,6 +11,16 @@ module BlueCollarSystems
 
       SOURCE_ID = /\Atext_span:([1-9]\d*):(0|[1-9]\d*)\z/.freeze
       ENTITY_ID = /\A(?:persistent_id|entity_id):[1-9]\d*\z/.freeze
+
+      # Hoisted out of stable_entity_id. That method runs once per entity per
+      # snapshot, and a snapshot enumerates the entire entity collection, so
+      # rebuilding this pair list on every call was allocating one array-of-arrays
+      # per entity per snapshot on text-heavy pages.
+      STABLE_ID_CANDIDATES = [
+        [:persistent_id, 'persistent_id'.freeze],
+        [:entityID, 'entity_id'.freeze]
+      ].freeze
+      STABLE_ID_DIGITS = /\A\d+\z/.freeze
       IMPORTER_ID = 'sketchup_pdf_vector_importer'.freeze
       SOURCE_EXPECTED_SCHEMA = 'bcs.source_expected/1.0'.freeze
       FLAT_TEXT_CAPABILITY_SCHEMA =
@@ -512,13 +522,19 @@ module BlueCollarSystems
 
       def stable_entity_id(entity)
         raise ContractError, 'entity is nil' if entity.nil?
-        candidates = [[:persistent_id, 'persistent_id'], [:entityID, 'entity_id']]
-        candidates.each do |method_name, prefix|
+        STABLE_ID_CANDIDATES.each do |method_name, prefix|
           next unless entity.respond_to?(method_name)
           raw = entity.send(method_name)
           next if raw == true || raw == false || raw.nil?
           number = raw.to_i
-          next unless number > 0 && raw.to_s.strip =~ /\A\d+\z/
+          next unless number > 0
+          # Identical acceptance to the previous single-line guard. An Integer's
+          # to_s can only contain digits (plus a leading '-'), and number > 0 has
+          # already rejected negatives and zero, so the string round-trip and
+          # regex are only meaningful for non-Integer raw identities.
+          unless raw.is_a?(Integer)
+            next unless raw.to_s.strip =~ STABLE_ID_DIGITS
+          end
           return "#{prefix}:#{number}"
         end
         raise ContractError, 'entity has no positive numeric stable host identity'
@@ -541,18 +557,112 @@ module BlueCollarSystems
 
       def snapshot(collection)
         raise ContractError, 'entity collection cannot be enumerated' unless collection.respond_to?(:to_a)
+        started = Time.now
         values = Array(collection.to_a)
-        { entities: values, by_id: stable_entity_map(values) }
+        result = { entities: values, by_id: stable_entity_map(values) }
+        record_bookkeeping_snapshot!(values.length, (Time.now - started) * 1000.0)
+        result
       rescue ContractError
         raise
       rescue StandardError => e
         raise ContractError, "entity snapshot failed: #{e.message}"
       end
 
+      # --- ownership-bookkeeping instrumentation -------------------------------
+      #
+      # A snapshot enumerates the WHOLE entity collection, and the text paths take
+      # snapshots per text item, so the cost of verifying ownership scales with model
+      # size rather than with the item being verified. The decisive question is
+      # therefore whether that cost GROWS as items accumulate, which a single total
+      # cannot answer. entities_enumerated is the sum of collection sizes across all
+      # snapshots: compare it against snapshot_calls to recover the average collection
+      # size, and compare first_snapshot_entities against last_snapshot_entities to
+      # see the growth directly. Counters never raise -- instrumentation must not be
+      # able to fail an import.
+
+      def new_bookkeeping_stats
+        {
+          :snapshot_calls => 0,
+          :entities_enumerated => 0,
+          :snapshot_ms => 0.0,
+          :diff_calls => 0,
+          :diff_probes => 0,
+          :first_snapshot_entities => nil,
+          :last_snapshot_entities => nil,
+          :max_snapshot_entities => 0
+        }
+      end
+
+      def bookkeeping_stats
+        @bookkeeping_stats = new_bookkeeping_stats if @bookkeeping_stats.nil?
+        @bookkeeping_stats
+      end
+
+      def reset_bookkeeping_stats!
+        # Lifetime totals deliberately survive the reset. A per-import counter that
+        # reads zero is ambiguous: it can mean "no snapshots happened" or "a reset
+        # landed after the work". Keeping an un-resettable total plus a reset count
+        # tells those two apart from a single run instead of by guesswork.
+        @bookkeeping_lifetime_snapshots = lifetime_snapshots
+        @bookkeeping_resets = bookkeeping_resets + 1
+        @bookkeeping_stats = new_bookkeeping_stats
+      end
+
+      def lifetime_snapshots
+        @bookkeeping_lifetime_snapshots = 0 if @bookkeeping_lifetime_snapshots.nil?
+        @bookkeeping_lifetime_snapshots
+      end
+
+      def bookkeeping_resets
+        @bookkeeping_resets = 0 if @bookkeeping_resets.nil?
+        @bookkeeping_resets
+      end
+
+      def note_lifetime_snapshot!
+        @bookkeeping_lifetime_snapshots = lifetime_snapshots + 1
+        nil
+      rescue StandardError
+        nil
+      end
+
+      def record_bookkeeping_snapshot!(count, ms)
+        note_lifetime_snapshot!
+        stats = bookkeeping_stats
+        stats[:snapshot_calls] += 1
+        stats[:entities_enumerated] += count
+        stats[:snapshot_ms] += ms
+        stats[:first_snapshot_entities] = count if stats[:first_snapshot_entities].nil?
+        stats[:last_snapshot_entities] = count
+        stats[:max_snapshot_entities] = count if count > stats[:max_snapshot_entities]
+        nil
+      rescue StandardError
+        nil
+      end
+
+      def record_bookkeeping_diff!(probes)
+        stats = bookkeeping_stats
+        stats[:diff_calls] += 1
+        stats[:diff_probes] += probes
+        nil
+      rescue StandardError
+        nil
+      end
+
       def created_between(before_snapshot, after_snapshot)
-        before_ids = before_snapshot[:by_id].keys
-        ids = after_snapshot[:by_id].keys.reject { |identity| before_ids.include?(identity) }
-        ids.map { |identity| after_snapshot[:by_id][identity] }
+        # Hash#keys returns an Array, so the previous Array#include? membership test
+        # ran a linear scan for every identity in the "after" set -- O(n^2) per call,
+        # on a per-text-item path. Hash#key? is O(1) and Hash#each preserves insertion
+        # order, so the returned entities are identical and in the same order.
+        before_by_id = before_snapshot[:by_id]
+        after_by_id = after_snapshot[:by_id]
+        created = []
+        probes = 0
+        after_by_id.each do |identity, entity|
+          probes += 1
+          created << entity unless before_by_id.key?(identity)
+        end
+        record_bookkeeping_diff!(probes)
+        created
       end
 
       # Validate an explicit ownership claim without treating every concurrent
@@ -576,8 +686,21 @@ module BlueCollarSystems
       end
 
       def stable_ids(values)
-        stable_entity_map(Array(values))
-        Array(values).map { |entity| stable_entity_id(entity) }
+        # Previously this called stable_entity_map purely for its duplicate-identity
+        # raise and then recomputed every identity in a second pass, so each entity
+        # paid for stable_entity_id twice. One pass keeps the same duplicate
+        # detection, the same error message, and the same result order.
+        seen = {}
+        ids = []
+        Array(values).each do |entity|
+          identity = stable_entity_id(entity)
+          if seen.key?(identity)
+            raise ContractError, "duplicate stable entity identity #{identity}"
+          end
+          seen[identity] = true
+          ids << identity
+        end
+        ids
       end
 
       def erase_owned!(collection, entities)
