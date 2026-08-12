@@ -253,10 +253,11 @@ class GeometryBuilderStagingTest < Minitest::Test
 
     assert_equal 500, result[:edges]
     assert_equal true, result[:geometry_staging][:enabled]
-    assert_equal 3, result[:geometry_staging][:batch_count]
-    assert_equal 3, result[:geometry_staging][:explode_count]
-    assert_equal 3, model.active_entities.groups_created
-    assert_equal 3, model.active_entities.groups_exploded
+    # 500 paths / chunk 250 => two explode batches under restored reviewed policy.
+    assert_equal 2, result[:geometry_staging][:batch_count]
+    assert_equal 2, result[:geometry_staging][:explode_count]
+    assert_equal 2, model.active_entities.groups_created
+    assert_equal 2, model.active_entities.groups_exploded
     assert_equal 500, model.active_entities.to_a.length
     assert model.active_entities.to_a.all? { |entity| entity.is_a?(Edge) }
     endpoints = model.active_entities.to_a.values_at(0, -1).map do |edge|
@@ -352,7 +353,7 @@ class GeometryBuilderStagingTest < Minitest::Test
     result = builder.build
 
     assert_equal true, result[:geometry_staging][:enabled]
-    assert_equal 3, result[:geometry_staging][:explode_count]
+    assert_equal 2, result[:geometry_staging][:explode_count]
     assert_equal 500, result[:faces]
     instances = model.active_entities.to_a.grep(ComponentInstance)
     assert_equal 1, instances.length,

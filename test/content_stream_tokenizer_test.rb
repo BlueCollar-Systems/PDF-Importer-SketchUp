@@ -183,6 +183,8 @@ FIXTURES = [
   "0.5 w 1 J 2 j [3 4] 0 d",
   "{ignored} 10 10 m",
   "BI /W 1 /H 1 /BPC 8 /CS /RGB ID \x00\x01\x02 EI q",
+  # EI immediately followed by a name must keep the leading '/' (offset parity).
+  "BI /W 1 ID \x00\x01 EI/Name Do",
 ].freeze
 
 FIXTURES.each_with_index do |stream, idx|

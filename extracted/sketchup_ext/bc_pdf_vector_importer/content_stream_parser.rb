@@ -149,34 +149,34 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Content stream tokenizer
       # ---------------------------------------------------------------
-      # Fast manual numeric-literal check: optional sign, optional digits,
-      # optional single dot with optional digits. Replaces a hot-path regex.
+      # Fast manual numeric-literal check matching /\A[+-]?\d*\.?\d+\z/.
+      # Trailing-dot forms like "5." are operators, not numbers.
       def numeric_literal?(word)
         return false if word.nil? || word.empty?
+        last = word[-1]
+        return false if last < '0' || last > '9'
         i = 0
         len = word.length
         i += 1 if word[i] == '+' || word[i] == '-'
-        has_digits = false
         while i < len && word[i] >= '0' && word[i] <= '9'
           i += 1
-          has_digits = true
         end
         if i < len && word[i] == '.'
           i += 1
+          return false if i >= len || word[i] < '0' || word[i] > '9'
           while i < len && word[i] >= '0' && word[i] <= '9'
             i += 1
-            has_digits = true
           end
         end
-        has_digits && i == len
+        i == len
       end
 
       # PDF inline image: BI ... ID <binary> EI
-      # We must skip the binary data without scanning it as tokens. The following
-      # helpers perform the same boundary-aware search the old regex did, but
-      # with character checks instead of a regex engine.
-      def whitespace?(ch)
-        ch == ' ' || ch == "\t" || ch == "\n" || ch == "\r" || ch == "\v" || ch == "\f" || ch == "\x00"
+      # Boundary helpers mirror the prior regex markers:
+      #   /\sID[\s\n\r]/ and /[\s\n\r]EI(?=[\s\n\r\/\[<])/
+      # Ruby \s does not include NUL; keep the same set so binary scans stay equivalent.
+      def inline_image_whitespace?(ch)
+        ch == ' ' || ch == "\t" || ch == "\n" || ch == "\r" || ch == "\v" || ch == "\f"
       end
 
       def inline_image_id_marker(stream, start)
@@ -184,8 +184,10 @@ module BlueCollarSystems
         return nil if start + 3 > len
         i = start
         while i <= len - 3
-          if stream[i] == 'I' && stream[i + 1] == 'D' && whitespace?(stream[i - 1]) && whitespace?(stream[i + 2])
-            return i - 1  # position of leading whitespace, matching old regex semantics
+          if stream[i] == 'I' && stream[i + 1] == 'D' &&
+             i > 0 && inline_image_whitespace?(stream[i - 1]) &&
+             inline_image_whitespace?(stream[i + 2])
+            return i - 1  # leading whitespace, matching old regex match start
           end
           i += 1
         end
@@ -198,10 +200,12 @@ module BlueCollarSystems
         i = start
         while i <= len - 3
           if stream[i] == 'E' && stream[i + 1] == 'I'
-            if whitespace?(stream[i - 1])
-              nxt = stream[i + 2]
-              if whitespace?(nxt) || nxt == '/' || nxt == '[' || nxt == '<'
-                return i
+            if i > 0 && inline_image_whitespace?(stream[i - 1])
+              nxt = (i + 2 < len) ? stream[i + 2] : nil
+              if inline_image_whitespace?(nxt) || nxt == '/' || nxt == '[' || nxt == '<'
+                # Return leading whitespace so caller +3 lands on the next token
+                # (including '/' of "/Name"), matching old regex match start.
+                return i - 1
               end
             end
           end
