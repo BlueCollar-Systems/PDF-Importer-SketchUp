@@ -4852,13 +4852,27 @@ module BlueCollarSystems
         opts, 'post_build_completed',
         "post_build_ms=#{stats[:pipeline_performance][:post_build_ms]}"
       )
-      Sketchup.status_text = if import_contract_ready?(stats)
-        "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text " \
-          "items — #{elapsed}s"
-      else
-        "PDF Import finished, but QA contract is NOT READY — " \
-          "#{stats[:edges]} edges, #{stats[:text]} text items"
+      # Batch/host jobs must not touch Sketchup.status_text after a large
+      # solid-text commit. SketchUp 2017 can spend tens of minutes redrawing
+      # the status bar / viewport and block Ruby before the pipeline returns,
+      # which looks like a host hang after text already certified (Alvord).
+      begin
+        interactive = !(defined?(BatchHostPolicy) &&
+                        BatchHostPolicy.respond_to?(:noninteractive?) &&
+                        BatchHostPolicy.noninteractive?)
+        if interactive && defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+          Sketchup.status_text = if import_contract_ready?(stats)
+            "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text " \
+              "items — #{elapsed}s"
+          else
+            "PDF Import finished, but QA contract is NOT READY — " \
+              "#{stats[:edges]} edges, #{stats[:text]} text items"
+          end
+        end
+      rescue StandardError
+        # Status text is advisory only.
       end
+      report_pipeline_progress(opts, 'pipeline_return_ready')
       stats
     rescue ImportRunControl::ImportCancelled
       operation_open =
@@ -4869,6 +4883,11 @@ module BlueCollarSystems
         abort_open_operation!(model, operation_open, 'Pipeline')
       raise e
     ensure
+      begin
+        report_pipeline_progress(opts, 'pipeline_ensure_started') if
+          defined?(opts) && opts.is_a?(Hash)
+      rescue StandardError
+      end
       cleanup_item_raster_page_cache!(opts) if
         defined?(opts) && opts.is_a?(Hash)
       Logger.flush_log
@@ -4876,6 +4895,11 @@ module BlueCollarSystems
          !(defined?(opts) && opts.is_a?(Hash) &&
            opts[:preserve_prepared_parser])
         PdfSalvage.cleanup(path)
+      end
+      begin
+        report_pipeline_progress(opts, 'pipeline_ensure_finished') if
+          defined?(opts) && opts.is_a?(Hash)
+      rescue StandardError
       end
     end
 
