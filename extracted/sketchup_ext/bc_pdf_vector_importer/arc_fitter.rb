@@ -94,7 +94,11 @@ module BlueCollarSystems
       #     start_pt: [x,y], mid_pt: [x,y], end_pt: [x,y] }
       # ---------------------------------------------------------------
       def self.detect_arcs_in_polyline(points, opts = {})
-        arc_tol   = opts[:arc_fit_tol] || 0.08
+        # Default matches the Python hosts' arc_fit_tol_mm = 0.05, expressed in
+        # this fitter's inch units. The old 0.08 default predated unit review and
+        # was ~2mm if read as inches -- callers always passed an explicit value,
+        # so only direct/test callers ever saw it.
+        arc_tol   = opts[:arc_fit_tol] || (0.05 / 25.4)
         min_segs = opts[:min_arc_segments] || 3
         max_segs = opts[:max_arc_segments] || 64
         min_angle = opts[:min_arc_angle_deg] || 5.0
@@ -121,7 +125,13 @@ module BlueCollarSystems
                 cx, cy, r, rms = fit
                 # Accept if fit is good relative to radius
                 tol = [arc_tol, r * 0.005].max
-                if rms < tol && r > 0.01
+                # rms <= tol mirrors Python's `if rms > tol: continue`. The radius
+                # floor r > 0.01 (inches) is deliberately NOT aligned to Python's
+                # 0.1mm in this pass: Python applies its floor in source-mm space
+                # before host scaling, while this fitter sees post-scale inches, so
+                # a faithful alignment needs a min_radius option plumbed from the
+                # builder with @scale -- tracked as follow-up, not silently changed.
+                if rms <= tol && r > 0.01
                   # Check arc sweep is meaningful
                   dx0 = run_pts.first[0] - cx
                   dy0 = run_pts.first[1] - cy
@@ -177,7 +187,7 @@ module BlueCollarSystems
       # Returns { center:, radius:, start_pt:, mid_pt:, end_pt: } or nil.
       # ---------------------------------------------------------------
       def self.bezier_to_arc(p0, p1, p2, p3, opts = {})
-        tol = opts[:arc_fit_tol] || 0.08
+        tol = opts[:arc_fit_tol] || (0.05 / 25.4)  # Python arc_fit_tol_mm=0.05, in inches
         n_samples = opts[:arc_samples] || 7
         n_samples = n_samples | 1  # ensure odd
 

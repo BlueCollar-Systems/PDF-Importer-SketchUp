@@ -489,11 +489,15 @@ module BlueCollarSystems
         # Convert Point3d to [x,y] for the arc fitter
         pts_2d = points.map { |p| [p.x, p.y] }
 
-        # Arc fit tolerance in inches (consistent with arc_fitter.rb which
-        # expects inches).  0.003" ≈ 0.08mm matches the Python importers'
-        # default arc_fit_tol_mm.  Scaled by import scale factor.
+        # Arc fit tolerance in inches (arc_fitter.rb expects inches), scaled by
+        # the import scale factor. 0.05mm / 25.4 to match the Python importers'
+        # arc_fit_tol_mm default of 0.05 EXACTLY -- the previous 0.003" (~0.0762mm)
+        # claimed to match Python but was ~52% looser, so for fitted radii below
+        # 15.24mm SketchUp promoted borderline polylines to arcs that FreeCAD /
+        # Blender / LibreCAD left as polylines. Above 15.24mm both hosts gate on
+        # the shared r*0.005 term, where parity comes from the Neumaier fit.
         segments = ArcFitter.detect_arcs_in_polyline(pts_2d,
-          arc_fit_tol: 0.003 * @scale,
+          arc_fit_tol: (0.05 / 25.4) * @scale,
           min_arc_segments: 4,
           max_arc_segments: 64
         )
