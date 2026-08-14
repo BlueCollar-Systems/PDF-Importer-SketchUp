@@ -21,19 +21,34 @@ module BlueCollarSystems
         n = points.length
         raise "Need >= 3 points" if n < 3
 
-        sx  = 0.0; sy  = 0.0; sx2 = 0.0; sy2 = 0.0
-        sxy = 0.0; sz  = 0.0; sxz = 0.0; syz = 0.0
+        # Neumaier-compensated accumulation, NOT plain +=. The Python shared core
+        # uses math.fsum here (exactly rounded); Ruby Float summation is always
+        # naive, and on ill-conditioned fits the difference is host-visible: on
+        # oracle case 143 (a 163-degree arc, r~10, points centred ~4,000 units
+        # away) the naive fit is off by 5.3e-2 in radius and its RMS lands on the
+        # other side of the promotion tolerance, so SketchUp emitted different
+        # geometry than FreeCAD/Blender/LibreCAD for the same drawing. Neumaier
+        # reproduces the fsum radius bit-for-bit on that case, which meets the
+        # behavioral-parity bar this port is held to.
+        sx  = [0.0, 0.0]; sy  = [0.0, 0.0]; sx2 = [0.0, 0.0]; sy2 = [0.0, 0.0]
+        sxy = [0.0, 0.0]; sz  = [0.0, 0.0]; sxz = [0.0, 0.0]; syz = [0.0, 0.0]
 
         points.each do |pt|
           x, y = pt[0].to_f, pt[1].to_f
           x2 = x * x
           y2 = y * y
-          sx  += x;       sy  += y
-          sx2 += x2;      sy2 += y2
-          sxy += x * y
+          neumaier_add(sx, x);       neumaier_add(sy, y)
+          neumaier_add(sx2, x2);     neumaier_add(sy2, y2)
+          neumaier_add(sxy, x * y)
           z = x2 + y2
-          sz  += z;       sxz += x * z;  syz += y * z
+          neumaier_add(sz, z)
+          neumaier_add(sxz, x * z)
+          neumaier_add(syz, y * z)
         end
+        sx = neumaier_value(sx);   sy = neumaier_value(sy)
+        sx2 = neumaier_value(sx2); sy2 = neumaier_value(sy2)
+        sxy = neumaier_value(sxy); sz = neumaier_value(sz)
+        sxz = neumaier_value(sxz); syz = neumaier_value(syz)
 
         # Solve 3×3 system via Cramer's rule
         a = [[sx, sy, n.to_f], [sx2, sxy, sx], [sxy, sy2, sy]]
@@ -55,13 +70,14 @@ module BlueCollarSystems
         r_sq = vc + cx * cx + cy * cy
         r = r_sq > 0 ? Math.sqrt(r_sq) : 0.0
 
-        # RMS error
-        rms = 0.0
+        # RMS error -- compensated for the same reason as the accumulators, and
+        # Math.hypot to mirror the Python core's math.hypot distance exactly.
+        rms_acc = [0.0, 0.0]
         points.each do |pt|
-          dist = Math.sqrt((pt[0] - cx)**2 + (pt[1] - cy)**2)
-          rms += (dist - r)**2
+          dist = Math.hypot(pt[0] - cx, pt[1] - cy)
+          neumaier_add(rms_acc, (dist - r)**2)
         end
-        rms = Math.sqrt(rms / n)
+        rms = Math.sqrt(neumaier_value(rms_acc) / n)
 
         [cx, cy, r, rms]
       end
@@ -192,6 +208,26 @@ module BlueCollarSystems
       end
 
       private
+
+      # Neumaier compensated summation over a [running_sum, compensation] pair.
+      # Ruby 2.2 compatible: plain module functions, mutation via Array element
+      # assignment. Matches CPython 3.12+ builtin sum() term-for-term, which in
+      # turn reproduces math.fsum on every case measured; see circle_fit above
+      # for why plain += is not acceptable here.
+      def self.neumaier_add(state, value)
+        t = state[0] + value
+        if state[0].abs >= value.abs
+          state[1] += (state[0] - t) + value
+        else
+          state[1] += (value - t) + state[0]
+        end
+        state[0] = t
+        nil
+      end
+
+      def self.neumaier_value(state)
+        state[0] + state[1]
+      end
 
       def self.det3(m)
         m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
