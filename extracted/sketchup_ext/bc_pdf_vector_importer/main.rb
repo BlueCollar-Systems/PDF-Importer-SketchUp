@@ -32,6 +32,7 @@ module BlueCollarSystems
     require File.join(dir, 'text_parser')
     require File.join(dir, 'text_source_identity')
     require File.join(dir, 'external_text_extractor')
+    require File.join(dir, 'nominal_text_scanner')
     require File.join(dir, 'bezier')
     require File.join(dir, 'arc_fitter')
     require File.join(dir, 'ocg_parser')
@@ -138,6 +139,17 @@ module BlueCollarSystems
     def self.abort_open_operation!(model, operation_open, source)
       safe_abort_operation(model, source) if operation_open
       false
+    end
+
+    # disable_ui, disable_transparency, disable_update. SketchUp 2017+ skips
+    # viewport rebuilds until commit. Same geometry/style SHA; cheaper explode
+    # and host serialize on dense 3D Text / path pages.
+    def self.start_import_operation!(model, name)
+      begin
+        model.start_operation(name, true, false, true)
+      rescue ArgumentError, TypeError
+        model.start_operation(name, true)
+      end
     end
 
     def self.report_pipeline_progress(opts, phase, detail = nil)
@@ -2312,6 +2324,33 @@ module BlueCollarSystems
       SafeTemp.join("bc_pdf_embedded_images_#{Process.pid}")
     end
 
+    def self.nominal_anchors_from_text_items(items)
+      Array(items).map do |item|
+        next nil unless item
+        x = item.respond_to?(:x) ? item.x.to_f : nil
+        y = item.respond_to?(:y) ? item.y.to_f : nil
+        size = item.respond_to?(:font_size) ? item.font_size.to_f : 0.0
+        next nil unless x && y && x.finite? && y.finite? &&
+          size.finite? && size > 0.05
+        angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
+        angle = 0.0 unless angle.finite?
+        NominalTextScanner::Anchor.new(x, y, size, angle)
+      end.compact
+    end
+
+    def self.extract_external_page_text(path, page_num, streams, offset_x,
+                                        offset_y, strict, angle_items)
+      opts = {
+        :offset_x_pts => offset_x,
+        :offset_y_pts => offset_y,
+        :strict_text_fidelity => strict,
+        :content_streams => streams
+      }
+      anchors = nominal_anchors_from_text_items(angle_items)
+      opts[:nominal_anchors] = anchors unless anchors.empty?
+      ExternalTextExtractor.extract(path, page_num, opts)
+    end
+
     def self.apply_internal_text_angle_hints(text_items, angle_items)
       return text_items unless text_items && angle_items && !angle_items.empty?
 
@@ -3199,7 +3238,7 @@ module BlueCollarSystems
       }
       record_source_lineage!(stats, path, path, nil, opts)
 
-      model.start_operation('Import PDF Raster', true)
+      start_import_operation!(model, 'Import PDF Raster')
       operation_open = true
       pages.each_with_index do |page_num, index|
         raw = parser.page_data(page_num)
@@ -3505,7 +3544,7 @@ module BlueCollarSystems
       # Track new entities in the currently active editing context.
       # Using model.entities misses imports done while editing groups/components.
       pre_import_entities = model.active_entities.to_a
-      model.start_operation("Import PDF Vectors", true)
+      start_import_operation!(model, "Import PDF Vectors")
       operation_open = true
 
       # Reset ID counter once at the start of a multi-page import
@@ -3830,6 +3869,7 @@ module BlueCollarSystems
               "(limit #{stream_limit_mb.round(1)}MB) — using external text extractor")
             prefer_internal_text = false
           end
+          angle_items = nil
           if prefer_internal_text
             font_maps = parser.page_font_maps(page_num)
             parser_opts = { strict_text_fidelity: strict_text_processing }
@@ -3839,15 +3879,34 @@ module BlueCollarSystems
             text_items = TextParser.new(streams, font_maps, parser_opts, ocg_map).parse
             text_source = :internal
             if text_items.nil? || text_items.empty?
-              text_items = ExternalTextExtractor.extract(path, page_num,
-                offset_x_pts: text_offset_x, offset_y_pts: text_offset_y,
-                strict_text_fidelity: strict_text_processing)
+              text_items = extract_external_page_text(
+                path, page_num, streams, text_offset_x, text_offset_y,
+                strict_text_processing, nil
+              )
               text_source = :external
             end
           else
-            text_items = ExternalTextExtractor.extract(path, page_num,
-              offset_x_pts: text_offset_x, offset_y_pts: text_offset_y,
-              strict_text_fidelity: strict_text_processing)
+            if stream_bytes <= stream_limit_bytes
+              begin
+                angle_font_maps = parser.page_font_maps(page_num)
+                angle_items = TextParser.new(
+                  streams,
+                  angle_font_maps,
+                  { strict_text_fidelity: true, merge_text_runs: false },
+                  ocg_map
+                ).parse
+              rescue StandardError => e
+                Logger.warn(
+                  "Pipeline",
+                  "Page #{page_num}: internal text angle hints unavailable: #{e.message}"
+                )
+                angle_items = nil
+              end
+            end
+            text_items = extract_external_page_text(
+              path, page_num, streams, text_offset_x, text_offset_y,
+              strict_text_processing, angle_items
+            )
             text_source = :external
             if text_items.nil? || text_items.empty?
               font_maps = parser.page_font_maps(page_num)
@@ -3860,13 +3919,15 @@ module BlueCollarSystems
           if text_source == :external && text_items && !text_items.empty? &&
              stream_bytes <= stream_limit_bytes
             begin
-              angle_font_maps = defined?(font_maps) && font_maps ? font_maps : parser.page_font_maps(page_num)
-              angle_items = TextParser.new(
-                streams,
-                angle_font_maps,
-                { strict_text_fidelity: true, merge_text_runs: false },
-                ocg_map
-              ).parse
+              if angle_items.nil?
+                angle_font_maps = defined?(font_maps) && font_maps ? font_maps : parser.page_font_maps(page_num)
+                angle_items = TextParser.new(
+                  streams,
+                  angle_font_maps,
+                  { strict_text_fidelity: true, merge_text_runs: false },
+                  ocg_map
+                ).parse
+              end
               text_items = apply_internal_text_angle_hints(text_items, angle_items)
             rescue StandardError => e
               Logger.warn("Pipeline", "Page #{page_num}: internal text angle hints unavailable: #{e.message}")

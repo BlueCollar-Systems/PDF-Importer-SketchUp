@@ -180,6 +180,42 @@ class PopplerActiveBoundaryValidationTest < Minitest::Test
     end
   end
 
+  def test_content_streams_skip_pdf_reparse_for_nominal_anchors
+    pdf = temp_pdf('streams_skip_reparse')
+    parser_calls = 0
+    original_new = NS::PDFParser.method(:new)
+    NS::PDFParser.define_singleton_method(:new) do |*args|
+      parser_calls += 1
+      original_new.call(*args)
+    end
+    original_exe = EXTERNAL.method(:pdftotext_executable)
+    original_run = RUNNER.method(:run)
+    success = method(:successful_run)
+    EXTERNAL.define_singleton_method(:pdftotext_executable) do
+      'pdftotext.exe'
+    end
+    RUNNER.define_singleton_method(:run) do |args, _opts = {}|
+      File.open(args[-1], 'wb') { |file| file.write(VALID_BBOX_HTML) }
+      success.call('')
+    end
+
+    items = EXTERNAL.extract(
+      pdf, 1, :content_streams => ['BT /F1 12 Tf 10 20 Td (VISIBLE) Tj ET']
+    )
+
+    assert_equal 0, parser_calls,
+                 'decoded page streams must not trigger a second PDFParser'
+    refute_empty items
+    assert_equal 'VISIBLE', items.first.text
+  ensure
+    NS::PDFParser.define_singleton_method(:new, original_new) if original_new
+    RUNNER.define_singleton_method(:run, original_run) if original_run
+    EXTERNAL.define_singleton_method(
+      :pdftotext_executable, original_exe
+    ) if original_exe
+    File.delete(pdf) if pdf && File.exist?(pdf)
+  end
+
   def test_empty_poppler_svg_retries_mutool_without_changing_representation
     pdf = temp_pdf('svg_retry')
     calls = []

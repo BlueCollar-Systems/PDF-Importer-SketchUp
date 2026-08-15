@@ -409,7 +409,9 @@ module BlueCollarSystems
       def extract_text(parser, pdf_path, page_num, streams, ocg_map, opts)
         return [[], nil] unless opts[:import_text]
 
-        items = ExternalTextExtractor.extract(pdf_path, page_num)
+        items = ExternalTextExtractor.extract(
+          pdf_path, page_num, :content_streams => streams
+        )
         return [items, :external] if items && !items.empty?
 
         font_maps = parser.page_font_maps(page_num)

@@ -188,6 +188,26 @@ class CairoGlyphSourceTest < Minitest::Test
     assert_in_delta 307.2 / 72.0, extent[3], 1.0e-6
   end
 
+  def test_repeated_glyph_placements_reuse_definition_loop_coordinates
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" width="612pt" height="396pt" ' \
+          'viewBox="0 0 612 396"><defs><g><g id="glyph-0-0">' \
+          '<path d="M 0 0 L 7.2 0 L 7.2 -7.2 L 0 -7.2 Z"/>' \
+          '</g></g></defs><g>' \
+          '<use xlink:href="#glyph-0-0" x="72" y="96"/>' \
+          '<use xlink:href="#glyph-0-0" x="144" y="96"/>' \
+          '</g></svg>'
+    placed = CGS.model_space_loops(
+      svg, FIXTURE_MEDIA_BOX, :cache_model_space_loops => false
+    )
+    assert_equal 2, placed.length
+    first = placed[0][:cache_definition_loops][0][0]
+    second = placed[1][:cache_definition_loops][0][0]
+    assert_in_delta first.x, second.x, 1.0e-12
+    assert_in_delta first.y, second.y, 1.0e-12
+    refute_in_delta placed[0][:loops][0][0].x, placed[1][:loops][0][0].x, 0.01,
+                    'world loops must stay unique per placement'
+  end
+
   def test_known_value_coordinate_mapping_matrix_use
     # Rotated/sheared placements arrive as matrix() on the <use>; the pen is
     # the matrix translation (plus additive x/y). 90-degree rotation matrix

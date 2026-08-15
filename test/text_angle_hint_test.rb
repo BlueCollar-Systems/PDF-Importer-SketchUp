@@ -215,6 +215,13 @@ assert_near(
   'pipeline phase timings must accumulate across pages'
 )
 
+anchors = BlueCollarSystems::PDFVectorImporter.nominal_anchors_from_text_items(
+  internal
+)
+assert_true(anchors.length == 2, 'internal items become nominal anchors')
+assert_near(anchors[0].size_pt, 11.0, 0.001, 'anchor size is Tf-scaled font_size')
+assert_near(anchors[0].angle_deg, -90.0, 0.001, 'anchor angle is source text matrix')
+
 puts
 if $failures.empty?
   puts "PASS: #{$pass_count} assertions"

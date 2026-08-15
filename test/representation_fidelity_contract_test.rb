@@ -2380,6 +2380,23 @@ class RepresentationFidelityContractTest < Minitest::Test
                  'both import transactions must clean/rebind before commit'
   end
 
+  def test_import_operations_suppress_viewport_rebuild_until_commit
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+      :encoding => 'UTF-8'
+    )
+    assert_match(
+      /start_operation\(name, true, false, true\)/,
+      main,
+      'vector/raster imports must pass disable_update to start_operation'
+    )
+    assert_match(
+      /extract_external_page_text/,
+      main,
+      'text extract must reuse decoded page streams instead of reparsing the PDF'
+    )
+  end
+
   def test_raster_artifact_verifier_binds_png_page_box_aspect_and_rotation
     path = File.join(Dir.tmpdir, "bc_raster_contract_#{Process.pid}.png")
     pdf_path = File.join(Dir.tmpdir, "bc_raster_contract_#{Process.pid}.pdf")
