@@ -153,6 +153,31 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  class FakeVertex
+    attr_reader :position
+
+    def initialize(point)
+      @position = point
+    end
+  end
+
+  class FakeLoop
+    attr_reader :vertices
+
+    def initialize(points)
+      @vertices = Array(points).map { |point| FakeVertex.new(point) }
+    end
+  end
+
+  class FakeFace < FakeEntity
+    attr_reader :loops
+
+    def initialize(entity_id, loops, options = {})
+      super(entity_id, 'Face', options)
+      @loops = loops
+    end
+  end
+
   class CountingBoundsComponent < FakeComponent
     attr_reader :bounds_calls
 
@@ -767,6 +792,106 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_equal fidelity.canonical_sha256(value),
                  Digest::SHA256.hexdigest(actual)
     assert_operator cache.length, :>=, 3
+  end
+
+  def test_canonical_json_string_tokens_are_interned_and_byte_identical
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    expected = JSON.generate(['type'])
+    expected = expected[1, expected.length - 2]
+
+    first = fidelity.canonical_json_scalar('type')
+    second = fidelity.canonical_json_scalar('type')
+
+    assert_equal expected, first
+    assert_same first, second,
+                'repeated JSON object keys must reuse the interned token'
+  end
+
+  def test_canonical_json_numeric_tokens_match_json_generate_without_wrapping
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    samples = [
+      0.0, 1.0, 12.0, 1.234567891, 1.0 / 72.0, 1.0e-9,
+      fidelity.canonical_number(1.2345678914)
+    ]
+    json_calls = 0
+    json_singleton = class << JSON; self; end
+    json_singleton.class_eval do
+      alias_method :generate_before_numeric_token_count, :generate
+    end
+    json_singleton.send(:define_method, :generate) do |*args|
+      json_calls += 1
+      generate_before_numeric_token_count(*args)
+    end
+
+    samples.each do |value|
+      expected = JSON.generate([value])
+      expected = expected[1, expected.length - 2]
+      json_calls = 0
+      actual = fidelity.canonical_json_scalar(value)
+      assert_equal expected, actual
+      assert_equal 0, json_calls,
+                   "numeric JSON token must not wrap #{value.inspect} in JSON.generate"
+    end
+  ensure
+    if json_singleton
+      json_singleton.class_eval do
+        if method_defined?(:generate_before_numeric_token_count)
+          alias_method :generate, :generate_before_numeric_token_count
+          remove_method :generate_before_numeric_token_count
+        end
+      end
+    end
+  end
+
+  def test_definition_face_loops_are_canonicalized_once_through_the_json_cache
+    loop_points = [
+      FakePoint.new(0.0, 0.0, 0.0),
+      FakePoint.new(1.0, 0.0, 0.0),
+      FakePoint.new(1.0, 1.0, 0.0),
+      FakePoint.new(0.0, 1.0, 0.0)
+    ]
+    bounds = FakeBounds.new(
+      FakePoint.new(0.0, 0.0, 0.0), FakePoint.new(1.0, 1.0, 0.0)
+    )
+    face = FakeFace.new(801, [FakeLoop.new(loop_points)], :bounds => bounds)
+    component = FakeComponent.new(
+      802, [],
+      :definition => FakeDefinition.new([face]),
+      :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
+                          0, 0, 1, 0, 10, 20, 0, 1]
+    )
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    json_cache = {}
+    uncached_loop_encodes = 0
+    singleton = class << fidelity; self; end
+    singleton.class_eval do
+      alias_method :canonical_json_before_loop_count, :canonical_json
+    end
+    singleton.send(:define_method, :canonical_json) do |value, cache = nil, write_cache = true|
+      if cache.nil? && value.is_a?(Array) && !value.empty? &&
+         value.first.is_a?(Array)
+        uncached_loop_encodes += 1
+      end
+      canonical_json_before_loop_count(value, cache, write_cache)
+    end
+
+    first = fidelity.physical_evidence([component], {}, json_cache)
+    assert_equal 0, uncached_loop_encodes,
+                 'face loop sort must use the definition JSON cache; an uncached ' \
+                 'contour encoding is thrown away and paid for again while hashing'
+    second = fidelity.physical_evidence([component], {}, json_cache)
+    assert_equal 0, uncached_loop_encodes
+    assert_equal first[:physical_geometry_sha256], second[:physical_geometry_sha256]
+    assert_equal first, fidelity.physical_evidence([component])
+  ensure
+    if singleton
+      singleton.class_eval do
+        if method_defined?(:canonical_json_before_loop_count)
+          alias_method :canonical_json, :canonical_json_before_loop_count
+          remove_method :canonical_json_before_loop_count
+        end
+      end
+    end
   end
 
   def test_physical_evidence_serializes_each_root_payload_once

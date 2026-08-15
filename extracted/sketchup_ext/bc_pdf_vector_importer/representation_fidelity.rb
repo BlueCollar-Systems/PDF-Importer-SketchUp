@@ -22,6 +22,11 @@ module BlueCollarSystems
       ].freeze
       STABLE_ID_DIGITS = /\A\d+\z/.freeze
       IMPORTER_ID = 'sketchup_pdf_vector_importer'.freeze
+      JSON_TRUE_TOKEN = 'true'.freeze
+      JSON_FALSE_TOKEN = 'false'.freeze
+      JSON_NULL_TOKEN = 'null'.freeze
+      JSON_STRING_TOKEN_LIMIT = 96
+      JSON_STRING_TOKENS = {}
       SOURCE_EXPECTED_SCHEMA = 'bcs.source_expected/1.0'.freeze
       FLAT_TEXT_CAPABILITY_SCHEMA =
         'bcs.sketchup_flat_text_capability/1.0'.freeze
@@ -870,12 +875,36 @@ module BlueCollarSystems
       # payload graph is immutable. It produces the exact same bytes as
       # JSON.generate(canonical_value(value)), but lets repeated shared
       # component subtrees reuse their already-encoded JSON.
+      def intern_json_string_token(value)
+        cached = JSON_STRING_TOKENS[value]
+        return cached if cached
+        wrapped = JSON.generate([value])
+        token = wrapped[1, wrapped.length - 2]
+        JSON_STRING_TOKENS[value] = token if value.length <= JSON_STRING_TOKEN_LIMIT
+        token
+      end
+
       def canonical_json_scalar(value)
         # Ruby 2.2's bundled JSON rejects top-level primitives unless quirks
-        # mode is enabled. Encoding inside an array and removing its brackets
-        # yields the identical token accepted by every supported runtime.
-        wrapped = JSON.generate([value])
-        wrapped[1, wrapped.length - 2]
+        # mode is enabled. Numbers and bool/null tokens are identical to
+        # JSON.generate([value]) with the brackets stripped; repeated object
+        # keys reuse interned string tokens. Escaped strings still go through
+        # JSON.generate so the contract bytes stay exact.
+        case value
+        when Float, Integer
+          value.to_s
+        when true
+          JSON_TRUE_TOKEN
+        when false
+          JSON_FALSE_TOKEN
+        when nil
+          JSON_NULL_TOKEN
+        when String
+          intern_json_string_token(value)
+        else
+          wrapped = JSON.generate([value])
+          wrapped[1, wrapped.length - 2]
+        end
       end
 
       def canonical_json(value, cache = nil, write_cache = true)
@@ -1000,14 +1029,17 @@ module BlueCollarSystems
         []
       end
 
-      def face_loops(entity)
+      def face_loops(entity, canonical_json_cache = nil,
+                     write_canonical_cache = false)
         if entity.respond_to?(:loops)
           loops = Array(entity.loops).map do |loop|
             vertices = loop.respond_to?(:vertices) ? loop.vertices : []
             ordered_points(vertices)
           end
           return loops.reject { |points| points.empty? }.sort_by do |points|
-            canonical_json(points)
+            canonical_json(
+              points, canonical_json_cache, write_canonical_cache
+            )
           end
         end
         vertices = entity.respond_to?(:vertices) ? entity.vertices : []
@@ -1036,7 +1068,9 @@ module BlueCollarSystems
         if type == 'Edge'
           payload[:endpoints] = edge_points(entity)
         elsif type == 'Face'
-          payload[:loops] = face_loops(entity)
+          payload[:loops] = face_loops(
+            entity, canonical_json_cache, write_canonical_cache
+          )
         elsif type == 'Text'
           payload[:anchor] = numeric_point(entity.point) if entity.respond_to?(:point)
           payload[:text_sha256] = Digest::SHA256.hexdigest(entity.text.to_s) if
