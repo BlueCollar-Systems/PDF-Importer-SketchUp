@@ -204,6 +204,19 @@ class SvgTextCollapseTest < Minitest::Test
     assert_nil placement[:fill_rgb]
   end
 
+  def test_parse_use_placements_cache_does_not_share_mutable_paint
+    svg = '<svg><defs><path id="font_7_38" d="M.1 0L.2 0Z"/></defs>' \
+          '<g fill="#336699">' \
+          '<use xlink:href="#font_7_38" x="10" y="20"/>' \
+          '</g></svg>'
+    first = R.parse_use_placements(svg).first
+    original = first[:fill_rgb].dup
+    first[:fill_rgb][0] = 0.0
+    second = R.parse_use_placements(svg).first
+    assert_in_delta original[0], second[:fill_rgb][0], 1.0e-12
+    refute_same first[:fill_rgb], second[:fill_rgb]
+  end
+
   def test_svg_render_args_support_mutool
     renderer = { kind: :mutool, exe: 'mutool' }
     variants = R.svg_render_arg_variants(renderer, 'in.pdf', 'out.svg', 3, true)

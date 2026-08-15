@@ -1455,6 +1455,8 @@ module BlueCollarSystems
 
         out = []
         seen_physical = {}
+        definition_loops_by_glyph = {}
+        local_loops_by_matrix = {}
         SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
           local = glyph_paths[p[:glyph_id]]
           next unless local
@@ -1482,9 +1484,20 @@ module BlueCollarSystems
           tx = (e - vb_min_x) * unit + box_offset_x_in
           ty = (vb_h + vb_min_y - f) * unit + y_offset + box_offset_y_in
 
+          # Definition loops depend only on glyph identity + import scale.
+          # Local loops depend on the 2x2 of the SVG matrix. Reuse those
+          # Point3d graphs across repeated placements; world loops stay
+          # unique. Solid-cache prepare_entry copies before host mutation.
+          definition_key = [p[:glyph_id], scale]
+          cache_definition_loops = definition_loops_by_glyph[definition_key]
+          local_key = [p[:glyph_id], scale, a, b, c, d]
+          cache_local_loops = local_loops_by_matrix[local_key]
+          build_definition = cache_definition_loops.nil?
+          build_local = cache_local_loops.nil?
+          cache_definition_loops = [] if build_definition
+          cache_local_loops = [] if build_local
+
           loops = []
-          cache_local_loops = []
-          cache_definition_loops = []
           local.each do |pts|
             loop_pts = []
             cache_loop_pts = []
@@ -1499,17 +1512,27 @@ module BlueCollarSystems
               local_y = -(b * lx) + (d * ly)
               wx = tx + local_x
               wy = ty + local_y
-              definition_loop_pts << Geom::Point3d.new(lx, ly, 0.0)
-              cache_loop_pts << Geom::Point3d.new(local_x, local_y, 0.0)
+              if build_definition
+                definition_loop_pts << Geom::Point3d.new(lx, ly, 0.0)
+              end
+              if build_local
+                cache_loop_pts << Geom::Point3d.new(local_x, local_y, 0.0)
+              end
               loop_pts << Geom::Point3d.new(wx, wy, 0.0)
             end
             if loop_pts.length >= 2
               loops << loop_pts
-              cache_local_loops << cache_loop_pts
-              cache_definition_loops << definition_loop_pts
+              cache_definition_loops << definition_loop_pts if build_definition
+              cache_local_loops << cache_loop_pts if build_local
             end
           end
           next if loops.empty?
+          if build_definition
+            definition_loops_by_glyph[definition_key] = cache_definition_loops
+          end
+          if build_local
+            local_loops_by_matrix[local_key] = cache_local_loops
+          end
 
           ink_points = loops.flatten
           ink_x = ink_points.map { |point| point.x.to_f / unit }

@@ -8,6 +8,7 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
+require 'digest/md5'
 require File.join(File.dirname(__FILE__), 'safe_temp')
 require File.join(File.dirname(__FILE__), 'command_runner')
 require File.join(File.dirname(__FILE__), 'logger')
@@ -825,6 +826,29 @@ module BlueCollarSystems
       end
 
       def self.parse_use_placements(svg)
+        svg_text = svg.to_s
+        cache_key = Digest::MD5.hexdigest(svg_text)
+        @use_placements_cache ||= {}
+        cached = @use_placements_cache[cache_key]
+        return copy_use_placements(cached) if cached
+
+        placements = parse_use_placements_uncached(svg_text)
+        @use_placements_cache[cache_key] = placements
+        copy_use_placements(placements)
+      end
+
+      def self.copy_use_placements(placements)
+        Array(placements).map do |placement|
+          copy = placement.dup
+          rgb = copy[:fill_rgb]
+          copy[:fill_rgb] = rgb.dup if rgb
+          matrix = copy[:matrix]
+          copy[:matrix] = matrix.dup if matrix
+          copy
+        end
+      end
+
+      def self.parse_use_placements_uncached(svg)
         a = []
         # SVG presentation attributes inherit through nested groups. Cairo
         # emits text color on the wrapping <g>, not on each glyph <use>; a
@@ -850,34 +874,58 @@ module BlueCollarSystems
           next unless name_match
           element_name = name_match[1].to_s.downcase
           parent = paint_stack.last
-          fill_present, direct_fill = svg_fill_spec(tag)
-          fill_opacity_present, direct_fill_opacity =
-            svg_opacity_spec(tag, 'fill-opacity')
-          opacity_present, direct_opacity = svg_opacity_spec(tag, 'opacity')
-          frame = {
-            :name => element_name,
-            :fill_rgb => fill_present ? direct_fill : parent[:fill_rgb],
-            :fill_opacity => fill_opacity_present ? direct_fill_opacity :
-              parent[:fill_opacity],
-            :opacity_product => multiply_svg_opacity(
-              parent[:opacity_product],
-              opacity_present ? direct_opacity : 1.0
-            )
-          }
+          # Path/geometry tags are siblings of <use>, not ancestors. Skip
+          # per-attribute regex work unless this tag can carry fill/opacity
+          # into a descendant use (or is a use itself).
+          needs_paint = element_name == 'use' ||
+            tag.include?('fill') || tag.include?('opacity') ||
+            tag.include?('style')
+          attrs = nil
+          if needs_paint
+            attrs = svg_tag_attribute_map(tag)
+            style_props = svg_style_property_map(attrs['style'])
+            fill_value = style_props['fill']
+            fill_value = attrs['fill'] if fill_value.nil?
+            fill_present = !fill_value.nil?
+            direct_fill = fill_present ? parse_svg_color(fill_value) : nil
+            fo_value = style_props['fill-opacity']
+            fo_value = attrs['fill-opacity'] if fo_value.nil?
+            fo_present = !fo_value.nil?
+            op_value = style_props['opacity']
+            op_value = attrs['opacity'] if op_value.nil?
+            op_present = !op_value.nil?
+            frame = {
+              :name => element_name,
+              :fill_rgb => fill_present ? direct_fill : parent[:fill_rgb],
+              :fill_opacity => fo_present ? parse_svg_opacity(fo_value) :
+                parent[:fill_opacity],
+              :opacity_product => multiply_svg_opacity(
+                parent[:opacity_product],
+                op_present ? parse_svg_opacity(op_value) : 1.0
+              )
+            }
+          else
+            frame = {
+              :name => element_name,
+              :fill_rgb => parent[:fill_rgb],
+              :fill_opacity => parent[:fill_opacity],
+              :opacity_product => parent[:opacity_product]
+            }
+          end
           paint_stack << frame
           self_closing = tag =~ /\/\s*>\s*\z/
 
           if element_name == 'use'
-            href = svg_attribute_value(tag, 'xlink:href') ||
-              svg_attribute_value(tag, 'href')
+            attrs = svg_tag_attribute_map(tag) if attrs.nil?
+            href = attrs['xlink:href'] || attrs['href']
             if href && href.start_with?('#')
               id = href[1..-1]
               if glyph_reference_id?(id)
-                x = (svg_attribute_value(tag, 'x') || '0').to_f
-                y = (svg_attribute_value(tag, 'y') || '0').to_f
+                x = (attrs['x'] || '0').to_f
+                y = (attrs['y'] || '0').to_f
 
                 matrix = nil
-                tr = svg_attribute_value(tag, 'transform')
+                tr = attrs['transform']
                 if tr && tr =~ /matrix\(([^)]+)\)/i
                   vals = $1.split(/[,\s]+/).reject(&:empty?).map(&:to_f)
                   matrix = vals[0, 6] if vals.length >= 6
@@ -901,6 +949,29 @@ module BlueCollarSystems
           paint_stack.pop if self_closing
         end
         a
+      end
+
+      def self.svg_tag_attribute_map(tag)
+        attrs = {}
+        tag.to_s.scan(
+          /([A-Za-z_:][A-Za-z0-9:_.-]*)\s*=\s*(['"])(.*?)\2/m
+        ) do |name, _quote, value|
+          attrs[name.to_s.downcase] = value
+        end
+        attrs
+      end
+
+      def self.svg_style_property_map(style)
+        props = {}
+        return props if style.nil? || style.to_s.empty?
+        style.to_s.split(';').each do |part|
+          colon = part.index(':')
+          next unless colon
+          key = part[0, colon].to_s.strip.downcase
+          next if key.empty?
+          props[key] = part[(colon + 1)..-1].to_s.strip
+        end
+        props
       end
 
       def self.svg_attribute_value(tag, name)

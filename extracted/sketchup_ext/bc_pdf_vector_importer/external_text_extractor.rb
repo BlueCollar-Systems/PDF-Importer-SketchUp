@@ -91,10 +91,13 @@ module BlueCollarSystems
             unless opts.key?(:nominal_anchors)
               anchors = begin
                 require_relative 'nominal_text_scanner'
-                parser = PDFParser.new(pdf_path)
-                parser.parse
-                info = parser.page_data(page_number)
-                streams = info ? (info[:content_streams] || []) : []
+                streams = opts[:content_streams]
+                unless streams
+                  parser = PDFParser.new(pdf_path)
+                  parser.parse
+                  info = parser.page_data(page_number)
+                  streams = info ? (info[:content_streams] || []) : []
+                end
                 NominalTextScanner.scan(streams)
               rescue StandardError
                 []
