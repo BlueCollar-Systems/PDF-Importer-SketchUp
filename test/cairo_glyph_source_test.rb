@@ -822,6 +822,38 @@ class CairoGlyphSourceTest < Minitest::Test
                  'bbox and contour verification must share one coordinate traversal'
   end
 
+  def test_model_space_loops_and_verify_flatten_each_source_glyph_once
+    svg = <<-SVG
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
+  <defs>
+    <g id="glyph-0-0"><path d="M 0 0 L 10 0 L 10 -10 L 0 -10 Z"/></g>
+    <g id="glyph-0-1"><path d="M 0 0 L 6 0 L 6 -8 L 0 -8 Z"/></g>
+  </defs>
+  <use xlink:href="#glyph-0-0" x="10" y="20"/>
+  <use xlink:href="#glyph-0-1" x="30" y="20"/>
+</svg>
+    SVG
+    flatten_calls = 0
+    original = SVG_R.method(:svg_path_to_points)
+    SVG_R.define_singleton_method(:svg_path_to_points) do |*args|
+      flatten_calls += 1
+      original.call(*args)
+    end
+    begin
+      placed = CGS.model_space_loops(
+        svg, [0, 0, 100, 100], :cache_model_space_loops => false
+      )
+      binding = CGS.verify_model_loop_bindings(svg, [0, 0, 100, 100], placed)
+      assert_equal true, binding[:ok], binding[:failures].inspect
+      assert_equal 2, placed.length
+      assert_equal 2, flatten_calls,
+                   'independent loop binding must reuse the canonical flattened ' \
+                   'glyph inventory; it must not flatten each source path twice'
+    ensure
+      SVG_R.define_singleton_method(:svg_path_to_points, original)
+    end
+  end
+
   def test_curved_contour_inventory_is_scale_invariant_and_source_bound
     svg = <<-SVG
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
