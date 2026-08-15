@@ -1290,19 +1290,8 @@ module BlueCollarSystems
         pen_dx = svg_min_x - media_min_x
         pen_dy = svg_min_y - media_min_y
 
-        defs = SvgTextRenderer.parse_glyph_defs(svg)
-        point_factory = lambda do |x, y, z|
-          NumericPoint.new(x, y, z)
-        end
         canonical_unit = PDF_PT_TO_INCH
-        glyph_paths = {}
-        defs.each do |glyph_id, path_d|
-          next if path_d.to_s.strip.empty?
-          paths = SvgTextRenderer.svg_path_to_points(
-            path_d, canonical_unit, canonical_unit, point_factory
-          )
-          glyph_paths[glyph_id] = paths unless paths.empty?
-        end
+        glyph_paths = canonical_glyph_paths_in(svg)
         pens = []
         seen_physical = {}
         SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
@@ -1399,6 +1388,30 @@ module BlueCollarSystems
       # core reused by the corpus oracle work, F-2).
       # ------------------------------------------------------------------
 
+      # Flatten each source glyph path once per SVG document at the canonical
+      # 1x physical unit. model_space_loops and the independent raw-SVG
+      # binding walk both need that inventory. Repeating Bezier subdivision
+      # is not additional independence — independence is the two affine
+      # mappings applied to the same source contours.
+      def self.canonical_glyph_paths_in(svg)
+        svg_key = svg.respond_to?(:length) ?
+          Digest::MD5.hexdigest(svg.to_s) : svg.object_id
+        @canonical_glyph_paths_cache ||= {}
+        cached = @canonical_glyph_paths_cache[svg_key]
+        return copy_model_space_loop_value(cached) if cached
+
+        glyph_paths = {}
+        SvgTextRenderer.parse_glyph_defs(svg).each do |glyph_id, path_d|
+          next if path_d.to_s.strip.empty?
+          subpaths = SvgTextRenderer.svg_path_to_points(
+            path_d, PDF_PT_TO_INCH, PDF_PT_TO_INCH
+          )
+          glyph_paths[glyph_id] = subpaths unless subpaths.empty?
+        end
+        @canonical_glyph_paths_cache[svg_key] = glyph_paths
+        copy_model_space_loop_value(glyph_paths)
+      end
+
       # Parses a pdftocairo -svg document (glyph <defs> + <use> placements)
       # and returns GeometryBuilder-ready outline loops in model inches:
       # an array of { :glyph_id, :pen_pdf => [x_pt, y_pt], :loops =>
@@ -1438,18 +1451,7 @@ module BlueCollarSystems
           vb_h = (svg_page_box[3] - svg_page_box[1]).abs.to_f
         end
 
-        glyph_paths = {}
-        SvgTextRenderer.parse_glyph_defs(svg).each do |glyph_id, path_d|
-          next if path_d.strip.empty?
-          # Keep the physical source contour inventory independent of import
-          # scale. Scale the already-flattened canonical points below; never
-          # let curve subdivision change merely because the user chose a
-          # different output size.
-          subpaths = SvgTextRenderer.svg_path_to_points(
-            path_d, PDF_PT_TO_INCH, PDF_PT_TO_INCH
-          )
-          glyph_paths[glyph_id] = subpaths unless subpaths.empty?
-        end
+        glyph_paths = canonical_glyph_paths_in(svg)
 
         out = []
         seen_physical = {}
