@@ -2200,7 +2200,13 @@ module BlueCollarSystems
         source_id = 'unidentified source span' if source_id.empty?
         reason = (failure[:reason] || failure['reason']).to_s
         reason = 'unreported failure' if reason.empty?
-        "#{source_id}: #{reason}"
+        # Carry the renderer's captured exception text into the page error. The
+        # reason code alone (e.g. the catch-all host_3d_text_exception) cost a
+        # full diagnostic pass on tracemonkey because the real message --
+        # 'source span produced no filled face' -- lived only in last_import.log,
+        # which is overwritten by the next import.
+        detail = (failure[:detail] || failure['detail']).to_s.strip
+        detail.empty? ? "#{source_id}: #{reason}" : "#{source_id}: #{reason} (#{detail})"
       end
       raise RepresentationFidelity::ContractError,
             "Page #{page_num}: requested #{label} representation was not " \
@@ -4525,7 +4531,10 @@ module BlueCollarSystems
             failures = text3d_result[:failures].map do |failure|
               {
                 :source_span_id => failure[:source_span_id],
-                :reason => failure[:reason_code].to_s
+                :reason => failure[:reason_code].to_s,
+                # The renderer captured the real exception message here; dropping
+                # it made the page error say only 'host_3d_text_exception'.
+                :detail => failure[:detail].to_s
               }
             end
             enforce_requested_text_delivery!(
