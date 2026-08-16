@@ -175,7 +175,10 @@ class AllModesPlacementContractTest < Minitest::Test
       ),
       encoding: 'UTF-8'
     )
-    assert_match(/Array\(text_items\)\.each do \|source_item\|/, main)
+    assert_match(
+      /Array\(text_items\)\.each(?:_with_index)? do \|source_item/,
+      main
+    )
     assert_match(/FallbackController\.new\(\s*requested_text_mode, source_id/m, main)
     assert_match(/SvgItemRepresentationRenderer\.render_svg/, main)
     assert_match(/create_text_representation_container!/, main)
