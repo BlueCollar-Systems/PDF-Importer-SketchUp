@@ -10,6 +10,16 @@ require File.join(File.dirname(__FILE__), 'import_run_control')
 module BlueCollarSystems
   module PDFVectorImporter
     module Svg3DTextRenderer
+      # Raised by safe_construction_scale when a span's own glyph contour holds
+      # vertices closer than the host merge tolerance at every construction scale
+      # up to MAX_CONSTRUCTION_SCALE. That is a deterministic, item-specific fact
+      # about the source geometry (the host cannot build the face), so the render
+      # loop converts it to an AFFIRMATIVE text3d -> glyphs proof. Typed so the
+      # classification cannot silently revert to the catch-all STOP reason if the
+      # message is ever reworded -- matching on message text is how
+      # host_3d_text_exception became a catch-all in the first place.
+      class UnrepresentableSourceContour < RuntimeError; end
+
       DEFAULT_DEPTH_INCHES = 1.0 / 64.0
       SIZE_TOLERANCE_INCHES = 1.0e-6
       HOST_POINT_TOLERANCE_INCHES = 0.001
@@ -253,10 +263,7 @@ module BlueCollarSystems
             )
             cleanup = cleanup_owned_group(entities, group)
             owned_groups.delete(group)
-            if e.is_a?(RuntimeError) &&
-               e.message.to_s.include?(
-                 'source contour has coincident vertices that scaling cannot separate'
-               )
+            if e.is_a?(UnrepresentableSourceContour)
               result[:transition_proofs] << unrepresentable_as_3d_text_proof(
                 source_id, item, depth, opts[:source_context], e.message
               )
@@ -1093,7 +1100,8 @@ module BlueCollarSystems
           return [scale * 10.0, MAX_CONSTRUCTION_SCALE].min if safe
           scale *= 10.0
         end
-        raise 'source contour has coincident vertices that scaling cannot separate'
+        raise UnrepresentableSourceContour,
+              'source contour has coincident vertices that scaling cannot separate'
       end
 
       # O(N log N) duplicate check: bucket points on quantized grid cells and
