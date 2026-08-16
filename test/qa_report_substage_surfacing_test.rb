@@ -41,7 +41,9 @@ class QAReportSubstageSurfacingTest < Minitest::Test
         # run3, matching CANARY_RENDERER_PERF. evidence_physical_ms is 99.0% of this
         # figure, which is where 14_837 comes from.
         :text3d_render_ms => 22_875.0, :text3d_record_ms => 14_837.0,
-        :content_stream_parse_ms => 971.0, :commit_ms => 5_527.0
+        :content_stream_parse_ms => 971.0, :commit_ms => 5_527.0,
+        :source_verify_ms => 80.0, :page_certify_ms => 447.0,
+        :commit_operation_ms => 5_000.0
       },
       :text_renderers => [{ :performance => CANARY_RENDERER_PERF.dup }],
       :geometry_staging => [CANARY_STAGING.dup]
@@ -56,7 +58,7 @@ class QAReportSubstageSurfacingTest < Minitest::Test
     {
       :pipeline_performance => {
         :text3d_render_ms => 1_000.0, :text3d_record_ms => 500.0,
-        :commit_ms => 200.0
+        :commit_ms => 200.0, :commit_operation_ms => 200.0
       },
       :text_renderers => [{
         :performance => {
@@ -185,10 +187,10 @@ class QAReportSubstageSurfacingTest < Minitest::Test
     assert_in_delta 200.0, leaf_sum(before_phases, before_agg), 0.001,
                     'without records the promoted parents should contribute no leaves'
     # Surfacing is what restores it, and in more detail than the two opaque totals gave:
-    # 900 render children + 495 evidence children + 350 explode + 200 commit.
+    # 900 render children + 495 evidence children + 350 explode + 200 commit_operation.
     after_leaves = leaf_sum(after_phases, after_agg)
     assert_in_delta 1_945.0, after_leaves, 0.001,
-                    'expected parse+verification+match+definition+instance+evidence*+explode+commit'
+                    'expected parse+verification+match+definition+instance+evidence*+explode+commit_operation'
     assert after_leaves > leaf_sum(before_phases, before_agg) * 5
   end
 

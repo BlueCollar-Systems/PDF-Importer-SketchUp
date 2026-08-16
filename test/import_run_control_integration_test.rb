@@ -26,11 +26,16 @@ class ImportRunControlIntegrationTest < Minitest::Test
     assert_operator item_loop.index('run_control_checkpoint!('), :<,
                     item_loop.index('complete_item_representation_ladder!')
 
-    commit = MAIN[/post_build_commit_started.*?model\.commit_operation/m]
+    commit = MAIN[/post_build_commit_started.*?commit_includes_source_binding_verification/m]
     refute_nil commit
     assert_includes commit, "run_control_checkpoint!(opts, :pre_commit"
     assert_operator commit.index('run_control_checkpoint!'), :<,
                     commit.index('verify_cached_source_pdf_bindings!')
+    assert_includes commit, ':source_verify_ms'
+    assert_includes commit, ':page_certify_ms'
+    assert_includes commit, ':commit_operation_ms'
+    assert_operator commit.index('model.commit_operation'), :<,
+                    commit.index(':commit_operation_ms')
   end
 
   def test_pipeline_abort_remains_the_partial_page_cleanup_boundary

@@ -127,6 +127,10 @@ class GeometryBuilderStagingTest < Minitest::Test
     def explode
       @parent.explode_group(self, @entities.to_a)
     end
+
+    def erase!
+      @parent.erase_entity(self)
+    end
   end
 
   class ComponentDefinition
@@ -179,6 +183,10 @@ class GeometryBuilderStagingTest < Minitest::Test
       @items.dup
     end
 
+    def length
+      @items.length
+    end
+
     def add_group
       group = Group.new(self)
       @items << group
@@ -224,6 +232,11 @@ class GeometryBuilderStagingTest < Minitest::Test
       @groups_exploded += 1
       children
     end
+
+    def erase_entity(entity)
+      @items.delete(entity)
+      entity
+    end
   end
 
   class Model
@@ -253,14 +266,23 @@ class GeometryBuilderStagingTest < Minitest::Test
 
     assert_equal 500, result[:edges]
     assert_equal true, result[:geometry_staging][:enabled]
-    # 500 paths / chunk 250 => two explode batches under restored reviewed policy.
+    # Isolated 250-path groups stay in the model. Exploding them into the
+    # live parent is the leftover 1011 3D Text cost and does not change
+    # source-glyph 3D Text solids.
     assert_equal 2, result[:geometry_staging][:batch_count]
-    assert_equal 2, result[:geometry_staging][:explode_count]
+    assert_equal 0, result[:geometry_staging][:explode_count]
+    assert_equal true, result[:geometry_staging][:explode_skipped]
+    assert_equal 2, result[:geometry_staging][:retained_group_count]
+    assert_equal 0, result[:geometry_staging][:erased_empty_group_count]
+    assert_equal false, result[:geometry_staging][:explode_once]
     assert_equal 2, model.active_entities.groups_created
-    assert_equal 2, model.active_entities.groups_exploded
-    assert_equal 500, model.active_entities.to_a.length
-    assert model.active_entities.to_a.all? { |entity| entity.is_a?(Edge) }
-    endpoints = model.active_entities.to_a.values_at(0, -1).map do |edge|
+    assert_equal 0, model.active_entities.groups_exploded
+    groups = model.active_entities.to_a.grep(Group)
+    assert_equal 2, groups.length
+    edges = groups.flat_map { |group| group.entities.to_a }
+    assert_equal 500, edges.length
+    assert edges.all? { |entity| entity.is_a?(Edge) }
+    endpoints = edges.values_at(0, -1).map do |edge|
       edge.start_point.y
     end
     assert_equal [0.0, 499.0 / 72.0], endpoints
@@ -353,11 +375,19 @@ class GeometryBuilderStagingTest < Minitest::Test
     result = builder.build
 
     assert_equal true, result[:geometry_staging][:enabled]
-    assert_equal 2, result[:geometry_staging][:explode_count]
+    assert_equal 0, result[:geometry_staging][:explode_count]
+    assert_equal true, result[:geometry_staging][:explode_skipped]
+    assert_equal 2, result[:geometry_staging][:retained_group_count]
     assert_equal 500, result[:faces]
+    groups = model.active_entities.to_a.grep(Group)
+    assert_equal 2, groups.length
     instances = model.active_entities.to_a.grep(ComponentInstance)
     assert_equal 1, instances.length,
                  'one stable destination/style must retain one tiny-fill batch'
+    groups.each do |group|
+      assert_equal 0, group.entities.to_a.grep(ComponentInstance).length,
+                   'the tiny batch instance must stay on the stable parent'
+    end
     assert_equal 500, instances.first.definition.entities.faces_created
   end
 

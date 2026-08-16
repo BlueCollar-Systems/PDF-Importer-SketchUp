@@ -16,9 +16,13 @@ module BlueCollarSystems
 
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
-      # Stage into isolated groups before explode once path count is high.
-      # Gate 0 REMEDIATE: restore reviewed 500/250/100 policy until a host
-      # explode/merge identity matrix certifies any lower threshold.
+      # Heavy pages construct inside isolated 250-path groups so SketchUp is
+      # not merging every add_edges into a live 36k-edge parent. A host canary
+      # of one giant group + one explode made construction and explode both
+      # slower (1011 3D Text: builder 5.2s→13.6s, explode 4.5s→7.1s) without
+      # changing first-span 3D Text SHA. Sequential explode into the
+      # accumulating parent cannot drop that leftover without flattening, so
+      # retain the identity-transform staging groups instead of exploding.
       GEOMETRY_STAGING_PATH_THRESHOLD = 500
       GEOMETRY_STAGING_CHUNK_PATHS = 250
       SMALL_FACE_DIRECT_MAX_EXTENT = 0.002
@@ -326,7 +330,12 @@ module BlueCollarSystems
           :batch_count => 0,
           :explode_count => 0,
           :exploded_entity_count => 0,
-          :explode_ms => 0.0
+          :explode_ms => 0.0,
+          :explode_once => false,
+          :explode_skipped => false,
+          :retained_group_count => 0,
+          :erased_empty_group_count => 0,
+          :explode_batch_ms => []
         }
       end
 
@@ -346,8 +355,9 @@ module BlueCollarSystems
         key = parent_entities.object_id
         slot = staging[:parents][key]
         new_path = slot.nil? || slot[:last_path_index] != path_index
-        if slot.nil? || (new_path &&
-                         slot[:path_count] >= GEOMETRY_STAGING_CHUNK_PATHS)
+        chunk_limit = GEOMETRY_STAGING_CHUNK_PATHS
+        if slot.nil? || (new_path && chunk_limit &&
+                         slot[:path_count] >= chunk_limit)
           group = parent_entities.add_group
           unless group && group.respond_to?(:entities) &&
                  group.respond_to?(:explode)
@@ -376,20 +386,53 @@ module BlueCollarSystems
       def finalize_geometry_staging!
         staging = @geometry_staging
         return true unless staging[:enabled]
+        retained = 0
+        erased = 0
         staging[:groups].each do |group|
-          started = builder_monotonic_ms
-          exploded = group.explode
-          unless exploded.is_a?(Array)
-            raise 'host rejected exact bulk geometry staging merge'
+          next unless group
+          child_count = staging_group_child_count(group)
+          if child_count == 0
+            erase_empty_staging_group!(group)
+            erased += 1
+            next
           end
-          staging[:explode_count] += 1
-          staging[:exploded_entity_count] += exploded.length
-          staging[:explode_ms] += builder_monotonic_ms - started
+          retained += 1
         end
+        staging[:explode_count] = 0
+        staging[:exploded_entity_count] = 0
+        staging[:explode_ms] = 0.0
+        staging[:explode_once] = false
+        staging[:explode_skipped] = true
+        staging[:retained_group_count] = retained
+        staging[:erased_empty_group_count] = erased
         staging[:groups] = []
         staging[:parents] = {}
         staging[:stable_targets] = {}
         true
+      end
+
+      def staging_group_child_count(group)
+        children = group.respond_to?(:entities) ? group.entities : nil
+        return 0 unless children
+        if children.respond_to?(:length)
+          children.length
+        elsif children.respond_to?(:size)
+          children.size
+        elsif children.respond_to?(:to_a)
+          children.to_a.length
+        else
+          1
+        end
+      end
+
+      def erase_empty_staging_group!(group)
+        if group.respond_to?(:erase!)
+          group.erase!
+          return true
+        end
+        exploded = group.respond_to?(:explode) ? group.explode : nil
+        return true if exploded.is_a?(Array)
+        raise 'host cannot remove an empty bulk geometry staging group'
       end
 
       def geometry_staging_metrics
@@ -398,10 +441,15 @@ module BlueCollarSystems
           :enabled => staging[:enabled] == true,
           :path_threshold => GEOMETRY_STAGING_PATH_THRESHOLD,
           :chunk_path_limit => GEOMETRY_STAGING_CHUNK_PATHS,
+          :explode_once => staging[:explode_once] == true,
+          :explode_skipped => staging[:explode_skipped] == true,
+          :retained_group_count => staging[:retained_group_count].to_i,
+          :erased_empty_group_count => staging[:erased_empty_group_count].to_i,
           :batch_count => staging[:batch_count].to_i,
           :explode_count => staging[:explode_count].to_i,
           :exploded_entity_count => staging[:exploded_entity_count].to_i,
-          :explode_ms => staging[:explode_ms].to_f.round(3)
+          :explode_ms => staging[:explode_ms].to_f.round(3),
+          :explode_batch_ms => Array(staging[:explode_batch_ms])
         }
       end
 

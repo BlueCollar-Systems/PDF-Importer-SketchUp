@@ -21,6 +21,15 @@ module BlueCollarSystems
         :defer_final_diagnostics, :complexity_confirm, :prepared_parser,
         :prepared_pdf_path, :preserve_prepared_parser, :preserve_logger
       ].freeze
+      # Per-span evidence trees are restored from the live page groups on resume.
+      # Cloning them into the model attribute dictionary is a multi-second JSON
+      # walk on 1011 3D Text (791 expected_evidence payloads) and does not
+      # change physical geometry/style SHA.
+      JOURNAL_STATS_OMIT = %w[
+        text_renderers
+        text_attempts
+        source_provenance_objects
+      ].freeze
 
       def self.identity_for(pdf_path, options, source_root)
         opts = options.is_a?(Hash) ? options : {}
@@ -318,7 +327,7 @@ module BlueCollarSystems
             'entity_signature_sha256' => signature,
             'next_y_offset' => finite_number(options[:next_y_offset] || 0.0,
                                               'next_y_offset'),
-            'stats' => json_safe(options[:stats] || {})
+            'stats' => journal_stats_payload(options[:stats])
           }
           data['pages'] << entry
           data['pages'].sort_by! { |row| row['page_number'].to_i }
@@ -496,12 +505,15 @@ module BlueCollarSystems
           if @entity_signature_proc.respond_to?(:call)
             return @entity_signature_proc.call(entity).to_s
           end
-          inventory = []
-          collect_entity_signature(entity, inventory, 0)
-          Digest::SHA256.hexdigest(canonical_json(inventory))
+          digest = Digest::SHA256.new
+          digest.update('[')
+          first = [true]
+          collect_entity_signature(entity, digest, first, 0)
+          digest.update(']')
+          digest.hexdigest
         end
 
-        def collect_entity_signature(entity, inventory, depth)
+        def collect_entity_signature(entity, digest, first, depth)
           raise ResumeMismatch, 'retained entity tree is too deep' if depth > 64
           row = {
             'depth' => depth,
@@ -522,13 +534,13 @@ module BlueCollarSystems
             endpoints = [entity.start, entity.end].map do |vertex|
               point_signature(vertex.respond_to?(:position) ? vertex.position : vertex)
             end
-            row['edge_endpoints'] = endpoints.sort_by { |point| canonical_json(point) }
+            row['edge_endpoints'] = endpoints.sort
           end
           if entity.respond_to?(:vertices)
             vertices = Array(entity.vertices).map do |vertex|
               point_signature(vertex.respond_to?(:position) ? vertex.position : vertex)
             end
-            row['vertices'] = vertices.sort_by { |point| canonical_json(point) }
+            row['vertices'] = vertices.sort
           end
           row['text'] = entity.text.to_s if entity.respond_to?(:text)
           row['hidden'] = entity.hidden? == true if entity.respond_to?(:hidden?)
@@ -540,12 +552,15 @@ module BlueCollarSystems
             layer = entity.layer
             row['layer'] = layer.respond_to?(:name) ? layer.name.to_s : layer.to_s
           end
-          inventory << row
+          encoded = JSON.generate(canonical_value(row))
+          digest.update(',') unless first[0]
+          first[0] = false
+          digest.update(encoded)
           children = entity.respond_to?(:entities) ? entity.entities : nil
           Array(children && children.respond_to?(:to_a) ? children.to_a : []).each do |child|
-            collect_entity_signature(child, inventory, depth + 1)
+            collect_entity_signature(child, digest, first, depth + 1)
           end
-          inventory
+          true
         end
 
         def point_signature(point)
@@ -592,6 +607,17 @@ module BlueCollarSystems
 
         def json_safe(value)
           canonical_value(value)
+        end
+
+        def journal_stats_payload(stats)
+          return {} unless stats.is_a?(Hash)
+          payload = {}
+          stats.each do |key, value|
+            name = key.to_s
+            next if JOURNAL_STATS_OMIT.include?(name)
+            payload[name] = value
+          end
+          json_safe(payload)
         end
 
         def stringify_hash(value)
