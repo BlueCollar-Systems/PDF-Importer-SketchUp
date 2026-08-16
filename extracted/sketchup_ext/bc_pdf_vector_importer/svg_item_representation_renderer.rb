@@ -144,7 +144,7 @@ module BlueCollarSystems
           "source_id=#{source_id}; mode=#{mode}"
         )
         verify_structure!(group, mode, entries.length, build[:edge_count],
-                          source_id)
+                          source_id, build[:delivered_edge_count])
         emit_progress_callback(
           opts[:progress_callback], 'svg_item_structure_verified',
           "source_id=#{source_id}; mode=#{mode}"
@@ -183,6 +183,7 @@ module BlueCollarSystems
           :glyph_ids => entries.map { |entry| entry[:glyph_id].to_s },
           :source_extent => expected.map { |value| value.to_f },
           :edge_count => build[:edge_count],
+          :delivered_edge_count => build[:delivered_edge_count].to_i,
           :face_count => build[:face_count].to_i,
           :hole_count => build[:hole_count].to_i,
           :face_fill_failures => Array(build[:face_fill_failures]),
@@ -664,7 +665,14 @@ module BlueCollarSystems
           entity_type(entity) == 'Edge'
         end
         edge_count = built_edges.empty? ? edges.length : built_edges.length
-        { :edge_count => edge_count, :glyph_group_count => 0 }.merge(fill)
+        # :edge_count is what exists after the build (re-verified exactly after
+        # any later transform); :delivered_edge_count is what add_edges returned
+        # and is the LOWER bound the structural contract enforces at build time:
+        # the host may split delivered edges while facing, it may never drop or
+        # merge one (a self-referential post-build count alone would let a
+        # host-dropped outline edge pass silently).
+        { :edge_count => edge_count, :delivered_edge_count => edges.length,
+          :glyph_group_count => 0 }.merge(fill)
       end
 
       def self.build_glyph_groups!(group, entries, source_id, layer,
@@ -1221,18 +1229,23 @@ module BlueCollarSystems
       end
 
       def self.verify_structure!(group, mode, expected_glyphs, expected_edges,
-                                 source_id)
+                                 source_id, minimum_edges = nil)
         members = entity_members(group)
         raise RepresentationFidelity::ContractError,
               "#{source_id}: item vector group is empty" if members.empty?
-        # Flat representations are the exact source outline EDGES (counted
-        # against the build) plus the filled glyph FACES they bound; nothing
-        # else may live inside an owned item group.
+        # Flat representations are the source outline EDGES -- exactly the
+        # count that existed after the build, and never fewer than the host
+        # was given (add_edges may be split by facing, never dropped) -- plus
+        # the filled glyph FACES they bound; nothing else may live inside an
+        # owned item group.
         if mode == :geometry
           edges = members.select { |entity| entity_type(entity) == 'Edge' }
-          valid = edges.length == expected_edges.to_i && members.all? do |entity|
-            flat_representation_member?(entity)
-          end
+          minimum = minimum_edges.nil? ? 0 : minimum_edges.to_i
+          valid = edges.length == expected_edges.to_i &&
+                  edges.length >= minimum &&
+                  members.all? do |entity|
+                    flat_representation_member?(entity)
+                  end
           unless valid
             raise RepresentationFidelity::ContractError,
                   "#{source_id}: Geometry is not a flat raw-edge representation"

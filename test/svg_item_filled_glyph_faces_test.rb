@@ -291,6 +291,13 @@ class FilledGlyphEntities
         @items << FilledGlyphEdge.new(next_id, mid, b)
       end
     end
+    if @options[:drop_edge_on_face]
+      # A host that MERGES/drops a delivered outline edge while facing must be
+      # refused: the group would no longer hold the source outline. Emulate one
+      # dropped edge per add_face call.
+      victim = @items.find { |entity| entity.is_a?(FilledGlyphEdge) }
+      @items.delete(victim) if victim
+    end
     face = FilledGlyphFace.new(self, next_id, Array(points).dup, -1.0)
     @items << face
     face
@@ -576,6 +583,33 @@ class SvgItemFilledGlyphFacesTest < Minitest::Test
     assert RENDERER.verify_structure!(
       result[:group], :geometry, 1, result[:edge_count], 'text_span:1:0'
     )
+  end
+
+  def test_geometry_contract_refuses_a_host_that_drops_delivered_edges_while_facing
+    # The post-build edge count alone would be self-referential; the contract
+    # also enforces the delivered count as a lower bound (facing may split
+    # edges, never drop or merge one).
+    entities, = entities_with_model(:drop_edge_on_face => true)
+    error = assert_raises(FIDELITY::ContractError) do
+      render(entities, :geometry)
+    end
+    assert_match(/not a flat raw-edge representation/, error.message)
+  end
+
+  def test_structure_contract_lower_bound_is_the_delivered_edge_count
+    entities, = entities_with_model
+    result = render(entities, :geometry)
+    assert_equal result[:edge_count], result[:delivered_edge_count]
+    assert RENDERER.verify_structure!(
+      result[:group], :geometry, 1, result[:edge_count], 'text_span:1:0',
+      result[:delivered_edge_count]
+    )
+    assert_raises(FIDELITY::ContractError) do
+      RENDERER.verify_structure!(
+        result[:group], :geometry, 1, result[:edge_count], 'text_span:1:0',
+        result[:edge_count] + 1
+      )
+    end
   end
 
   def test_structure_contract_accepts_faces_but_still_counts_edges
