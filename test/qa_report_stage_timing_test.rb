@@ -107,7 +107,7 @@ class QAReportStageTimingTest < Minitest::Test
 
   def test_unaccounted_ms_exposes_the_unexplained_remainder
     stats = base_stats(pipeline_performance: {
-      item_delivery_ms: 40_000.0, commit_ms: 6_800.0
+      item_delivery_ms: 40_000.0, commit_ms: 6_800.0, commit_operation_ms: 6_800.0
     })
     phases = build(stats)[:performance][:phases]
     assert_equal 50_000.0, phases[:unaccounted_ms],
@@ -222,7 +222,7 @@ class QAReportStageTimingTest < Minitest::Test
     # Both parents present in that stage set must be declared. Originally this expected
     # only page_total_ms, because the suffix rule could not see that post_build_ms is
     # also a parent.
-    assert_equal %w[page_total_ms post_build_ms text3d_record_ms text3d_render_ms],
+    assert_equal %w[commit_ms page_total_ms post_build_ms text3d_record_ms text3d_render_ms],
                  Array(perf[:phase_aggregates]).map(&:to_s).sort,
                  'reinterpreting a key must be auditable, never silent magic'
   end
@@ -240,12 +240,13 @@ class QAReportStageTimingTest < Minitest::Test
 
   def test_flat_stage_set_without_aggregates_is_unaffected
     stats = base_stats(pipeline_performance: {
-      item_delivery_ms: 40_000.0, commit_ms: 6_800.0
+      item_delivery_ms: 40_000.0, commit_ms: 6_800.0, commit_operation_ms: 6_800.0
     })
     perf = build(stats)[:performance]
     assert_equal 50_000.0, perf[:phases][:unaccounted_ms]
-    assert_nil perf[:phase_aggregates],
-               'nothing to declare when no aggregate is present'
+    assert_equal %w[commit_ms],
+                 Array(perf[:phase_aggregates]).map(&:to_s).sort,
+                 'commit_ms is the parent of commit_operation_ms'
   end
 
   # --- parents are DECLARED, not inferred from names ------------------------
@@ -312,7 +313,7 @@ class QAReportStageTimingTest < Minitest::Test
       commit_ms: 19_000.0, raster_render_ms: 9_000.0, text_extract_ms: 30_000.0
     })
     declared = Array(build(stats)[:performance][:phase_aggregates]).map(&:to_s).sort
-    assert_equal %w[page_total_ms post_build_ms raster_total_ms], declared
+    assert_equal %w[commit_ms page_total_ms post_build_ms raster_total_ms], declared
   end
 
   def test_an_unknown_stage_is_surfaced_not_silently_counted
@@ -356,7 +357,9 @@ class QAReportStageTimingTest < Minitest::Test
 
   def test_cpu_timings_never_enter_wall_phases_or_the_leaf_sum
     stats = base_stats(
-      pipeline_performance: { commit_ms: 6_800.0, item_delivery_ms: 40_000.0 },
+      pipeline_performance: {
+        commit_ms: 6_800.0, commit_operation_ms: 6_800.0, item_delivery_ms: 40_000.0
+      },
       pipeline_cpu_performance: { text3d_render_cpu_ms: 19_500.0 }
     )
     perf = build(stats)[:performance]

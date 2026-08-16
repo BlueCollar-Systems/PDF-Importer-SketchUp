@@ -74,6 +74,8 @@ module BlueCollarSystems
         # were the two largest leaves in the table (22.9 s and 14.6 s of a 60 s import);
         # promoting them is what makes that 62% attributable instead of opaque.
         :text3d_render_ms, :text3d_record_ms,
+        # commit_ms encloses source_verify_ms + page_certify_ms + commit_operation_ms.
+        :commit_ms,
         # geometry_explode_ms is recorded inside the geometry builder's own span, so the
         # builder is treated as enclosing it. If the two are in fact siblings this
         # under-attributes by their difference, which only makes unaccounted_ms larger --
@@ -90,7 +92,8 @@ module BlueCollarSystems
         :embedded_image_scan_ms, :text_extract_ms, :prebuild_analysis_ms,
         :svg_source_render_ms, :text3d_render_ms, :text3d_transform_ms,
         :text3d_record_ms, :item_page_inventory_ms, :item_delivery_ms,
-        :commit_ms, :post_commit_cleanup_ms, :entity_diff_ms, :view_fit_ms,
+        :commit_ms, :source_verify_ms, :page_certify_ms, :commit_operation_ms,
+        :post_commit_cleanup_ms, :entity_diff_ms, :view_fit_ms,
         :diagnostics_ms, :raster_render_ms, :raster_verify_ms, :raster_add_image_ms,
         :raster_cleanup_ms, :raster_pixel_proof_ms,
         # Sub-stages of text3d_render_ms / text3d_record_ms and of the geometry builder.

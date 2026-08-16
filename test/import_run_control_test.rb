@@ -162,4 +162,181 @@ class ImportRunControlTest < Minitest::Test
     assert_equal :page, snapshot[:stage]
     assert_equal 1, probe.calls
   end
+
+  def test_journal_stats_omit_per_span_evidence_payloads
+    group = FakeCertGroup.new(7)
+    model = FakeCertModel.new(group)
+    run = journal_controller(model)
+    bulky = {
+      :edges => 5649,
+      :text => 791,
+      :text_renderers => [{ :group => group, :depths => [0.015625] * 791 }],
+      :text_attempts => [{ :expected_evidence => { :geometry_payload => { :n => 1 } } }],
+      :source_provenance_objects => [{ :expected_evidence => { :style_payload => { :n => 2 } } }],
+      :pipeline_performance => { :commit_ms => 12.5 }
+    }
+
+    run.certify_page!(group, 1, :stats => bulky)
+    stored = run.journal['pages'][0]['stats']
+
+    assert_equal 5649, stored['edges']
+    assert_equal 791, stored['text']
+    assert_in_delta 12.5, stored['pipeline_performance']['commit_ms'], 0.001
+    refute stored.key?('text_renderers'),
+           'resume journal must not clone 3D Text renderer rows'
+    refute stored.key?('text_attempts'),
+           'resume journal must not clone per-span expected_evidence trees'
+    refute stored.key?('source_provenance_objects'),
+           'resume journal must not clone provenance expected_evidence trees'
+  end
+
+  def test_entity_signature_uses_numeric_point_order_and_detects_geometry_change
+    run = journal_controller(FakeCertModel.new)
+    left = FakeCertGroup.new(
+      1,
+      [FakeCertEdge.new(11, [0.0, 0.0, 0.0], [10.0, 9.0, 0.0])]
+    )
+    right = FakeCertGroup.new(
+      1,
+      [FakeCertEdge.new(11, [0.0, 0.0, 0.0], [10.0, 9.0, 0.0])]
+    )
+    moved = FakeCertGroup.new(
+      1,
+      [FakeCertEdge.new(11, [0.0, 0.0, 0.0], [10.0, 10.0, 0.0])]
+    )
+
+    first = run.send(:entity_signature, left)
+    second = run.send(:entity_signature, right)
+    changed = run.send(:entity_signature, moved)
+
+    assert_match(/\A[0-9a-f]{64}\z/, first)
+    assert_equal first, second
+    refute_equal first, changed
+  end
+
+  def journal_controller(model)
+    digest = 'ab' * 32
+    IRC::Controller.new(
+      :pages => [1],
+      :requested_mode => :text3d,
+      :model => model,
+      :identity => {
+        'pdf_sha256' => digest,
+        'options_sha256' => digest,
+        'importer_sha256' => digest,
+        'package_sha256' => digest,
+        'source_tree_sha256' => digest
+      },
+      :clock => FakeClock.new([0.0])
+    )
+  end
+
+  class FakeCertPoint
+    attr_reader :x, :y, :z
+
+    def initialize(values)
+      @x = values[0].to_f
+      @y = values[1].to_f
+      @z = values[2].to_f
+    end
+
+    def to_a
+      [@x, @y, @z]
+    end
+  end
+
+  class FakeCertEdge
+    attr_reader :start, :end
+
+    def initialize(persistent_id, start_xyz, end_xyz)
+      @persistent_id = persistent_id
+      @start = FakeCertPoint.new(start_xyz)
+      @end = FakeCertPoint.new(end_xyz)
+    end
+
+    def persistent_id
+      @persistent_id
+    end
+
+    def typename
+      'Edge'
+    end
+
+    def name
+      ''
+    end
+
+    def bounds
+      FakeCertBounds.new(@start, @end)
+    end
+  end
+
+  class FakeCertBounds
+    attr_reader :min, :max
+
+    def initialize(min_point, max_point)
+      @min = min_point
+      @max = max_point
+    end
+  end
+
+  class FakeCertGroup
+    attr_reader :entities
+
+    def initialize(persistent_id, children = [])
+      @persistent_id = persistent_id
+      @entities = children
+      @attrs = {}
+    end
+
+    def persistent_id
+      @persistent_id
+    end
+
+    def typename
+      'Group'
+    end
+
+    def name
+      'PDF Page 1'
+    end
+
+    def valid?
+      true
+    end
+
+    def bounds
+      FakeCertBounds.new(
+        FakeCertPoint.new([0.0, 0.0, 0.0]),
+        FakeCertPoint.new([1.0, 1.0, 0.0])
+      )
+    end
+
+    def set_attribute(_dict, key, value)
+      @attrs[key.to_s] = value
+    end
+
+    def get_attribute(_dict, key, default = nil)
+      @attrs.key?(key.to_s) ? @attrs[key.to_s] : default
+    end
+  end
+
+  class FakeCertModel
+    def initialize(group = nil)
+      @group = group
+      @attrs = {}
+    end
+
+    def get_attribute(dict, key, default = nil)
+      @attrs[[dict, key]] || default
+    end
+
+    def set_attribute(dict, key, value)
+      @attrs[[dict, key]] = value
+    end
+
+    def active_entities
+      @group ? [@group] : []
+    end
+  end
 end

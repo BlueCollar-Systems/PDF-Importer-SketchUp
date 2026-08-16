@@ -3332,9 +3332,17 @@ module BlueCollarSystems
       # Raster page caches are importer-owned evidence artifacts.  They must be
       # gone before the model transaction becomes durable; an ensure-only
       # cleanup would report a failure after commit, when rollback is too late.
+      stats[:pipeline_performance] ||= {}
+      source_verify_started = Time.now
       cleanup_item_raster_page_cache!(opts)
       verify_cached_source_pdf_bindings!(opts)
+      stats[:pipeline_performance][:source_verify_ms] =
+        ((Time.now - source_verify_started) * 1000.0).round(3)
+      stats[:pipeline_performance][:page_certify_ms] = 0.0
+      commit_operation_started = Time.now
       model.commit_operation
+      stats[:pipeline_performance][:commit_operation_ms] =
+        ((Time.now - commit_operation_started) * 1000.0).round(3)
       operation_open = false
       stats[:elapsed_seconds] = (Time.now - import_start).round(1)
       stats[:log_path] = Logger.log_path
@@ -4860,8 +4868,12 @@ module BlueCollarSystems
       report_pipeline_progress(opts, 'post_build_commit_started')
       verified_commit_started = Time.now
       run_control_checkpoint!(opts, :pre_commit, :completed => 0, :total => 1)
+      source_verify_started = Time.now
       cleanup_item_raster_page_cache!(opts)
       verify_cached_source_pdf_bindings!(opts)
+      stats[:pipeline_performance][:source_verify_ms] =
+        ((Time.now - source_verify_started) * 1000.0).round(3)
+      page_certify_started = Time.now
       if opts[:page_certifier].respond_to?(:call)
         unless pages.length == 1 && page_group_for_certification
           raise ImportRunControl::ResumeMismatch,
@@ -4871,8 +4883,13 @@ module BlueCollarSystems
           page_group_for_certification, running_y_offset, stats
         )
       end
+      stats[:pipeline_performance][:page_certify_ms] =
+        ((Time.now - page_certify_started) * 1000.0).round(3)
+      commit_operation_started = Time.now
       model.commit_operation
       operation_open = false
+      stats[:pipeline_performance][:commit_operation_ms] =
+        ((Time.now - commit_operation_started) * 1000.0).round(3)
       stats[:pipeline_performance][:commit_ms] =
         ((Time.now - verified_commit_started) * 1000.0).round(3)
       stats[:pipeline_performance][:commit_includes_source_binding_verification] =
