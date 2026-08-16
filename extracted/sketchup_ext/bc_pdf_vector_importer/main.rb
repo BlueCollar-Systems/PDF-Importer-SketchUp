@@ -1771,7 +1771,20 @@ module BlueCollarSystems
         :mode => :text3d,
         :requested_mode => requested_mode,
         :delivered_mode => :text3d,
-        :degraded => requested_mode != :text3d,
+        # text -> text3d is the CORRECT rung on SketchUp, not a degradation: the
+        # host exposes no flat editable model-text constructor
+        # (RepresentationFidelity::FLAT_TEXT_HOST_API_FACT), so every span's
+        # ladder advance carries an affirmative host_representation_unsupported
+        # proof. Reporting it as degraded inflated the warnings count, drove
+        # fallback.used=true, and produced the reason code
+        # text_degraded_svg_unavailable -- an environment-fault label -- for a
+        # capability fact. Owner ruling 2026-08-15: affirmative transitions are
+        # delivered representation, and only environment-caused delivery counts
+        # as degraded.
+        :degraded => false,
+        :affirmative_transition => requested_mode != :text3d,
+        :affirmative_transition_reason_code =>
+          (requested_mode == :text3d ? nil : :host_representation_unsupported),
         :reason => requested_mode == :text3d ? nil :
           'affirmative item-specific requested-representation impossibility',
         :count => rows.length + physical_count,
@@ -4528,7 +4541,10 @@ module BlueCollarSystems
               :mode => :text3d,
               :requested_mode => exact_3d_requested_mode,
               :delivered_mode => :text3d,
-              :degraded => exact_3d_requested_mode != :text3d,
+              :degraded => false,
+              :affirmative_transition => exact_3d_requested_mode != :text3d,
+              :affirmative_transition_reason_code =>
+                (exact_3d_requested_mode == :text3d ? nil : :host_representation_unsupported),
               :count => 0,
               :no_semantic_text => true,
               :source_svg_inspected => true
