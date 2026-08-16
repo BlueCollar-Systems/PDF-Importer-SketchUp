@@ -892,23 +892,12 @@ module BlueCollarSystems
       }
       placed = CairoGlyphSource.model_space_loops(svg, media_box, base_opts)
       pens = Array(placed).map do |entry|
-        {
-          :x => Array(entry[:pen_pdf])[0],
-          :y => Array(entry[:pen_pdf])[1],
-          :placement_index => entry[:placement_index]
-        }
+        CairoGlyphSource.placement_pen_record(entry)
       end
       match = CairoGlyphSource.match_spans(pens, text_items, media_box)
 
       base_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
       base_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
-      tolerance = if CairoGlyphSource.const_defined?(
-        :SPAN_MATCH_TOLERANCE_PT
-      )
-                    CairoGlyphSource::SPAN_MATCH_TOLERANCE_PT.to_f
-                  else
-                    2.0
-                  end
       peer_boxes = {}
       Array(text_items).each do |item|
         source_id = RepresentationFidelity.source_span_id(item)
@@ -916,10 +905,10 @@ module BlueCollarSystems
         next unless box
         x0, x1 = [box[0].to_f, box[2].to_f].minmax
         y0, y1 = [box[1].to_f, box[3].to_f].minmax
-        peer_boxes[source_id] = [
-          x0 - tolerance, y0 - tolerance,
-          x1 + tolerance, y1 + tolerance
-        ]
+        # Ownership uses the extractor bbox, not the matcher halo. Expanding
+        # these boxes by SPAN_MATCH_TOLERANCE_PT double-counted packed shop-
+        # drawing neighbors and discarded whole spans for one overlapping pen.
+        peer_boxes[source_id] = [x0, y0, x1, y1]
       end
 
       peer_owners =
@@ -4450,7 +4439,8 @@ module BlueCollarSystems
         if use_item_raster && !Array(text_items).empty?
           raster_parent = builder.page_group ?
             builder.page_group.entities : model.active_entities
-          Array(text_items).each do |source_item|
+          raster_delivery_started = Time.now
+          Array(text_items).each_with_index do |source_item, item_index|
             source_id = RepresentationFidelity.source_span_id(source_item)
             controller = RepresentationFidelity::FallbackController.new(
               :raster, source_id
@@ -4461,7 +4451,18 @@ module BlueCollarSystems
               page_rotation, opts, import_start, page_y_offset, {},
               layer_mgr.text_fallback_layer, text_items
             )
+            completed_items = item_index + 1
+            if completed_items == Array(text_items).length ||
+               (completed_items % 50).zero?
+              report_pipeline_progress(
+                opts, 'item_raster_delivery_progress',
+                "completed=#{completed_items}; " \
+                  "total=#{Array(text_items).length}"
+              )
+            end
           end
+          stats[:pipeline_performance][:item_delivery_ms] =
+            ((Time.now - raster_delivery_started) * 1000.0).round(3)
           stats[:text_mode] = :raster
         end
 
@@ -5367,9 +5368,13 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError,
               'item raster cached source PDF digest is missing'
       end
+      content_sha = proof[:content_sha256].to_s.downcase
+      unless content_sha =~ /\A[0-9a-f]{64}\z/
+        content_sha = Digest::SHA256.file(png_path).hexdigest
+      end
       {
         :png_path => png_path.to_s,
-        :content_sha256 => Digest::SHA256.file(png_path).hexdigest,
+        :content_sha256 => content_sha,
         :content_byte_size => File.size(png_path).to_i,
         :source_span_id => source_id,
         :page_number => requested_page,
@@ -5680,11 +5685,7 @@ module BlueCollarSystems
       requested = (opts[:raster_dpi] || 300).to_i
       requested = 300 if requested <= 0
       requested = [[requested, 150].max, 1200].min
-
-      # Safe sharpening default:
-      # if user kept the legacy 300 DPI default, raise target modestly.
       desired = requested
-      desired = 400 if requested <= 300
 
       page_w_in = page_w_pts.to_f / 72.0
       page_h_in = page_h_pts.to_f / 72.0
@@ -5813,12 +5814,6 @@ module BlueCollarSystems
       rescue StandardError => e
         Logger.warn('Raster', "item image evidence attributes unavailable: #{e.message}")
       end
-      Logger.info(
-        'Raster',
-        "Page #{page_num} #{source_id}: placed verified item raster " \
-          "#{artifact[:pixel_width]}x#{artifact[:pixel_height]} px at " \
-          "#{crop[:dpi]} DPI [#{(Time.now - import_start).round(1)}s]"
-      )
       delivery = {
         :entity => image,
         :artifact_evidence => artifact,

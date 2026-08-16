@@ -1136,7 +1136,7 @@ class RepresentationFidelityContractTest < Minitest::Test
     )
     refute_match(/require.*svg_geometry_renderer|SvgGeometryRenderer/, main)
     assert_match(
-      /Array\(text_items\)\.each do \|source_item\|.*?FallbackController\.new\(\s*requested_text_mode, source_id\s*\).*?complete_item_representation_ladder!/m,
+      /Array\(text_items\)\.each_with_index do \|source_item, item_index\|.*?FallbackController\.new\(\s*requested_text_mode, source_id\s*\).*?complete_item_representation_ladder!/m,
       main
     )
     assert_match(/SvgItemRepresentationRenderer\.render_svg/, main)
@@ -2221,6 +2221,27 @@ class RepresentationFidelityContractTest < Minitest::Test
     refute_nil body
     assert_includes body, 'opts[:item_raster_cache_persistent] != true'
     refute_includes body, '!opts[:item_raster_page_cache].is_a?(Hash)'
+  end
+
+  def test_page_wide_unique_glyph_assignment_is_not_peer_bbox_rejected
+    renderer = File.read(
+      File.join(
+        SRC_ROOT, 'bc_pdf_vector_importer',
+        'svg_item_representation_renderer.rb'
+      ),
+      :encoding => 'UTF-8'
+    )
+    assert_includes renderer, 'uniquely_assigned_page_match?'
+    refute_includes renderer, 'unambiguous_placement_indices'
+  end
+
+  def test_raster_dpi_planner_does_not_bump_default_300_to_400
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+      :encoding => 'UTF-8'
+    )
+    refute_match(/desired = 400 if requested <= 300/, main)
+    refute_match(/raise target modestly/, main)
   end
 
   def test_item_raster_source_digest_freezes_and_rejects_source_rebinding

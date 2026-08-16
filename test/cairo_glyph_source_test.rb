@@ -99,6 +99,17 @@ class CairoGlyphSourceTest < Minitest::Test
     assert_in_delta DECLARED_X0_PT, first_pen_x, 0.5
   end
 
+  def test_placement_pen_record_preserves_source_ink_bbox
+    placed = CGS.model_space_loops(fixture_svg, FIXTURE_MEDIA_BOX)
+    refute_empty placed
+    record = CGS.placement_pen_record(placed.first)
+    assert_equal placed.first[:pen_pdf][0], record[:x]
+    assert_equal placed.first[:pen_pdf][1], record[:y]
+    assert_equal placed.first[:placement_index], record[:placement_index]
+    assert_kind_of Array, record[:ink_bbox_pdf]
+    assert_equal 4, record[:ink_bbox_pdf].length
+  end
+
   # ── 3. VALUE lock: cairo ink extent vs PDF-declared extent ──────────────
 
   def test_condensed_span_ink_extent_within_declared_tolerance
