@@ -654,7 +654,17 @@ module BlueCollarSystems
         end
         raise RepresentationFidelity::ContractError,
               "#{source_id}: Geometry created no raw edges" if edges.empty?
-        { :edge_count => edges.length, :glyph_group_count => 0 }.merge(fill)
+        # The host may split or merge edges while it builds the glyph faces
+        # (add_face on the outer loop, counters erased), so the structural
+        # contract must be checked against the edges that actually exist in
+        # the owned group after the build -- not the count returned by
+        # add_edges before any face existed. (In-host 3.7.141 regression:
+        # every Geometry import raised "not a flat raw-edge representation".)
+        built_edges = entity_members(group).select do |entity|
+          entity_type(entity) == 'Edge'
+        end
+        edge_count = built_edges.empty? ? edges.length : built_edges.length
+        { :edge_count => edge_count, :glyph_group_count => 0 }.merge(fill)
       end
 
       def self.build_glyph_groups!(group, entries, source_id, layer,

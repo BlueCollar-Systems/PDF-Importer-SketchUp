@@ -277,6 +277,20 @@ class FilledGlyphEntities
         @items << FilledGlyphFace.new(self, next_id, inner.dup, -1.0)
       end
     end
+    if @options[:split_edges_on_face]
+      # SketchUp also splits existing EDGES when it heals the face boundary
+      # (an edge gets a vertex at a touching point and becomes two edges), so
+      # the group holds more edges after add_face than add_edges returned. The
+      # in-host 3.7.141 regression: verify_structure! compared the pre-face
+      # add_edges count with the post-face group and refused every Geometry
+      # import. Emulate one split per add_face call.
+      first_edge = @items.find { |entity| entity.is_a?(FilledGlyphEdge) }
+      if first_edge
+        a, b = first_edge.points
+        mid = Geom::Point3d.new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, 0.0)
+        @items << FilledGlyphEdge.new(next_id, mid, b)
+      end
+    end
     face = FilledGlyphFace.new(self, next_id, Array(points).dup, -1.0)
     @items << face
     face
@@ -542,6 +556,26 @@ class SvgItemFilledGlyphFacesTest < Minitest::Test
     assert_equal true, result[:ok]
     assert_equal 1, result[:face_count]
     assert_equal false, result[:ink_applied]
+  end
+
+  def test_geometry_contract_survives_the_host_splitting_edges_while_facing
+    # In-host regression on 3.7.141: SketchUp split outline edges while building
+    # the glyph faces, the group then held more Edge entities than add_edges had
+    # returned, and verify_structure! raised "Geometry is not a flat raw-edge
+    # representation" for EVERY Geometry item. The reported edge_count must be
+    # the edges that exist after the build, and the structure check must pass.
+    entities, = entities_with_model(:split_edges_on_face => true)
+    result = render(entities, :geometry)
+
+    assert_equal true, result[:ok], result.inspect
+    edges, faces = edges_and_faces(result[:group].entities)
+    assert_operator edges.length, :>, 8, 'the host split at least one edge'
+    assert_equal edges.length, result[:edge_count],
+                 'edge_count reflects the edges that exist after facing'
+    assert_operator faces.length, :>=, 1
+    assert RENDERER.verify_structure!(
+      result[:group], :geometry, 1, result[:edge_count], 'text_span:1:0'
+    )
   end
 
   def test_structure_contract_accepts_faces_but_still_counts_edges
