@@ -1,8 +1,17 @@
 # bc_pdf_vector_importer/svg_item_representation_renderer.rb
 # Item-scoped exact source Glyphs and flat Geometry representations.
+#
+# Every placement is delivered as its exact source outline EDGES plus filled
+# FACES for the outer contours (counters such as O/A/B stay open), painted
+# with the source ink through the same material path 3D Text uses. Edge-only
+# delivery rendered every glyph hollow (white inside a 1 px outline) while the
+# PDF shows filled glyphs -- a visible difference under the owner's ruling
+# (visual oracle, sheet 1011, 2026-08-16). A contour the host cannot face is
+# recorded in the item evidence and its edges are kept; it never raises.
 
 require File.join(File.dirname(__FILE__), 'cairo_glyph_source')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
+require File.join(File.dirname(__FILE__), 'svg_3d_text_renderer')
 require 'digest'
 
 module BlueCollarSystems
@@ -112,9 +121,12 @@ module BlueCollarSystems
             opts[:progress_callback]
           ) :
           build_flat_geometry!(group, entries, source_id, opts[:layer])
+        apply_item_ink!(group, entries, build)
         emit_progress_callback(
           opts[:progress_callback], 'svg_item_build_completed',
-          "source_id=#{source_id}; edges=#{build[:edge_count]}; mode=#{mode}"
+          "source_id=#{source_id}; edges=#{build[:edge_count]}; " \
+            "faces=#{build[:face_count]}; ink_applied=#{build[:ink_applied]}; " \
+            "mode=#{mode}"
         )
         after = RepresentationFidelity.snapshot(entities)
         created = RepresentationFidelity.created_between(before, after)
@@ -171,6 +183,12 @@ module BlueCollarSystems
           :glyph_ids => entries.map { |entry| entry[:glyph_id].to_s },
           :source_extent => expected.map { |value| value.to_f },
           :edge_count => build[:edge_count],
+          :face_count => build[:face_count].to_i,
+          :hole_count => build[:hole_count].to_i,
+          :face_fill_failures => Array(build[:face_fill_failures]),
+          :ink_applied => build[:ink_applied] == true,
+          :source_ink_rgb => build[:source_ink_rgb],
+          :source_ink_material_name => build[:source_ink_material_name],
           :glyph_group_count => build[:glyph_group_count],
           :glyph_component_definition_builds =>
             build[:glyph_component_definition_builds].to_i,
@@ -626,13 +644,17 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError,
               'owned Geometry group has no entities collection' unless child
         edges = []
+        fill = new_fill_summary
         Array(entries).each do |entry|
           edges.concat(add_entry_edges!(child, entry, source_id, :geometry,
                                         layer))
+          faces = add_entry_faces!(child, entry, source_id, :geometry, layer)
+          merge_fill_summary!(fill, faces)
+          fill[:paint_targets] << [entry, faces[:faces]]
         end
         raise RepresentationFidelity::ContractError,
               "#{source_id}: Geometry created no raw edges" if edges.empty?
-        { :edge_count => edges.length, :glyph_group_count => 0 }
+        { :edge_count => edges.length, :glyph_group_count => 0 }.merge(fill)
       end
 
       def self.build_glyph_groups!(group, entries, source_id, layer,
@@ -652,6 +674,7 @@ module BlueCollarSystems
 
         edge_count = 0
         glyph_count = 0
+        fill = new_fill_summary
         Array(entries).each do |entry|
           glyph = child.add_group
           raise RepresentationFidelity::ContractError,
@@ -668,6 +691,11 @@ module BlueCollarSystems
           )
           raise RepresentationFidelity::ContractError,
                 "#{source_id}: physical Glyph created no edges" if edges.empty?
+          faces = add_entry_faces!(
+            glyph.entities, entry, source_id, :glyphs, layer
+          )
+          merge_fill_summary!(fill, faces)
+          fill[:paint_targets] << [entry, [glyph]]
           edge_count += edges.length
           glyph_count += 1
         end
@@ -677,7 +705,7 @@ module BlueCollarSystems
           :glyph_component_definition_builds => 0,
           :glyph_component_cache_hits => 0,
           :glyph_component_instances => 0
-        }
+        }.merge(fill)
       end
 
       def self.component_cache_available?(entities, model, component_cache)
@@ -697,12 +725,14 @@ module BlueCollarSystems
         instance_count = 0
         definition_builds = 0
         cache_hits = 0
+        fill = new_fill_summary
         Array(entries).each_with_index do |entry, entry_index|
           key = glyph_definition_cache_key(entry)
           cached = component_cache[key]
           definition = cached.is_a?(Hash) ? cached[:definition] : nil
           definition_edge_count = cached.is_a?(Hash) ?
             cached[:edge_count].to_i : 0
+          definition_fill = cached.is_a?(Hash) ? cached[:fill] : nil
           emit_progress_callback(
             progress_callback, 'svg_item_component_started',
             "source_id=#{source_id}; placement=#{entry_index + 1}/" \
@@ -723,13 +753,18 @@ module BlueCollarSystems
               definition.entities, entry, layer
             )
             definition_edge_count = definition_edges.length
+            definition_fill = add_definition_faces!(
+              definition.entities, entry, layer
+            )
             component_cache[key] = {
               :definition => definition,
-              :edge_count => definition_edge_count
+              :edge_count => definition_edge_count,
+              :fill => definition_fill
             }
             definition_builds += 1
           end
           edge_count += definition_edge_count
+          merge_fill_summary!(fill, definition_fill)
 
           matrix = Array(entry[:cache_instance_transformation])
           unless matrix.length == 16
@@ -748,6 +783,7 @@ module BlueCollarSystems
             instance, source_id, :glyphs, entry[:glyph_id],
             [entry[:placement_index]]
           )
+          fill[:paint_targets] << [entry, [instance]]
           instance_count += 1
           emit_progress_callback(
             progress_callback, 'svg_item_component_completed',
@@ -761,7 +797,7 @@ module BlueCollarSystems
           :glyph_component_definition_builds => definition_builds,
           :glyph_component_cache_hits => cache_hits,
           :glyph_component_instances => instance_count
-        }
+        }.merge(fill)
       end
 
       def self.glyph_definition_cache_key(entry)
@@ -853,6 +889,224 @@ module BlueCollarSystems
                 "(expected #{expected}, created #{created.length})"
         end
         created
+      end
+
+      # ---- Filled glyph faces -------------------------------------------
+
+      def self.new_fill_summary
+        {
+          :face_count => 0,
+          :hole_count => 0,
+          :face_fill_failures => [],
+          :paint_targets => []
+        }
+      end
+
+      def self.merge_fill_summary!(summary, outcome)
+        return summary unless outcome.is_a?(Hash)
+        summary[:face_count] += Array(outcome[:faces]).length
+        summary[:hole_count] += outcome[:hole_count].to_i
+        summary[:face_fill_failures].concat(Array(outcome[:failures]))
+        summary
+      end
+
+      def self.add_entry_faces!(entities, entry, source_id, mode, layer)
+        add_loop_faces!(entities, entry[:loops], layer) do |face|
+          assign_identity!(
+            face, source_id, mode, entry[:glyph_id], [entry[:placement_index]]
+          )
+        end
+      end
+
+      def self.add_definition_faces!(entities, entry, layer)
+        add_loop_faces!(entities, entry[:cache_definition_loops], layer) do |face|
+          assign_shared_glyph_identity!(face, entry[:glyph_id])
+        end
+      end
+
+      # Fill one placement's outline loops with host faces after its edges
+      # exist. Contours follow the SVG non-zero rule the 3D Text renderer uses
+      # (Svg3DTextRenderer.build_filled_glyph): a contour is a boundary only
+      # when crossing it toggles the cumulative winding between zero and
+      # nonzero. Boundaries whose inside winding is nonzero become filled
+      # faces; boundaries whose inside winding is zero (counters) are faced
+      # then erased so the enclosing face keeps a hole -- SketchUp reuses the
+      # existing counter edges either way. Any contour the host cannot face is
+      # recorded and skipped; the edges are already there and never removed.
+      # Returns { :faces, :hole_count, :failures } and never raises.
+      def self.add_loop_faces!(entities, loops, layer)
+        outcome = { :faces => [], :hole_count => 0, :failures => [] }
+        unless entities && entities.respond_to?(:add_face)
+          outcome[:failures] << 'host entities cannot create glyph faces'
+          return outcome
+        end
+        contours = []
+        Array(loops).each_with_index do |loop_points, loop_index|
+          points = face_contour_points(loop_points)
+          next unless points
+          area = Svg3DTextRenderer.signed_area(points)
+          next unless area.finite? && area != 0.0
+          contours << {
+            :points => points,
+            :area => area.abs,
+            :winding => area > 0.0 ? 1 : -1,
+            :index => loop_index
+          }
+        end
+        contours.sort_by! { |contour| -contour[:area] }
+        contours.each_with_index do |contour, index|
+          probe = contour[:points][0]
+          containing = contours[0...index].select do |outer|
+            Svg3DTextRenderer.point_in_polygon?(probe, outer[:points])
+          end
+          outside_winding = containing.inject(0) do |total, outer|
+            total + outer[:winding]
+          end
+          inside_winding = outside_winding + contour[:winding]
+          next if outside_winding.zero? == inside_winding.zero?
+          face = nil
+          failure = nil
+          begin
+            face = entities.add_face(contour[:points])
+          rescue StandardError => e
+            failure = "loop #{contour[:index]}: add_face failed: #{e.message}"
+          end
+          if face.nil? && inside_winding.zero?
+            # The host may already have split the enclosing face along these
+            # counter edges and decline to "add" the face again; the counter
+            # face then already exists and must still be erased for the hole.
+            face = find_face_bounded_by(entities, contour[:points])
+          end
+          unless face
+            outcome[:failures] << (
+              failure || "loop #{contour[:index]}: host returned no face"
+            )
+            next
+          end
+          if inside_winding.zero?
+            begin
+              Svg3DTextRenderer.erase_face!(entities, face)
+              outcome[:hole_count] += 1
+            rescue StandardError => e
+              outcome[:failures] <<
+                "loop #{contour[:index]}: hole face erase failed: #{e.message}"
+            end
+          else
+            orient_face_up!(face)
+            face.layer = layer if layer && face.respond_to?(:layer=)
+            yield face if block_given?
+            outcome[:faces] << face
+          end
+        end
+        outcome
+      rescue StandardError => e
+        outcome[:failures] << "glyph face fill failed: #{e.message}"
+        outcome
+      end
+
+      # The existing host face whose vertex set equals +points+ (within the
+      # host merge tolerance), or nil.
+      def self.find_face_bounded_by(entities, points)
+        return nil unless entities.respond_to?(:to_a)
+        wanted = Array(points)
+        entities.to_a.each do |entity|
+          next unless entity_type(entity) == 'Face'
+          vertices = if entity.respond_to?(:vertices)
+                       Array(entity.vertices).map do |vertex|
+                         vertex.respond_to?(:position) ? vertex.position : vertex
+                       end
+                     elsif entity.respond_to?(:points)
+                       Array(entity.points)
+                     else
+                       []
+                     end
+          next unless vertices.length == wanted.length
+          matched = wanted.all? do |point|
+            vertices.any? do |vertex|
+              vertex.respond_to?(:distance) &&
+                vertex.distance(point).to_f <= SIZE_TOLERANCE_INCHES
+            end
+          end
+          return entity if matched
+        end
+        nil
+      rescue StandardError
+        nil
+      end
+
+      # Distinct contour vertices without the closing point, or nil when the
+      # loop is degenerate (fewer than three distinct points / zero area).
+      def self.face_contour_points(loop_points)
+        Svg3DTextRenderer.normalized_contour(normalized_points(loop_points))
+      rescue StandardError
+        nil
+      end
+
+      # SketchUp creates every face on the ground plane facing down regardless
+      # of vertex order; flip it so the painted front faces the page viewer.
+      def self.orient_face_up!(face)
+        return false unless face.respond_to?(:normal) &&
+                            face.respond_to?(:reverse!)
+        normal = face.normal
+        return false unless normal.respond_to?(:z) && normal.z.to_f < 0.0
+        face.reverse!
+        true
+      rescue StandardError
+        false
+      end
+
+      # Paint the delivered faces with the source ink through the 3D Text
+      # material path (Svg3DTextRenderer.apply_source_text_ink!). A span with
+      # one fill style paints the owned group once (nil-material faces, glyph
+      # groups, component instances and shared definitions all inherit it); a
+      # span mixing fill styles paints each physical unit with its own entry
+      # style. The outcome is recorded on the build summary -- a headless host
+      # without materials reports ink_applied false, never a silent claim.
+      def self.apply_item_ink!(group, entries, build)
+        build[:ink_applied] = false
+        build[:source_ink_rgb] = nil
+        build[:source_ink_material_name] = nil
+        style = homogeneous_ink_style(entries)
+        if style
+          build[:source_ink_rgb] = style[:rgb]
+          build[:source_ink_material_name] =
+            Svg3DTextRenderer.material_name_for_rgb(style[:rgb], style[:opacity])
+          build[:ink_applied] = Svg3DTextRenderer.apply_source_text_ink!(
+            group, style[:rgb], style[:opacity]
+          ) == true
+          return build
+        end
+        targets = Array(build[:paint_targets])
+        return build if targets.empty?
+        applied = targets.all? do |entry, units|
+          unit_style = homogeneous_ink_style([entry])
+          next false unless unit_style
+          Array(units).all? do |unit|
+            painted = Svg3DTextRenderer.apply_source_text_ink!(
+              unit, unit_style[:rgb], unit_style[:opacity]
+            ) == true
+            if painted && unit.respond_to?(:back_material=) &&
+               unit.respond_to?(:material)
+              unit.back_material = unit.material
+            end
+            painted
+          end
+        end
+        build[:ink_applied] = applied == true
+        build
+      rescue StandardError => e
+        Logger.warn(
+          'SvgItemRepresentationRenderer',
+          "item vector ink paint failed: #{e.message}"
+        ) if defined?(Logger) && Logger.respond_to?(:warn)
+        build[:ink_applied] = false
+        build
+      end
+
+      def self.homogeneous_ink_style(entries)
+        Svg3DTextRenderer.homogeneous_source_ink_style(entries)
+      rescue StandardError
+        nil
       end
 
       def self.normalized_points(values)
@@ -961,9 +1215,13 @@ module BlueCollarSystems
         members = entity_members(group)
         raise RepresentationFidelity::ContractError,
               "#{source_id}: item vector group is empty" if members.empty?
+        # Flat representations are the exact source outline EDGES (counted
+        # against the build) plus the filled glyph FACES they bound; nothing
+        # else may live inside an owned item group.
         if mode == :geometry
-          valid = members.length == expected_edges.to_i && members.all? do |entity|
-            entity_type(entity) == 'Edge'
+          edges = members.select { |entity| entity_type(entity) == 'Edge' }
+          valid = edges.length == expected_edges.to_i && members.all? do |entity|
+            flat_representation_member?(entity)
           end
           unless valid
             raise RepresentationFidelity::ContractError,
@@ -973,8 +1231,11 @@ module BlueCollarSystems
           valid = members.length == expected_glyphs.to_i && members.all? do |glyph|
             ['Group', 'ComponentInstance'].include?(entity_type(glyph)) &&
               !entity_members(glyph).empty? &&
-              entity_members(glyph).all? do |entity|
+              entity_members(glyph).any? do |entity|
                 entity_type(entity) == 'Edge'
+              end &&
+              entity_members(glyph).all? do |entity|
+                flat_representation_member?(entity)
               end
           end
           unless valid
@@ -986,6 +1247,10 @@ module BlueCollarSystems
                 "#{source_id}: item vector mode is invalid"
         end
         true
+      end
+
+      def self.flat_representation_member?(entity)
+        ['Edge', 'Face'].include?(entity_type(entity))
       end
 
       def self.verify_bounds!(group, expected, source_id)

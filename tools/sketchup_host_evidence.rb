@@ -1863,14 +1863,23 @@ module SketchupHostEvidence
     unless rows.length == 1 && hash_value(rows[0], :typename).to_s == 'Group'
       raise EvidenceError, "#{label} must identify one owned Geometry group"
     end
+    # Flat Geometry is the exact source outline edges plus the filled glyph
+    # faces they bound (edge-only text rendered hollow; visual oracle 1011,
+    # 2026-08-16). Edges must be present; faces may accompany them; nothing
+    # else may live inside the owned group.
+    flat_types = ['Edge', 'Face']
     children = Array(hash_value(rows[0], :children))
     if compact_physical_partition_row?(rows[0])
       topology = compact_topology!(rows[0], label)
       direct = hash_value(topology, :direct_child_types)
       counts = hash_value(topology, :descendant_type_counts)
-      unless !direct.empty? && direct.all? { |type| type == 'Edge' } &&
-             counts.keys.map(&:to_s) == ['Edge'] &&
-             counts['Edge'] == direct.length &&
+      count_types = counts.keys.map(&:to_s)
+      unless !direct.empty? && direct.include?('Edge') &&
+             direct.all? { |type| flat_types.include?(type) } &&
+             count_types.include?('Edge') &&
+             (count_types - flat_types).empty? &&
+             counts.values.inject(0) { |sum, value| sum + value.to_i } ==
+               direct.length &&
              !positive_z_depth?(hash_value(rows[0], :bounds))
         raise EvidenceError, "#{label} is not flat raw-edge Geometry"
       end
@@ -1880,10 +1889,12 @@ module SketchupHostEvidence
     children.each do |child|
       verify_live_manifest_row!(child, "#{label} physical child")
     end
-    unless !children.empty? && children.all? do |child|
-      hash_value(child, :typename).to_s == 'Edge' &&
-        Array(hash_value(child, :children)).empty?
-    end
+    child_types = children.map { |child| hash_value(child, :typename).to_s }
+    unless !children.empty? && child_types.include?('Edge') &&
+           children.all? do |child|
+             flat_types.include?(hash_value(child, :typename).to_s) &&
+               Array(hash_value(child, :children)).empty?
+           end
       raise EvidenceError, "#{label} is not flat raw-edge Geometry"
     end
     verify_item_group_identity_if_required!(rows[0], record, :geometry, label)
@@ -1900,7 +1911,7 @@ module SketchupHostEvidence
       topology = compact_topology!(rows[0], label)
       direct = hash_value(topology, :direct_child_types)
       counts = hash_value(topology, :descendant_type_counts)
-      allowed = ['Group', 'ComponentInstance', 'Edge']
+      allowed = ['Group', 'ComponentInstance', 'Edge', 'Face']
       unless !direct.empty? && direct.all? do |type|
         ['Group', 'ComponentInstance'].include?(type)
       end && counts.fetch('Edge', 0) > 0 &&
@@ -1922,7 +1933,7 @@ module SketchupHostEvidence
         hash_value(child, :typename).to_s
       )
     end
-    allowed = ['Group', 'ComponentInstance', 'Edge']
+    allowed = ['Group', 'ComponentInstance', 'Edge', 'Face']
     unless !children.empty? && valid_containers &&
            descendant_types.include?('Edge') &&
            (descendant_types - allowed).empty?
