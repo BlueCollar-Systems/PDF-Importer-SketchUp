@@ -920,6 +920,103 @@ class SketchupHostEvidenceTest < Minitest::Test
                  'style must not be serialized once for sorting and again for hashing'
   end
 
+  def test_canonical_json_cmp_matches_joined_byte_order_including_number_prefixes
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    samples = [
+      { 'n' => 1 },
+      { 'n' => 1.0 },
+      { 'n' => 12 },
+      { 'n' => 1, 'z' => 0 },
+      { 'children' => [1, 2], 'type' => 'A' },
+      { 'children' => [1, 20], 'type' => 'A' },
+      { :bounds => nil, :children => [{ :type => 'Face' }],
+        :transformation => [1.0, 0.0], :type => 'ComponentInstance' },
+      { :bounds => nil, :children => [{ :type => 'Face' }],
+        :transformation => [1.0, 1.0], :type => 'ComponentInstance' }
+    ]
+    cache = {}
+    samples.each do |left|
+      samples.each do |right|
+        joined = fidelity.canonical_json(left) <=> fidelity.canonical_json(right)
+        streamed = fidelity.canonical_json_cmp(left, right, cache, false)
+        assert_equal joined, streamed,
+                     'streamed JSON order must match joined contract bytes ' \
+                     "(#{left.inspect} vs #{right.inspect})"
+      end
+    end
+  end
+
+  def test_physical_hash_feeds_cached_definition_children_to_digest
+    loop_points = [
+      FakePoint.new(0.0, 0.0, 0.0),
+      FakePoint.new(1.0, 0.0, 0.0),
+      FakePoint.new(1.0, 1.0, 0.0),
+      FakePoint.new(0.0, 1.0, 0.0)
+    ]
+    bounds = FakeBounds.new(
+      FakePoint.new(0.0, 0.0, 0.0), FakePoint.new(1.0, 1.0, 0.0)
+    )
+    face = FakeFace.new(901, [FakeLoop.new(loop_points)], :bounds => bounds)
+    definition = FakeDefinition.new([face])
+    first = FakeComponent.new(
+      902, [],
+      :definition => definition,
+      :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
+                          0, 0, 1, 0, 10, 20, 0, 1]
+    )
+    second = FakeComponent.new(
+      903, [],
+      :definition => definition,
+      :transformation => [1, 0, 0, 0, 0, 1, 0, 0,
+                          0, 0, 1, 0, 30, 40, 0, 1]
+    )
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    definition_cache = {}
+    json_cache = {}
+
+    uncached = fidelity.physical_evidence([first])
+    first_physical = fidelity.physical_evidence(
+      [first], definition_cache, json_cache
+    )
+    assert_equal uncached, first_physical
+
+    children_json = json_cache.values.map { |pair| pair[1] }.find do |encoded|
+      encoded.is_a?(String) && encoded.start_with?('[') &&
+        encoded.include?('"type":"Face"')
+    end
+    refute_nil children_json,
+               'definition capture must intern the shared children JSON'
+    refute_operator children_json.length, :<, 32
+
+    updates = []
+    original = Digest::SHA256.instance_method(:update)
+    Digest::SHA256.send(:define_method, :update) do |data|
+      updates << data
+      original.bind(self).call(data)
+    end
+
+    second_physical = fidelity.physical_evidence(
+      [second], definition_cache, json_cache
+    )
+    cached_updates = updates.dup
+
+    assert cached_updates.any? { |chunk| chunk.equal?(children_json) },
+           'SHA-256 must consume the interned definition children JSON ' \
+           'directly; joining it into a new parent string recopies every ' \
+           'repeated glyph solid'
+    refute cached_updates.any? { |chunk|
+      chunk.is_a?(String) && chunk.object_id != children_json.object_id &&
+        chunk.include?(children_json) && chunk.include?('ComponentInstance')
+    }, 'instance/group encodings must not recopy cached glyph JSON'
+    assert_equal fidelity.physical_evidence([second]), second_physical
+  ensure
+    if original
+      Digest::SHA256.send(:define_method, :update) do |data|
+        original.bind(self).call(data)
+      end
+    end
+  end
+
   def test_definition_capture_reuses_canonical_child_fragments
     children = 24.times.map do |index|
       FakeEntity.new(500 + index, 'Edge')
