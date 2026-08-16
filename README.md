@@ -87,8 +87,8 @@ assets, checksums, license, and notes.
   | **Text** | Closest verified text representation | Never silently aliases to Labels. SketchUp 2017 exposes no distinct flat editable constructor, and native annotations expose no source glyph-size/run-width control; signed item proofs therefore advance automatically to exact source-outline 3D Text. |
   | **Labels** | Editable `Sketchup::Text` annotation | Exact content/anchor and hidden leader are read back; nonzero glyph rotation is a proven host limit for that item. |
   | **3D Text** | Positive-depth source-glyph solid text | Model-space placement, rotation, size, source glyphs, and depth are verified. |
-  | **Glyphs** | Per-glyph grouped source outlines | Outline identity, grouping, placement, rotation, size, and visibility are verified. |
-  | **Geometry** | Source/page path edges | Geometry remains separate from Glyph groups and is verified as owned physical edges. |
+  | **Glyphs** | Per-glyph grouped source outlines: filled glyph faces + exact outline edges, painted with the source ink | Outline identity, grouping, placement, rotation, size, and visibility are verified; face fill and ink are recorded per item. |
+  | **Geometry** | Source/page path outlines: filled glyph faces + exact outline edges, painted with the source ink | Geometry remains separate from Glyph groups and is verified as one owned flat group of edges plus faces. |
   | **Raster** | Source-bound image | Canonical text items use verified item crops; a zero-canonical-text selected page uses a verified page image. |
 
   Evidence keeps two page-image cases distinct. Explicit full-page Raster from

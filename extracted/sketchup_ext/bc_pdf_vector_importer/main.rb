@@ -663,6 +663,13 @@ module BlueCollarSystems
         :physical_entity_ids => Array(result[:physical_entity_ids]),
         :source_placement_indices => Array(result[:placement_indices]),
         :source_glyph_ids => Array(result[:glyph_ids]),
+        # Filled glyph faces + source ink (edges alone rendered hollow).
+        :edge_count => result[:edge_count].to_i,
+        :face_count => result[:face_count].to_i,
+        :hole_count => result[:hole_count].to_i,
+        :face_fill_failures => Array(result[:face_fill_failures]),
+        :ink_applied => result[:ink_applied] == true,
+        :source_ink_material_name => result[:source_ink_material_name],
         :placement_verified => true,
         :rotation_verified => true,
         :width_verified => true,
@@ -688,10 +695,17 @@ module BlueCollarSystems
         :count => 1,
         :resulting_entity_ids => [entity_id],
         :physical_entity_ids => Array(result[:physical_entity_ids]),
+        :edge_count => result[:edge_count].to_i,
+        :face_count => result[:face_count].to_i,
+        :hole_count => result[:hole_count].to_i,
+        :face_fill_failures => Array(result[:face_fill_failures]),
+        :ink_applied => result[:ink_applied] == true,
+        :source_ink_material_name => result[:source_ink_material_name],
         :visual_fidelity_verified => true
       )
       stats[:text] = stats[:text].to_i + 1
       stats[:edges] = stats[:edges].to_i + result[:edge_count].to_i
+      stats[:faces] = stats[:faces].to_i + result[:face_count].to_i
       true
     end
 
