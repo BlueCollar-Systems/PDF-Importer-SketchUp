@@ -25,8 +25,18 @@ module BlueCollarSystems
       JSON_TRUE_TOKEN = 'true'.freeze
       JSON_FALSE_TOKEN = 'false'.freeze
       JSON_NULL_TOKEN = 'null'.freeze
+      JSON_BEGIN_OBJECT = '{'.freeze
+      JSON_END_OBJECT = '}'.freeze
+      JSON_BEGIN_ARRAY = '['.freeze
+      JSON_END_ARRAY = ']'.freeze
+      JSON_COMMA = ','.freeze
+      JSON_COLON = ':'.freeze
       JSON_STRING_TOKEN_LIMIT = 96
       JSON_STRING_TOKENS = {}
+      # Tiny structural tokens stay in a local buffer. Cached glyph JSON is
+      # larger than this and is yielded as the interned string so SHA-256 and
+      # sort can consume it without another parent join.
+      CANONICAL_JSON_LARGE_CHUNK = 64
       SOURCE_EXPECTED_SCHEMA = 'bcs.source_expected/1.0'.freeze
       FLAT_TEXT_CAPABILITY_SCHEMA =
         'bcs.sketchup_flat_text_capability/1.0'.freeze
@@ -907,52 +917,225 @@ module BlueCollarSystems
         end
       end
 
+      def cached_canonical_json(value, cache)
+        return nil if cache.nil? || !(value.is_a?(Hash) || value.is_a?(Array))
+        cached = cache[value.object_id]
+        return cached[1] if cached && cached[0].equal?(value)
+        nil
+      end
+
+      # Yield the exact contract bytes as interned chunks. Cached definition
+      # subtrees stay one string; instance/group wrappers stream around them
+      # instead of joining another copy of every glyph solid.
+      def each_canonical_json_chunk(value, cache = nil, write_cache = true,
+                                    &block)
+        if cache.nil?
+          block.call(JSON.generate(canonical_value(value)))
+          return
+        end
+        unless cache.is_a?(Hash)
+          raise ContractError, 'canonical JSON cache must be a Hash'
+        end
+
+        cached = cached_canonical_json(value, cache)
+        if cached
+          block.call(cached)
+          return
+        end
+
+        cacheable = value.is_a?(Hash) || value.is_a?(Array)
+        if cacheable && write_cache
+          encoded = join_canonical_json_chunks(value, cache, write_cache)
+          cache[value.object_id] = [value, encoded]
+          block.call(encoded)
+          return
+        end
+
+        buffer = String.new
+        emit_canonical_json_chunks(value, cache, write_cache) do |chunk|
+          if chunk.length >= CANONICAL_JSON_LARGE_CHUNK
+            unless buffer.empty?
+              block.call(buffer)
+              buffer = String.new
+            end
+            block.call(chunk)
+          else
+            buffer << chunk
+          end
+        end
+        block.call(buffer) unless buffer.empty?
+      end
+
+      def join_canonical_json_chunks(value, cache, write_cache)
+        chunks = []
+        emit_canonical_json_chunks(value, cache, write_cache) do |chunk|
+          chunks << chunk
+        end
+        return chunks[0] if chunks.length == 1
+        chunks.join
+      end
+
+      def emit_canonical_json_chunks(value, cache, write_cache, &block)
+        case value
+        when Hash
+          block.call(JSON_BEGIN_OBJECT)
+          keys = {}
+          value.keys.each do |key|
+            name = key.to_s
+            keys[name] = key unless keys.key?(name)
+          end
+          first = true
+          keys.keys.sort.each do |name|
+            unless first
+              block.call(JSON_COMMA)
+            end
+            first = false
+            block.call(canonical_json_scalar(name))
+            block.call(JSON_COLON)
+            each_canonical_json_chunk(
+              value[keys[name]], cache, write_cache, &block
+            )
+          end
+          block.call(JSON_END_OBJECT)
+        when Array
+          block.call(JSON_BEGIN_ARRAY)
+          first = true
+          value.each do |entry|
+            unless first
+              block.call(JSON_COMMA)
+            end
+            first = false
+            each_canonical_json_chunk(entry, cache, write_cache, &block)
+          end
+          block.call(JSON_END_ARRAY)
+        when Numeric
+          block.call(canonical_json_scalar(canonical_number(value)))
+        when Symbol
+          block.call(canonical_json_scalar(value.to_s))
+        when true, false, nil
+          block.call(canonical_json_scalar(value))
+        else
+          block.call(canonical_json_scalar(value.to_s))
+        end
+      end
+
+      def canonical_json_chunks(value, cache = nil, write_cache = true)
+        chunks = []
+        each_canonical_json_chunk(value, cache, write_cache) do |chunk|
+          chunks << chunk
+        end
+        chunks
+      end
+
+      # Compare canonical JSON byte order without joining cached glyph solids
+      # into a parent string. Identical interned fragments skip memcmp.
+      def concat_canonical_chunks_cmp(left_chunks, right_chunks)
+        li = 0
+        lj = 0
+        lo = 0
+        ro = 0
+        while true
+          while li < left_chunks.length &&
+                (left_chunks[li].nil? || lo >= left_chunks[li].length)
+            li += 1
+            lo = 0
+          end
+          while lj < right_chunks.length &&
+                (right_chunks[lj].nil? || ro >= right_chunks[lj].length)
+            lj += 1
+            ro = 0
+          end
+          left_done = li >= left_chunks.length
+          right_done = lj >= right_chunks.length
+          return 0 if left_done && right_done
+          return -1 if left_done
+          return 1 if right_done
+
+          left_chunk = left_chunks[li]
+          right_chunk = right_chunks[lj]
+          if lo == 0 && ro == 0 && left_chunk.equal?(right_chunk)
+            li += 1
+            lj += 1
+            next
+          end
+
+          left_rest = lo == 0 ? left_chunk : left_chunk[lo, left_chunk.length - lo]
+          right_rest = ro == 0 ? right_chunk : right_chunk[ro, right_chunk.length - ro]
+          if left_rest.equal?(right_rest) || left_rest == right_rest
+            li += 1
+            lj += 1
+            lo = 0
+            ro = 0
+            next
+          end
+          if right_rest.start_with?(left_rest)
+            li += 1
+            lo = 0
+            ro += left_rest.length
+            next
+          end
+          if left_rest.start_with?(right_rest)
+            lj += 1
+            ro = 0
+            lo += right_rest.length
+            next
+          end
+          return left_rest <=> right_rest
+        end
+      end
+
+      def canonical_json_cmp(left, right, cache = nil, write_cache = true)
+        return 0 if left.equal?(right)
+        concat_canonical_chunks_cmp(
+          canonical_json_chunks(left, cache, write_cache),
+          canonical_json_chunks(right, cache, write_cache)
+        )
+      end
+
+      class CanonicalJsonOrderKey
+        include Comparable
+        attr_reader :chunks
+
+        def initialize(chunks)
+          @chunks = chunks
+        end
+
+        def <=>(other)
+          return nil unless other.is_a?(CanonicalJsonOrderKey)
+          return 0 if equal?(other)
+          RepresentationFidelity.concat_canonical_chunks_cmp(
+            @chunks, other.chunks
+          )
+        end
+      end
+
+      def canonical_json_order_key(value, cache = nil, write_cache = true)
+        CanonicalJsonOrderKey.new(
+          canonical_json_chunks(value, cache, write_cache)
+        )
+      end
+
       def canonical_json(value, cache = nil, write_cache = true)
         return JSON.generate(canonical_value(value)) if cache.nil?
         unless cache.is_a?(Hash)
           raise ContractError, 'canonical JSON cache must be a Hash'
         end
 
-        cacheable = value.is_a?(Hash) || value.is_a?(Array)
-        cache_key = cacheable ? value.object_id : nil
-        cached = cache_key ? cache[cache_key] : nil
-        if cached && cached[0].equal?(value)
-          return cached[1]
-        end
-
-        encoded = case value
-                  when Hash
-                    keys = {}
-                    value.keys.each do |key|
-                      name = key.to_s
-                      keys[name] = key unless keys.key?(name)
-                    end
-                    members = keys.keys.sort.map do |name|
-                      canonical_json_scalar(name) + ':' +
-                        canonical_json(value[keys[name]], cache, write_cache)
-                    end
-                    '{' + members.join(',') + '}'
-                  when Array
-                    '[' + value.map do |entry|
-                      canonical_json(entry, cache, write_cache)
-                    end.join(',') + ']'
-                  when Numeric
-                    canonical_json_scalar(canonical_number(value))
-                  when Symbol
-                    canonical_json_scalar(value.to_s)
-                  when true, false, nil
-                    canonical_json_scalar(value)
-                  else
-                    canonical_json_scalar(value.to_s)
-                  end
-        cache[cache_key] = [value, encoded] if cache_key && write_cache
-        encoded
+        chunks = canonical_json_chunks(value, cache, write_cache)
+        return chunks[0] if chunks.length == 1
+        chunks.join
       end
 
       def canonical_sha256(value, cache = nil, write_cache = true)
-        Digest::SHA256.hexdigest(
+        return Digest::SHA256.hexdigest(
           canonical_json(value, cache, write_cache)
-        )
+        ) if cache.nil?
+
+        digest = Digest::SHA256.new
+        each_canonical_json_chunk(value, cache, write_cache) do |chunk|
+          digest.update(chunk)
+        end
+        digest.hexdigest
       end
 
       def store_canonical_json_fragment!(value, cache, source_cache = nil)
@@ -1037,7 +1220,7 @@ module BlueCollarSystems
             ordered_points(vertices)
           end
           return loops.reject { |points| points.empty? }.sort_by do |points|
-            canonical_json(
+            canonical_json_order_key(
               points, canonical_json_cache, write_canonical_cache
             )
           end
@@ -1090,7 +1273,7 @@ module BlueCollarSystems
                      Array(child_payloads)
                    end
         payload[:children] = children.sort_by do |child|
-          canonical_json(
+          canonical_json_order_key(
             child, canonical_json_cache, write_canonical_cache
           )
         end
@@ -1172,7 +1355,7 @@ module BlueCollarSystems
                      Array(child_payloads)
                    end
         payload[:children] = children.sort_by do |child|
-          canonical_json(
+          canonical_json_order_key(
             child, canonical_json_cache, write_canonical_cache
           )
         end
@@ -1399,17 +1582,20 @@ module BlueCollarSystems
       # potentially enormous physical tree once for sorting and again for
       # hashing.
       def sorted_payload_and_sha256(values, canonical_json_cache = nil)
-        encoded = Array(values).map do |entry|
-          [canonical_json(entry, canonical_json_cache, false), entry]
-        end.sort_by { |pair| pair[0] }
+        decorated = Array(values).map do |entry|
+          chunks = canonical_json_chunks(entry, canonical_json_cache, false)
+          [CanonicalJsonOrderKey.new(chunks), entry, chunks]
+        end.sort_by { |row| row[0] }
         digest = Digest::SHA256.new
-        digest.update('[')
-        encoded.each_with_index do |pair, index|
-          digest.update(',') unless index.zero?
-          digest.update(pair[0])
+        digest.update(JSON_BEGIN_ARRAY)
+        decorated.each_with_index do |row, index|
+          digest.update(JSON_COMMA) unless index.zero?
+          row[2].each do |chunk|
+            digest.update(chunk)
+          end
         end
-        digest.update(']')
-        [encoded.map { |pair| pair[1] }, digest.hexdigest]
+        digest.update(JSON_END_ARRAY)
+        [decorated.map { |row| row[1] }, digest.hexdigest]
       end
 
       def physical_evidence(entities, definition_tree_cache = nil,
