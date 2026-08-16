@@ -6,14 +6,20 @@
 **Reference PDF:** private fixture supplied through `BCS_PRIVATE_REFERENCE_PDF`
 **Reference PDF SHA-256:** computed at runtime and retained only in out-of-tree evidence
 
+> **Superseded Labels delivery rule (2026-08-16):** The native-Label outcome in
+> this historical design is replaced by the current finite-bbox Labels
+> contract. SketchUp 2017 cannot control or verify source glyph size or run
+> width, so requested Labels advance item-by-item to exact source-outline 3D
+> visual-equivalent delivery. It is not a native editable annotation. Semantic
+> span identity and provenance remain preserved, with no silent Raster.
+
 ## 1. Outcome
 
 SketchUp must preserve the PDF renderer's exact source glyph outlines, placement,
 rotation, scale, color, and positive 3D depth while avoiding repeated construction
-of identical glyph solids. Text mode must keep horizontal text as native SketchUp
-Labels and must deliver source-rotated text through the certified
-Labels-to-3D-Text fallback with the same authoritative full-page glyph matching
-used by direct 3D Text.
+of identical glyph solids. Finite-bbox Text/Labels delivery uses certified,
+reason-bound source-outline 3D visual-equivalent fallback with the same
+authoritative full-page glyph matching used by direct 3D Text.
 
 The foreground remains unchanged: the user selects Text or 3D Text and imports.
 All matching, reuse, verification, fallback evidence, and performance telemetry
@@ -44,10 +50,12 @@ operations.
 
 ### 2.2 Text rotation/alignment root cause
 
-SketchUp has no distinct flat editable model Text entity, so Text correctly
-advances item-by-item to Labels. Native `Sketchup::Text` Labels cannot rotate
-their glyphs. A nonzero source rotation is therefore affirmative host
-impossibility for the Labels rung and must advance that item to exact 3D Text.
+SketchUp has no distinct flat editable model Text entity, so Text advances
+item-by-item through its host-capability proof. Native `Sketchup::Text` Labels
+cannot control finite-bbox source glyph size/run width, and their leader vector
+cannot rotate glyphs. The applicable size or rotation subtype is therefore
+affirmative host impossibility for the Labels rung and advances that item to
+exact source-outline 3D Text.
 
 The direct 3D Text path matches all 813 semantic spans against the complete SVG
 placement inventory. The Text fallback path renders only the 156 rotated target
@@ -68,9 +76,10 @@ fallback ladder and preserves the visual defect.
    evidence. Generic failure cannot authorize a fallback.
 3. Direct 3D Text and Labels-to-3D-Text fallback use exact renderer SVG outlines.
    Host-font substitution is prohibited.
-4. A source-rotated span cannot be recorded as a completed native Label unless
-   the resulting glyph rotation is independently verified.
-5. Horizontal Text items remain native Labels when their placement is verified.
+4. A finite-bbox span cannot be recorded as a completed native Label because
+   SketchUp 2017 cannot verify source glyph size/run width.
+5. Horizontal spans use the size/run-width proof; rotated spans use the distinct
+   rotation proof; both advance to source-outline 3D visual-equivalent delivery.
 6. Reuse cannot alter source outline points, fill rule, winding, holes, placement,
    affine transform, paint, source identity, or extrusion depth.
 7. No lossy contour simplification or arbitrary visual-tolerance culling is part
@@ -206,7 +215,8 @@ Before production changes, add failing tests for:
    definition reuse.
 4. A partial target set uses the full semantic inventory for matching and
    receives the same placement indices as a full-page render.
-5. Horizontal Text completes as native Labels.
+5. Horizontal Text records the finite-bbox size/run-width transition and uses
+   exact source-outline 3D Text.
 6. Rotated Text records Text-to-Labels and Labels-to-3D-Text transitions and uses
    exact source-outline 3D Text.
 7. Rotated Text is never accepted as an unrotated native Label.

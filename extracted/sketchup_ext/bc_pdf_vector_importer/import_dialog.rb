@@ -59,10 +59,12 @@ module BlueCollarSystems
       TEXT_MODES   = 'Text|Labels|3D Text|Glyphs|Geometry|Raster'
       TEXT_MODE_CHOICES = TEXT_MODES.split('|').freeze
       # Sketchup::Text is the Labels representation, not the distinct flat Text
-      # representation. Text therefore begins with a host-capability proof and
-      # advances through the finite adjacent fallback ladder when unavailable.
+      # representation. On SketchUp 2017, finite-bbox Labels also cannot retain
+      # source glyph size/run width, so their audited adjacent delivery is the
+      # source-outline 3D visual equivalent rather than an editable annotation.
       TEXT_MODE_HINT = '3D Text is the default visual mode: model-space size and rotation match the PDF. ' \
-                       'Text and Labels are distinct requests; Raster crops each canonical text item.'.freeze
+                       'On SketchUp 2017, finite-bbox Labels advance to a source-outline 3D visual-equivalent; ' \
+                       'it is not a native editable annotation, preserves semantic/provenance identity, and uses no silent Raster.'.freeze
       FIRST_RUN_TEXT_MODE = '3D Text'.freeze
       FIRST_RUN_MATCH_PDF_LAYERS = 'Yes'.freeze
 

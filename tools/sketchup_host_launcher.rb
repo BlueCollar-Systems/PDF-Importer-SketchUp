@@ -487,6 +487,8 @@ module SketchupHostLauncher
       'import_mode' => original_job[:import_mode],
       'pages' => original_job[:pages] == :all ? 'all' : original_job[:pages],
       'skp_export_only' => original_job[:skp_export_only] == true,
+      'labels_visual_equivalent_acceptance' =>
+        original_job[:labels_visual_equivalent_acceptance] == true,
       'original_job_path' => File.expand_path(original_job_path),
       'original_job_sha256' => Digest::SHA256.file(original_job_path).hexdigest,
       'original_pdf_path' => source,
@@ -987,7 +989,31 @@ module SketchupHostLauncher
         evidence, delivery_manifest, effective_requested_mode(job), job[:pages]
       )
     end
+    verify_labels_visual_equivalent_profile!(manifest, result, job)
     true
+  end
+
+  def verify_labels_visual_equivalent_profile!(manifest, result, job)
+    return true unless job[:labels_visual_equivalent_acceptance] == true
+    require_equal!(result['labels_visual_equivalent_acceptance'], true,
+                   'Labels visual-equivalent acceptance marker')
+    require_equal!(manifest['labels_visual_equivalent_acceptance'], true,
+                   'Labels visual-equivalent manifest marker')
+    reopened = manifest['reopened_owned_entities']
+    unless reopened.is_a?(Array) && !reopened.empty?
+      raise LaunchError,
+            'Labels visual-equivalent reopened ownership is missing'
+    end
+    census = SketchupHostEvidence.
+      verify_labels_visual_equivalent_acceptance!(result, reopened)
+    require_equal!(result['labels_visual_equivalent_census'], census,
+                   'Labels visual-equivalent result census')
+    require_equal!(manifest['labels_visual_equivalent_census'], census,
+                   'Labels visual-equivalent manifest census')
+    true
+  rescue SketchupHostEvidence::EvidenceError => error
+    raise LaunchError,
+          "Labels visual-equivalent reopened evidence failed: #{error.message}"
   end
 
   def verify_source_tree_report_binding!(report, job)

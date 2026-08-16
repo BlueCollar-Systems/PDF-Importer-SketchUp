@@ -178,6 +178,31 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  class FakeStyledEntity < FakeEntity
+    attr_reader :material
+
+    def initialize(entity_id, typename, options = {})
+      super
+      @hidden = options.fetch(:hidden, false)
+      @visible = options.fetch(:visible, true)
+      @material = options[:material]
+    end
+
+    def hidden?; @hidden; end
+    def visible?; @visible; end
+    def soft?; false; end
+    def smooth?; false; end
+  end
+
+  class FakeStyledGroup < FakeStyledEntity
+    attr_reader :entities
+
+    def initialize(entity_id, children, options = {})
+      super(entity_id, 'Group', options)
+      @entities = children
+    end
+  end
+
   class CountingBoundsComponent < FakeComponent
     attr_reader :bounds_calls
 
@@ -1154,6 +1179,46 @@ class SketchupHostEvidenceTest < Minitest::Test
     refute manifest.first['geometry_evidence'].key?('payload')
   end
 
+  def test_compact_snapshot_reads_persisted_contour_and_filled_face_style
+    material = Struct.new(:name, :color, :alpha).new('PDF Text Ink', nil, 1.0)
+    root = FakeStyledGroup.new(
+      150,
+      [
+        FakeStyledEntity.new(151, 'Face'),
+        FakeStyledEntity.new(152, 'Edge', :hidden => true),
+        FakeStyledEntity.new(153, 'Edge', :hidden => true)
+      ],
+      :material => material,
+      :attributes => {
+        ['BC_PDF_Importer', 'source_span_id'] => 'text_span:1:0',
+        ['BC_PDF_Importer', 'source_kind'] => 'text_span',
+        ['BC_PDF_Importer', 'source_claim_root'] => true,
+        ['BC_PDF_Importer', 'representation'] => 'text3d',
+        ['BC_PDF_Importer', 'renderer'] => 'svg_source_3d_text',
+        ['BC_PDF_Importer', 'contour_edge_policy'] => 'persisted_hidden',
+        ['BC_PDF_Importer', 'contour_edges_hidden_verified'] => true,
+        ['BC_PDF_Importer', 'fixed_frame_style_policy'] =>
+          'source_outline_filled_faces_with_hidden_contour_edges'
+      }
+    )
+
+    row = SketchupHostEvidence.snapshot_entities(
+      [root], :compact => true
+    ).first
+    identity = row['representation_evidence']
+    readback = row['style_evidence']['visual_readback']
+
+    assert_equal 'persisted_hidden', identity['contour_edge_policy']
+    assert_equal true, identity['contour_edges_hidden_verified']
+    assert_equal 2, readback['edge_count']
+    assert_equal 2, readback['hidden_edge_count']
+    assert_equal 0, readback['visible_edge_count']
+    assert_equal true, readback['all_contour_edges_hidden']
+    assert_equal 1, readback['face_count']
+    assert_equal 1, readback['visible_face_count']
+    assert_equal 1, readback['materialized_visible_face_count']
+  end
+
   def test_compact_snapshot_keeps_native_face_and_edge_claim_roots_expanded
     dictionary = 'BC_PDF_Importer'
     attributes = {
@@ -1561,6 +1626,29 @@ class SketchupHostEvidenceTest < Minitest::Test
     owned = SketchupHostEvidence.owned_manifest(before, after)
     assert_equal [10, 11],
                  SketchupHostEvidence.manifest_entity_ids(owned).sort
+  end
+
+  def test_physical_source_claim_roots_cannot_be_nested_under_claim_roots
+    rows = Marshal.load(Marshal.dump(text3d_manifest))
+    root = rows.fetch(0)
+    child = root.fetch('children').fetch(0)
+    root['representation_evidence']['source_claim_root'] = true
+    child['representation_evidence'] = {
+      'source_claim_root' => true,
+      'source_span_id' => 'text_span:1:1',
+      'source_kind' => 'text_span',
+      'representation' => 'text3d',
+      'renderer' => 'svg_source_3d_text'
+    }
+    gates_only = {
+      :representation_fidelity => { :ready => true },
+      :import_contract_ready => { :ready => true }
+    }
+
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(gates_only, rows)
+    end
+    assert_match(/nested|ancestor|claim root/i, error.message)
   end
 
   def test_missing_ledger_is_not_coerced_to_empty
@@ -2246,6 +2334,52 @@ class SketchupHostEvidenceTest < Minitest::Test
       end
       assert_match(/fallback|transition|source item/i, error.message)
     end
+  end
+
+  def test_general_labels_verifier_binds_reason_subtype_and_full_global_payload
+    stats = strict_item_fallback_stats
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, text3d_manifest, :labels, [1]
+    )
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'labels.pdf', { :text_mode => :labels }, stats
+    )[:extra][:representation_fidelity]
+    assert_equal true, qa[:ready], qa[:errors].join(', ')
+
+    mismatched_reason = Marshal.load(Marshal.dump(stats))
+    mismatched_reason[:text_attempts][0][:attempt_history][0][:reason] =
+      'label_rotation_unsupported_by_host'
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        mismatched_reason, text3d_manifest, :labels, [1]
+      )
+    end
+    assert_match(/reason|subtype|rotation|size/i, error.message)
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'labels.pdf', { :text_mode => :labels }, mismatched_reason
+    )[:extra][:representation_fidelity]
+    assert_equal false, qa[:ready]
+    assert qa[:errors].any? { |message|
+      message =~ /transition|reason|subtype|fallback/i
+    }, qa[:errors].join(', ')
+
+    global_only = Marshal.load(Marshal.dump(stats))
+    global = global_only[:fallback_transitions][0]
+    global[:evidence][:source_anchor][0] += 1.0
+    resign_labels_capability_proof!(global)
+    error = assert_raises(StandardError) do
+      SketchupHostEvidence.verify_delivery_evidence!(
+        global_only, text3d_manifest, :labels, [1]
+      )
+    end
+    assert_match(/ledger|transition|payload|attempt/i, error.message)
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+      'labels.pdf', { :text_mode => :labels }, global_only
+    )[:extra][:representation_fidelity]
+    assert_equal false, qa[:ready]
+    assert qa[:errors].any? { |message|
+      message =~ /transition|ledger|fallback|digest/i
+    }, qa[:errors].join(', ')
   end
 
   def test_report_copy_is_parsed_bound_and_atomic
@@ -3070,19 +3204,10 @@ class SketchupHostEvidenceTest < Minitest::Test
   def strict_item_fallback_stats
     source_id = 'text_span:1:0'
     entity_id = 'entity_id:13'
-    proof = {
-      :source_span_id => source_id,
-      :importer_id => 'sketchup_pdf_vector_importer',
-      :page_number => 1, :scope => :item,
-      :category => :exact_representation_impossible,
-      :affirmative_impossibility => true, :generic_failure => false,
-      :from_mode => :labels, :to_mode => :text3d,
-      :reason_code => :source_item_identity_unavailable,
-      :attempted_renderer => 'native_label_renderer',
-      :evidence => { :fresh_inventory_evaluation => true },
-      :created_entity_ids => [], :cleaned_entity_ids => [],
-      :cleanup_outcome => :not_required
-    }
+    proof = labels_capability_proof(
+      source_id, Digest::SHA256.hexdigest('A'),
+      :label_source_size_unsupported_by_host
+    )
     expected = fixture_expected_evidence(:text3d, source_id, 'A')
     flags = fixture_mode_flags(:text3d)
     ready_stats(
@@ -3090,9 +3215,11 @@ class SketchupHostEvidenceTest < Minitest::Test
         :source_span_id => source_id, :requested_mode => :labels,
         :delivered_mode => :text3d, :resulting_entity_ids => [entity_id],
         :source_text_sha256 => Digest::SHA256.hexdigest('A'),
+        :source_bbox_pdf => [0.0, 0.0, 72.0, 72.0],
         :expected_evidence => expected,
         :attempt_history => [{
           :mode => :labels, :outcome => :failed,
+          :reason => 'label_source_size_unsupported_by_host',
           :resulting_entity_ids => [], :transition_proof => proof
         }, {
           :mode => :text3d, :outcome => :complete,
@@ -3103,7 +3230,13 @@ class SketchupHostEvidenceTest < Minitest::Test
         }.merge(flags)]
       }.merge(flags)],
       :source_provenance_objects => [{
-        :span_id => source_id, :resulting_entity_ids => [entity_id]
+        :span_id => source_id, :source_kind => 'text_span',
+        :created_entity_type => 'source_glyph_3d_text',
+        :renderer => 'svg_source_3d_text',
+        :requested_mode => :labels, :delivered_mode => :text3d,
+        :source_text_sha256 => Digest::SHA256.hexdigest('A'),
+        :source_bbox_pdf => [0.0, 0.0, 72.0, 72.0],
+        :resulting_entity_ids => [entity_id]
       }],
       :fallback_transitions => [proof.dup]
     )
@@ -3183,6 +3316,74 @@ class SketchupHostEvidenceTest < Minitest::Test
       :created_entity_ids => [], :cleaned_entity_ids => [],
       :cleanup_outcome => :not_required, :evidence => evidence
     }
+  end
+
+  def labels_capability_proof(source_id, source_sha, reason,
+                              rotation_degrees = 0.0)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    rotated = reason.to_s == 'label_rotation_unsupported_by_host'
+    rotation_degrees = 90.0 if rotated && rotation_degrees.to_f == 0.0
+    evidence = {
+      :schema => 'bcs.sketchup_labels_capability/1.0',
+      :proof_subtype => rotated ?
+        'source_glyph_rotation_unsupported' :
+        'finite_bbox_source_size_run_width_unsupported',
+      :source_span_id => source_id,
+      :requested_mode => :labels,
+      :source_text_sha256 => source_sha,
+      :source_bbox_pdf => [0.0, 0.0, 72.0, 72.0],
+      :source_dimensions_pdf => [72.0, 72.0],
+      :source_anchor => [0.0, 0.0, 0.0],
+      :source_rotation_degrees => rotation_degrees,
+      :source_rotation_radians => rotation_degrees.to_f * Math::PI / 180.0,
+      :pdf_point_to_inch => 1.0 / 72.0,
+      :import_scale => 1.0,
+      :expected_width => 1.0,
+      :expected_height => 1.0,
+      :host_product => 'SketchUp',
+      :host_api_contract => 'SketchUp 2017 Ruby API',
+      :host_entity_type => 'Sketchup::Text',
+      :host_constructor => 'Sketchup::Entities#add_text',
+      :native_label_finite_bbox_control_available => false,
+      :native_label_run_width_control_available => false,
+      :native_label_glyph_rotation_control_available => false,
+      :text_vector_role => 'leader_vector',
+      :capability_observation_only => true,
+      :host_api_fact => rotated ?
+        'Text vector controls the leader and does not rotate label glyphs' :
+        'Sketchup::Text exposes neither glyph-size nor source run-width control',
+      :verification => rotated ?
+        'source rotation is nonzero and native label orientation is unsupported' :
+        'native annotation width and height cannot be matched to the source PDF'
+    }
+    evidence[:evidence_sha256] = fidelity.canonical_sha256(evidence)
+    proof = {
+      :source_span_id => source_id, :importer_id => fidelity::IMPORTER_ID,
+      :page_number => source_id.split(':')[1].to_i,
+      :requested_mode => :labels, :scope => :item,
+      :category => :exact_representation_impossible,
+      :affirmative_impossibility => true, :generic_failure => false,
+      :from_mode => :labels, :to_mode => :text3d,
+      :reason_code => :host_representation_unsupported,
+      :reason_subtype => reason.to_sym,
+      :attempted_renderer => 'sketchup_native_text',
+      :created_entity_ids => [], :cleaned_entity_ids => [],
+      :cleanup_outcome => :not_required, :evidence => evidence
+    }
+    resign_labels_capability_proof!(proof)
+  end
+
+  def resign_labels_capability_proof!(proof)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    unsigned_evidence = proof[:evidence].dup
+    unsigned_evidence.delete(:evidence_sha256)
+    proof[:evidence][:evidence_sha256] =
+      fidelity.canonical_sha256(unsigned_evidence)
+    unsigned = proof.dup
+    unsigned.delete(:proof_sha256)
+    unsigned.delete(:page)
+    proof[:proof_sha256] = fidelity.canonical_sha256(unsigned)
+    proof
   end
 
   def strict_requested_item_raster_fixture
@@ -3283,22 +3484,33 @@ class SketchupHostEvidenceTest < Minitest::Test
           :entity_type_verified => true, :artifact_evidence => artifact
         }
       else
-        proof = {
-          :source_span_id => source_id,
-          :importer_id => 'sketchup_pdf_vector_importer',
-          :page_number => 1, :scope => :item,
-          :category => :exact_representation_impossible,
-          :affirmative_impossibility => true, :generic_failure => false,
-          :from_mode => mode, :to_mode => ladder[index + 1],
-          :reason_code => :verified_source_representation_impossible,
-          :attempted_renderer => "#{mode}_renderer",
-          :evidence => { :fresh_inventory_evaluation => true },
-          :created_entity_ids => [], :cleaned_entity_ids => [],
-          :cleanup_outcome => :not_required
-        }
+        proof = if mode == :labels
+                  labels_capability_proof(
+                    source_id, 'b' * 64,
+                    :label_source_size_unsupported_by_host
+                  )
+                else
+                  {
+                    :source_span_id => source_id,
+                    :importer_id => 'sketchup_pdf_vector_importer',
+                    :page_number => 1, :scope => :item,
+                    :category => :exact_representation_impossible,
+                    :affirmative_impossibility => true,
+                    :generic_failure => false,
+                    :from_mode => mode, :to_mode => ladder[index + 1],
+                    :reason_code => :verified_source_representation_impossible,
+                    :attempted_renderer => "#{mode}_renderer",
+                    :evidence => { :fresh_inventory_evaluation => true },
+                    :created_entity_ids => [], :cleaned_entity_ids => [],
+                    :cleanup_outcome => :not_required
+                  }
+                end
         proofs << proof
         {
           :mode => mode, :outcome => :failed,
+          :reason => mode == :labels ?
+            'label_source_size_unsupported_by_host' :
+            'verified_source_representation_impossible',
           :resulting_entity_ids => [], :transition_proof => proof
         }
       end

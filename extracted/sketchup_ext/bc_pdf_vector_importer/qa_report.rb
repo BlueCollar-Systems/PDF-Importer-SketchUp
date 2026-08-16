@@ -940,13 +940,17 @@ module BlueCollarSystems
           :requested_mode,
           :affirmative_impossibility, :generic_failure,
           :attempted_renderer, :created_entity_ids, :cleaned_entity_ids,
-          :evidence
+          :evidence, :proof_sha256
         ].each { |key| proof[key] = telemetry_value(entry, key) }
+        proof[:page] = telemetry_value(entry, :page) if
+          telemetry_key?(entry, :page)
         proof[:scope] = telemetry_value(entry, :scope).to_s.to_sym
         proof[:category] = telemetry_value(entry, :category).to_s.to_sym
         proof[:from_mode] = telemetry_value(entry, :from_mode)
         proof[:to_mode] = telemetry_value(entry, :to_mode)
         proof[:reason_code] = telemetry_value(entry, :reason_code).to_s.to_sym
+        proof[:reason_subtype] =
+          telemetry_value(entry, :reason_subtype).to_s.to_sym
         proof[:cleanup_outcome] =
           telemetry_value(entry, :cleanup_outcome).to_s.to_sym
         proof
@@ -954,25 +958,37 @@ module BlueCollarSystems
         nil
       end
 
-      def transition_signature(entry)
+      def transition_signature(entry, expected_reason = nil,
+                               expected_context = nil)
         proof = symbolized_transition_proof(entry)
         return nil unless proof
         evidence_digest = nil
-        if RepresentationFidelity.normalize_mode(proof[:from_mode]) == :text
+        labels_proof_digest = nil
+        labels_canonical_payload = nil
+        from_mode = RepresentationFidelity.normalize_mode(proof[:from_mode])
+        if from_mode == :text
           evidence = proof[:evidence]
           evidence_digest = telemetry_value(
             evidence, :evidence_sha256
           ).to_s.downcase
+        elsif from_mode == :labels
+          normalized = RepresentationFidelity.validate_labels_transition_proof!(
+            proof, expected_reason, expected_context
+          )
+          labels_proof_digest = normalized[:proof_sha256]
+          labels_canonical_payload =
+            RepresentationFidelity.canonical_json(normalized)
         end
         [
           proof[:source_span_id].to_s,
-          RepresentationFidelity.normalize_mode(proof[:from_mode]),
+          from_mode,
           RepresentationFidelity.normalize_mode(proof[:to_mode]),
           proof[:reason_code], proof[:importer_id].to_s,
           proof[:page_number].to_i,
           Array(proof[:created_entity_ids]).map { |value| value.to_s }.sort,
           Array(proof[:cleaned_entity_ids]).map { |value| value.to_s }.sort,
-          proof[:cleanup_outcome], evidence_digest
+          proof[:cleanup_outcome], evidence_digest,
+          labels_proof_digest, labels_canonical_payload
         ]
       end
 
@@ -1941,7 +1957,8 @@ module BlueCollarSystems
               begin
                 raise RepresentationFidelity::ContractError,
                       'failed rung transition proof is missing' unless proof
-                advanced = controller.advance!(proof)
+                rung_reason = telemetry_value(rung, :reason)
+                advanced = controller.advance!(proof, rung_reason)
                 unless advanced == expected_history_modes[rung_index + 1]
                   raise RepresentationFidelity::ContractError,
                         'failed rung transition does not match the ladder'
@@ -1978,7 +1995,23 @@ module BlueCollarSystems
                           "proof_bbox=#{proof_bbox.inspect}"
                   end
                 end
-                attempt_transition_signatures << transition_signature(proof)
+                expected_context = nil
+                if mode == :labels
+                  expected_context = {
+                    :source_span_id => span_id,
+                    :source_text_sha256 => telemetry_value(
+                      attempt, :source_text_sha256
+                    ),
+                    :source_bbox_pdf => telemetry_value(
+                      attempt, :source_bbox_pdf
+                    ),
+                    :requested_mode => requested,
+                    :reason_subtype => rung_reason
+                  }
+                end
+                attempt_transition_signatures << transition_signature(
+                  proof, rung_reason, expected_context
+                )
               rescue StandardError => e
                 errors << "failed_rung_transition_invalid:#{span_id}:#{e.message}"
               end
@@ -2352,9 +2385,11 @@ module BlueCollarSystems
         unless text_mode.empty?
           signals << "text_mode_#{text_mode}"
           if %w[glyphs geometry].include?(text_mode)
-            actions << 'Use Labels or 3D Text mode when editable text is more important than exact glyph outlines.'
-          elsif %w[labels text3d 3d_text].include?(text_mode)
-            actions << 'Use Geometry or Glyphs mode when exact visual text outlines are more important than editability.'
+            actions << 'Use 3D Text when filled source-outline visual text is preferred to editable outline geometry.'
+          elsif text_mode == 'labels'
+            actions << 'On SketchUp 2017, finite-bbox Labels advance to the source-outline 3D visual-equivalent; this preserves semantic/provenance identity but is not a native editable annotation and never silently uses Raster.'
+          elsif %w[text3d 3d_text].include?(text_mode)
+            actions << 'Use Geometry or Glyphs only when editable outline geometry is preferred to filled source-outline 3D Text.'
           end
         end
 

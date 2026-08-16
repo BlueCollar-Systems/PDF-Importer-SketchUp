@@ -621,6 +621,43 @@ class SketchupHostLauncherTest < Minitest::Test
   end
   end
 
+  def test_labels_visual_equivalent_profile_is_reverified_from_reopened_manifest
+    census = { 'schema' => 'bcs.labels_visual_equivalent_acceptance/1.0' }
+    reopened = [{ 'sentinel' => 'reopened-owned' }]
+    manifest = {
+      'reopened_owned_entities' => reopened,
+      'labels_visual_equivalent_acceptance' => true,
+      'labels_visual_equivalent_census' => census
+    }
+    result = {
+      'labels_visual_equivalent_acceptance' => true,
+      'labels_visual_equivalent_census' => census
+    }
+    job = { :labels_visual_equivalent_acceptance => true }
+    received = nil
+
+    if SketchupHostLauncher.respond_to?(
+      :verify_labels_visual_equivalent_profile!
+    ) && SketchupHostEvidence.respond_to?(
+      :verify_labels_visual_equivalent_acceptance!
+    )
+      verifier = lambda do |actual_result, actual_reopened|
+        received = [actual_result, actual_reopened]
+        census
+      end
+      verified = SketchupHostEvidence.stub(
+        :verify_labels_visual_equivalent_acceptance!, verifier
+      ) do
+        SketchupHostLauncher.verify_labels_visual_equivalent_profile!(
+          manifest, result, job
+        )
+      end
+    end
+
+    assert_equal true, verified
+    assert_equal [result, reopened], received
+  end
+
   def test_restore_failure_changes_apparent_success_to_error
     Dir.mktmpdir('su-launch') do |dir|
       job_path, result_path, _pdf = write_job(dir)

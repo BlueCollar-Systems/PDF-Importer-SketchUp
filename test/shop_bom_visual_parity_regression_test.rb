@@ -1,10 +1,12 @@
 #!/usr/bin/env ruby
 # test/shop_bom_visual_parity_regression_test.rb
 # Opt-in regression anchor for an explicitly supplied shop BOM drawing.
-# Verifies BOM table text is extracted and placed in Labels and 3D Text modes.
+# Verifies BOM table text is extracted and delivered through the explicit
+# Labels-to-source-outline-3D visual-equivalent transition and 3D Text modes.
 # Skips when the external reference PDF is not configured.
 
 require 'minitest/autorun'
+require 'digest'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 SRC_ROOT = File.join(REPO_ROOT, 'extracted', 'sketchup_ext')
@@ -275,6 +277,12 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
     def record_mesh(text, height)
       @mesh << { text: text, height: height }
     end
+
+    def add_source_3d_group
+      group = PlacementEntity.new('Group', 1.0, 0.5, 0.02)
+      @entities << group
+      group
+    end
   end
 
   def simulate_placement(use_3d_text:)
@@ -302,7 +310,48 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
         ents.record_mesh(it.text, height) if height
       end
     end
-    ents
+    { entities: ents, items: items, builder: builder }
+  end
+
+  def label_fallback_stats
+    {
+      fallback_transitions: [], terminal_text_delivery_records: [],
+      text_attempts: [], text_renderers: [], page_text_sources: {},
+      source_provenance_objects: [], raster_delivery_records: [],
+      raster_fallback_used: false, text: 0, edges: 0, faces: 0
+    }
+  end
+
+  def completed_source_3d_row(source, group)
+    bbox = [
+      source.bbox_x0, source.bbox_y0, source.bbox_x1, source.bbox_y1
+    ].map(&:to_f)
+    width = (bbox[2] - bbox[0]).abs / 72.0
+    height = (bbox[3] - bbox[1]).abs / 72.0
+    expected = {
+      source_text_sha256: Digest::SHA256.hexdigest(source.text.to_s),
+      source_bbox_pdf: bbox,
+      source_anchor: [bbox[0] / 72.0, bbox[1] / 72.0, 0.0],
+      source_rotation_radians: source.angle.to_f * Math::PI / 180.0,
+      expected_width: width, expected_height: height, expected_depth: 0.02,
+      physical_style_sha256: 'a' * 64,
+      physical_geometry_sha256: 'b' * 64,
+      expected_transformation: { kind: 'source_glyph_3d_text' }
+    }
+    {
+      source_span_id: source.source_span_id,
+      group: group,
+      group_entity_id:
+        BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+          .stable_entity_id(group),
+      identity_verified: true, placement_verified: true,
+      rotation_verified: true, size_verified: true, depth_verified: true,
+      content_verified: true, physical_geometry_verified: true,
+      physical_style_verified: true, transform_verified: true,
+      depth: 0.02, width: width, height: height, face_count: 1,
+      extruded_face_count: 1, ink_applied: true,
+      expected_evidence: expected
+    }
   end
 
   def test_extracts_bom_table_text
@@ -317,19 +366,110 @@ class ShopBomVisualParityRegressionTest < Minitest::Test
     assert_operator row_count, :>=, 25, 'expected BOM table row/header sample strings'
   end
 
-  def test_labels_mode_places_bom_strings
+  def test_labels_mode_delivers_all_bom_spans_as_source_outline_3d
     skip_unless_pdf!
-    ents = simulate_placement(use_3d_text: false)
-    placed = ents.labels.map { |e| e[:text].to_s.strip }
-    BOM_HEADERS.each do |hdr|
-      assert placed.any? { |t| t.casecmp(hdr).zero? }, "Labels mode missing #{hdr}"
+    simulation = simulate_placement(use_3d_text: false)
+    ents = simulation[:entities]
+    items = simulation[:items]
+    builder = simulation[:builder]
+    failures = builder.text_delivery_failures
+
+    assert_equal 791, items.length, 'authoritative page-1 span inventory changed'
+    assert_empty ents.labels,
+                 'finite-bbox Labels must create zero native SketchUp Text'
+    assert_equal 791, failures.length
+    reasons = failures.each_with_object(Hash.new(0)) do |failure, counts|
+      counts[failure[:reason]] += 1
     end
-    assert_operator ents.labels.length, :>=, 250, 'Labels mode should place most extracted strings'
+    assert_equal 653, reasons['label_source_size_unsupported_by_host']
+    assert_equal 138, reasons['label_rotation_unsupported_by_host']
+    source_ids = items.map(&:source_span_id)
+    assert_equal source_ids.length, source_ids.uniq.length
+    item_by_id = items.each_with_object({}) do |source, index|
+      index[source.source_span_id] = source
+    end
+    failures.each do |failure|
+      proof = failure[:transition_proof]
+      source = item_by_id.fetch(failure[:source_span_id])
+      assert_equal :labels, proof[:from_mode]
+      assert_equal :text3d, proof[:to_mode]
+      assert_equal Digest::SHA256.hexdigest(source.text.to_s),
+                   proof[:evidence][:source_text_sha256]
+    end
+
+    render_batches = []
+    render_source_3d = lambda do |_parent, _svg, _box, render_items, _options|
+      render_batches << render_items.map(&:source_span_id)
+      rows = render_items.map do |source|
+        completed_source_3d_row(source, ents.add_source_3d_group)
+      end
+      {
+        failures: [], span_results: rows, unmatched_source_results: [],
+        transition_proofs: [], solid_cache: {}, performance: {},
+        authoritative_match_span_count: render_items.length,
+        render_target_span_count: render_items.length,
+        match_scope_verified: true
+      }
+    end
+    stats = label_fallback_stats
+    document = {
+      svg: '<svg viewBox="0 0 1 1"></svg>', renderer: :pdftocairo,
+      missing_fonts: [], missing_language_packs: []
+    }
+    importer = BlueCollarSystems::PDFVectorImporter
+    model = Struct.new(:active_entities).new(ents)
+    importer::Svg3DTextRenderer.stub(:render_svg, render_source_3d) do
+      importer::Svg3DTextRenderer.stub(:finalize_source_evidence!, true) do
+        importer.stub(:apply_and_verify_page_representation_transform, true) do
+          importer.complete_label_item_fallbacks!(
+            stats, model, ents, 'fixture.pdf', 1, items,
+            media_box, media_box, 0, {}, Time.now, 0.0, document,
+            failures, builder.text_attempts, nil, items
+          )
+        end
+      end
+    end
+
+    assert_equal [source_ids], render_batches,
+                 'source-outline renderer must receive every span once'
+    assert_equal 791, stats[:text_attempts].length
+    assert stats[:text_attempts].all? { |row|
+      row[:requested_mode] == :labels && row[:delivered_mode] == :text3d &&
+        row[:renderer] == :svg_source_3d_text
+    }
+    delivered_sha = stats[:text_attempts].each_with_object({}) do |row, index|
+      index[row[:source_span_id]] = row[:source_text_sha256]
+    end
+    expected_sha = item_by_id.each_with_object({}) { |(id, source), index|
+      index[id] = Digest::SHA256.hexdigest(source.text.to_s)
+    }
+    assert_equal expected_sha, delivered_sha
+    transitions = stats[:fallback_transitions]
+    assert_equal 791, transitions.length
+    assert_equal source_ids.sort,
+                 transitions.map { |row| row[:source_span_id] }.sort
+    provenance = stats[:source_provenance_objects]
+    assert_equal 791, provenance.length
+    assert_equal source_ids.sort, provenance.map { |row| row[:span_id] }.sort
+    assert_equal 791, provenance.map { |row| row[:object_id] }.uniq.length
+    assert provenance.all? { |row|
+      row[:created_entity_type] == 'source_glyph_3d_text'
+    }
+    provenance_ids = provenance.map { |row| row[:span_id] }
+    BOM_HEADERS.each do |header|
+      header_ids = items.select do |source|
+        source.text.to_s.strip.casecmp(header).zero?
+      end.map(&:source_span_id)
+      refute_empty header_ids, "missing BOM header #{header}"
+      assert_empty(header_ids - provenance_ids)
+    end
+    assert_equal false, stats[:raster_fallback_used]
+    assert_empty stats[:raster_delivery_records]
   end
 
   def test_text3d_mode_uses_readable_nominal_heights
     skip_unless_pdf!
-    ents = simulate_placement(use_3d_text: true)
+    ents = simulate_placement(use_3d_text: true)[:entities]
     placed = ents.mesh.map { |e| e[:text].to_s.strip }
     BOM_HEADERS.each do |hdr|
       assert placed.any? { |t| t.casecmp(hdr).zero? }, "3D Text mode missing #{hdr}"

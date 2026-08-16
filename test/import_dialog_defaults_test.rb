@@ -205,6 +205,15 @@ class ImportDialogDefaultsTest < Minitest::Test
     expected.each { |mode| assert_includes basic, ">#{mode}<" }
   end
 
+  def test_labels_hint_does_not_promise_native_annotation_editability
+    hint = BID::TEXT_MODE_HINT
+
+    assert_match(/finite[- ]bbox Labels/i, hint)
+    assert_match(/source-outline 3D visual-equivalent/i, hint)
+    assert_match(/not (?:a )?native editable annotation/i, hint)
+    assert_match(/no silent Raster/i, hint)
+  end
+
   def test_basic_html_professional_flow
     html = BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', 'Geometry', 'Yes', 'Yes')
 

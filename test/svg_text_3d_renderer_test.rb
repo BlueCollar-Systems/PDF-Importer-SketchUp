@@ -242,6 +242,10 @@ class Svg3DGroup
     @attributes[[dictionary, key]] = value
   end
 
+  def get_attribute(dictionary, key, default = nil)
+    @attributes.fetch([dictionary, key], default)
+  end
+
   def bounds
     points = []
     @entities.to_a.each do |entity|
@@ -386,10 +390,22 @@ class Svg3DMaterial
   attr_reader :name
   attr_accessor :color
   attr_accessor :alpha
+  attr_accessor :texture
+  attr_reader :attributes
 
   def initialize(name)
     @name = name
     @alpha = 1.0
+    @texture = nil
+    @attributes = {}
+  end
+
+  def set_attribute(dictionary, key, value)
+    @attributes[[dictionary, key]] = value
+  end
+
+  def get_attribute(dictionary, key, default = nil)
+    @attributes.fetch([dictionary, key], default)
   end
 end
 
@@ -432,6 +448,27 @@ end
 
 Svg3DSpan = Struct.new(:text, :font_name, :source_span_id,
                        :bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1, :angle)
+
+class Svg3DVisualStyleEntity
+  attr_accessor :material
+  attr_reader :entities, :attributes
+
+  def initialize(type, children = [])
+    @type = type
+    @entities = children
+    @attributes = {}
+    @hidden = false
+  end
+
+  def typename; @type; end
+  def hidden?; @hidden; end
+  def hidden=(value); @hidden = value == true; end
+  def visible?; true; end
+
+  def set_attribute(dictionary, key, value)
+    @attributes[[dictionary, key]] = value
+  end
+end
 
 class SvgText3DRendererTest < Minitest::Test
   RENDERER = BlueCollarSystems::PDFVectorImporter::Svg3DTextRenderer
@@ -533,6 +570,47 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal 'text_span:1:0',
       delivered[:group].attributes[['BC_PDF_Importer', 'source_span_id']]
     assert_empty result[:transition_proofs]
+  end
+
+  def test_source_outline_contour_edges_are_persistently_hidden_and_read_back
+    edges = [
+      Svg3DVisualStyleEntity.new('Edge'),
+      Svg3DVisualStyleEntity.new('Edge')
+    ]
+    face = Svg3DVisualStyleEntity.new('Face')
+    root = Svg3DVisualStyleEntity.new('Group', [face] + edges)
+    root.material = Object.new
+
+    readback = RENDERER.govern_source_outline_visual_style!(root)
+
+    assert edges.all?(&:hidden?), 'every contour edge must persist as hidden'
+    assert_equal 2, readback[:edge_count]
+    assert_equal 2, readback[:hidden_edge_count]
+    assert_equal 0, readback[:visible_edge_count]
+    assert_equal true, readback[:contour_edges_hidden_verified]
+    assert_equal 'persisted_hidden', readback[:contour_edge_policy]
+    assert_equal 'persisted_hidden', root.attributes[
+      ['BC_PDF_Importer', 'contour_edge_policy']
+    ]
+    assert_equal true, root.attributes[
+      ['BC_PDF_Importer', 'contour_edges_hidden_verified']
+    ]
+    assert_equal 'source_outline_filled_faces_with_hidden_contour_edges',
+                 root.attributes[
+                   ['BC_PDF_Importer', 'fixed_frame_style_policy']
+                 ]
+  end
+
+  def test_render_result_carries_contour_governance_readback
+    result = RENDERER.render_svg(
+      Svg3DEntities.new, square_svg, MEDIA_BOX, [span], :depth => 0.05
+    )
+
+    assert result[:ok], result[:failures].inspect
+    delivered = result[:span_results].first
+    assert_equal 'persisted_hidden', delivered[:contour_edge_policy]
+    assert delivered.key?(:contour_edges_hidden_verified)
+    assert delivered.key?(:contour_edge_count)
   end
 
   def test_exact_svg_outline_orientation_is_not_overridden_by_semantic_hint
@@ -843,6 +921,65 @@ class SvgText3DRendererTest < Minitest::Test
                  RENDERER.apply_source_text_ink!(group, style[:rgb], style[:opacity])
     assert_equal 'PDF_51_102_153_a128', group.material.name
     assert_in_delta 0.5, group.material.alpha, 1.0e-12
+  end
+
+  def test_source_ink_material_name_collisions_never_reuse_unsafe_materials
+    collision_mutators = {
+      :wrong_color => lambda do |material|
+        material.color = Sketchup::Color.new(255, 0, 0)
+      end,
+      :transparent => lambda do |material|
+        material.color = Sketchup::Color.new(47, 92, 151)
+        material.alpha = 0.0
+      end,
+      :textured => lambda do |material|
+        material.color = Sketchup::Color.new(47, 92, 151)
+        material.alpha = 1.0
+        material.texture = Object.new
+      end
+    }
+
+    collision_mutators.each do |kind, mutate|
+      model = Svg3DModel.new
+      collision = model.materials.add('PDF_47_92_151')
+      mutate.call(collision)
+      group = Svg3DEntities.new(:model => model).add_group
+
+      assert_equal true,
+                   RENDERER.apply_source_text_ink!(
+                     group, [47, 92, 151], 1.0
+                   ), kind.to_s
+      refute_same collision, group.material, kind.to_s
+      refute_equal 'PDF_47_92_151', group.material.name, kind.to_s
+      color = group.material.color
+      assert_equal [47, 92, 151],
+                   [color.red, color.green, color.blue], kind.to_s
+      assert_in_delta 1.0, group.material.alpha, 1.0e-12, kind.to_s
+      assert_nil group.material.texture, kind.to_s
+      assert_equal true, group.get_attribute(
+        'BC_PDF_Importer', 'source_ink_material_owned', nil
+      )
+      assert_equal group.material.name, group.get_attribute(
+        'BC_PDF_Importer', 'source_ink_material_name', nil
+      )
+      assert_equal [47, 92, 151], group.get_attribute(
+        'BC_PDF_Importer', 'source_ink_rgb', nil
+      )
+      assert_in_delta 1.0, group.get_attribute(
+        'BC_PDF_Importer', 'source_ink_alpha', nil
+      ), 1.0e-12
+      assert_equal true, group.get_attribute(
+        'BC_PDF_Importer', 'source_ink_color_readback_verified', nil
+      )
+      assert_equal true, group.get_attribute(
+        'BC_PDF_Importer', 'source_ink_alpha_readback_verified', nil
+      )
+      assert_equal true, group.get_attribute(
+        'BC_PDF_Importer', 'source_ink_texture_absent_verified', nil
+      )
+      physical = FIDELITY.material_payload(group.material)
+      assert_equal false, physical[:texture_present], kind.to_s
+    end
   end
 
   def test_out_of_range_source_fill_opacity_fails_closed

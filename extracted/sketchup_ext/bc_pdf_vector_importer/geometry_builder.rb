@@ -958,13 +958,12 @@ module BlueCollarSystems
             place_mesh_text(
               entities, item, origin_x, origin_y, layer, @requested_text_mode
             )
-          elsif @requested_text_mode != :text &&
+          elsif ![:text, :labels].include?(@requested_text_mode) &&
                 stacked_vertical_dimension_labels?(item)
             # Stacked vertical dimension numeral splitting creates sub-items
-            # that share the parent source_span_id. That is safe for native
-            # Labels and 3D Text, but flat Text mode binds one proof per
-            # source_span_id and therefore requires the whole span as a single
-            # native Text entity.
+            # that share the parent source_span_id. Text and Labels both bind
+            # one source-outline fallback proof per source_span_id and therefore
+            # require the whole semantic span as a single item.
             place_stacked_vertical_dimension_labels(
               entities, item, origin_x, origin_y, layer
             )
@@ -1392,107 +1391,33 @@ module BlueCollarSystems
       end
 
       def host_unsupported_label_rotation_proof(item, display_angle, anchor)
-        source_id = RepresentationFidelity.source_span_id(item)
-        binding = RepresentationFidelity.proof_binding(source_id)
-        source_text = item.respond_to?(:text) ? item.text.to_s : ''
-        source_bbox = RepresentationFidelity.strict_source_bbox_pdf(item)
         source_anchor = RepresentationFidelity.numeric_point(anchor)
-        expected_width = (source_bbox[2] - source_bbox[0]).abs *
-          PDF_POINT_TO_INCH * @scale.to_f
-        expected_height = (source_bbox[3] - source_bbox[1]).abs *
-          PDF_POINT_TO_INCH * @scale.to_f
-        rotation_radians = display_angle.to_f * Math::PI / 180.0
-        unless !source_text.empty? && source_anchor &&
-               expected_width.finite? && expected_width > 0.0 &&
-               expected_height.finite? && expected_height > 0.0 &&
-               rotation_radians.finite?
+        unless source_anchor
           raise RepresentationFidelity::ContractError,
                 'rotated label impossibility source placement is unavailable'
         end
-        {
-          :source_span_id => source_id,
-          :importer_id => binding[:importer_id],
-          :page_number => binding[:page_number],
-          :scope => :item,
-          :category => :exact_representation_impossible,
-          :affirmative_impossibility => true,
-          :generic_failure => false,
-          :from_mode => :labels,
-          :to_mode => :text3d,
-          :reason_code => :host_representation_unsupported,
-          :attempted_renderer => 'sketchup_native_text',
-          :created_entity_ids => [],
-          :cleaned_entity_ids => [],
-          :cleanup_outcome => :not_required,
-          :evidence => {
-            :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
-            :source_bbox_pdf => source_bbox,
-            :source_anchor => source_anchor,
-            :source_rotation_radians =>
-              RepresentationFidelity.canonical_number(rotation_radians),
-            :expected_width =>
-              RepresentationFidelity.canonical_number(expected_width),
-            :expected_height =>
-              RepresentationFidelity.canonical_number(expected_height),
-            :source_rotation_degrees => display_angle.to_f,
-            :host_entity_type => 'Sketchup::Text',
-            :host_api_fact => 'Text vector controls the leader and does not rotate label glyphs',
-            :verification => 'source rotation is nonzero and native label orientation is unsupported'
-          }
-        }
+        RepresentationFidelity.labels_transition_impossibility_proof(
+          item, :label_rotation_unsupported_by_host,
+          :source_anchor => source_anchor,
+          :source_rotation_degrees => display_angle.to_f,
+          :pdf_point_to_inch => PDF_POINT_TO_INCH,
+          :import_scale => @scale.to_f
+        )
       end
 
       def host_unsupported_label_size_proof(item, display_angle, anchor)
-        source_id = RepresentationFidelity.source_span_id(item)
-        binding = RepresentationFidelity.proof_binding(source_id)
-        source_text = item.respond_to?(:text) ? item.text.to_s : ''
-        source_bbox = RepresentationFidelity.strict_source_bbox_pdf(item)
         source_anchor = RepresentationFidelity.numeric_point(anchor)
-        expected_width = (source_bbox[2] - source_bbox[0]).abs *
-          PDF_POINT_TO_INCH * @scale.to_f
-        expected_height = (source_bbox[3] - source_bbox[1]).abs *
-          PDF_POINT_TO_INCH * @scale.to_f
-        rotation_radians = display_angle.to_f * Math::PI / 180.0
-        unless !source_text.empty? && source_anchor &&
-               expected_width.finite? && expected_width > 0.0 &&
-               expected_height.finite? && expected_height > 0.0 &&
-               rotation_radians.finite?
+        unless source_anchor
           raise RepresentationFidelity::ContractError,
                 'native label size-impossibility evidence is unavailable'
         end
-        {
-          :source_span_id => source_id,
-          :importer_id => binding[:importer_id],
-          :page_number => binding[:page_number],
-          :scope => :item,
-          :category => :exact_representation_impossible,
-          :affirmative_impossibility => true,
-          :generic_failure => false,
-          :from_mode => :labels,
-          :to_mode => :text3d,
-          :reason_code => :host_representation_unsupported,
-          :attempted_renderer => 'sketchup_native_text',
-          :created_entity_ids => [],
-          :cleaned_entity_ids => [],
-          :cleanup_outcome => :not_required,
-          :evidence => {
-            :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
-            :source_bbox_pdf => source_bbox,
-            :source_anchor => source_anchor,
-            :source_rotation_radians =>
-              RepresentationFidelity.canonical_number(rotation_radians),
-            :expected_width =>
-              RepresentationFidelity.canonical_number(expected_width),
-            :expected_height =>
-              RepresentationFidelity.canonical_number(expected_height),
-            :source_rotation_degrees => display_angle.to_f,
-            :host_entity_type => 'Sketchup::Text',
-            :host_api_fact =>
-              'Sketchup::Text exposes neither glyph-size nor source run-width control',
-            :verification =>
-              'native annotation width and height cannot be matched to the source PDF'
-          }
-        }
+        RepresentationFidelity.labels_transition_impossibility_proof(
+          item, :label_source_size_unsupported_by_host,
+          :source_anchor => source_anchor,
+          :source_rotation_degrees => display_angle.to_f,
+          :pdf_point_to_inch => PDF_POINT_TO_INCH,
+          :import_scale => @scale.to_f
+        )
       end
 
 
@@ -2089,8 +2014,8 @@ module BlueCollarSystems
             'label_rotation_unsupported_by_host', proof
           )
         end
-        if normalize_text_mode_symbol(requested_mode) == :text
-          # The Text request promises source-aligned visual text. SketchUp's
+        if [:text, :labels].include?(normalize_text_mode_symbol(requested_mode))
+          # Text and Labels promise source-aligned visual text. SketchUp's
           # only flat text API creates screen annotations whose glyph size and
           # run width cannot be controlled or verified. Do not create a label
           # and then call its unmeasured result visually exact; advance the
