@@ -253,11 +253,20 @@ module BlueCollarSystems
             )
             cleanup = cleanup_owned_group(entities, group)
             owned_groups.delete(group)
-            result[:failures] << hard_failure(
-              source_id, classify_host_failure(e), e.message,
-              cleanup[:created_entity_ids], cleanup[:cleaned_entity_ids],
-              cleanup[:cleanup_outcome]
-            )
+            if e.is_a?(RuntimeError) &&
+               e.message.to_s.include?(
+                 'source contour has coincident vertices that scaling cannot separate'
+               )
+              result[:transition_proofs] << unrepresentable_as_3d_text_proof(
+                source_id, item, depth, opts[:source_context], e.message
+              )
+            else
+              result[:failures] << hard_failure(
+                source_id, classify_host_failure(e), e.message,
+                cleanup[:created_entity_ids], cleanup[:cleaned_entity_ids],
+                cleanup[:cleanup_outcome]
+              )
+            end
           end
         end
         run_checkpoint!(opts, :text_item, render_items.length, render_items.length)
@@ -1355,6 +1364,40 @@ module BlueCollarSystems
             :source_text_codepoints => text.each_char.map { |c| format('U+%04X', c.ord) },
             :requested_depth => depth,
             :verification => 'item text inspected before any glyph build; no host call attempted',
+            :source_renderer => (source_context.is_a?(Hash) ? source_context[:renderer].to_s : nil)
+          }
+        }
+      end
+
+      def self.unrepresentable_as_3d_text_proof(source_id, item, depth,
+                                                source_context, host_message)
+        binding = RepresentationFidelity.proof_binding(source_id)
+        text = begin
+          CairoGlyphSource.item_text(item)
+        rescue StandardError
+          nil
+        end
+        {
+          :source_span_id => source_id,
+          :importer_id => binding[:importer_id],
+          :page_number => binding[:page_number],
+          :scope => :item,
+          :category => :exact_representation_impossible,
+          :affirmative_impossibility => true,
+          :generic_failure => false,
+          :from_mode => :text3d,
+          :to_mode => :glyphs,
+          :reason_code => :source_item_unrepresentable_as_3d_text,
+          :attempted_renderer => 'svg_source_3d_text',
+          :created_entity_ids => [],
+          :cleaned_entity_ids => [],
+          :cleanup_outcome => :not_required,
+          :evidence => {
+            :source_observation => 'source span glyph contour has coincident vertices that cannot be separated by safe construction scaling; it cannot be represented as a SketchUp 3D text solid',
+            :source_text => text,
+            :requested_depth => depth,
+            :host_error => host_message.to_s,
+            :verification => 'RuntimeError raised during build_span_group after whitespace-only and identity checks passed',
             :source_renderer => (source_context.is_a?(Hash) ? source_context[:renderer].to_s : nil)
           }
         }
