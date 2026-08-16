@@ -462,10 +462,31 @@ module BlueCollarSystems
           block = { used: true, reason: 'raster_fallback' }
         elsif degraded.empty?
           block = { used: false, reason: nil }
+          # Certified affirmative transitions are DELIVERED representation, not
+          # fallback -- but a reader must still be able to see that the host chose
+          # an adjacent rung, and why, without mistaking it for degradation.
+          affirmative = Array(stats[:text_renderers]).select do |entry|
+            entry[:affirmative_transition] || entry['affirmative_transition']
+          end
+          unless affirmative.empty?
+            block[:affirmative_transitions] = affirmative.map do |entry|
+              {
+                requested_mode: normalize_report_text_mode(entry[:requested_mode] || entry["requested_mode"]),
+                delivered_mode: normalize_report_text_mode(entry[:delivered_mode] || entry["delivered_mode"]),
+                reason_code: (entry[:affirmative_transition_reason_code] ||
+                              entry['affirmative_transition_reason_code']).to_s,
+                count: (entry[:count] || entry['count']).to_i,
+                degraded: false
+              }
+            end
+          end
         else
           notes = degraded.map do |entry|
             entry[:note] || entry['note']
           end.compact.map(&:to_s).reject(&:empty?).uniq
+          # Only genuinely degraded renderers reach here now (affirmative
+          # text->text3d transitions no longer set :degraded). The catch-all
+          # reason is therefore an honest environment label again.
           reason = if stats[:svg_renderer_missing]
                      'text_degraded_missing_svg_renderer'
                    elsif notes.include?('Poppler/MuPDF not found')
@@ -538,6 +559,10 @@ module BlueCollarSystems
 
       def normalize_report_text_mode(mode)
         case mode.to_s.strip.downcase
+        # 'text' (flat editable model text) was missing here, so a text->text3d
+        # transition could never be described in the fallback block except as
+        # degradation of an unnamed requested mode.
+        when 'text', 'flat_text', 'editable_text' then 'text'
         when 'text3d', '3d_text', '3d text', 'add_3d_text' then '3d_text'
         when 'labels', 'label', 'add_text' then 'labels'
         when 'glyphs', 'glyph' then 'glyphs'
