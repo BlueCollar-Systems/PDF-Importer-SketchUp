@@ -142,7 +142,12 @@ module SketchupHostLauncher
     end
 
     def spawn(environment, command)
-      Process.spawn(environment, *command)
+      # Process.spawn with an array on Windows does not quote the executable path,
+      # so a path containing spaces (e.g., C:\Program Files\SketchUp\...) fails
+      # with ENOENT. Build a single quoted command line instead.
+      exe, *args = command
+      cmd = %Q{"#{exe}" #{args.map { |a| %Q{"#{a}"} }.join(' ')}}
+      Process.spawn(environment, cmd)
     end
 
     def poll(pid)
