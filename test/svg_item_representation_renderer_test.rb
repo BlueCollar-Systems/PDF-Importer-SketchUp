@@ -377,7 +377,7 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     end
   end
 
-  def test_geometry_can_deliver_an_unambiguous_ligature_that_glyphs_cannot_own
+  def test_ink_covered_ligature_is_owned_as_one_source_outline
     source = ITEM.new('AB', 10.0, 20.0, 12.0, 0.0, 'F1', 12.0,
                       9.0, 19.0, 22.0, 32.0, nil, 'text_span:1:0')
     glyph_entities = ItemVectorEntities.new
@@ -385,6 +385,46 @@ class SvgItemRepresentationRendererTest < Minitest::Test
 
     glyphs = render(glyph_entities, :glyphs, square_svg, source)
     geometry = render(geometry_entities, :geometry, square_svg, source)
+
+    assert_equal true, glyphs[:ok],
+                 'source-ink coverage may own a ligature as one glyph outline'
+    assert_equal true, geometry[:ok]
+    assert_equal [0], glyphs[:placement_indices]
+    assert_equal [0], geometry[:placement_indices]
+    assert_equal :exact_glyph_ownership, glyphs[:association_strategy]
+    assert_equal 1, glyph_entities.to_a.length
+    assert_equal 1, geometry_entities.to_a.length
+  end
+
+  def test_geometry_can_deliver_an_unambiguous_ligature_that_glyphs_cannot_own
+    source = ITEM.new('AB', 10.0, 20.0, 12.0, 0.0, 'F1', 12.0,
+                      9.0, 19.0, 22.0, 32.0, nil, 'text_span:1:0')
+    svg = square_svg
+    opts = { :scale => 1.0, :svg_page_box => MEDIA_BOX }
+    placed = IMP::CairoGlyphSource.model_space_loops(svg, MEDIA_BOX, opts)
+    pens = Array(placed).map do |entry|
+      {
+        :x => Array(entry[:pen_pdf])[0],
+        :y => Array(entry[:pen_pdf])[1],
+        :placement_index => entry[:placement_index]
+      }
+    end
+    match = IMP::CairoGlyphSource.match_spans(pens, [source], MEDIA_BOX)
+    glyph_entities = ItemVectorEntities.new
+    geometry_entities = ItemVectorEntities.new
+    shared = {
+      :scale => 1.0, :svg_page_box => MEDIA_BOX,
+      :source_context => source_context,
+      :precomputed_placed => placed, :precomputed_pens => pens,
+      :precomputed_match => match
+    }
+
+    glyphs = RENDERER.render_svg(
+      glyph_entities, svg, MEDIA_BOX, source, :glyphs, shared
+    )
+    geometry = RENDERER.render_svg(
+      geometry_entities, svg, MEDIA_BOX, source, :geometry, shared
+    )
 
     refute glyphs[:ok],
            'Glyphs needs one exact owned placement for each visible source glyph'
@@ -587,6 +627,65 @@ class SvgItemRepresentationRendererTest < Minitest::Test
       :peer_ambiguous_placement_indices
     ]
     assert_empty entities.to_a
+  end
+
+  def test_isolated_exact_match_rejects_the_whole_span_when_one_peer_overlaps
+    match = {
+      :placement_matches => [
+        { :source_span_id => 'text_span:1:0', :placement_index => 0 },
+        { :source_span_id => 'text_span:1:0', :placement_index => 1 }
+      ]
+    }
+    pens = [
+      { :x => 10.0, :y => 20.0, :placement_index => 0 },
+      { :x => 70.0, :y => 20.0, :placement_index => 1 }
+    ]
+    peer_boxes = {
+      'text_span:1:0' => [9.0, 19.0, 82.0, 32.0],
+      'text_span:1:1' => [9.0, 19.0, 22.0, 32.0]
+    }
+    owners = RENDERER.build_placement_peer_owners(pens, peer_boxes)
+
+    selection = RENDERER.select_item_placements(
+      'text_span:1:0', :glyphs, match, pens, MEDIA_BOX, nil,
+      peer_boxes, owners
+    )
+
+    assert_empty selection[:indices],
+                 'Glyphs must not silently omit the overlapping source glyph'
+    assert_equal [0], selection[:ambiguous_indices]
+    assert_equal [0, 1], selection[:candidate_indices]
+    assert_equal :exact_glyph_ownership, selection[:strategy]
+  end
+
+  def test_page_wide_unique_assignment_keeps_exact_glyphs_inside_peer_bboxes
+    match = {
+      :placement_matches => [
+        { :source_span_id => 'text_span:1:0', :placement_index => 0 },
+        { :source_span_id => 'text_span:1:0', :placement_index => 1 },
+        { :source_span_id => 'text_span:1:1', :placement_index => 2 }
+      ]
+    }
+    pens = [
+      { :x => 10.0, :y => 20.0, :placement_index => 0 },
+      { :x => 70.0, :y => 20.0, :placement_index => 1 },
+      { :x => 11.0, :y => 20.0, :placement_index => 2 }
+    ]
+    peer_boxes = {
+      'text_span:1:0' => [9.0, 19.0, 82.0, 32.0],
+      'text_span:1:1' => [9.0, 19.0, 22.0, 32.0]
+    }
+    owners = RENDERER.build_placement_peer_owners(pens, peer_boxes)
+
+    selection = RENDERER.select_item_placements(
+      'text_span:1:0', :glyphs, match, pens, MEDIA_BOX, nil,
+      peer_boxes, owners
+    )
+
+    assert_equal [0, 1], selection[:indices]
+    assert_empty selection[:ambiguous_indices]
+    assert_equal [0, 1], selection[:candidate_indices]
+    assert_equal :exact_glyph_ownership, selection[:strategy]
   end
 
   def test_glyph_component_cache_reuses_one_exact_definition

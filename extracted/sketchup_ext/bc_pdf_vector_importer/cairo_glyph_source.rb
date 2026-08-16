@@ -334,6 +334,30 @@ module BlueCollarSystems
       # Position-match rendered glyph pen points (PDF points, media-origin
       # relative, y-up) against extractor span bboxes. Returns counts plus
       # the matched item objects (for provenance).
+      def self.placement_pen_record(entry)
+        unless entry.is_a?(Hash)
+          return { :x => nil, :y => nil, :placement_index => nil }
+        end
+        pen = entry[:pen_pdf]
+        pen = entry['pen_pdf'] unless pen.is_a?(Array)
+        if pen.is_a?(Array) && pen.length >= 2
+          x = pen[0]
+          y = pen[1]
+        else
+          x = entry[:x]
+          y = entry[:y]
+        end
+        record = {
+          :x => x,
+          :y => y,
+          :placement_index => entry[:placement_index]
+        }
+        ink = entry[:ink_bbox_pdf]
+        ink = entry['ink_bbox_pdf'] unless ink.is_a?(Array)
+        record[:ink_bbox_pdf] = ink if ink.is_a?(Array) && ink.length >= 4
+        record
+      end
+
       def self.match_spans(placements_pdf, text_items, media_box)
         result = {
           matched_items: [], placement_matches: [],

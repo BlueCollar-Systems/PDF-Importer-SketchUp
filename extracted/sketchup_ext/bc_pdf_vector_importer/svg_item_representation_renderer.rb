@@ -53,11 +53,7 @@ module BlueCollarSystems
                  opts[:precomputed_pens]
                else
                  Array(placed).map do |entry|
-                   {
-                     :x => Array(entry[:pen_pdf])[0],
-                     :y => Array(entry[:pen_pdf])[1],
-                     :placement_index => entry[:placement_index]
-                   }
+                   CairoGlyphSource.placement_pen_record(entry)
                  end
                end
         match = if opts[:precomputed_match].is_a?(Hash)
@@ -370,8 +366,9 @@ module BlueCollarSystems
       # source glyph, so it uses the strict one-to-one semantic association.
       # Flat Geometry has a different contract: it may preserve a ligature or
       # combined source outline as raw paths when every renderer placement in
-      # the source bbox belongs unambiguously to this item. Peer overlap rejects
-      # the entire candidate set instead of duplicating another text artifact.
+      # the source bbox belongs unambiguously to this item. Peer overlap
+      # rejects the entire candidate set instead of duplicating another text
+      # artifact or silently omitting part of the source span.
       def self.build_placement_peer_owners(pens, peer_boxes)
         grid_size = PEER_OWNER_GRID_SIZE_PT
         grid = {}
@@ -432,6 +429,19 @@ module BlueCollarSystems
           record[:source_span_id].to_s == source_id
         end.map { |record| record[:placement_index].to_i }.uniq.sort
         unless exact.empty?
+          # Page-wide match_spans already assigns each pen to at most one
+          # source span. Packed extractor bboxes still overlap, so a later
+          # "pen sits in a peer bbox" check false-proved whole spans
+          # impossible and dumped them to item Raster. Trust the unique
+          # assignment; isolated per-item matches keep the peer-bbox gate.
+          if uniquely_assigned_page_match?(match)
+            return {
+              :indices => exact,
+              :candidate_indices => exact,
+              :ambiguous_indices => [],
+              :strategy => :exact_glyph_ownership
+            }
+          end
           ambiguous = ambiguous_peer_placements(
             exact, pens, media_box, source_id, peer_items,
             precomputed_peer_boxes, precomputed_peer_owners
@@ -463,6 +473,23 @@ module BlueCollarSystems
           :ambiguous_indices => ambiguous,
           :strategy => :bbox_raw_outline_set
         }
+      end
+
+      def self.uniquely_assigned_page_match?(match)
+        return false unless match.is_a?(Hash)
+        owners = {}
+        Array(match[:placement_matches]).each do |record|
+          next unless record.is_a?(Hash)
+          source_span_id = record[:source_span_id].to_s
+          next if source_span_id.empty?
+          placement_index = record[:placement_index].to_i
+          previous = owners[placement_index]
+          return false if previous && previous != source_span_id
+          owners[placement_index] = source_span_id
+        end
+        source_ids = {}
+        owners.each_value { |source_span_id| source_ids[source_span_id] = true }
+        !owners.empty? && source_ids.length > 1
       end
 
       def self.ambiguous_peer_placements(candidate_indices, pens, media_box,
