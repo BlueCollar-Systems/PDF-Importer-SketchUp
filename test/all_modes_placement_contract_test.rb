@@ -162,6 +162,29 @@ class AllModesPlacementContractTest < Minitest::Test
     assert_match(/width|size/i, proof[:evidence][:host_api_fact])
   end
 
+  def test_labels_mode_advances_horizontal_span_before_native_add_text
+    b = make_mode_builder(use_3d: false)
+    item = identified_text_item(
+      'SHOP BOLTS', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil,
+      100.0, 198.0, 160.0, 210.0
+    )
+    ents = LabelModeEntities.new
+
+    refute b.send(:place_text, ents, item, 0.0, 0.0, 792.0, 'TextLayer')
+
+    assert_empty ents.texts
+    failure = b.text_delivery_failures.fetch(0)
+    proof = failure[:transition_proof]
+    assert_equal 'label_source_size_unsupported_by_host', failure[:reason]
+    assert_equal :labels, failure[:requested]
+    assert_equal item.source_span_id, failure[:source_span_id]
+    assert_equal item.source_span_id, proof[:source_span_id]
+    assert_equal :labels, proof[:from_mode]
+    assert_equal :text3d, proof[:to_mode]
+    assert_equal Digest::SHA256.hexdigest('SHOP BOLTS'),
+                 proof[:evidence][:source_text_sha256]
+  end
+
   # Geometry and Glyphs may share free SVG extraction, but every source item
   # owns a distinct physical structure: raw edges vs glyph groups.
   def test_geometry_and_glyphs_force_distinct_host_entity_structures

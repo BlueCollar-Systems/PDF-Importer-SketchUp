@@ -41,7 +41,7 @@ Windows releases include an integrity-checked Poppler runtime. Legacy direct
 ## Legacy hardware notes
 
 - Use the default **3D Text** mode for Adobe-like visual review. On PCs with **&lt; 8 GB RAM** or pre-2015 CPUs, avoid **Glyphs/Geometry** unless exact outline geometry is required because those modes create many edges.
-- Use **Labels** only when editable SketchUp text matters more than model-space PDF appearance.
+- On SketchUp 2017, finite-bbox **Labels** advance to the explicit source-outline 3D visual-equivalent because native annotations cannot preserve source glyph size/run width. This delivery preserves semantic/provenance identity, never silently uses Raster, and is not a native editable annotation.
 - Hardware limits are a **user choice of mode**, not a license for the importer to silently switch modes to “fix” transforms. See [AGENTS.md](AGENTS.md) (text-mode fidelity).
 - Use **page ranges** for large shop sets on slow machines.
 - Import report `human_summary` notes fallbacks; open **Import Health** after import.

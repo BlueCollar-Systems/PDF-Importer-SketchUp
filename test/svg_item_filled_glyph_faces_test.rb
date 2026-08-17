@@ -134,11 +134,22 @@ end
 
 class FilledGlyphMaterial
   attr_reader :name
-  attr_accessor :color, :alpha
+  attr_accessor :color, :alpha, :texture
+  attr_reader :attributes
 
   def initialize(name)
     @name = name
     @alpha = 1.0
+    @texture = nil
+    @attributes = {}
+  end
+
+  def set_attribute(dictionary, key, value)
+    @attributes[[dictionary, key]] = value
+  end
+
+  def get_attribute(dictionary, key, default = nil)
+    @attributes.fetch([dictionary, key], default)
   end
 end
 

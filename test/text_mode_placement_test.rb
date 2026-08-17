@@ -337,23 +337,56 @@ end
 
 sample_label_entities = DummyEntities.new
 sample_mesh_entities = DummyEntities.new
-label_builder.send(:place_text, sample_label_entities, quan, 0.0, 0.0, 792.0, 'TextLayer')
+sample_label_delivered = label_builder.send(
+  :place_text, sample_label_entities, quan, 0.0, 0.0, 792.0, 'TextLayer'
+)
 mesh_builder.send(:place_text, sample_mesh_entities, quan, 0.0, 0.0, 792.0, 'TextLayer')
-label_call = sample_label_entities.texts.first
 mesh_point = first_translation_point(sample_mesh_entities)
-assert_true(label_call && mesh_point, 'sample label and 3D text should both place')
-if label_call && mesh_point
-  label_point = label_call[:point]
-  assert_near(label_point.x, mesh_point.x, 0.001,
-              '3D Text should use same SketchUp X anchor as label for centered bbox text')
-  assert_near(label_point.y, mesh_point.y, 0.001,
-              '3D Text should use same SketchUp Y anchor as label for centered bbox text')
-  label_vec = label_call[:vector]
-  assert_true(label_vec && label_vec.x.abs < 0.001 && label_vec.y.abs < 0.001,
-              'native Labels should use a zero leader vector')
-  assert_true(label_call[:entity].display_leader == false,
-              'native Labels should hide SketchUp leader lines when the API supports it')
-end
+assert_true(!sample_label_delivered,
+            'finite horizontal Labels must advance before native add_text')
+assert_true(sample_label_entities.texts.empty?,
+            'finite horizontal Labels must create no unmeasured native Text')
+sample_label_failure = label_builder.text_delivery_failures.last
+sample_label_proof = sample_label_failure && sample_label_failure[:transition_proof]
+assert_true(sample_label_failure &&
+            sample_label_failure[:reason] == 'label_source_size_unsupported_by_host',
+            'horizontal Labels must record the source-size host limitation')
+assert_true(sample_label_failure && sample_label_failure[:requested] == :labels,
+            'horizontal Labels failure must retain the requested representation')
+assert_true(sample_label_proof && sample_label_proof[:source_span_id] == quan.source_span_id,
+            'horizontal Labels proof must retain the source-span identity')
+assert_true(sample_label_proof &&
+            sample_label_proof[:evidence][:source_text_sha256] ==
+              Digest::SHA256.hexdigest('QUAN'),
+            'horizontal Labels proof must retain the semantic-text binding')
+assert_true(sample_label_proof && sample_label_proof[:from_mode] == :labels &&
+            sample_label_proof[:to_mode] == :text3d,
+            'horizontal Labels must advance only to source-outline 3D Text')
+assert_true(mesh_point,
+            'the existing direct 3D Text path must continue to place the span')
+
+stacked_label_builder = make_builder(use_3d_text: false)
+stacked_label_entities = DummyEntities.new
+stacked_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+  '2 2', 100.0, 200.0, 8.0, 0.0, 'pdftotext', nil,
+  100.0, 200.0, 108.0, 240.0, nil, 'text_span:1:3'
+)
+stacked_label_builder.send(
+  :place_text, stacked_label_entities, stacked_item,
+  0.0, 0.0, 792.0, 'TextLayer'
+)
+stacked_failures = stacked_label_builder.text_delivery_failures
+assert_true(stacked_label_entities.texts.empty?,
+            'stacked Labels must create no native Text sub-items')
+assert_true(stacked_failures.length == 1,
+            'one stacked source span must produce one source-bound transition proof')
+stacked_proof = stacked_failures.first && stacked_failures.first[:transition_proof]
+assert_true(stacked_proof && stacked_proof[:source_span_id] == stacked_item.source_span_id,
+            'stacked Labels fallback must retain the parent source-span identity')
+assert_true(stacked_proof &&
+            stacked_proof[:evidence][:source_text_sha256] ==
+              Digest::SHA256.hexdigest('2 2'),
+            'stacked Labels fallback must retain the parent semantic text')
 
 rotated_item = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   'a1001', 140.0, 250.0, 8.0, 90.0, 'pdftotext', nil, 140.0, 250.0, 148.0, 292.0,
@@ -543,30 +576,30 @@ else
     mesh_builder.send(:place_text, mesh_entities, item, 0.0, 0.0, 792.0, 'TextLayer')
   end
 
-  extra_placements = items.inject(0) do |acc, it|
-    acc + (label_builder.send(:stacked_vertical_dimension_labels?, it) ?
-             it.text.to_s.strip.split(/\s+/).length - 1 : 0)
-  end
-  expected_labels = items.length + extra_placements
+  expected_labels = items.length
   label_total = label_entities.entities.count do |entity|
     entity.respond_to?(:typename) && entity.typename.to_s == 'Text'
   end
   label_failures = label_builder.text_delivery_failures[label_failure_start..-1] || []
-  rotation_transitions = label_failures.select do |failure|
+  label_transitions = label_failures.select do |failure|
     proof = failure[:transition_proof]
-    failure[:reason] == 'label_rotation_unsupported_by_host' &&
+    ['label_rotation_unsupported_by_host',
+     'label_source_size_unsupported_by_host'].include?(failure[:reason]) &&
       failure[:source_span_id].to_s =~ /\Atext_span:1:\d+\z/ &&
       proof && proof[:source_span_id] == failure[:source_span_id] &&
       proof[:affirmative_impossibility] == true &&
       proof[:from_mode] == :labels && proof[:to_mode] == :text3d
   end
-  assert_true(label_failures.length == rotation_transitions.length,
-              'every undelivered acceptance Label must have an item-bound rotation transition')
-  assert_true(label_total + rotation_transitions.length == expected_labels,
-              "Labels mode must place or prove the adjacent rotation transition for all #{expected_labels} " \
-              "annotations (got #{label_total} placements + #{rotation_transitions.length} proofs)")
+  assert_true(label_total == 0,
+              'Labels visual-parity mode must create zero native Text entities')
+  assert_true(label_failures.length == label_transitions.length,
+              'every acceptance Label must have an item-bound size/rotation transition')
+  assert_true(label_transitions.length == expected_labels,
+              "Labels mode must prove one adjacent source-outline transition for all #{expected_labels} " \
+              "spans (got #{label_transitions.length} proofs)")
   assert_true(label_entities.mesh_calls.empty?,
-              "Labels mode should not create 3D text while native labels succeed (got #{label_entities.mesh_calls.length})")
+              "the direct builder must defer source-outline 3D Text to the page fallback helper " \
+              "(got #{label_entities.mesh_calls.length} direct mesh calls)")
   assert_true(mesh_entities.mesh_calls.length == items.length,
               "3D Text mode should mesh every item (got #{mesh_entities.mesh_calls.length} of #{items.length})")
 
@@ -589,7 +622,7 @@ else
   assert_true(!label_stop_builder.text_delivery_failures.empty?,
               'Labels failure must be reported for the exact source span')
 
-  puts "  External reference: labels=#{label_total}, rotation_proofs=#{rotation_transitions.length}, " \
+  puts "  External reference: labels=#{label_total}, transition_proofs=#{label_transitions.length}, " \
        "mesh=#{mesh_entities.mesh_calls.length}, items=#{items.length}"
 end
 

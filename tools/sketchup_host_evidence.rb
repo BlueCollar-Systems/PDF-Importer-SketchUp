@@ -111,6 +111,530 @@ module SketchupHostEvidence
     'raster_image' => :raster,
     'sketchup_image' => :raster
   }.freeze unless const_defined?(:CREATED_ENTITY_MODES, false)
+  LABELS_VISUAL_EQUIVALENT_SCHEMA =
+    'bcs.labels_visual_equivalent_acceptance/1.0'.freeze unless
+      const_defined?(:LABELS_VISUAL_EQUIVALENT_SCHEMA, false)
+  LABELS_VISUAL_EQUIVALENT_SOURCE_COUNT = 791 unless
+    const_defined?(:LABELS_VISUAL_EQUIVALENT_SOURCE_COUNT, false)
+  LABELS_VISUAL_EQUIVALENT_SIZE_COUNT = 653 unless
+    const_defined?(:LABELS_VISUAL_EQUIVALENT_SIZE_COUNT, false)
+  LABELS_VISUAL_EQUIVALENT_ROTATION_COUNT = 138 unless
+    const_defined?(:LABELS_VISUAL_EQUIVALENT_ROTATION_COUNT, false)
+  LABELS_CONTOUR_EDGE_POLICY = 'persisted_hidden'.freeze unless
+    const_defined?(:LABELS_CONTOUR_EDGE_POLICY, false)
+  LABELS_FIXED_FRAME_STYLE_POLICY =
+    'source_outline_filled_faces_with_hidden_contour_edges'.freeze unless
+      const_defined?(:LABELS_FIXED_FRAME_STYLE_POLICY, false)
+
+  # Canonical 1011 Labels visual-equivalent acceptance. This is intentionally
+  # opt-in at the host-job layer: ordinary Labels imports may contain any source
+  # count, while this release gate requires the exact known 791-span corpus.
+  # It certifies only persisted/reopened model evidence. The <=30 second import
+  # budget and fixed-frame Adobe side-by-side comparison remain external live
+  # gates and are named in, never claimed by, the returned census.
+  def self.verify_labels_visual_equivalent_acceptance!(evidence,
+                                                       reopened_manifest)
+    unless evidence.is_a?(Hash) &&
+           normalize_mode(hash_value(evidence, :requested_text_mode)) == :labels
+      raise EvidenceError,
+            'Labels visual-equivalent acceptance requires requested Labels'
+    end
+    expected_count = LABELS_VISUAL_EQUIVALENT_SOURCE_COUNT
+    spans = labels_acceptance_array!(evidence, :text_source_span_ids).map do |id|
+      id.to_s
+    end
+    unless spans.length == expected_count && spans.uniq.length == expected_count &&
+           spans.all? { |id| id =~ SOURCE_SPAN_ID }
+      raise EvidenceError,
+            "Labels visual-equivalent source census must contain #{expected_count} unique spans"
+    end
+
+    attempts = labels_acceptance_array!(evidence, :text_attempts)
+    transitions = labels_acceptance_array!(evidence, :fallback_transitions)
+    provenance = labels_visual_provenance_objects!(evidence)
+    unless attempts.length == expected_count &&
+           transitions.length == expected_count &&
+           provenance.length == expected_count
+      raise EvidenceError,
+            "Labels visual-equivalent acceptance requires #{expected_count} attempts, transitions, and provenance rows"
+    end
+    labels_require_no_raster!(evidence)
+
+    attempt_by_source = {}
+    persistent_by_source = {}
+    source_sha_by_source = {}
+    evidence_sha_by_source = {}
+    transition_proof_by_source = {}
+    transition_reason_by_source = {}
+    reasons = Hash.new(0)
+    attempts.each do |attempt|
+      unless attempt.is_a?(Hash)
+        raise EvidenceError, 'Labels visual-equivalent attempt is invalid'
+      end
+      source_id = hash_value(attempt, :source_span_id).to_s
+      if attempt_by_source.key?(source_id)
+        raise EvidenceError,
+              "duplicate Labels visual-equivalent attempt #{source_id}"
+      end
+      unless normalize_mode(hash_value(attempt, :requested_mode)) == :labels &&
+             normalize_mode(hash_value(attempt, :delivered_mode)) == :text3d &&
+             hash_value(attempt, :renderer).to_s == 'svg_source_3d_text'
+        raise EvidenceError,
+              "#{source_id} is not a Labels to source-glyph 3D delivery"
+      end
+      identity = labels_single_persistent_identity!(
+        hash_value(attempt, :resulting_entity_ids),
+        "#{source_id} attempt"
+      )
+      source_sha = hash_value(attempt, :source_text_sha256).to_s.downcase
+      unless source_sha =~ /\A[0-9a-f]{64}\z/
+        raise EvidenceError, "#{source_id} source text SHA256 is invalid"
+      end
+      expected = hash_value(attempt, :expected_evidence)
+      unless expected.is_a?(Hash) &&
+             hash_value(expected, :source_span_id).to_s == source_id &&
+             hash_value(expected, :source_text_sha256).to_s.downcase == source_sha &&
+             normalize_mode(hash_value(expected, :representation)) == :text3d
+        raise EvidenceError,
+              "#{source_id} expected source span/SHA evidence is inconsistent"
+      end
+      evidence_sha = hash_value(expected, :evidence_sha256).to_s.downcase
+      unless evidence_sha =~ /\A[0-9a-f]{64}\z/
+        raise EvidenceError, "#{source_id} source evidence SHA256 is invalid"
+      end
+      history = hash_value(attempt, :attempt_history)
+      unless history.is_a?(Array)
+        raise EvidenceError, "#{source_id} attempt history is missing"
+      end
+      labels_rungs = history.select do |rung|
+        rung.is_a?(Hash) && normalize_mode(hash_value(rung, :mode)) == :labels
+      end
+      text3d_rungs = history.select do |rung|
+        rung.is_a?(Hash) && normalize_mode(hash_value(rung, :mode)) == :text3d
+      end
+      unless labels_rungs.length == 1 &&
+             hash_value(labels_rungs[0], :outcome).to_s == 'failed' &&
+             text3d_rungs.length == 1 &&
+             hash_value(text3d_rungs[0], :outcome).to_s == 'complete'
+        raise EvidenceError,
+              "#{source_id} does not contain one failed Labels rung and one completed 3D Text rung"
+      end
+      reason = hash_value(labels_rungs[0], :reason).to_s
+      unless %w[
+        label_source_size_unsupported_by_host
+        label_rotation_unsupported_by_host
+      ].include?(reason)
+        raise EvidenceError,
+              "#{source_id} Labels transition reason is invalid"
+      end
+      reasons[reason] += 1
+      transition_proof_by_source[source_id] =
+        labels_transition_signature!(
+          hash_value(labels_rungs[0], :transition_proof),
+          source_id, source_sha, reason, attempt
+        )
+      transition_reason_by_source[source_id] = reason
+      attempt_by_source[source_id] = attempt
+      persistent_by_source[source_id] = identity
+      source_sha_by_source[source_id] = source_sha
+      evidence_sha_by_source[source_id] = evidence_sha
+    end
+    unless attempt_by_source.keys.sort == spans.sort
+      raise EvidenceError,
+            'Labels visual-equivalent attempt/source span sets differ'
+    end
+    unless persistent_by_source.values.uniq.length == expected_count
+      raise EvidenceError,
+            'Labels visual-equivalent persistent identities are not one-to-one'
+    end
+    unless reasons['label_source_size_unsupported_by_host'] ==
+             LABELS_VISUAL_EQUIVALENT_SIZE_COUNT &&
+           reasons['label_rotation_unsupported_by_host'] ==
+             LABELS_VISUAL_EQUIVALENT_ROTATION_COUNT
+      raise EvidenceError,
+            'Labels transition accounting must be 653 size and 138 rotation proofs'
+    end
+
+    transition_by_source = {}
+    transition_sources = transitions.map do |transition|
+      unless transition.is_a?(Hash)
+        raise EvidenceError,
+              'Labels visual-equivalent transition is invalid'
+      end
+      source_id = hash_value(transition, :source_span_id).to_s
+      if transition_by_source.key?(source_id)
+        raise EvidenceError,
+              "duplicate Labels visual-equivalent transition #{source_id}"
+      end
+      signature = labels_transition_signature!(
+        transition, source_id, source_sha_by_source[source_id],
+        transition_reason_by_source[source_id], attempt_by_source[source_id]
+      )
+      fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+      local = transition_proof_by_source[source_id]
+      unless local[:proof_sha256] == signature[:proof_sha256] &&
+             fidelity.canonical_json(local) == fidelity.canonical_json(signature)
+        raise EvidenceError,
+              "#{source_id} global transition is not bound to its Labels attempt proof"
+      end
+      transition_by_source[source_id] = signature
+      source_id
+    end
+    unless transition_sources.length == transition_sources.uniq.length &&
+           transition_sources.sort == spans.sort
+      raise EvidenceError,
+            'Labels visual-equivalent transition/source span sets differ'
+    end
+
+    provenance_by_source = {}
+    provenance.each do |row|
+      unless row.is_a?(Hash)
+        raise EvidenceError, 'Labels visual-equivalent provenance row is invalid'
+      end
+      source_id = hash_value(row, :span_id).to_s
+      object_id = hash_value(row, :object_id).to_s
+      if provenance_by_source.key?(source_id)
+        raise EvidenceError,
+              "duplicate Labels visual-equivalent provenance #{source_id}"
+      end
+      unless object_id == source_id &&
+             hash_value(row, :created_entity_type).to_s ==
+               'source_glyph_3d_text' &&
+             hash_value(row, :renderer).to_s == 'svg_source_3d_text'
+        raise EvidenceError,
+              "#{source_id} provenance is not source-glyph 3D Text"
+      end
+      identity = labels_single_persistent_identity!(
+        hash_value(row, :resulting_entity_ids),
+        "#{source_id} provenance"
+      )
+      unless identity == persistent_by_source[source_id]
+        raise EvidenceError,
+              "#{source_id} provenance/persistent identity is not one-to-one"
+      end
+      expected = hash_value(row, :expected_evidence)
+      unless expected.is_a?(Hash) &&
+             hash_value(expected, :source_span_id).to_s == source_id &&
+             hash_value(expected, :source_text_sha256).to_s.downcase ==
+               source_sha_by_source[source_id] &&
+             hash_value(expected, :evidence_sha256).to_s.downcase ==
+               evidence_sha_by_source[source_id]
+        raise EvidenceError,
+              "#{source_id} provenance source span/SHA evidence differs"
+      end
+      provenance_by_source[source_id] = object_id
+    end
+    unless provenance_by_source.keys.sort == spans.sort &&
+           provenance_by_source.values.uniq.length == expected_count
+      raise EvidenceError,
+            'Labels visual-equivalent provenance/source IDs are not one-to-one'
+    end
+
+    verify_source_claim_ancestry_disjoint!(reopened_manifest)
+    all_rows = labels_flatten_manifest!(reopened_manifest)
+    text_count = all_rows.count do |row|
+      hash_value(row, :typename).to_s == 'Text'
+    end
+    unless text_count == 0
+      raise EvidenceError,
+            "reopened Labels visual-equivalent model contains #{text_count} native Sketchup::Text entities"
+    end
+    raster_count = all_rows.count do |row|
+      type = hash_value(row, :typename).to_s.downcase
+      representation = hash_value(row, :representation_evidence)
+      mode = representation.is_a?(Hash) ?
+        normalize_mode(hash_value(representation, :representation)) : nil
+      IMAGE_TYPENAMES.include?(type) || mode == :raster
+    end
+    unless raster_count == 0
+      raise EvidenceError,
+            "reopened Labels visual-equivalent model contains #{raster_count} raster entities"
+    end
+    claims = all_rows.select do |row|
+      representation = hash_value(row, :representation_evidence)
+      representation.is_a?(Hash) &&
+        hash_value(representation, :source_claim_root) == true
+    end
+    unless claims.length == expected_count
+      raise EvidenceError,
+            "reopened Labels visual-equivalent model must contain #{expected_count} source claim roots"
+    end
+    claim_sources = {}
+    claim_persistent = {}
+    claims.each do |row|
+      representation = hash_value(row, :representation_evidence)
+      source_id = hash_value(representation, :source_span_id).to_s
+      if claim_sources.key?(source_id)
+        raise EvidenceError,
+              "duplicate reopened source claim #{source_id}"
+      end
+      persistent_id = hash_value(row, :persistent_id)
+      unless persistent_id.is_a?(Integer) && persistent_id > 0
+        raise EvidenceError,
+              "#{source_id} reopened persistent identity is invalid"
+      end
+      if claim_persistent.key?(persistent_id)
+        raise EvidenceError,
+              "duplicate reopened persistent identity #{persistent_id}"
+      end
+      expected_identity = "persistent_id:#{persistent_id}"
+      unless persistent_by_source[source_id] == expected_identity &&
+             hash_value(row, :typename).to_s == 'Group' &&
+             normalize_mode(hash_value(representation, :representation)) == :text3d &&
+             hash_value(representation, :renderer).to_s == 'svg_source_3d_text' &&
+             hash_value(representation, :source_kind).to_s == 'text_span' &&
+             hash_value(representation, :source_text_sha256).to_s.downcase ==
+               source_sha_by_source[source_id] &&
+             hash_value(representation, :source_evidence_sha256).to_s.downcase ==
+               evidence_sha_by_source[source_id]
+        raise EvidenceError,
+              "#{source_id} reopened source span/SHA/persistent claim differs"
+      end
+      labels_verify_reopened_visual_style!(row, source_id)
+      claim_sources[source_id] = true
+      claim_persistent[persistent_id] = true
+    end
+    unless claim_sources.keys.sort == spans.sort
+      raise EvidenceError,
+            'reopened Labels visual-equivalent claim/source span sets differ'
+    end
+
+    {
+      'schema' => LABELS_VISUAL_EQUIVALENT_SCHEMA,
+      'requested_mode' => 'labels',
+      'reopened_sketchup_text_count' => text_count,
+      'reopened_raster_count' => raster_count,
+      'source_glyph_3d_delivery_count' => claims.length,
+      'unique_source_span_count' => spans.uniq.length,
+      'unique_persistent_id_count' => claim_persistent.length,
+      'unique_provenance_id_count' => provenance_by_source.values.uniq.length,
+      'labels_to_text3d_transition_count' => transition_sources.length,
+      'label_source_size_transition_count' =>
+        reasons['label_source_size_unsupported_by_host'],
+      'label_rotation_transition_count' =>
+        reasons['label_rotation_unsupported_by_host'],
+      'filled_visible_faces_verified' => true,
+      'persisted_hidden_contour_edges_verified' => true,
+      'external_live_gates_required' => [
+        'import_elapsed_seconds_lte_30',
+        'fixed_frame_side_by_side_no_visible_difference'
+      ]
+    }
+  end
+
+  def self.labels_acceptance_array!(evidence, key)
+    value = hash_value(evidence, key)
+    unless value.is_a?(Array)
+      raise EvidenceError,
+            "Labels visual-equivalent #{key} ledger is missing"
+    end
+    value
+  end
+  private_class_method :labels_acceptance_array!
+
+  def self.labels_visual_provenance_objects!(evidence)
+    value = hash_value(evidence, :source_provenance_objects)
+    if value.nil?
+      container = hash_value(evidence, :source_provenance)
+      value = hash_value(container, :objects) if container.is_a?(Hash)
+    end
+    unless value.is_a?(Array)
+      raise EvidenceError,
+            'Labels visual-equivalent source provenance ledger is missing'
+    end
+    value
+  end
+  private_class_method :labels_visual_provenance_objects!
+
+  def self.labels_require_no_raster!(evidence)
+    [
+      :raster_delivery_records, :inline_image_page_raster_fallbacks,
+      :page_representation_fallbacks
+    ].each do |key|
+      rows = labels_acceptance_array!(evidence, key)
+      unless rows.empty?
+        raise EvidenceError,
+              "Labels visual-equivalent acceptance forbids #{key} raster delivery"
+      end
+    end
+    [:page_text_delivery_records, :terminal_text_delivery_records].each do |key|
+      rows = labels_acceptance_array!(evidence, key)
+      rows.each do |row|
+        unless row.is_a?(Hash)
+          raise EvidenceError,
+                "Labels visual-equivalent #{key} row is invalid"
+        end
+        delivered = normalize_mode(hash_value(row, :delivered_mode))
+        representation = normalize_mode(hash_value(row, :representation))
+        entity_type = hash_value(row, :created_entity_type).to_s.downcase
+        renderer = hash_value(row, :renderer).to_s.downcase
+        if delivered == :raster || representation == :raster ||
+           %w[raster_image sketchup_image image].include?(entity_type) ||
+           renderer.include?('raster')
+          raise EvidenceError,
+                "Labels visual-equivalent acceptance forbids raster in #{key}"
+        end
+      end
+    end
+    if hash_value(evidence, :raster_fallback_used) == true
+      raise EvidenceError,
+            'Labels visual-equivalent acceptance forbids raster fallback'
+    end
+    true
+  end
+  private_class_method :labels_require_no_raster!
+
+  def self.labels_single_persistent_identity!(values, label)
+    ids = values
+    unless ids.is_a?(Array) && ids.length == 1
+      raise EvidenceError, "#{label} must own exactly one persistent identity"
+    end
+    identity = ids[0].to_s
+    unless identity =~ /\Apersistent_id:[1-9][0-9]*\z/
+      raise EvidenceError, "#{label} identity is not a persistent_id"
+    end
+    identity
+  end
+  private_class_method :labels_single_persistent_identity!
+
+  def self.labels_transition_signature!(proof, expected_source_id,
+                                        expected_source_sha, expected_reason,
+                                        attempt = nil)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    source_id = expected_source_id.to_s
+    context = {
+      :source_span_id => source_id,
+      :importer_id => fidelity::IMPORTER_ID,
+      :page_number => source_span_page!(source_id),
+      :requested_mode => :labels,
+      :reason_subtype => expected_reason,
+      :source_text_sha256 => expected_source_sha.to_s.downcase
+    }
+    if attempt.is_a?(Hash)
+      bbox = hash_value(attempt, :source_bbox_pdf)
+      context[:source_bbox_pdf] = bbox if bbox.is_a?(Array)
+    end
+    fidelity.validate_labels_transition_proof!(
+      proof, expected_reason, context
+    )
+  rescue StandardError => error
+    raise EvidenceError,
+          "#{expected_source_id} Labels transition proof is invalid: #{error.message}"
+  end
+  private_class_method :labels_transition_signature!
+
+  def self.labels_flatten_manifest!(rows, result = [])
+    unless rows.is_a?(Array)
+      raise EvidenceError,
+            'reopened Labels visual-equivalent manifest is missing'
+    end
+    rows.each do |row|
+      unless row.is_a?(Hash)
+        raise EvidenceError,
+              'reopened Labels visual-equivalent manifest row is invalid'
+      end
+      unless hash_value(row, :valid) == true &&
+             hash_value(row, :deleted) == false
+        raise EvidenceError,
+              'reopened Labels visual-equivalent manifest contains a non-live entity'
+      end
+      result << row
+      children = hash_value(row, :children)
+      children = [] if children.nil?
+      labels_flatten_manifest!(children, result)
+    end
+    result
+  end
+  private_class_method :labels_flatten_manifest!
+
+  def self.labels_verify_reopened_visual_style!(row, source_id)
+    representation = hash_value(row, :representation_evidence)
+    unless hash_value(representation, :contour_edge_policy).to_s ==
+             LABELS_CONTOUR_EDGE_POLICY &&
+           hash_value(representation, :contour_edges_hidden_verified) == true &&
+           hash_value(representation, :fixed_frame_style_policy).to_s ==
+             LABELS_FIXED_FRAME_STYLE_POLICY
+      raise EvidenceError,
+            "#{source_id} has no governed persisted contour-edge policy"
+    end
+    style = hash_value(row, :style_evidence)
+    source_rgb = hash_value(representation, :source_ink_rgb)
+    source_alpha = hash_value(representation, :source_ink_alpha)
+    material_name = hash_value(
+      representation, :source_ink_material_name
+    ).to_s
+    material = style.is_a?(Hash) ? hash_value(style, :material) : nil
+    material_color = material.is_a?(Hash) ?
+      hash_value(material, :color) : nil
+    physical_rgb = if material_color.is_a?(Hash)
+                     [
+                       hash_value(material_color, :red),
+                       hash_value(material_color, :green),
+                       hash_value(material_color, :blue)
+                     ]
+                   end
+    source_rgb_valid = source_rgb.is_a?(Array) && source_rgb.length == 3 &&
+      source_rgb.all? { |value|
+        value.is_a?(Integer) && value >= 0 && value <= 255
+      }
+    unless hash_value(representation, :source_ink_material_owned) == true &&
+           source_rgb_valid &&
+           source_alpha.is_a?(Numeric) &&
+           (source_alpha.to_f - 1.0).abs <= 1.0e-12 &&
+           !material_name.empty? &&
+           hash_value(
+             representation, :source_ink_color_readback_verified
+           ) == true &&
+           hash_value(
+             representation, :source_ink_alpha_readback_verified
+           ) == true &&
+           hash_value(
+             representation, :source_ink_texture_absent_verified
+           ) == true &&
+           material.is_a?(Hash) &&
+           hash_value(material, :name).to_s == material_name &&
+           physical_rgb == source_rgb &&
+           hash_value(material, :alpha).is_a?(Numeric) &&
+           (hash_value(material, :alpha).to_f - 1.0).abs <= 1.0e-12 &&
+           hash_value(material, :texture_present) == false
+      raise EvidenceError,
+            "#{source_id} source ink material/color/alpha/texture readback is invalid"
+    end
+    readback = style.is_a?(Hash) ? hash_value(style, :visual_readback) : nil
+    unless readback.is_a?(Hash)
+      raise EvidenceError,
+            "#{source_id} reopened visual style readback is missing"
+    end
+    edge_count = hash_value(readback, :edge_count).to_i
+    hidden_edges = hash_value(readback, :hidden_edge_count).to_i
+    visible_edges = hash_value(readback, :visible_edge_count).to_i
+    face_count = hash_value(readback, :face_count).to_i
+    visible_faces = hash_value(readback, :visible_face_count).to_i
+    filled_faces = hash_value(
+      readback, :materialized_visible_face_count
+    ).to_i
+    persisted_edge_count = hash_value(representation, :contour_edge_count)
+    unless persisted_edge_count.is_a?(Integer) &&
+           persisted_edge_count == edge_count
+      raise EvidenceError,
+            "#{source_id} persisted contour-edge count differs from readback"
+    end
+    unless hash_value(readback, :root_entity_visible) == true &&
+           hash_value(readback, :root_layer_visible) == true &&
+           edge_count > 0 && hidden_edges == edge_count &&
+           visible_edges == 0 &&
+           hash_value(readback, :all_contour_edges_hidden) == true
+      raise EvidenceError,
+            "#{source_id} reopened contour-edge suppression/readback failed"
+    end
+    unless face_count > 0 && visible_faces == face_count &&
+           filled_faces == face_count
+      raise EvidenceError,
+            "#{source_id} reopened faces are not all visible and material-filled"
+    end
+    true
+  end
+  private_class_method :labels_verify_reopened_visual_style!
 
   def self.verify_source_locations!(expected_root, locations)
     root = normalized_path(expected_root)
@@ -436,6 +960,7 @@ module SketchupHostEvidence
     if !manifest.is_a?(Array) || manifest.empty?
       raise EvidenceError, 'entity manifest is missing or empty'
     end
+    verify_source_claim_ancestry_disjoint!(manifest)
     namespaces = manifest_identity_sets(manifest)
     if namespaces['entity_id'].empty? || namespaces['persistent_id'].empty?
       raise EvidenceError,
@@ -822,6 +1347,7 @@ module SketchupHostEvidence
       'material' => style_root[:material],
       'back_material' => style_root[:back_material]
     }
+    style['visual_readback'] = physical_style_visual_readback(style_root)
     if compact
       schema = 'bcs.host_physical_partition/1.0'
       geometry['schema'] = schema
@@ -838,6 +1364,61 @@ module SketchupHostEvidence
     raise EvidenceError, "host physical evidence failed: #{error.message}"
   end
   private_class_method :physical_tree_evidence
+
+  def self.physical_style_visual_readback(root)
+    unless root.is_a?(Hash)
+      raise EvidenceError, 'host physical style payload is unavailable'
+    end
+    counts = {
+      'edge_count' => 0,
+      'hidden_edge_count' => 0,
+      'visible_edge_count' => 0,
+      'face_count' => 0,
+      'visible_face_count' => 0,
+      'materialized_visible_face_count' => 0
+    }
+    visit = nil
+    visit = lambda do |payload, inherited_visible, inherited_material|
+      unless payload.is_a?(Hash)
+        raise EvidenceError, 'host physical child style payload is invalid'
+      end
+      entity_visible = inherited_visible &&
+        payload[:entity_visible] != false && payload['entity_visible'] != false &&
+        payload[:layer_visible] != false && payload['layer_visible'] != false
+      material = payload[:material] || payload['material'] || inherited_material
+      type = (payload[:type] || payload['type']).to_s
+      if type == 'Edge'
+        counts['edge_count'] += 1
+        hidden = payload[:hidden] == true || payload['hidden'] == true
+        counts['hidden_edge_count'] += 1 if hidden
+        counts['visible_edge_count'] += 1 if entity_visible && !hidden
+      elsif type == 'Face'
+        counts['face_count'] += 1
+        if entity_visible
+          counts['visible_face_count'] += 1
+          counts['materialized_visible_face_count'] += 1 unless material.nil?
+        end
+      end
+      children = payload[:children] || payload['children'] || []
+      unless children.is_a?(Array)
+        raise EvidenceError, 'host physical style children are invalid'
+      end
+      children.each do |child|
+        visit.call(child, entity_visible, material)
+      end
+    end
+    visit.call(root, true, nil)
+    counts['all_contour_edges_hidden'] =
+      counts['edge_count'] > 0 &&
+      counts['hidden_edge_count'] == counts['edge_count'] &&
+      counts['visible_edge_count'] == 0
+    counts['root_entity_visible'] =
+      root[:entity_visible] == true || root['entity_visible'] == true
+    counts['root_layer_visible'] =
+      root[:layer_visible] != false && root['layer_visible'] != false
+    counts
+  end
+  private_class_method :physical_style_visual_readback
 
   def self.compact_owner_typename?(typename)
     ['Group', 'ComponentInstance', 'Text', 'Image'].include?(typename.to_s)
@@ -1151,7 +1732,14 @@ module SketchupHostEvidence
     values['source_claim_root'] = claim_root unless claim_root.nil?
     [
       'source_evidence_sha256', 'source_text_sha256',
-      'physical_geometry_sha256', 'physical_style_sha256'
+      'physical_geometry_sha256', 'physical_style_sha256',
+      'source_ink_material_owned', 'source_ink_material_name',
+      'source_ink_rgb', 'source_ink_alpha',
+      'source_ink_color_readback_verified',
+      'source_ink_alpha_readback_verified',
+      'source_ink_texture_absent_verified',
+      'contour_edge_policy', 'contour_edge_count',
+      'contour_edges_hidden_verified', 'fixed_frame_style_policy'
     ].each do |key|
       value = entity.get_attribute(dictionary, key, nil)
       values[key] = value unless value.nil?
@@ -1337,6 +1925,33 @@ module SketchupHostEvidence
     end
   end
   private_class_method :visit_manifest
+
+  def self.verify_source_claim_ancestry_disjoint!(rows)
+    visit = nil
+    visit = lambda do |children, ancestor_claim|
+      unless children.is_a?(Array)
+        raise EvidenceError, 'manifest children must be an Array'
+      end
+      children.each do |row|
+        unless row.is_a?(Hash)
+          raise EvidenceError, 'manifest row must be a Hash'
+        end
+        representation = hash_value(row, :representation_evidence)
+        claim = source_claim_root?(representation)
+        if claim && ancestor_claim
+          source_id = hash_value(representation, :source_span_id).to_s
+          raise EvidenceError,
+                "source claim root #{source_id} is nested under another source claim root"
+        end
+        descendants = hash_value(row, :children)
+        descendants = [] if descendants.nil?
+        visit.call(descendants, ancestor_claim || claim)
+      end
+    end
+    visit.call(rows, false)
+    true
+  end
+  private_class_method :verify_source_claim_ancestry_disjoint!
 
   def self.verify_ready_gate!(stats, gate_name)
     gate = hash_value(stats, gate_name)
@@ -2068,7 +2683,8 @@ module SketchupHostEvidence
   private_class_method :canonical_claims!
 
   def self.transition_signature!(proof, expected_mode, source_id, from_mode,
-                                 to_mode, selected_pages, attempt = nil)
+                                 to_mode, selected_pages, attempt = nil,
+                                 expected_failure_reason = nil)
     raise EvidenceError, 'fallback transition proof is missing' unless
       proof.is_a?(Hash)
     proof_source = hash_value(proof, :source_span_id).to_s.strip
@@ -2111,6 +2727,7 @@ module SketchupHostEvidence
       raise EvidenceError, 'fallback transition evidence is missing'
     end
     evidence_digest = nil
+    canonical_transition_payload = nil
     if actual_from == :text
       fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
       begin
@@ -2144,6 +2761,35 @@ module SketchupHostEvidence
                 'flat Text capability proof conflicts with source attempt'
         end
       end
+    elsif actual_from == :labels
+      fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+      if attempt && expected_failure_reason.to_s.strip.empty?
+        raise EvidenceError,
+              'Labels capability transition is missing its failed-rung reason'
+      end
+      context = {
+        :source_span_id => source_id,
+        :importer_id => fidelity::IMPORTER_ID,
+        :page_number => page,
+        :requested_mode => :labels
+      }
+      if attempt
+        attempt_sha = hash_value(attempt, :source_text_sha256).to_s.downcase
+        context[:source_text_sha256] = attempt_sha unless attempt_sha.empty?
+        attempt_bbox = hash_value(attempt, :source_bbox_pdf)
+        context[:source_bbox_pdf] = attempt_bbox if attempt_bbox.is_a?(Array)
+        context[:reason_subtype] = expected_failure_reason
+      end
+      begin
+        normalized_labels = fidelity.validate_labels_transition_proof!(
+          proof, expected_failure_reason, context
+        )
+      rescue StandardError => error
+        raise EvidenceError,
+              "Labels capability transition is invalid: #{error.message}"
+      end
+      evidence_digest = normalized_labels[:proof_sha256]
+      canonical_transition_payload = fidelity.canonical_json(normalized_labels)
     end
     created = canonical_claims!(
       hash_value(proof, :created_entity_ids), 'created', true
@@ -2160,7 +2806,8 @@ module SketchupHostEvidence
       raise EvidenceError, 'fallback transition did not clean every owned artifact'
     end
     [source_id, actual_from.to_s, actual_to.to_s, reason,
-     created.sort, cleaned.sort, cleanup, evidence_digest]
+     created.sort, cleaned.sort, cleanup, evidence_digest,
+     canonical_transition_payload]
   end
   private_class_method :transition_signature!
 
@@ -2408,7 +3055,8 @@ module SketchupHostEvidence
             end
             attempt_signatures << transition_signature!(
               hash_value(rung, :transition_proof), expected_mode, source_id,
-              mode, ladder[rung_index + 1], pages, attempt
+              mode, ladder[rung_index + 1], pages, attempt,
+              hash_value(rung, :reason)
             )
           end
         end

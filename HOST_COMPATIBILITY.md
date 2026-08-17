@@ -43,7 +43,7 @@ representation.
 | Option | SketchUp result |
 |--------|-----------------|
 | **Text** | Distinct flat editable model text when the host exposes a constructor; SketchUp 2017 does not, so an exact item-bound capability proof advances only to source-outline 3D Text (Labels are a separate requested mode) |
-| **Labels** | Editable `Sketchup::Text` when the host can represent the item; nonzero glyph rotation enters the verified closest fallback ladder |
+| **Labels** | SketchUp 2017 proves finite-bbox source size/run width (or nonzero rotation) unsupported before native annotation creation, then advances to the adjacent source-outline 3D visual equivalent with semantic/provenance identity preserved; this is not a native editable annotation and never silently uses Raster |
 | **3D Text** | Source-glyph solid text with verified positive Z depth; preserves model-space size and PDF rotation |
 | **Glyphs** | One physical unit per source glyph: filled glyph faces + exact outline edges (counters stay open), painted with the source ink; flat (no Z depth) |
 | **Geometry** | One flat owned group per source item: filled glyph faces + exact outline edges, painted with the source ink; a contour the host cannot face keeps its edges and is recorded in the item evidence |
@@ -62,18 +62,33 @@ Saved/reopened Raster evidence is physical: SketchUp `TextureWriter` must export
 the actual image, and its decoded visual-pixel digest and dimensions must match.
 Self-authored attributes alone cannot certify the texture.
 
-The dialog defaults to 3D Text on first run and restores the last text rendering option used after that. Labels are an editability tradeoff, not the default visual sign-off mode.
+The dialog defaults to 3D Text on first run and restores the last text rendering option used after that. On SketchUp 2017, Labels is an explicit audited request whose finite-bbox items use source-outline 3D visual-equivalent delivery; it does not promise native annotation editability.
 
 **Mode fidelity:** honor the selected text option first. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. A missing helper, generic exception, empty artifact, or broken implementation cannot authorize fallback. The exact ladders are Text → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; and Geometry → item Raster. Raster has no next rung. Requested Raster uses verified item crops when canonical text spans exist and a verified page image for a selected zero-canonical-text page; fallback Raster is item-scoped. Each adjacent rung requires its own renderer and type/visual certificate. Terminal Raster can still fail verification, in which case the exact failure is reported and delivery stops. Successful peer spans and page geometry remain intact. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
 
-Native Labels are certified only after the host reads back a `Text` entity with
-the exact content, all three anchor/direction coordinates, and its leader hidden.
-`Text#vector` controls the leader, not glyph orientation. A nonzero requested
-glyph rotation is an affirmative host-representation impossibility for that item,
-so the closest next attempt is source-glyph 3D Text—not a direct geometry swap.
+`Sketchup::Text` exposes neither source-glyph size nor source run-width control,
+and `Text#vector` controls the leader rather than glyph orientation. For each
+finite-bbox Labels item, SketchUp 2017 therefore records an affirmative size/run-
+width proof before `add_text`; a nonzero requested angle records the rotation
+proof first. The closest next attempt is source-outline 3D Text—not a direct
+Geometry or Raster swap. The delivery retains the exact source span, semantic
+text hash, placement, and provenance; a missing bbox or generic failure stops
+without silently creating Raster.
 If both text extractors return no spans, the importer checks page and referenced
 Form-XObject streams for real painting text-show operands before accepting a
 no-text page; undecodable text is not silently omitted.
+
+**Canonical Labels visual-equivalent live gate:** the opt-in host job sets
+`"labels_visual_equivalent_acceptance": true`. Approval requires the authoritative
+reopened model census to contain 0 `Sketchup::Text`, 0 Raster entities or delivery
+records, and exactly 791 unique source-glyph 3D deliveries. Persistent ID, source
+span ID, and provenance ID must be one-to-one for all 791 sources, with 653 size
+transitions plus 138 rotation transitions. Every delivery must read back filled
+visible faces with material and persisted hidden contour edges under the governed
+fixed-frame style policy; importer attributes alone are not proof. Import within
+30 seconds and the fixed-frame PDF/model side-by-side no-visible-difference result
+remain external live gates. Host-free tests validate the schema and fail-closed
+checks, but cannot certify live SketchUp behavior or either external live gate.
 
 **Poppler proof scope:** process exit status and a nonempty SVG are transport
 evidence, not semantic completeness. The known Adobe-GB1 diagnostic cluster may

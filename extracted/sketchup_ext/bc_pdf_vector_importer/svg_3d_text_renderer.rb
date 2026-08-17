@@ -28,6 +28,9 @@ module BlueCollarSystems
       # pdftocairo/mutool supplies inherited or per-use fill evidence.
       TEXT_INK_MATERIAL_NAME = 'PDF_0_0_0'.freeze
       TEXT_INK_RGB = [0, 0, 0].freeze
+      CONTOUR_EDGE_POLICY = 'persisted_hidden'.freeze
+      FIXED_FRAME_STYLE_POLICY =
+        'source_outline_filled_faces_with_hidden_contour_edges'.freeze
 
       def self.render_svg(entities, svg, media_box, text_items, opts = {})
         render_started = monotonic_ms
@@ -573,9 +576,7 @@ module BlueCollarSystems
           ink_applied = apply_source_text_ink!(
             group, source_ink_rgb, source_ink[:opacity]
           )
-          source_ink_material_name = material_name_for_rgb(
-            source_ink_rgb, source_ink[:opacity]
-          )
+          source_ink_material_name = applied_source_ink_material_name(group)
         else
           # Per-glyph solids already carry distinct source fills; leave the
           # span group unpainted so those materials remain authoritative.
@@ -583,6 +584,8 @@ module BlueCollarSystems
           ink_applied = true
           source_ink_material_name = nil
         end
+
+        contour_style = govern_source_outline_visual_style!(group)
 
         matrices = entries.map { |entry| Array(entry[:svg_matrix]).map { |v| v.to_f } }
         ids = entries.map { |entry| entry[:glyph_id].to_s }
@@ -604,6 +607,12 @@ module BlueCollarSystems
           :ink_applied => ink_applied,
           :source_ink_rgb => source_ink_rgb,
           :source_ink_material_name => source_ink_material_name,
+          :contour_edge_policy => contour_style[:contour_edge_policy],
+          :contour_edge_count => contour_style[:edge_count],
+          :hidden_contour_edge_count => contour_style[:hidden_edge_count],
+          :visible_contour_edge_count => contour_style[:visible_edge_count],
+          :contour_edges_hidden_verified =>
+            contour_style[:contour_edges_hidden_verified],
           :identity_verified => !ids.empty? && ids.none? { |id| id.empty? },
           :placement_verified => !placement_indices.empty? &&
             placement_indices.uniq.length == placement_indices.length,
@@ -697,9 +706,7 @@ module BlueCollarSystems
           ink_applied = apply_source_text_ink!(
             group, source_ink_rgb, source_ink[:opacity]
           )
-          source_ink_material_name = material_name_for_rgb(
-            source_ink_rgb, source_ink[:opacity]
-          )
+          source_ink_material_name = applied_source_ink_material_name(group)
         else
           source_ink_rgb = nil
           ink_applied = definition_records.all? do |record|
@@ -708,6 +715,7 @@ module BlueCollarSystems
           end
           source_ink_material_name = nil
         end
+        contour_style = govern_source_outline_visual_style!(group)
         matrices = entries.map do |entry|
           Array(entry[:svg_matrix]).map { |value| value.to_f }
         end
@@ -748,6 +756,12 @@ module BlueCollarSystems
           :ink_applied => ink_applied,
           :source_ink_rgb => source_ink_rgb,
           :source_ink_material_name => source_ink_material_name,
+          :contour_edge_policy => contour_style[:contour_edge_policy],
+          :contour_edge_count => contour_style[:edge_count],
+          :hidden_contour_edge_count => contour_style[:hidden_edge_count],
+          :visible_contour_edge_count => contour_style[:visible_edge_count],
+          :contour_edges_hidden_verified =>
+            contour_style[:contour_edges_hidden_verified],
           :identity_verified => !ids.empty? && ids.none? { |id| id.empty? },
           :placement_verified => !placement_indices.empty? &&
             placement_indices.uniq.length == placement_indices.length,
@@ -807,23 +821,17 @@ module BlueCollarSystems
         return false unless materials
         channels = normalize_source_ink_rgb(rgb) || TEXT_INK_RGB
         alpha = normalize_source_ink_opacity(opacity)
-        return false if alpha.nil?
-        material_name = material_name_for_rgb(channels, alpha)
-        mat = materials[material_name]
-        unless mat
-          mat = materials.add(material_name)
-          if mat && mat.respond_to?(:color=) &&
-             defined?(Sketchup) && Sketchup.const_defined?(:Color)
-            mat.color = Sketchup::Color.new(
-              channels[0], channels[1], channels[2]
-            )
-          end
-        end
-        return false unless mat
-        if mat.respond_to?(:alpha=) && (alpha - 1.0).abs > 1.0e-12
-          mat.alpha = alpha
-        end
+        return false if alpha.nil? || alpha <= 0.0
+        mat = exact_importer_source_ink_material!(materials, channels, alpha)
+        return false unless mat && source_ink_material_readback_matches?(
+          mat, channels, alpha, true
+        )
         group.material = mat
+        assigned = group.respond_to?(:material) ? group.material : mat
+        return false unless assigned && source_ink_material_readback_matches?(
+          assigned, channels, alpha, true
+        )
+        persist_source_ink_readback!(group, assigned, channels, alpha)
         true
       rescue StandardError => e
         Logger.warn(
@@ -832,6 +840,228 @@ module BlueCollarSystems
         )
         false
       end
+
+      def self.exact_importer_source_ink_material!(materials, channels, alpha)
+        base_name = material_name_for_rgb(channels, alpha)
+        existing = materials[base_name]
+        if source_ink_material_readback_matches?(
+          existing, channels, alpha, true
+        )
+          return existing
+        end
+
+        name = existing ? collision_safe_source_ink_material_name(
+          materials, base_name, channels, alpha
+        ) : base_name
+        candidate = materials[name]
+        if source_ink_material_readback_matches?(
+          candidate, channels, alpha, true
+        )
+          return candidate
+        end
+        return nil if candidate
+        material = materials.add(name)
+        return nil unless material
+        return nil unless configure_importer_source_ink_material!(
+          material, channels, alpha
+        )
+        material
+      end
+      private_class_method :exact_importer_source_ink_material!
+
+      def self.collision_safe_source_ink_material_name(materials, base_name,
+                                                       channels, alpha)
+        token = Digest::SHA256.hexdigest(
+          "#{channels.join(',')}:#{format('%.9f', alpha)}"
+        )[0, 12]
+        stem = "#{base_name}_bcs_#{token}"
+        name = stem
+        suffix = 1
+        while materials[name] && !source_ink_material_readback_matches?(
+          materials[name], channels, alpha, true
+        )
+          suffix += 1
+          name = "#{stem}_#{suffix}"
+        end
+        name
+      end
+      private_class_method :collision_safe_source_ink_material_name
+
+      def self.configure_importer_source_ink_material!(material, channels, alpha)
+        unless material.respond_to?(:color=) && material.respond_to?(:color) &&
+               material.respond_to?(:alpha=) && material.respond_to?(:alpha) &&
+               material.respond_to?(:texture) &&
+               defined?(Sketchup) && Sketchup.const_defined?(:Color)
+          return false
+        end
+        material.color = Sketchup::Color.new(
+          channels[0], channels[1], channels[2]
+        )
+        material.alpha = alpha
+        if !material.texture.nil? && material.respond_to?(:texture=)
+          material.texture = nil
+        end
+        unless material.respond_to?(:set_attribute) &&
+               material.respond_to?(:get_attribute)
+          return false
+        end
+        dictionary = 'BC_PDF_Importer'
+        material.set_attribute(dictionary, 'source_ink_material_owned', true)
+        material.set_attribute(dictionary, 'source_ink_rgb', channels.dup)
+        material.set_attribute(dictionary, 'source_ink_alpha', alpha)
+        material.set_attribute(
+          dictionary, 'source_ink_texture_absent_verified',
+          material.texture.nil?
+        )
+        source_ink_material_readback_matches?(material, channels, alpha, true)
+      end
+      private_class_method :configure_importer_source_ink_material!
+
+      def self.source_ink_material_readback_matches?(material, channels, alpha,
+                                                     require_owner)
+        return false unless material && material.respond_to?(:color) &&
+                            material.respond_to?(:alpha) &&
+                            material.respond_to?(:texture)
+        color = material.color
+        return false unless color && color.respond_to?(:red) &&
+                            color.respond_to?(:green) &&
+                            color.respond_to?(:blue)
+        actual_rgb = [color.red.to_i, color.green.to_i, color.blue.to_i]
+        actual_alpha = material.alpha.to_f
+        return false unless actual_alpha.finite? && actual_rgb == channels &&
+                            (actual_alpha - alpha).abs <= 1.0e-12 &&
+                            material.texture.nil?
+        if require_owner
+          return false unless material.respond_to?(:get_attribute)
+          dictionary = 'BC_PDF_Importer'
+          owned = material.get_attribute(
+            dictionary, 'source_ink_material_owned', nil
+          )
+          owned_rgb = material.get_attribute(dictionary, 'source_ink_rgb', nil)
+          owned_alpha = material.get_attribute(
+            dictionary, 'source_ink_alpha', nil
+          )
+          texture_absent = material.get_attribute(
+            dictionary, 'source_ink_texture_absent_verified', nil
+          )
+          return false unless owned == true && owned_rgb == channels &&
+                              owned_alpha.is_a?(Numeric) &&
+                              (owned_alpha.to_f - alpha).abs <= 1.0e-12 &&
+                              texture_absent == true
+        end
+        true
+      rescue StandardError
+        false
+      end
+      private_class_method :source_ink_material_readback_matches?
+
+      def self.persist_source_ink_readback!(group, material, channels, alpha)
+        return false unless group.respond_to?(:set_attribute)
+        dictionary = 'BC_PDF_Importer'
+        group.set_attribute(dictionary, 'source_ink_material_owned', true)
+        group.set_attribute(
+          dictionary, 'source_ink_material_name', material.name.to_s
+        )
+        group.set_attribute(dictionary, 'source_ink_rgb', channels.dup)
+        group.set_attribute(dictionary, 'source_ink_alpha', alpha)
+        group.set_attribute(
+          dictionary, 'source_ink_color_readback_verified', true
+        )
+        group.set_attribute(
+          dictionary, 'source_ink_alpha_readback_verified', true
+        )
+        group.set_attribute(
+          dictionary, 'source_ink_texture_absent_verified', true
+        )
+        true
+      end
+      private_class_method :persist_source_ink_readback!
+
+      def self.applied_source_ink_material_name(group)
+        return nil unless group.respond_to?(:material)
+        material = group.material
+        material && material.respond_to?(:name) ? material.name.to_s : nil
+      rescue StandardError
+        nil
+      end
+      private_class_method :applied_source_ink_material_name
+
+      # Source-outline 3D text is compared in a governed fixed frame. Persist
+      # the contour decision on the model itself instead of relying on a user's
+      # current edge-display style: every generated Edge is hidden and read
+      # back before the delivery can advertise a verified policy. Component
+      # definitions are walked once per object identity so cached glyph solids
+      # receive the same durable state as uncached span geometry.
+      def self.govern_source_outline_visual_style!(group)
+        seen = {}
+        counts = { :edge_count => 0, :hidden_edge_count => 0 }
+        visit_source_outline_entities(group, seen) do |entity|
+          next unless source_outline_entity_type(entity) == 'Edge'
+          counts[:edge_count] += 1
+          unless entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?)
+            raise 'source-outline contour visibility is not writable/readable'
+          end
+          entity.hidden = true
+          unless entity.hidden? == true
+            raise 'source-outline contour edge hidden-state readback failed'
+          end
+          counts[:hidden_edge_count] += 1
+        end
+        counts[:visible_edge_count] =
+          counts[:edge_count] - counts[:hidden_edge_count]
+        counts[:contour_edge_policy] = CONTOUR_EDGE_POLICY
+        counts[:contour_edges_hidden_verified] =
+          counts[:edge_count] > 0 && counts[:visible_edge_count] == 0
+        persist_source_outline_style_policy!(group, counts)
+        counts
+      end
+
+      def self.visit_source_outline_entities(entity, seen, &block)
+        return if entity.nil?
+        identity = entity.object_id
+        return if seen.key?(identity)
+        seen[identity] = true
+        block.call(entity)
+        collection = if entity.respond_to?(:entities)
+                       entity.entities
+                     elsif entity.respond_to?(:definition) && entity.definition &&
+                           entity.definition.respond_to?(:entities)
+                       entity.definition.entities
+                     end
+        return unless collection && collection.respond_to?(:to_a)
+        Array(collection.to_a).each do |child|
+          visit_source_outline_entities(child, seen, &block)
+        end
+      end
+      private_class_method :visit_source_outline_entities
+
+      def self.source_outline_entity_type(entity)
+        return entity.typename.to_s if entity.respond_to?(:typename)
+        entity.class.name.to_s.split('::').last
+      rescue StandardError
+        ''
+      end
+      private_class_method :source_outline_entity_type
+
+      def self.persist_source_outline_style_policy!(group, counts)
+        return true unless group.respond_to?(:set_attribute)
+        dictionary = 'BC_PDF_Importer'
+        group.set_attribute(
+          dictionary, 'contour_edge_policy', CONTOUR_EDGE_POLICY
+        )
+        group.set_attribute(
+          dictionary, 'contour_edge_count', counts[:edge_count].to_i
+        )
+        group.set_attribute(
+          dictionary, 'contour_edges_hidden_verified',
+          counts[:contour_edges_hidden_verified] == true
+        )
+        group.set_attribute(
+          dictionary, 'fixed_frame_style_policy', FIXED_FRAME_STYLE_POLICY
+        )
+        true
+      end
+      private_class_method :persist_source_outline_style_policy!
 
       def self.homogeneous_source_ink_style(entries)
         source_text_ink_style(entries)
@@ -878,6 +1108,7 @@ module BlueCollarSystems
         raise 'extruded source glyph width/height verification failed' unless
           width_ok && height_ok && position_ok
         raise 'extruded source glyph has no verified positive Z depth' unless depth_ok
+        contour_style = govern_source_outline_visual_style!(group)
         matrices = entries.map { |entry| Array(entry[:svg_matrix]).map { |v| v.to_f } }
         ids = entries.map { |entry| entry[:glyph_id].to_s }
         placement_indices = entries.map { |entry| entry[:placement_index].to_i }
@@ -900,6 +1131,12 @@ module BlueCollarSystems
           :ink_applied => rows.all? { |row| row[:ink_applied] == true },
           :source_ink_rgb => nil,
           :source_ink_material_name => nil,
+          :contour_edge_policy => contour_style[:contour_edge_policy],
+          :contour_edge_count => contour_style[:edge_count],
+          :hidden_contour_edge_count => contour_style[:hidden_edge_count],
+          :visible_contour_edge_count => contour_style[:visible_edge_count],
+          :contour_edges_hidden_verified =>
+            contour_style[:contour_edges_hidden_verified],
           :identity_verified => !ids.empty? && ids.none? { |id| id.empty? },
           :placement_verified => !placement_indices.empty? &&
             placement_indices.uniq.length == placement_indices.length,

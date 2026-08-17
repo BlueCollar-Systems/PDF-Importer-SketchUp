@@ -414,6 +414,45 @@ class RepresentationFidelityContractTest < Minitest::Test
            page_number: 1)
   end
 
+  def label_fallback_stats
+    {
+      fallback_transitions: [], terminal_text_delivery_records: [],
+      text_attempts: [], text_renderers: [], page_text_sources: {},
+      source_provenance_objects: [], raster_delivery_records: [],
+      raster_fallback_used: false, text: 0, edges: 0, faces: 0
+    }
+  end
+
+  def completed_source_3d_row(source, group, source_text_sha256)
+    source_bbox = [
+      source.bbox_x0, source.bbox_y0, source.bbox_x1, source.bbox_y1
+    ].map(&:to_f)
+    width = (source_bbox[2] - source_bbox[0]).abs / 72.0
+    height = (source_bbox[3] - source_bbox[1]).abs / 72.0
+    expected = {
+      source_text_sha256: source_text_sha256,
+      source_bbox_pdf: source_bbox,
+      source_anchor: [source_bbox[0] / 72.0, source_bbox[1] / 72.0, 0.0],
+      source_rotation_radians: source.angle.to_f * Math::PI / 180.0,
+      expected_width: width, expected_height: height, expected_depth: 0.02,
+      physical_style_sha256: 'a' * 64,
+      physical_geometry_sha256: 'b' * 64,
+      expected_transformation: { kind: 'source_glyph_3d_text' }
+    }
+    {
+      source_span_id: source.source_span_id,
+      group: group,
+      group_entity_id: IMP::RepresentationFidelity.stable_entity_id(group),
+      identity_verified: true, placement_verified: true,
+      rotation_verified: true, size_verified: true, depth_verified: true,
+      content_verified: true, physical_geometry_verified: true,
+      physical_style_verified: true, transform_verified: true,
+      depth: 0.02, width: width, height: height, face_count: 1,
+      extruded_face_count: 1, ink_applied: true,
+      expected_evidence: expected
+    }
+  end
+
   def test_text_and_labels_remain_distinct_across_fidelity_boundaries
     assert_equal :text, IMP.normalize_text_renderer_mode('Text')
     assert_equal :text, IMP::RepresentationFidelity.normalize_mode('Text')
@@ -958,41 +997,41 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal [102], entities.erased.map(&:persistent_id)
   end
 
-  def test_label_api_exception_never_claims_an_unreturned_partial_label
+  def test_label_size_proof_precedes_api_that_would_raise_after_creation
     source = item('partial label')
     b = builder(:labels)
     entities = FidelityEntities.new(label: :raise_after_create)
 
-    assert_raises(IMP::RepresentationFidelity::ContractError) do
-      b.send(:place_annotation_label, entities, source, 0, 0, nil)
-    end
-    assert_equal [101], entities.to_a.map(&:persistent_id)
+    refute b.send(:place_annotation_label, entities, source, 0, 0, nil)
+    assert_empty entities.to_a
     assert_empty entities.erased
+    failure = b.text_delivery_failures.fetch(0)
+    assert_equal 'label_source_size_unsupported_by_host', failure[:reason]
   end
 
-  def test_label_cleanup_erases_only_the_explicit_label_not_a_peer
+  def test_label_size_proof_precedes_api_that_would_create_a_peer
     source = item('owned label')
     b = builder(:labels)
     entities = FidelityEntities.new(peer_after_label: true)
 
-    assert_raises(IMP::RepresentationFidelity::ContractError) do
-      b.send(:place_annotation_label, entities, source, 0, 0, nil)
-    end
-    assert_equal [102], entities.to_a.map(&:persistent_id)
-    assert_equal [101], entities.erased.map(&:persistent_id)
+    refute b.send(:place_annotation_label, entities, source, 0, 0, nil)
+    assert_empty entities.to_a
+    assert_empty entities.erased
+    assert_equal 'label_source_size_unsupported_by_host',
+                 b.text_delivery_failures.fetch(0)[:reason]
   end
 
-  def test_identityless_label_is_erased_and_never_certified
+  def test_label_size_proof_precedes_identityless_native_entity_creation
     provenance = []
     b = builder(:labels, provenance)
     entities = FidelityEntities.new(identityless_label: true)
 
-    assert_raises(IMP::RepresentationFidelity::ContractError) do
-      b.send(:place_annotation_label, entities, item, 0, 0, nil, :labels)
-    end
-    assert_equal 1, entities.erased.length
+    refute b.send(:place_annotation_label, entities, item, 0, 0, nil, :labels)
+    assert_empty entities.erased
     assert_empty entities.to_a
     assert_empty provenance
+    assert_equal 'label_source_size_unsupported_by_host',
+                 b.text_delivery_failures.fetch(0)[:reason]
   end
 
   def test_missing_source_identity_fails_before_creating_any_entity
@@ -1007,13 +1046,14 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_match(/source.*identity/i, b.text_delivery_failures.last[:reason])
   end
 
-  def test_snapshot_or_ownership_failure_escapes_item_fallback_for_atomic_abort
+  def test_label_size_proof_precedes_native_snapshot_or_ownership_boundary
     b = builder(:labels)
     entities = FidelityEntities.new(preexisting: [Object.new])
 
-    assert_raises(IMP::RepresentationFidelity::ContractError) do
-      b.send(:place_text, entities, item, 0, 0, 792, nil)
-    end
+    refute b.send(:place_text, entities, item, 0, 0, 792, nil)
+    assert_equal 1, entities.to_a.length
+    assert_equal 'label_source_size_unsupported_by_host',
+                 b.text_delivery_failures.fetch(0)[:reason]
 
     main = File.read(
       File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
@@ -1052,7 +1092,7 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_operator evidence.fetch(:expected_height), :>, 0.0
   end
 
-  def test_native_label_expected_dimensions_use_the_configured_import_scale
+  def test_label_size_impossibility_dimensions_use_the_configured_import_scale
     source = item('SCALED LABEL', 0.0, 24.0, 10.0)
     b = GB.new(nil, [], [], [0, 0, 612, 792],
                import_text: true,
@@ -1062,17 +1102,17 @@ class RepresentationFidelityContractTest < Minitest::Test
                page_number: 1)
     entities = FidelityEntities.new
 
-    assert b.send(
+    refute b.send(
       :place_annotation_label, entities, source, 0.0, 0.0, nil, :labels
     )
 
     attempt = b.text_attempts.fetch(0)
     rung = attempt.fetch(:attempt_history).fetch(0)
-    [attempt, rung].each do |delivery|
-      assert_equal true, delivery.fetch(:leader_vector_verified)
-      assert_equal [0.0, 0.0, 0.0], delivery.fetch(:leader_vector)
-    end
-    expected = attempt.fetch(:expected_evidence)
+    assert_equal :failed, rung.fetch(:outcome)
+    assert_empty entities.to_a
+    failure = b.text_delivery_failures.fetch(0)
+    assert_equal 'label_source_size_unsupported_by_host', failure[:reason]
+    expected = failure.fetch(:transition_proof).fetch(:evidence)
     assert_in_delta 24.0 * 2.5 / 72.0,
                     expected.fetch(:expected_width), 1.0e-9
     assert_in_delta 10.0 * 2.5 / 72.0,
@@ -1081,11 +1121,111 @@ class RepresentationFidelityContractTest < Minitest::Test
     expected_anchor = IMP::RepresentationFidelity.numeric_point(
       b.send(:text_point_to_su, source, label_x, label_y, 0.0, 0.0)
     )
-    assert_equal expected_anchor, expected.fetch(:source_anchor)
+    assert_equal expected_anchor.map { |value|
+      IMP::RepresentationFidelity.canonical_number(value)
+    }, expected.fetch(:source_anchor)
     assert_equal 0.0, expected.fetch(:source_rotation_radians)
+    proof = failure.fetch(:transition_proof)
+    assert_equal :label_source_size_unsupported_by_host,
+                 proof.fetch(:reason_subtype)
+    assert_equal IMP::RepresentationFidelity::LABELS_CAPABILITY_SCHEMA,
+                 expected.fetch(:schema)
+    assert_equal IMP::RepresentationFidelity::LABELS_SIZE_PROOF_SUBTYPE,
+                 expected.fetch(:proof_subtype)
+    assert_match(/\A[0-9a-f]{64}\z/, expected.fetch(:evidence_sha256))
+    assert_match(/\A[0-9a-f]{64}\z/, proof.fetch(:proof_sha256))
   end
 
-  def test_label_wrong_visual_or_entity_evidence_is_cleaned_and_never_certified
+  def test_shared_labels_transition_validator_rejects_every_field_tamper
+    proof, context = valid_labels_size_transition_proof
+    fidelity = IMP::RepresentationFidelity
+    normalized = fidelity.validate_labels_transition_proof!(
+      proof, 'label_source_size_unsupported_by_host', context
+    )
+    assert_equal proof[:proof_sha256], normalized[:proof_sha256]
+
+    expected_outer = %w[
+      affirmative_impossibility attempted_renderer category
+      cleaned_entity_ids cleanup_outcome created_entity_ids evidence from_mode
+      generic_failure importer_id page_number proof_sha256 reason_code
+      reason_subtype requested_mode scope source_span_id to_mode
+    ]
+    expected_evidence = %w[
+      capability_observation_only evidence_sha256 expected_height expected_width
+      host_api_contract host_api_fact host_constructor host_entity_type
+      host_product import_scale native_label_finite_bbox_control_available
+      native_label_glyph_rotation_control_available
+      native_label_run_width_control_available pdf_point_to_inch proof_subtype
+      requested_mode schema source_anchor source_bbox_pdf source_dimensions_pdf
+      source_rotation_degrees source_rotation_radians source_span_id
+      source_text_sha256 text_vector_role verification
+    ]
+    assert_equal expected_outer, proof.keys.map(&:to_s).sort
+    assert_equal expected_evidence,
+                 proof[:evidence].keys.map(&:to_s).sort
+
+    proof.keys.each do |field|
+      tampered = Marshal.load(Marshal.dump(proof))
+      if field == :proof_sha256
+        tampered[field] = '0' * 64
+      elsif field == :evidence
+        tampered[field] = {}
+      else
+        tampered[field] = tampered_contract_value(field, tampered[field])
+        resign_labels_transition!(tampered, false)
+      end
+      assert_raises(fidelity::ContractError, "outer #{field} tamper") do
+        fidelity.validate_labels_transition_proof!(
+          tampered, 'label_source_size_unsupported_by_host', context
+        )
+      end
+    end
+
+    proof[:evidence].keys.each do |field|
+      tampered = Marshal.load(Marshal.dump(proof))
+      tampered[:evidence][field] = if field == :evidence_sha256
+                                    '0' * 64
+                                  else
+                                    tampered_contract_value(
+                                      field, tampered[:evidence][field]
+                                    )
+                                  end
+      resign_labels_transition!(tampered, field != :evidence_sha256)
+      assert_raises(fidelity::ContractError, "evidence #{field} tamper") do
+        fidelity.validate_labels_transition_proof!(
+          tampered, 'label_source_size_unsupported_by_host', context
+        )
+      end
+    end
+  end
+
+  def test_labels_transition_validator_binds_rung_reason_and_rejects_generic_proof
+    proof, context = valid_labels_size_transition_proof
+    fidelity = IMP::RepresentationFidelity
+
+    assert_raises(fidelity::ContractError) do
+      fidelity.validate_labels_transition_proof!(
+        proof, 'label_rotation_unsupported_by_host', context
+      )
+    end
+
+    controller = fidelity::FallbackController.new(:labels, 'text_span:1:0')
+    assert_equal :text3d, controller.advance!(
+      proof, 'label_source_size_unsupported_by_host'
+    )
+
+    generic = valid_transition_proof(:labels, :text3d)
+    generic_controller = fidelity::FallbackController.new(
+      :labels, 'text_span:1:0'
+    )
+    assert_raises(fidelity::ContractError) do
+      generic_controller.advance!(
+        generic, 'label_source_size_unsupported_by_host'
+      )
+    end
+  end
+
+  def test_label_size_proof_precedes_unverifiable_native_entity_variants
     [
       { label_text: 'WRONG' },
       { label_typename: 'ComponentInstance' },
@@ -1100,7 +1240,10 @@ class RepresentationFidelityContractTest < Minitest::Test
       attempt = b.text_attempts.last
       assert_nil attempt[:delivered_mode]
       assert_equal false, attempt[:visual_fidelity_verified]
-      assert_equal :verified, attempt[:attempt_history].last[:cleanup_outcome]
+      assert_equal :not_required,
+                   attempt[:attempt_history].last[:cleanup_outcome]
+      assert_equal 'label_source_size_unsupported_by_host',
+                   b.text_delivery_failures.last[:reason]
     end
   end
 
@@ -2788,6 +2931,97 @@ class RepresentationFidelityContractTest < Minitest::Test
     }
   end
 
+  def valid_labels_size_transition_proof
+    source = item('BOUND LABEL', 0.0, 24.0, 10.0, 'text_span:1:0')
+    scale = 2.5
+    b = GB.new(nil, [], [], [0, 0, 612, 792],
+               import_text: true,
+               requested_text_mode: :labels,
+               scale_factor: scale,
+               provenance_bucket: [],
+               page_number: 1)
+    entities = FidelityEntities.new
+    refute b.send(
+      :place_annotation_label, entities, source, 0.0, 0.0, nil, :labels
+    )
+    failure = b.text_delivery_failures.fetch(0)
+    proof = failure.fetch(:transition_proof)
+    label_x, label_y, = b.send(:label_insertion_pdf, source)
+    anchor = IMP::RepresentationFidelity.numeric_point(
+      b.send(:text_point_to_su, source, label_x, label_y, 0.0, 0.0)
+    )
+    bbox = IMP::RepresentationFidelity.strict_source_bbox_pdf(source)
+    context = {
+      :source_span_id => source.source_span_id,
+      :importer_id => IMP::RepresentationFidelity::IMPORTER_ID,
+      :page_number => 1,
+      :requested_mode => :labels,
+      :reason_subtype => :label_source_size_unsupported_by_host,
+      :source_text_sha256 => Digest::SHA256.hexdigest(source.text.to_s),
+      :source_bbox_pdf => bbox,
+      :source_dimensions_pdf => [
+        (bbox[2] - bbox[0]).abs, (bbox[3] - bbox[1]).abs
+      ],
+      :source_anchor => anchor,
+      :source_rotation_degrees => 0.0,
+      :source_rotation_radians => 0.0,
+      :pdf_point_to_inch => 1.0 / 72.0,
+      :import_scale => scale,
+      :expected_width => 24.0 * scale / 72.0,
+      :expected_height => 10.0 * scale / 72.0
+    }
+    [proof, context]
+  end
+
+  def valid_labels_transition_proof_for(source)
+    bbox = IMP::RepresentationFidelity.strict_source_bbox_pdf(source)
+    IMP::RepresentationFidelity.labels_transition_impossibility_proof(
+      source, :label_source_size_unsupported_by_host,
+      :source_anchor => [bbox[0] / 72.0, bbox[1] / 72.0, 0.0],
+      :source_rotation_degrees => 0.0,
+      :pdf_point_to_inch => 1.0 / 72.0,
+      :import_scale => 1.0
+    )
+  end
+
+  def tampered_contract_value(field, value)
+    case value
+    when TrueClass, FalseClass
+      !value
+    when Numeric
+      value + 1
+    when Array
+      return ['persistent_id:999'] if value.empty?
+      changed = Marshal.load(Marshal.dump(value))
+      changed[0] = tampered_contract_value(field, changed[0])
+      changed
+    when Symbol
+      :tampered
+    when Hash
+      value.merge(:tampered => true)
+    else
+      "#{value}_tampered"
+    end
+  end
+
+  def resign_labels_transition!(proof, resign_evidence = true)
+    fidelity = IMP::RepresentationFidelity
+    if resign_evidence
+      unsigned_evidence = proof[:evidence].dup
+      unsigned_evidence.delete(:evidence_sha256)
+      unsigned_evidence.delete('evidence_sha256')
+      proof[:evidence][:evidence_sha256] =
+        fidelity.canonical_sha256(unsigned_evidence)
+    end
+    unsigned_proof = proof.dup
+    unsigned_proof.delete(:proof_sha256)
+    unsigned_proof.delete('proof_sha256')
+    unsigned_proof.delete(:page)
+    unsigned_proof.delete('page')
+    proof[:proof_sha256] = fidelity.canonical_sha256(unsigned_proof)
+    proof
+  end
+
   def test_fallback_controller_advances_only_one_adjacent_rung_and_terminates
     controller = IMP::RepresentationFidelity::FallbackController.new(
       :text3d, 'text_span:1:0'
@@ -3042,6 +3276,154 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_empty stats[:fallback_transitions]
   end
 
+  def test_real_label_builder_failures_complete_once_through_page_source_3d
+    entities = FidelityEntities.new
+    model = Struct.new(:active_entities).new(entities)
+    sources = [
+      item('SHOP BOLTS', 0.0, 60.0, 12.0, 'text_span:1:0'),
+      move_item(item('2 2', 0.0, 8.0, 40.0, 'text_span:1:1'), 80, 60),
+      move_item(item('ROTATED', 90.0, 42.0, 10.0, 'text_span:1:2'), 130, 70)
+    ]
+    label_builder = builder(:labels)
+
+    sources.each do |source|
+      refute label_builder.send(
+        :place_text, entities, source, 0.0, 0.0, 792.0, nil
+      )
+    end
+
+    assert_empty entities.created_labels
+    failures = label_builder.text_delivery_failures
+    assert_equal [
+      'label_source_size_unsupported_by_host',
+      'label_source_size_unsupported_by_host',
+      'label_rotation_unsupported_by_host'
+    ], failures.map { |failure| failure[:reason] }
+
+    expected_sha = {
+      'text_span:1:0' =>
+        '173fc397813b1817d4ccc26fd2cc7706792f3dcc335457069efb25a51bb4992e',
+      'text_span:1:1' =>
+        '04412575067f0bdb6722e31a7ee45744cc1ecf2dfacec4cfbfa70cfd364bb7e2',
+      'text_span:1:2' =>
+        '502ca5e2073665661a4e8a220117184056d165cc2c9b26881b1018ff3eebc425'
+    }
+    failed_sha = failures.each_with_object({}) do |failure, memo|
+      memo[failure[:source_span_id]] =
+        failure[:transition_proof][:evidence][:source_text_sha256]
+    end
+    assert_equal expected_sha, failed_sha
+    render_batches = []
+    render_text3d = lambda do |_parent, _svg, _box, render_items, _options|
+      render_batches << render_items.map(&:source_span_id)
+      rows = render_items.map do |source|
+        group = entities.add_test_entity(1.0, 0.5, 'Group')
+        completed_source_3d_row(
+          source, group, expected_sha.fetch(source.source_span_id)
+        )
+      end
+      {
+        failures: [], span_results: rows, unmatched_source_results: [],
+        transition_proofs: [], solid_cache: {}, performance: {},
+        authoritative_match_span_count: render_items.length,
+        render_target_span_count: render_items.length,
+        match_scope_verified: true
+      }
+    end
+    stats = label_fallback_stats
+    document = {
+      svg: '<svg viewBox="0 0 200 200"></svg>', renderer: :pdftocairo,
+      missing_fonts: [], missing_language_packs: []
+    }
+
+    IMP::Svg3DTextRenderer.stub(:render_svg, render_text3d) do
+      IMP::Svg3DTextRenderer.stub(:finalize_source_evidence!, true) do
+        IMP.stub(:apply_and_verify_page_representation_transform, true) do
+          IMP.complete_label_item_fallbacks!(
+            stats, model, entities, 'fixture.pdf', 1, sources,
+            [0, 0, 200, 200], [0, 0, 200, 200], 0, {}, Time.now,
+            0.0, document, failures, label_builder.text_attempts, nil, sources
+          )
+        end
+      end
+    end
+
+    source_ids = sources.map(&:source_span_id)
+    assert_equal [source_ids], render_batches,
+                 'one batch render must target every source exactly once'
+    assert_equal source_ids.sort,
+                 stats[:text_attempts].map { |row| row[:source_span_id] }.sort
+    delivered_sha = stats[:text_attempts].each_with_object({}) do |row, memo|
+      memo[row[:source_span_id]] = row[:source_text_sha256]
+    end
+    assert_equal expected_sha, delivered_sha
+    transitions = stats[:fallback_transitions]
+    assert_equal source_ids.sort,
+                 transitions.map { |row| row[:source_span_id] }.sort
+    assert transitions.all? { |row|
+      row[:from_mode] == :labels && row[:to_mode] == :text3d
+    }
+    transition_sha = transitions.each_with_object({}) do |row, memo|
+      memo[row[:source_span_id]] = row[:evidence][:source_text_sha256]
+    end
+    assert_equal expected_sha, transition_sha
+    provenance = stats[:source_provenance_objects]
+    assert_equal source_ids.sort, provenance.map { |row| row[:span_id] }.sort
+    assert_equal provenance.length,
+                 provenance.map { |row| row[:object_id] }.uniq.length
+    assert provenance.all? { |row|
+      row[:created_entity_type] == 'source_glyph_3d_text'
+    }
+    assert_equal false, stats[:raster_fallback_used]
+    assert_empty stats[:raster_delivery_records]
+  end
+
+  def test_label_page_fallback_refuses_duplicate_source_ids_before_rendering
+    entities = FidelityEntities.new
+    model = Struct.new(:active_entities).new(entities)
+    sources = [
+      item('FIRST', 0.0, 24.0, 10.0, 'text_span:1:0'),
+      move_item(item('SECOND', 0.0, 24.0, 10.0,
+                     'text_span:1:0'), 80, 60)
+    ]
+    label_builder = builder(:labels)
+    sources.each do |source|
+      refute label_builder.send(
+        :place_text, entities, source, 0.0, 0.0, 792.0, nil
+      )
+    end
+    renderer_calls = 0
+    duplicate_result = lambda do |_parent, _svg, _box, _items, _options|
+      renderer_calls += 1
+      {
+        failures: [{
+          source_span_id: 'text_span:1:0',
+          reason_code: :duplicate_semantic_source_identity
+        }]
+      }
+    end
+    document = {
+      svg: '<svg viewBox="0 0 100 100"></svg>', renderer: :pdftocairo,
+      missing_fonts: [], missing_language_packs: []
+    }
+
+    error = assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP::Svg3DTextRenderer.stub(:render_svg, duplicate_result) do
+        IMP.complete_label_item_fallbacks!(
+          label_fallback_stats, model, entities, 'fixture.pdf', 1, sources,
+          [0, 0, 100, 100], [0, 0, 100, 100], 0, {}, Time.now,
+          0.0, document, label_builder.text_delivery_failures,
+          label_builder.text_attempts, nil, sources
+        )
+      end
+    end
+
+    assert_match(/duplicate.*Labels fallback source item/i, error.message)
+    assert_equal 0, renderer_calls,
+                 'duplicate semantic identities must fail before SVG rendering'
+    assert_empty entities.created_labels
+  end
+
   def test_mixed_labels_keep_successful_3d_delivery_and_fallback_only_its_peer
     entities = FidelityEntities.new
     model = Struct.new(:active_entities).new(entities)
@@ -3052,10 +3434,8 @@ class RepresentationFidelityContractTest < Minitest::Test
     )
     first_group = entities.add_test_entity(1.0, 0.5, 'Group')
     first_group_id = IMP::RepresentationFidelity.stable_entity_id(first_group)
-    label_first = valid_transition_proof(:labels, :text3d,
-                                         'text_span:1:0')
-    label_second = valid_transition_proof(:labels, :text3d,
-                                          'text_span:1:1')
+    label_first = valid_labels_transition_proof_for(first)
+    label_second = valid_labels_transition_proof_for(second)
     text3d_second = valid_transition_proof(:text3d, :glyphs,
                                            'text_span:1:1')
     result = {
@@ -3082,8 +3462,16 @@ class RepresentationFidelityContractTest < Minitest::Test
       }
     ]
     failures = [
-      { source_span_id: 'text_span:1:0', transition_proof: label_first },
-      { source_span_id: 'text_span:1:1', transition_proof: label_second }
+      {
+        source_span_id: 'text_span:1:0',
+        reason: 'label_source_size_unsupported_by_host',
+        transition_proof: label_first
+      },
+      {
+        source_span_id: 'text_span:1:1',
+        reason: 'label_source_size_unsupported_by_host',
+        transition_proof: label_second
+      }
     ]
     stats = {
       fallback_transitions: [], terminal_text_delivery_records: [],

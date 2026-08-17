@@ -15,6 +15,7 @@
 # page_text_map / GeometryBuilder consumption.
 
 require 'minitest/autorun'
+require 'digest'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 SRC_ROOT = File.join(REPO_ROOT, 'extracted', 'sketchup_ext')
@@ -163,22 +164,93 @@ class BootstrapProvenanceJoinTest < Minitest::Test
     builder.build
   end
 
+  def complete_label_source_glyph_provenance(items, page, bucket, result)
+    attempts = Array(result[:text_attempts])
+    prior_by_id = attempts.each_with_object({}) do |attempt, memo|
+      memo[attempt[:source_span_id].to_s] = attempt
+    end
+    rows = items.each_with_index.map do |item, index|
+      source_id = item.source_span_id.to_s
+      bbox = [item.bbox_x0, item.bbox_y0, item.bbox_x1, item.bbox_y1]
+      width = (item.bbox_x1.to_f - item.bbox_x0.to_f).abs / 72.0
+      height = (item.bbox_y1.to_f - item.bbox_y0.to_f).abs / 72.0
+      expected = {
+        source_text_sha256: Digest::SHA256.hexdigest(item.text.to_s),
+        source_bbox_pdf: bbox,
+        source_anchor: [item.bbox_x0.to_f / 72.0,
+                        item.bbox_y0.to_f / 72.0, 0.0],
+        source_rotation_radians: item.angle.to_f * Math::PI / 180.0,
+        expected_width: width,
+        expected_height: height,
+        expected_depth: 0.015625,
+        physical_style_sha256: Digest::SHA256.hexdigest("style:#{source_id}"),
+        physical_geometry_sha256: Digest::SHA256.hexdigest("geometry:#{source_id}"),
+        expected_transformation: { kind: 'source_glyph_3d_text' }
+      }
+      {
+        source_span_id: source_id,
+        group_entity_id: "persistent_id:#{(page * 10_000) + index + 1}",
+        identity_verified: true,
+        placement_verified: true,
+        rotation_verified: true,
+        size_verified: true,
+        depth_verified: true,
+        content_verified: true,
+        physical_geometry_verified: true,
+        physical_style_verified: true,
+        transform_verified: true,
+        depth: 0.015625,
+        width: width,
+        height: height,
+        extruded_face_count: 1,
+        expected_evidence: expected
+      }
+    end
+    stats = {
+      text_attempts: [], text_renderers: [],
+      source_provenance_objects: bucket
+    }
+    render_result = {
+      span_results: rows,
+      solid_cache: {}, performance: {},
+      authoritative_match_span_count: rows.length,
+      render_target_span_count: rows.length,
+      match_scope_verified: true
+    }
+    MOD::Svg3DTextRenderer.stub(
+      :finalize_source_evidence!,
+      lambda do |_row, _item, _rotation, _definition_cache, _json_cache|
+        true
+      end
+    ) do
+      MOD.record_svg_3d_text_delivery!(
+        stats, page, items, render_result, :labels, prior_by_id, 0.0
+      )
+    end
+    stats
+  end
+
   def test_page_two_only_selection_places_only_page_two_text
     page_map = { 1 => bom_page_items(1), 2 => second_page_items }
     selected_pages = MOD.normalized_requested_pages([2], page_map.length)
     assert_equal [2], selected_pages
 
     bucket = []
-    entities = FakeEntities.new
     selected_pages.each do |page|
       MOD::TextSourceIdentity.assign!(page_map.fetch(page), page)
-      result = build_geometry(page_map.fetch(page), page, bucket, entities)
-      assert_operator result[:text_objects], :>, 0
+      items = page_map.fetch(page)
+      result = build_geometry(items, page, bucket)
+      assert_equal 0, result[:text_objects]
+      assert_equal items.length, result[:text_delivery_failures].length
+      complete_label_source_glyph_provenance(items, page, bucket, result)
     end
 
-    placed_text = entities.labels.map(&:text)
-    assert_includes placed_text, 'b202'
-    refute_includes placed_text, 'p7302'
+    page_two_mark = page_map.fetch(2).find { |item| item.text == 'b202' }
+    assert_includes bucket.map { |entry| entry[:span_id] },
+                    page_two_mark.source_span_id
+    assert bucket.all? { |entry|
+      entry[:created_entity_type] == 'source_glyph_3d_text'
+    }
     assert_equal [2], bucket.map { |entry| entry[:page] }.uniq
     assert page_map.fetch(1).all? { |item| item.source_span_id.nil? },
            'unselected page 1 must not enter identity or placement seams'
@@ -212,11 +284,19 @@ class BootstrapProvenanceJoinTest < Minitest::Test
     bucket = []
     result1 = build_geometry(page1, 1, bucket)
     result2 = build_geometry(page2, 2, bucket)
-    assert_operator result1[:text_objects], :>, 0, 'page 1 placed no text'
-    assert_operator result2[:text_objects], :>, 0, 'page 2 placed no text'
+    assert_equal 0, result1[:text_objects], 'page 1 created a native Label'
+    assert_equal 0, result2[:text_objects], 'page 2 created a native Label'
+    complete_label_source_glyph_provenance(page1, 1, bucket, result1)
+    complete_label_source_glyph_provenance(page2, 2, bucket, result2)
 
     prov_span_ids = bucket.map { |e| e[:span_id] }.compact
     refute_empty prov_span_ids, 'provenance emitted no span_id values'
+    assert(
+      bucket.all? do |entry|
+        entry[:created_entity_type] == 'source_glyph_3d_text'
+      end,
+      'Labels fallback provenance must contain no native_label rows'
+    )
 
     # Every provenance entry from the real pipeline path carries span_id.
     bucket.each do |entry|
@@ -260,16 +340,14 @@ class BootstrapProvenanceJoinTest < Minitest::Test
       end
     end
 
-    # Split/derived case: the stacked "2 2" item was split into two derived
-    # sub-items; BOTH provenance entries must keep the SOURCE span identity.
+    # Stacked semantic text stays one source item for source-glyph fallback;
+    # splitting it would duplicate a single source-span transition proof.
     stacked = page1.find { |it| it.text == '2 2' }
     stacked_entries = bucket.select { |e| e[:span_id] == stacked.source_span_id }
-    assert_operator stacked_entries.length, :>=, 2,
-                    'split stacked text must record one provenance entry per ' \
-                    'derived sub-item, all carrying the source span identity'
-    assert_equal stacked_entries.map { |e| e[:object_id] }.uniq.length,
-                 stacked_entries.length,
-                 'derived entries stay separate created-entity labels'
+    assert_equal 1, stacked_entries.length,
+                 'stacked text must record one source-glyph provenance entry'
+    assert_equal 'source_glyph_3d_text',
+                 stacked_entries.fetch(0)[:created_entity_type]
   end
 
   # Post-assignment clones keep identity (real helper, not a mock).

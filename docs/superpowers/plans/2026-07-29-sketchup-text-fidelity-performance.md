@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Superseded Labels delivery rule (2026-08-16):** The native-Label
+> conclusions in this historical plan are replaced by the current finite-bbox
+> Labels contract. SketchUp 2017 cannot control or verify source glyph size or
+> run width, so every finite-bbox Labels request advances item-by-item to the
+> exact source-outline 3D visual-equivalent. That delivery is not a native editable annotation;
+> semantic identity and provenance remain preserved, and
+> Raster is never selected silently.
+
 **Goal:** Make rotated Text fallback match the successful full-page 3D Text placement while constructing each exact repeated source-glyph solid only once per page/import.
 
 **Architecture:** `Svg3DTextRenderer` will separate the complete-page semantic match inventory from the target render subset, then use an import-scoped `Svg3DTextSolidCache` to create exact component definitions and lightweight translated instances. Existing semantic span groups, representation-ladder proofs, source evidence, positive depth, and save/reopen verification remain authoritative.
@@ -13,7 +21,7 @@
 - The representation ladder remains Text -> Labels -> 3D Text -> Glyphs -> Geometry -> item Raster.
 - Every rung change is item-scoped and requires affirmative impossibility evidence.
 - Direct 3D Text and Labels-to-3D-Text fallback use exact renderer SVG outlines; host-font substitution is prohibited.
-- A source-rotated span cannot be recorded as a completed native Label unless resulting glyph rotation is independently verified.
+- A finite-bbox Labels span cannot be recorded as a completed native Label; size/run-width and rotation limitations use distinct reason-bound proofs before source-outline 3D delivery.
 - No source outline point, fill rule, winding, hole, placement, affine transform, paint, source identity, or extrusion depth may change.
 - No lossy contour simplification or arbitrary visual-tolerance culling is permitted.
 - Ruby 2.2.4 and SketchUp Make 2017 remain supported.
@@ -627,8 +635,8 @@ ruby tools\sketchup_host_launcher.rb 'C:\TMP\su-acceptance-20260729\text\job.jso
 
 Required checks:
 
-- horizontal spans remain native Labels;
-- every rotated span records Text -> Labels -> 3D Text;
+- every finite-bbox span records a reason-bound Labels -> 3D Text transition;
+- horizontal spans use the size/run-width proof and rotated spans use the rotation proof;
 - rotated placement indices equal their direct-3D-Text placement indices;
 - no rotated source item is completed as an unrotated native Label;
 - full import does not regress against the separately recorded reference baseline;
