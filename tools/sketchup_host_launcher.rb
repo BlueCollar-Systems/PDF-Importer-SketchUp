@@ -13,6 +13,13 @@ require File.expand_path('sketchup_host_evidence', __dir__)
 module SketchupHostLauncher
   class LaunchError < StandardError; end
   DEFAULT_TIMEOUT_SECONDS = 3600.0
+  # SketchUp 2017 embeds Ruby 2.2, which has no long-path support: a host-facing
+  # path of 260+ characters (Windows MAX_PATH including the terminator) does not
+  # raise -- the host dies with signal 11 inside SketchupHostJob.load the moment
+  # it stats the path (reproduced 2026-08-17: a co-located immutable snapshot at
+  # 262 chars crashed every attempt, 259 ran). Every path handed to the host is
+  # kept at or below this length.
+  SU2017_MAX_HOST_PATH_LENGTH = 259
 
   # SketchUp's documented Sketchup.plugins_disabled= preference is persisted
   # here for the next process start. The launcher changes only this value and
@@ -142,7 +149,12 @@ module SketchupHostLauncher
     end
 
     def spawn(environment, command)
-      Process.spawn(environment, *command)
+      # Process.spawn with an array on Windows does not quote the executable path,
+      # so a path containing spaces (e.g., C:\Program Files\SketchUp\...) fails
+      # with ENOENT. Build a single quoted command line instead.
+      exe, *args = command
+      cmd = %Q{"#{exe}" #{args.map { |a| %Q{"#{a}"} }.join(' ')}}
+      Process.spawn(environment, cmd)
     end
 
     def poll(pid)
@@ -336,9 +348,11 @@ module SketchupHostLauncher
                        end
 
     job_id = "su-host-#{SecureRandom.hex(12)}"
+    assert_su2017_host_paths!(original_job)
     snapshot = prepare_controlled_job!(path, original_job, job_id)
     controlled_path = snapshot['job_path']
     job = SketchupHostJob.load(controlled_path)
+    assert_su2017_host_paths!(job)
     binding = {
       'job_id' => job_id,
       'job_sha256' => Digest::SHA256.file(controlled_path).hexdigest
@@ -460,11 +474,44 @@ module SketchupHostLauncher
     end
   end
 
+  # Host-facing paths SketchUp 2017's Ruby will stat/open. The immutable
+  # snapshot keeps the source file name (the SKP name derives from it), so when
+  # the co-located run dir under output_dir would push it past the limit the run
+  # dir moves to a short per-job temp dir instead -- the result records both
+  # original and immutable paths plus their digests either way.
+  def su2017_path_too_long?(path)
+    File.expand_path(path.to_s).length > SU2017_MAX_HOST_PATH_LENGTH
+  end
+
+  def assert_su2017_host_paths!(job)
+    offenders = [:pdf_path, :model_path, :result_path, :progress_path].select do |key|
+      job[key] && su2017_path_too_long?(job[key])
+    end
+    return true if offenders.empty?
+    detail = offenders.map do |key|
+      "#{key}=#{File.expand_path(job[key].to_s).length}"
+    end.join(', ')
+    raise LaunchError,
+          'SketchUp 2017 (Ruby 2.2) cannot open a path longer than '           "#{SU2017_MAX_HOST_PATH_LENGTH} characters and would crash with signal 11: "           "#{detail}. Shorten the output directory or the PDF file name."
+  end
+
+  def controlled_run_dir(original_job, job_id, snapshot_name)
+    colocated = File.join(original_job[:output_dir], '.bc_host_jobs', job_id)
+    longest = [File.join(colocated, snapshot_name), File.join(colocated, 'job.json')]
+    return colocated unless longest.any? { |candidate| su2017_path_too_long?(candidate) }
+    short = File.join(Dir.tmpdir, 'bc_host_jobs', job_id)
+    if su2017_path_too_long?(File.join(short, snapshot_name))
+      raise LaunchError,
+            'SketchUp 2017 (Ruby 2.2) cannot open the immutable PDF snapshot path even '             "in the temp dir (#{File.join(short, snapshot_name).length} characters); "             'shorten the PDF file name.'
+    end
+    short
+  end
+
   def prepare_controlled_job!(original_job_path, original_job, job_id)
     source = File.expand_path(original_job[:pdf_path].to_s)
     bytes = File.binread(source)
     source_sha256 = Digest::SHA256.hexdigest(bytes)
-    run_dir = File.join(original_job[:output_dir], '.bc_host_jobs', job_id)
+    run_dir = controlled_run_dir(original_job, job_id, File.basename(source))
     FileUtils.mkdir_p(run_dir)
     immutable_path = File.join(run_dir, File.basename(source))
     SketchupHostEvidence.atomic_write(immutable_path, bytes)

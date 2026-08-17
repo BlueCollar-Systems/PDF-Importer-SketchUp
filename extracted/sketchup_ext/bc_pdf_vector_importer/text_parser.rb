@@ -1014,83 +1014,11 @@ module BlueCollarSystems
         items.each_with_index do |item, i|
           next if used[i]
 
-          # Check if this is a small-font digit that might be a fraction part
-          if item.text =~ /\A\d{1,2}\z/ && items.length > i + 1
-            # Look for a nearby denominator
-            items.each_with_index do |other, j|
-              next if j <= i || used[j]
-              next unless other.text =~ /\A\d{1,2}\z/
-
-              # Check proximity (same X region, different Y = stacked)
-              dx = (item.x - other.x).abs
-              dy = (item.y - other.y).abs
-
-              # Stacked fractions: similar X, offset Y
-              if dx < item.font_size * 3 && dy < item.font_size * 2.0 && dy > 0.3
-                item_size = item.font_size.to_f
-                other_size = other.font_size.to_f
-                if item_size > 0.0 && other_size > 0.0
-                  next if [item_size, other_size].max > [item_size, other_size].min * 1.25
-                end
-                num_val = item.text.to_i
-                den_val = other.text.to_i
-
-                # Determine which is numerator (higher Y in PDF = visually on top)
-                if item.y > other.y
-                  numerator, denominator = num_val, den_val
-                  base_item = item
-                else
-                  numerator, denominator = den_val, num_val
-                  base_item = other
-                end
-
-                if VALID_DENOMS.include?(denominator) && numerator > 0 && numerator < denominator
-                  # Found a fraction! Reconstruct as inline
-                  frac_text = "#{numerator}/#{denominator}"
-                  mid_y = (item.y + other.y) / 2.0
-                  frac_item = TextItem.new(
-                    frac_text,
-                    [item.x, other.x].min,
-                    mid_y,
-                    [item.font_size, other.font_size].max,
-                    item.angle,
-                    item.font_name,
-                    [item.raw_font_size || item.font_size, other.raw_font_size || other.font_size].max
-                  )
-                  # Reconstructed fractions keep the base item's span identity
-                  # (corrective §1).
-                  if base_item.respond_to?(:source_span_id)
-                    frac_item.source_span_id = base_item.source_span_id
-                  end
-                  result << frac_item
-                  used[i] = true
-                  used[j] = true
-                  break
-                end
-              end
-            end
-          end
-
+          # Do not flatten stacked numerator/denominator into inline "n/d".
+          # Those PDF spans are separately placed; concatenating them is a
+          # representation change. Do not rewrite concatenated stacked digits
+          # ("316") into "3/16" at the span em — that FIT-squeezes the stack.
           unless used[i]
-            # Try splitting combined digit strings (e.g., "1516" → "15/16")
-            if item.text =~ /\A\d{3,4}\z/
-              frac = try_split_fraction(item.text)
-              if frac
-                split_item = TextItem.new(
-                  "#{frac[0]}/#{frac[1]}",
-                  item.x, item.y, item.font_size, item.angle, item.font_name,
-                  item.raw_font_size || item.font_size
-                )
-                # Split-derived text keeps the source span identity (corrective §1).
-                if item.respond_to?(:source_span_id)
-                  split_item.source_span_id = item.source_span_id
-                end
-                result << split_item
-                used[i] = true
-                next
-              end
-            end
-
             result << item
             used[i] = true
           end

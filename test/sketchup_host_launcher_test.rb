@@ -765,6 +765,84 @@ class SketchupHostLauncherTest < Minitest::Test
     refute_includes script, 'SendKeys'
   end
 
+  # SketchUp 2017's embedded Ruby 2.2 has no long-path support: any host-facing
+  # path of 260+ characters (MAX_PATH incl. NUL) crashes the host with signal 11
+  # while SketchupHostJob.load stats it -- reproduced 2026-08-17 on a real cell
+  # whose co-located immutable snapshot reached 262 chars (259 passed). The
+  # launcher must keep every path it hands to SketchUp under that limit.
+  def test_controlled_job_relocates_the_snapshot_when_the_colocated_path_would_exceed_su2017_max_path
+    Dir.mktmpdir('su-launch-longpath') do |dir|
+      long_name = 'NATIVE_' + ('x' * 90) + '.pdf'
+      output = File.join(dir, 'cell_' + ('y' * 120), 'geometry')
+      FileUtils.mkdir_p(output)
+      pdf = File.join(dir, long_name)
+      File.binwrite(pdf, "%PDF-1.4
+original
+%%EOF
+")
+      job_path = File.join(dir, 'job.json')
+      File.write(job_path, JSON.generate(
+        'pdf_path' => pdf, 'output_dir' => output,
+        'text_mode' => 'geometry', 'pages' => [1]
+      ))
+      original_job = SketchupHostJob.load(job_path)
+      colocated = File.join(output, '.bc_host_jobs', 'longpath-job', long_name)
+      assert_operator colocated.length, :>=,
+                      SketchupHostLauncher::SU2017_MAX_HOST_PATH_LENGTH + 1
+      snapshot = SketchupHostLauncher.prepare_controlled_job!(
+        job_path, original_job, 'longpath-job'
+      )
+      immutable = snapshot.fetch('immutable_pdf_path')
+      assert_operator immutable.length, :<=,
+                      SketchupHostLauncher::SU2017_MAX_HOST_PATH_LENGTH
+      assert_operator snapshot.fetch('job_path').length, :<=,
+                      SketchupHostLauncher::SU2017_MAX_HOST_PATH_LENGTH
+      assert_equal long_name, File.basename(immutable),
+                   'the snapshot keeps the source file name (SKP naming derives from it)'
+      assert_equal File.binread(pdf), File.binread(immutable)
+      refute_equal File.dirname(File.dirname(colocated)),
+                   File.dirname(File.dirname(immutable))
+    end
+  end
+
+  def test_controlled_job_keeps_the_colocated_snapshot_when_it_fits
+    Dir.mktmpdir('su-launch-shortpath') do |dir|
+      job_path, _result_path, pdf = write_job(dir)
+      original_job = SketchupHostJob.load(job_path)
+      snapshot = SketchupHostLauncher.prepare_controlled_job!(
+        job_path, original_job, 'short-job'
+      )
+      assert_equal File.join(original_job[:output_dir], '.bc_host_jobs', 'short-job',
+                             File.basename(pdf)),
+                   snapshot.fetch('immutable_pdf_path')
+    end
+  end
+
+  def test_launcher_refuses_a_host_facing_artifact_path_su2017_cannot_open
+    Dir.mktmpdir('su-launch-artifact-longpath') do |dir|
+      # The output dir is never created: this machine's Ruby cannot even remove
+      # a 260+ character directory, which is exactly why the launcher must
+      # refuse it before SketchUp 2017 ever sees it.
+      output = File.join(dir, 'cell_' + ('z' * 100), 'sub_' + ('z' * 100))
+      pdf = File.join(dir, 'input.pdf')
+      File.binwrite(pdf, "%PDF-1.4
+original
+%%EOF
+")
+      job_path = File.join(dir, 'job.json')
+      File.write(job_path, JSON.generate(
+        'pdf_path' => pdf, 'output_dir' => output,
+        'text_mode' => 'geometry', 'pages' => [1]
+      ))
+      original_job = SketchupHostJob.load(job_path)
+      error = assert_raises(SketchupHostLauncher::LaunchError) do
+        SketchupHostLauncher.assert_su2017_host_paths!(original_job)
+      end
+      assert_match(/SketchUp 2017.*path.*characters/i, error.message)
+      assert_match(/model_path|progress_path|result_path/, error.message)
+    end
+  end
+
   private
 
   def terminal_raster_manifest_row(physical)
