@@ -731,10 +731,15 @@ module BlueCollarSystems
                 ot = other.text.to_s
                 next false unless ot.length > t.length + 2
                 next false unless ot.include?(t)
-                dx = (other.x.to_f - it.x.to_f).abs
-                dy = (other.y.to_f - it.y.to_f).abs
-                dx <= [it.font_size.to_f * 3.0, 42.0].max &&
-                  dy <= [it.font_size.to_f * 1.8, 30.0].max
+                # A fraction is a leftover of the composite only when the
+                # composite actually contains it ON THE SAME LINE: the two
+                # source boxes overlap vertically and the fragment's centre
+                # lies inside the composite's horizontal extent. Anchor
+                # proximity alone (dx<=42 / dy<=30) dropped a genuinely
+                # separate weld size 23.5 pt below a "WEEP HOLES 3/16" line
+                # on 1011 (visual oracle, 2026-08-16); dropping a source span
+                # is a fidelity failure, keeping one extra fragment is not.
+                fragment_contained_in_line?(it, other)
               end
             elsif t == '0'
               items.any? do |other|
@@ -770,6 +775,44 @@ module BlueCollarSystems
           result = []
           items.each_with_index { |it2, i| result << it2 unless reject_indices.include?(i) }
           result
+        end
+
+        # True when +fragment+'s source box lies on the same text line as
+        # +composite+: their y-ranges intersect and the fragment's x-centre is
+        # inside the composite's x-range (PDF points, y-up). Items without a
+        # full source bbox fall back to the legacy anchor-proximity window.
+        def fragment_contained_in_line?(fragment, composite)
+          fbox = source_bbox_values(fragment)
+          cbox = source_bbox_values(composite)
+          if fbox.nil? || cbox.nil?
+            dx = (composite.x.to_f - fragment.x.to_f).abs
+            dy = (composite.y.to_f - fragment.y.to_f).abs
+            return dx <= [fragment.font_size.to_f * 3.0, 42.0].max &&
+                   dy <= [fragment.font_size.to_f * 1.8, 30.0].max
+          end
+
+          fx0, fy0, fx1, fy1 = fbox
+          cx0, cy0, cx1, cy1 = cbox
+          y_overlap = [fy1, cy1].min - [fy0, cy0].max
+          return false if y_overlap <= 0.0
+
+          fx_centre = (fx0 + fx1) * 0.5
+          fx_centre >= cx0 && fx_centre <= cx1
+        rescue StandardError
+          false
+        end
+
+        # [x0, y0, x1, y1] as floats with min/max normalised, or nil when any
+        # bbox member is missing.
+        def source_bbox_values(item)
+          names = [:bbox_x0, :bbox_y0, :bbox_x1, :bbox_y1]
+          return nil unless item && names.all? { |name| item.respond_to?(name) }
+          values = names.map { |name| item.send(name) }
+          return nil if values.any? { |value| value.nil? }
+          x0, y0, x1, y1 = values.map { |value| value.to_f }
+          [[x0, x1].min, [y0, y1].min, [x0, x1].max, [y0, y1].max]
+        rescue StandardError
+          nil
         end
 
         def estimate_angle(words, line_attrs = nil)

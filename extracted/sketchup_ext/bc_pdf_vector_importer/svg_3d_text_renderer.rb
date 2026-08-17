@@ -10,6 +10,16 @@ require File.join(File.dirname(__FILE__), 'import_run_control')
 module BlueCollarSystems
   module PDFVectorImporter
     module Svg3DTextRenderer
+      # Raised by safe_construction_scale when a span's own glyph contour holds
+      # vertices closer than the host merge tolerance at every construction scale
+      # up to MAX_CONSTRUCTION_SCALE. That is a deterministic, item-specific fact
+      # about the source geometry (the host cannot build the face), so the render
+      # loop converts it to an AFFIRMATIVE text3d -> glyphs proof. Typed so the
+      # classification cannot silently revert to the catch-all STOP reason if the
+      # message is ever reworded -- matching on message text is how
+      # host_3d_text_exception became a catch-all in the first place.
+      class UnrepresentableSourceContour < RuntimeError; end
+
       DEFAULT_DEPTH_INCHES = 1.0 / 64.0
       SIZE_TOLERANCE_INCHES = 1.0e-6
       HOST_POINT_TOLERANCE_INCHES = 0.001
@@ -253,11 +263,17 @@ module BlueCollarSystems
             )
             cleanup = cleanup_owned_group(entities, group)
             owned_groups.delete(group)
-            result[:failures] << hard_failure(
-              source_id, classify_host_failure(e), e.message,
-              cleanup[:created_entity_ids], cleanup[:cleaned_entity_ids],
-              cleanup[:cleanup_outcome]
-            )
+            if e.is_a?(UnrepresentableSourceContour)
+              result[:transition_proofs] << unrepresentable_as_3d_text_proof(
+                source_id, item, depth, opts[:source_context], e.message
+              )
+            else
+              result[:failures] << hard_failure(
+                source_id, classify_host_failure(e), e.message,
+                cleanup[:created_entity_ids], cleanup[:cleaned_entity_ids],
+                cleanup[:cleanup_outcome]
+              )
+            end
           end
         end
         run_checkpoint!(opts, :text_item, render_items.length, render_items.length)
@@ -1084,7 +1100,8 @@ module BlueCollarSystems
           return [scale * 10.0, MAX_CONSTRUCTION_SCALE].min if safe
           scale *= 10.0
         end
-        raise 'source contour has coincident vertices that scaling cannot separate'
+        raise UnrepresentableSourceContour,
+              'source contour has coincident vertices that scaling cannot separate'
       end
 
       # O(N log N) duplicate check: bucket points on quantized grid cells and
@@ -1355,6 +1372,40 @@ module BlueCollarSystems
             :source_text_codepoints => text.each_char.map { |c| format('U+%04X', c.ord) },
             :requested_depth => depth,
             :verification => 'item text inspected before any glyph build; no host call attempted',
+            :source_renderer => (source_context.is_a?(Hash) ? source_context[:renderer].to_s : nil)
+          }
+        }
+      end
+
+      def self.unrepresentable_as_3d_text_proof(source_id, item, depth,
+                                                source_context, host_message)
+        binding = RepresentationFidelity.proof_binding(source_id)
+        text = begin
+          CairoGlyphSource.item_text(item)
+        rescue StandardError
+          nil
+        end
+        {
+          :source_span_id => source_id,
+          :importer_id => binding[:importer_id],
+          :page_number => binding[:page_number],
+          :scope => :item,
+          :category => :exact_representation_impossible,
+          :affirmative_impossibility => true,
+          :generic_failure => false,
+          :from_mode => :text3d,
+          :to_mode => :glyphs,
+          :reason_code => :source_item_unrepresentable_as_3d_text,
+          :attempted_renderer => 'svg_source_3d_text',
+          :created_entity_ids => [],
+          :cleaned_entity_ids => [],
+          :cleanup_outcome => :not_required,
+          :evidence => {
+            :source_observation => 'source span glyph contour has coincident vertices that cannot be separated by safe construction scaling; it cannot be represented as a SketchUp 3D text solid',
+            :source_text => text,
+            :requested_depth => depth,
+            :host_error => host_message.to_s,
+            :verification => 'RuntimeError raised during build_span_group after whitespace-only and identity checks passed',
             :source_renderer => (source_context.is_a?(Hash) ? source_context[:renderer].to_s : nil)
           }
         }

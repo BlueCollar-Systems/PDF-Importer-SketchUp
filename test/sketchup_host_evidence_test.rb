@@ -2624,6 +2624,60 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_match(/Geometry|topology|edge/i, error.message)
   end
 
+  # Glyphs / Geometry deliver filled glyph faces beside the exact outline
+  # edges (visual oracle 1011, 2026-08-16: edge-only text rendered hollow).
+  # The host evidence gate must accept Face members as long as the raw edges
+  # are still present and nothing else lives inside the owned unit.
+  def test_geometry_rows_accept_filled_glyph_faces_beside_edges
+    rows = filled_geometry_manifest
+    stats = strict_page_mode_stats(:geometry, :geometry, 1)
+    expected = decorate_fixture_manifest!(rows, :geometry, 'text_span:1:0', 'A')
+    attempt = stats[:text_attempts].first
+    attempt[:expected_evidence] = expected
+    attempt[:attempt_history].last[:expected_evidence] = expected
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, rows, :geometry, [1]
+    )
+  end
+
+  def test_glyph_rows_accept_filled_glyph_faces_inside_glyph_units
+    rows = filled_glyph_manifest
+    stats = strict_page_mode_stats(:glyphs, :glyphs, 1)
+    expected = decorate_fixture_manifest!(rows, :glyphs, 'text_span:1:0', 'A')
+    attempt = stats[:text_attempts].first
+    attempt[:expected_evidence] = expected
+    attempt[:attempt_history].last[:expected_evidence] = expected
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, rows, :glyphs, [1]
+    )
+  end
+
+  def test_compact_geometry_accepts_edge_and_face_topology
+    rows, stats = compact_fixture(:geometry, filled_geometry_manifest)
+    topology = rows.first['geometry_evidence']['topology']
+    assert_equal ['Edge', 'Face'], topology['direct_child_types']
+    assert_equal({ 'Edge' => 1, 'Face' => 1 },
+                 topology['descendant_type_counts'])
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, rows, :geometry, [1]
+    )
+  end
+
+  def test_compact_glyphs_accepts_face_descendants_inside_glyph_units
+    rows, stats = compact_fixture(:glyphs, filled_glyph_manifest)
+    topology = rows.first['geometry_evidence']['topology']
+    assert_equal ['ComponentInstance'], topology['direct_child_types']
+    assert_equal({ 'ComponentInstance' => 1, 'Edge' => 1, 'Face' => 1 },
+                 topology['descendant_type_counts'])
+
+    assert SketchupHostEvidence.verify_delivery_evidence!(
+      stats, rows, :glyphs, [1]
+    )
+  end
+
   def test_compact_glyphs_rejects_direct_edge_without_glyph_container
     rows, stats = compact_fixture(:glyphs)
     topology = rows.first['geometry_evidence']['topology']
@@ -2731,15 +2785,22 @@ class SketchupHostEvidenceTest < Minitest::Test
     }]
   end
 
-  def compact_fixture(mode)
-    rows = case mode
-           when :text3d then text3d_manifest
-           when :geometry then geometry_manifest
-           when :glyphs then glyph_manifest
-           else raise ArgumentError, "unsupported compact fixture #{mode}"
-           end
+  def compact_fixture(mode, rows = nil)
+    custom_rows = !rows.nil?
+    rows ||= case mode
+             when :text3d then text3d_manifest
+             when :geometry then geometry_manifest
+             when :glyphs then glyph_manifest
+             else raise ArgumentError, "unsupported compact fixture #{mode}"
+             end
     stats = mode == :text3d ? strict_text3d_stats :
       strict_page_mode_stats(mode, mode, 1)
+    if custom_rows
+      expected = decorate_fixture_manifest!(rows, mode, 'text_span:1:0', 'A')
+      attempt = stats[:text_attempts].first
+      attempt[:expected_evidence] = expected
+      attempt[:attempt_history].last[:expected_evidence] = expected
+    end
     expected = stats[:text_attempts].first[:expected_evidence]
     root = rows.first
     child_types = Array(root['children']).map { |child| child['typename'] }.sort
@@ -2858,6 +2919,30 @@ class SketchupHostEvidenceTest < Minitest::Test
         }]
       }]
     }]
+    decorate_fixture_manifest!(rows, :glyphs, 'text_span:1:0', 'A')
+    rows
+  end
+
+  # Geometry group holding the exact outline edge plus its filled glyph face.
+  def filled_geometry_manifest
+    rows = geometry_manifest
+    rows.first['children'] << {
+      'entity_id' => 15, 'persistent_id' => 1015,
+      'typename' => 'Face', 'valid' => true, 'deleted' => false,
+      'children' => []
+    }
+    decorate_fixture_manifest!(rows, :geometry, 'text_span:1:0', 'A')
+    rows
+  end
+
+  # Glyph unit (component instance) holding its outline edge plus filled face.
+  def filled_glyph_manifest
+    rows = glyph_manifest
+    rows.first['children'].first['children'] << {
+      'entity_id' => 16, 'persistent_id' => 1016,
+      'typename' => 'Face', 'valid' => true, 'deleted' => false,
+      'children' => []
+    }
     decorate_fixture_manifest!(rows, :glyphs, 'text_span:1:0', 'A')
     rows
   end

@@ -45,8 +45,8 @@ representation.
 | **Text** | Distinct flat editable model text when the host exposes a constructor; SketchUp 2017 does not, so an exact item-bound capability proof advances only to source-outline 3D Text (Labels are a separate requested mode) |
 | **Labels** | Editable `Sketchup::Text` when the host can represent the item; nonzero glyph rotation enters the verified closest fallback ladder |
 | **3D Text** | Source-glyph solid text with verified positive Z depth; preserves model-space size and PDF rotation |
-| **Glyphs** | Per-glyph edges; high-fidelity outline path when exact geometry is preferred |
-| **Geometry** | Text as edges only; outline geometry when the user selects that option |
+| **Glyphs** | One physical unit per source glyph: filled glyph faces + exact outline edges (counters stay open), painted with the source ink; flat (no Z depth) |
+| **Geometry** | One flat owned group per source item: filled glyph faces + exact outline edges, painted with the source ink; a contour the host cannot face keeps its edges and is recorded in the item evidence |
 | **Raster** | Verified source-bound item crop, or a verified page image for a selected zero-canonical-text page |
 
 Explicit full-page Raster records semantic text not evaluated and never

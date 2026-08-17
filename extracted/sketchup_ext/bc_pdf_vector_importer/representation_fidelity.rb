@@ -79,7 +79,8 @@ module BlueCollarSystems
         :verified_source_representation_impossible,
         :source_item_identity_unavailable,
         :source_vector_geometry_absent,
-        :host_representation_unsupported
+        :host_representation_unsupported,
+        :source_item_unrepresentable_as_3d_text
       ].freeze
 
       STOP_REASON_CODES = [
