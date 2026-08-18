@@ -266,6 +266,18 @@ module BlueCollarSystems
             )
             emit_progress(:text_item_completed, progress_detail)
           end
+          # SketchUp suspends empty-group cleanup inside start/commit_operation
+          # and purges empty groups at commit. A Labels page whose every item
+          # advanced by proof (SketchUp 2017 finite-bbox size/rotation proofs)
+          # places nothing here, so an empty "Text" group would be part of the
+          # certified retained tree (main.rb page_certifier before
+          # commit_operation) and vanish before PageOrchestrator's immediate
+          # re-validation -> "retained entity signature changed". Remove it
+          # ourselves, deterministically, before certification.
+          if text_group && staging_group_child_count(text_group) == 0
+            erase_empty_staging_group!(text_group)
+            @text_group = nil
+          end
         end
         emit_progress(
           :text_completed,
