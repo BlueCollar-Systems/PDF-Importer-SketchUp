@@ -239,16 +239,17 @@ module SketchupBatchImport
       SketchupBatchImport.write_progress!(
         job, binding, 'reopen_evidence_snapshot_completed'
       )
+      labels_visual_equivalent_census = nil
       begin
+        reopened_owned_manifest = SketchupHostEvidence.owned_manifest(
+          before_manifest, reopened_manifest
+        )
+        raise 'no recursively owned imported host entities found after reopen' if
+          reopened_owned_manifest.empty?
         if pure_terminal_page_raster
           SketchupHostEvidence.verify_lightweight_reopen_continuity!(
             after_manifest, reopened_manifest
           )
-          reopened_owned_manifest = SketchupHostEvidence.owned_manifest(
-            before_manifest, reopened_manifest
-          )
-          raise 'no recursively owned imported host entities found after reopen' if
-            reopened_owned_manifest.empty?
           SketchupHostEvidence.verify_delivery_evidence!(
             stats, reopened_owned_manifest, requested_mode, job[:pages]
           )
@@ -257,6 +258,10 @@ module SketchupBatchImport
             after_manifest, reopened_manifest
           )
         end
+        labels_visual_equivalent_census =
+          verify_labels_visual_equivalent_profile!(
+            job, stats, reopened_owned_manifest
+          )
       rescue SketchupHostEvidence::EvidenceError => error
         # Persist both sides so a reopen RED can be diagnosed without
         # another full import (previous runs lost the reopened snapshot).
@@ -267,8 +272,12 @@ module SketchupBatchImport
         raise
       end
       manifest_payload['reopened_entities'] = reopened_manifest
-      manifest_payload['reopened_owned_entities'] = reopened_owned_manifest if
-        pure_terminal_page_raster
+      manifest_payload['reopened_owned_entities'] = reopened_owned_manifest
+      if labels_visual_equivalent_census
+        manifest_payload['labels_visual_equivalent_acceptance'] = true
+        manifest_payload['labels_visual_equivalent_census'] =
+          labels_visual_equivalent_census
+      end
       manifest_payload['reopen_persistent_id_verified'] = true
       manifest_payload['final_texture_proof_verified'] =
         pure_terminal_page_raster
@@ -346,6 +355,10 @@ module SketchupBatchImport
           Array(stats[:empty_page_source_inspections]),
         'source_glyph_physical_deliveries' =>
           Array(stats[:source_glyph_physical_deliveries]),
+        'labels_visual_equivalent_acceptance' =>
+          job[:labels_visual_equivalent_acceptance] == true,
+        'labels_visual_equivalent_census' =>
+          labels_visual_equivalent_census,
         'representation_fidelity' => stats[:representation_fidelity],
         'import_contract_ready' => stats[:import_contract_ready]
       }.merge(release_identity_payload(job, source_locations))
@@ -580,6 +593,14 @@ module SketchupBatchImport
         end
         pages.uniq.sort == selected
       end
+    end
+
+    def verify_labels_visual_equivalent_profile!(job, stats,
+                                                 reopened_owned_manifest)
+      return nil unless job[:labels_visual_equivalent_acceptance] == true
+      SketchupHostEvidence.verify_labels_visual_equivalent_acceptance!(
+        stats, reopened_owned_manifest
+      )
     end
 
     def import_options(importer, job, binding = nil)

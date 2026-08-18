@@ -392,7 +392,7 @@ class GeometryBuilderTextFallbackTest < Minitest::Test
     assert_empty entities.labels
   end
 
-  def test_unavailable_label_api_stops_without_3d_text_substitution
+  def test_horizontal_label_size_proof_precedes_native_api_and_3d_substitution
     provenance = []
     builder = make_builder(false, provenance)
     entities = TextFallbackEntities.new(:success, :nil)
@@ -402,12 +402,16 @@ class GeometryBuilderTextFallbackTest < Minitest::Test
     )
 
     refute delivered
+    assert_empty entities.added_texts
     assert_empty entities.mesh_calls
     refute_respond_to builder, :text_fallbacks
     assert_empty provenance
     failure = builder.text_delivery_failures.fetch(0)
     assert_equal :labels, failure[:requested]
-    assert_equal 'label_native_api_unavailable', failure[:reason]
+    assert_equal 'label_source_size_unsupported_by_host', failure[:reason]
+    proof = failure[:transition_proof]
+    assert_equal :labels, proof[:from_mode]
+    assert_equal :text3d, proof[:to_mode]
     assert_equal [:labels],
                  failure[:attempt_history].map { |rung| rung[:mode] }
   end
@@ -451,7 +455,7 @@ class GeometryBuilderTextFallbackTest < Minitest::Test
     end
   end
 
-  def test_whitespace_only_label_is_attempted_with_exact_source_content
+  def test_whitespace_only_label_fallback_preserves_exact_source_content
     provenance = []
     builder = make_builder(false, provenance, :labels)
     entities = TextFallbackEntities.new(:success, :nil)
@@ -463,11 +467,31 @@ class GeometryBuilderTextFallbackTest < Minitest::Test
     )
 
     refute delivered
-    assert_equal ['   '], entities.added_texts,
-                 'all native label signatures must receive exact source content'
+    assert_empty entities.added_texts,
+                 'source-size fallback must occur before native add_text'
     failure = builder.text_delivery_failures.fetch(0)
     assert_equal 'text_span:1:1', failure[:source_span_id]
     assert_equal :labels, failure[:requested]
+    assert_equal 'label_source_size_unsupported_by_host', failure[:reason]
+    assert_equal Digest::SHA256.hexdigest('   '),
+                 failure[:transition_proof][:evidence][:source_text_sha256]
+  end
+
+  def test_empty_label_span_is_ignored_without_entities_or_fallback
+    provenance = []
+    builder = make_builder(false, provenance, :labels)
+    entities = TextFallbackEntities.new(:success, :success)
+    item = Item.new('', 10.0, 20.0, 9.0, 0.0, 'Arial', nil,
+                    10.0, 20.0, 25.0, 29.0, nil, 'text_span:1:2')
+
+    assert_nil builder.send(
+      :place_text, entities, item, 0.0, 0.0, 792.0, 'Text'
+    )
+    assert_empty entities.to_a
+    assert_empty entities.added_texts
+    assert_empty builder.text_delivery_failures
+    assert_empty builder.text_attempts
+    assert_empty provenance
   end
 
   def test_sketchup_2017_label_leader_vector_is_never_certified_as_rotation

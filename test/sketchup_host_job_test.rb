@@ -114,6 +114,44 @@ class SketchupHostJobTest < Minitest::Test
     end
   end
 
+  def test_labels_visual_equivalent_acceptance_profile_is_explicit_and_preserved
+    load_job_tool
+    Dir.mktmpdir('su-host-labels-visual') do |dir|
+      _pdf, job_path = write_json_job(
+        dir,
+        'text_mode' => 'labels',
+        'import_mode' => 'vector',
+        'pages' => [1],
+        'labels_visual_equivalent_acceptance' => true
+      )
+
+      job = SketchupHostJob.load(job_path)
+
+      assert_equal true, job[:labels_visual_equivalent_acceptance]
+    end
+  end
+
+  def test_labels_visual_equivalent_acceptance_profile_rejects_wrong_scope
+    load_job_tool
+    Dir.mktmpdir('su-host-labels-visual-scope') do |dir|
+      [
+        { 'text_mode' => 'text3d', 'import_mode' => 'vector', 'pages' => [1] },
+        { 'text_mode' => 'labels', 'import_mode' => 'raster', 'pages' => [1] },
+        { 'text_mode' => 'labels', 'import_mode' => 'vector', 'pages' => 'all' },
+        { 'text_mode' => 'labels', 'import_mode' => 'vector', 'pages' => [1],
+          'skp_export_only' => true }
+      ].each do |scope|
+        _pdf, job_path = write_json_job(
+          dir, scope.merge('labels_visual_equivalent_acceptance' => true)
+        )
+        error = assert_raises(ArgumentError) do
+          SketchupHostJob.load(job_path)
+        end
+        assert_match(/Labels visual-equivalent acceptance/i, error.message)
+      end
+    end
+  end
+
   def test_controlled_job_preserves_original_and_immutable_source_lineage
     load_job_tool
     Dir.mktmpdir('su-host-job-lineage') do |dir|

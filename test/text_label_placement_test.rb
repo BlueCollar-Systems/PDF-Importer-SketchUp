@@ -228,15 +228,21 @@ assert_true(horiz_vec.x.abs < 0.01 && horiz_vec.y.abs < 0.01,
             'horizontal labels should use zero direction vector for SU 2017')
 
 dummy_entities = DummyEntities.new
-builder.send(:place_text, dummy_entities, center_item, 0.0, 0.0, 792.0, 'TextLayer')
-assert_true(dummy_entities.texts.length == 1,
-            "bbox-backed label should place exactly one SketchUp label (got #{dummy_entities.texts.length})")
-placed_text, placed_point, placed_vector, _ = dummy_entities.texts.first
-assert_true(placed_text == 'QUAN', "placed text should be QUAN (got #{placed_text.inspect})")
-assert_true(placed_point.respond_to?(:x) && placed_point.respond_to?(:y),
-            'placed label should receive a SketchUp point, not a raw Float')
-assert_true(placed_vector.respond_to?(:x) && placed_vector.respond_to?(:y),
-            'placed label should receive a direction vector')
+center_delivered = builder.send(
+  :place_text, dummy_entities, center_item, 0.0, 0.0, 792.0, 'TextLayer'
+)
+assert_true(!center_delivered,
+            'bbox-backed Labels must advance before native add_text')
+assert_true(dummy_entities.texts.empty?,
+            'bbox-backed Labels must create no unmeasured SketchUp Text')
+center_failure = builder.text_delivery_failures.last
+center_proof = center_failure && center_failure[:transition_proof]
+assert_true(center_failure &&
+            center_failure[:reason] == 'label_source_size_unsupported_by_host',
+            'bbox-backed Labels must record the source-size host limitation')
+assert_true(center_proof && center_proof[:from_mode] == :labels &&
+            center_proof[:to_mode] == :text3d,
+            'bbox-backed Labels must advance only to source-outline 3D Text')
 
 rotated_label = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
   'p7303', 150.0, 220.0, 8.0, 90.0, 'pdftotext', nil,
@@ -659,28 +665,27 @@ if PDF_EXTERNAL_REFERENCE && File.file?(PDF_EXTERNAL_REFERENCE)
   items.each do |item|
     builder.send(:place_text, placed_entities, item, 0.0, 0.0, 792.0, 'TextLayer')
   end
-  extra_placements = items.inject(0) do |acc, it|
-    acc + (builder.send(:stacked_vertical_dimension_labels?, it) ?
-             it.text.to_s.strip.split(/\s+/).length - 1 : 0)
-  end
-  expected_placements = items.length + extra_placements
+  expected_placements = items.length
   placed_total = placed_entities.entities.count do |entity|
     entity.respond_to?(:typename) && entity.typename.to_s == 'Text'
   end + placed_entities.mesh_calls.length
   delivery_failures = builder.text_delivery_failures[failure_start..-1] || []
-  rotation_transitions = delivery_failures.select do |failure|
+  label_transitions = delivery_failures.select do |failure|
     proof = failure[:transition_proof]
-    failure[:reason] == 'label_rotation_unsupported_by_host' &&
+    ['label_rotation_unsupported_by_host',
+     'label_source_size_unsupported_by_host'].include?(failure[:reason]) &&
       failure[:source_span_id].to_s =~ /\Atext_span:1:\d+\z/ &&
       proof && proof[:source_span_id] == failure[:source_span_id] &&
       proof[:affirmative_impossibility] == true &&
       proof[:from_mode] == :labels && proof[:to_mode] == :text3d
   end
-  assert_true(delivery_failures.length == rotation_transitions.length,
-              'every undelivered acceptance label must have an item-bound rotation-impossibility transition')
-  assert_true(placed_total + rotation_transitions.length == expected_placements,
-              "all external-reference labels must place or prove the adjacent rotation transition " \
-              "(got #{placed_total} placements + #{rotation_transitions.length} proofs of #{expected_placements})")
+  assert_true(placed_total == 0,
+              'Labels visual-parity mode must create zero native Text entities')
+  assert_true(delivery_failures.length == label_transitions.length,
+              'every acceptance Label must have an item-bound size/rotation transition')
+  assert_true(label_transitions.length == expected_placements,
+              "all external-reference Labels must prove one adjacent source-outline transition " \
+              "(got #{label_transitions.length} proofs of #{expected_placements})")
   puts "  External reference: #{items.length} text items, #{with_bbox} with bbox, #{headers.length} BOM headers"
 else
   puts '  SKIP: set BCS_PRIVATE_VALIDATION_ROOT or BCS_TIER1_USER_PDF'

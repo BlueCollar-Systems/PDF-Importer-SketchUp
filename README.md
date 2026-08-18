@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.143-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.145-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -24,8 +24,8 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 ### Recent fixes (v3.7.126)
 
-- **SketchUp 2017 label stability**: native Labels now use the documented two-argument `entities.add_text` form and persist an explicit three-coordinate leader-vector evidence value, avoiding the zero-length-vector host crash while keeping placement verification fail-closed.
-- **Rotated label fidelity**: fraction and part-mark labels with source rotation advance through the item-specific ladder to exact source-outline 3D Text when a native SketchUp label cannot preserve their visual orientation.
+- **SketchUp 2017 Labels stability and size fidelity**: finite-bbox Labels now prove the host's missing glyph-size/run-width control before `entities.add_text`, avoiding both unmeasured screen annotations and the zero-length-vector host crash. Each item advances exactly one rung to source-outline 3D Text with its semantic hash, source span, placement, and provenance intact.
+- **Rotated label fidelity**: fraction and part-mark labels with source rotation use the corresponding item-bound rotation proof and advance to exact source-outline 3D Text; they never become an unrotated native annotation.
 - **Multi-page accountability**: host QA now records every requested page as delivered, failed, or unaccounted and rejects incomplete page sets instead of allowing a page-one-only result to appear complete.
 
 ### Recent fixes (v3.7.125)
@@ -40,9 +40,9 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 ### Recent fixes (v3.7.114)
 
-- **Rotated text fidelity**: exact pdftocairo source-glyph outlines keep their own source orientation without a second semantic rotation; native Labels still use the PDF text-matrix angle.
+- **Rotated text fidelity**: exact pdftocairo source-glyph outlines keep their own source orientation without a second semantic rotation. Requested Labels retain that angle through their explicit source-outline 3D visual-equivalent delivery.
 - **Dimension placement**: horizontal wide-short dimensions are no longer misclassified as 90° text, one-digit mixed numbers center only in tight dimension breaks, and split diagonal part marks such as `a1` + `2` + `34` rejoin as `a1234`.
-- **Text accuracy**: a Text request no longer accepts an unmeasured SketchUp screen label as visually exact. Because `Sketchup::Text` exposes no source glyph-size or run-width control, the item-bound ladder advances automatically to exact source-outline 3D Text; the explicit Labels option remains native and editable.
+- **Text and Labels accuracy**: neither request accepts an unmeasured SketchUp screen annotation as visually exact. Because `Sketchup::Text` exposes no source glyph-size or run-width control, each finite-bbox Labels item carries an affirmative proof and advances to exact source-outline 3D Text. This visual-equivalent result is not promised to remain a native editable annotation, never silently enters Raster, and preserves semantic/provenance identity.
 - **Older-hardware performance**: source-glyph matching uses exact spatial preselection, single-use host renders avoid retaining a duplicate full-page point graph, and repeated component evidence reuses immutable definition topology and canonical fragments. A large synthetic regression drawing now imports substantially faster without changing its delivered text inventory.
 
 ### Recent fixes (v3.7.113)
@@ -85,7 +85,7 @@ assets, checksums, license, and notes.
   | Requested representation | Delivered object | Fidelity contract |
   |--------------------------|------------------|-------------------|
   | **Text** | Closest verified text representation | Never silently aliases to Labels. SketchUp 2017 exposes no distinct flat editable constructor, and native annotations expose no source glyph-size/run-width control; signed item proofs therefore advance automatically to exact source-outline 3D Text. |
-  | **Labels** | Editable `Sketchup::Text` annotation | Exact content/anchor and hidden leader are read back; nonzero glyph rotation is a proven host limit for that item. |
+  | **Labels** | Explicit source-outline 3D visual equivalent on SketchUp 2017 | A finite source bbox proves native annotation size/run-width control is unavailable before entity creation; rotation and horizontal-size proofs advance one rung while preserving exact semantic/provenance identity. No editability or silent Raster substitution is promised. |
   | **3D Text** | Positive-depth source-glyph solid text | Model-space placement, rotation, size, source glyphs, and depth are verified. |
   | **Glyphs** | Per-glyph grouped source outlines: filled glyph faces + exact outline edges, painted with the source ink | Outline identity, grouping, placement, rotation, size, and visibility are verified; face fill and ink are recorded per item. |
   | **Geometry** | Source/page path outlines: filled glyph faces + exact outline edges, painted with the source ink | Geometry remains separate from Glyph groups and is verified as one owned flat group of edges plus faces. |
@@ -105,7 +105,9 @@ assets, checksums, license, and notes.
   importer attributes alone are not proof.
 
   Use **3D Text** for go-live visual comparison against Adobe at equal zoom.
-  Use **Labels** only when you need to edit piece marks or notes after import.
+  Use **Labels** when you need the explicit Labels request and its audited
+  closest-representation ladder. On SketchUp 2017, finite-bbox spans are delivered
+  as source-outline 3D visual equivalents, not editable screen annotations.
   Use **Text** when you want the closest verified text result automatically;
   SketchUp 2017 reaches exact source-outline 3D Text because its flat annotation
   API cannot preserve source size. Use **Glyphs** or **Geometry** when the
@@ -115,10 +117,12 @@ assets, checksums, license, and notes.
 
   ### Text-mode fidelity and failure handling
 
-  The selected text representation is always attempted first and verified in
-  that exact type. Placement, rotation, width, and height are read back after
-  the final transform. A generic failed proof cleans its exact partial artifacts
-  and stops; it cannot trigger a representation change.
+  The selected text rung is always attempted first. For finite-bbox Labels on
+  SketchUp 2017, the item-bound capability attempt proves before host creation
+  that native annotations cannot preserve source size/run width; the adjacent
+  source-outline 3D attempt is then verified for placement, rotation, width,
+  height, semantics, and provenance. A generic failed proof cleans its exact
+  partial artifacts and stops; it cannot trigger a representation change.
 
   Missing helpers, generic host/API failures, exceptions, empty artifacts, and
   currently broken transform code are not proof that a representation is

@@ -70,6 +70,14 @@ module SketchupHostJob
     end
     raise ArgumentError, "unsupported text_mode: #{text_mode}" unless TEXT_MODES.include?(text_mode)
     raise ArgumentError, "unsupported import_mode: #{import_mode}" unless IMPORT_MODES.include?(import_mode)
+    labels_visual_equivalent_acceptance =
+      raw['labels_visual_equivalent_acceptance'] == true
+    if labels_visual_equivalent_acceptance &&
+       (text_mode != :labels || import_mode == 'raster' || pages == :all ||
+        raw['skp_export_only'] == true)
+      raise ArgumentError,
+            'Labels visual-equivalent acceptance requires Labels, full reopened verification, a vector-capable import mode, and exact pages'
+    end
     base = File.basename(pdf_path, File.extname(pdf_path))
     {
       :job_path => input,
@@ -94,6 +102,8 @@ module SketchupHostJob
       :import_mode => import_mode,
       :pages => pages,
       :skp_export_only => raw['skp_export_only'] == true,
+      :labels_visual_equivalent_acceptance =>
+        labels_visual_equivalent_acceptance,
       :model_path => File.join(output_dir, "#{base}-#{text_mode}.skp"),
       :result_path => File.join(output_dir, 'host_acceptance.json'),
       :progress_path => File.join(output_dir, 'host_progress.json')

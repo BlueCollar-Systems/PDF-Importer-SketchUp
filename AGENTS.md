@@ -15,7 +15,7 @@ UI / code names from `ImportDialog::TEXT_MODE_CHOICES` / symbols `:text`, `:labe
 | Requested mode | Required first attempt | Finite closest fallback after affirmative item proof |
 |----------------|------------------------|-----------------------------------------------------|
 | **Text** | Distinct flat editable model Text; never a Label alias | 3D Text → Glyphs → Geometry → item Raster |
-| **Labels** | Native `Sketchup::Text` Label | 3D Text → Glyphs → Geometry → item Raster |
+| **Labels** | Item-bound capability observation; on SketchUp 2017 every finite-bbox source proves size/run width or rotation unsupported before native `Sketchup::Text` creation, then advances to the source-outline 3D visual equivalent (not a native editable annotation) | 3D Text → Glyphs → Geometry → item Raster |
 | **3D Text** | Source-glyph solid text with positive Z depth | Glyphs → Geometry → item Raster |
 | **Glyphs** | Source glyph outlines | Geometry → item Raster |
 | **Geometry** | Page/source path geometry | Item Raster |
@@ -59,11 +59,16 @@ it may certify a page. Build final completeness proof only after real current
 source spans have been matched to created host entities; return code zero,
 nonempty output, or pre-placement SVG structure is never sufficient.
 
-For native Labels, certification includes readback of entity type, exact text,
-all three anchor/direction coordinates, and hidden-leader state. SketchUp's
-`Text#vector` is a leader vector, not glyph rotation. A nonzero model-space
-rotation is therefore an affirmative host-representation impossibility for that
-item after the Labels attempt; it enters Labels → 3D Text, not a geometry shortcut.
+SketchUp 2017 `Sketchup::Text` is a screen annotation: it exposes neither
+source-glyph size nor run-width control, and `Text#vector` controls the leader,
+not glyph rotation. A canonical finite-bbox Labels item therefore produces an
+affirmative, item-bound host-representation proof before `add_text`: nonzero
+rotation uses the rotation proof and a horizontal item uses the source-size/run-
+width proof. Both advance exactly one rung to verified source-outline 3D Text.
+The fallback must retain the exact semantic text hash, source span, placement,
+and provenance. It must never silently skip to Raster. Missing or invalid source
+dimensions cannot support this proof and stop delivery without creating an
+entity.
 
 An empty extractor result is a no-text proof only when decoded page streams and
 referenced Form XObjects contain no nonempty painting text-show operands. Ignore
@@ -75,12 +80,12 @@ inline-image bytes and `Tr 3` non-painting OCR text; otherwise stop explicitly.
 |----------|--------|
 | **SIZE-1** | Nominal PDF pt height only — no bbox-fit shrink/grow. Still inside the selected mode. |
 | **R20-2** | Ruby 2.2-safe height bounds + loud telemetry. Still 3D Text (or whatever was requested). |
-| Labels host limits | Try and certify native Labels first; a proven nonzero-rotation host limit advances one rung to verified 3D Text. |
+| Labels host limits | Attempt the Labels rung first. For a finite source bbox, prove the SketchUp 2017 size/run-width or rotation limitation before native entity creation, then advance one rung to verified source-outline 3D Text. |
 
 ### Conflict notes (reconciled)
 
 - Older peer-swapping ladders such as Geometry/Glyphs → 3D Text → Labels → page raster are **superseded**. Use only the finite closest ladders above, one proven item transition at a time.
-- “Rotated labels prefer geometry mesh” is wrong. Native Labels are attempted first; when the host cannot express that item rotation, the next rung is verified 3D Text.
+- “Labels can remain native and editable while matching the PDF” is wrong for finite-bbox source spans in SketchUp 2017. The item-bound Labels capability proof advances only to verified source-outline 3D Text; it never jumps directly to Geometry or Raster.
 
 ## Other pointers
 

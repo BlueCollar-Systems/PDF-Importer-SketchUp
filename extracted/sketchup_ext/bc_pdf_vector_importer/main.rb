@@ -374,7 +374,7 @@ module BlueCollarSystems
       {
         :mode => RepresentationFidelity.normalize_mode(proof[:from_mode]),
         :outcome => :failed,
-        :reason => proof[:reason_code].to_s,
+        :reason => (proof[:reason_subtype] || proof[:reason_code]).to_s,
         :created_entity_ids => Array(proof[:created_entity_ids]),
         :cleaned_entity_ids => Array(proof[:cleaned_entity_ids]),
         :resulting_entity_ids => [],
@@ -1061,7 +1061,12 @@ module BlueCollarSystems
     )
       items_by_id = {}
       Array(text_items).each do |item|
-        items_by_id[RepresentationFidelity.source_span_id(item)] = item
+        source_id = RepresentationFidelity.source_span_id(item)
+        if items_by_id.key?(source_id)
+          raise RepresentationFidelity::ContractError,
+                "duplicate Labels fallback source item #{source_id}"
+        end
+        items_by_id[source_id] = item
       end
       attempts_by_id = {}
       Array(prior_attempts).each do |attempt|
@@ -1089,7 +1094,7 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError,
                 "#{source_id} controller is not at the Labels rung"
         end
-        controller.advance!(proof)
+        controller.advance!(proof, failure[:reason])
         controllers[source_id] = controller
         failed_items << item
       end

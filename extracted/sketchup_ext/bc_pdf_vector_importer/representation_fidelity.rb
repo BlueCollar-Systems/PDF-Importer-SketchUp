@@ -43,6 +43,41 @@ module BlueCollarSystems
       FLAT_TEXT_HOST_API_FACT =
         'Sketchup::Entities#add_text exposes Sketchup::Text annotations/labels; ' \
         'no distinct flat editable model Text constructor is exposed'.freeze
+      LABELS_CAPABILITY_SCHEMA =
+        'bcs.sketchup_labels_capability/1.0'.freeze
+      LABELS_SIZE_PROOF_SUBTYPE =
+        'finite_bbox_source_size_run_width_unsupported'.freeze
+      LABELS_ROTATION_PROOF_SUBTYPE =
+        'source_glyph_rotation_unsupported'.freeze
+      LABELS_HOST_API_CONTRACT = 'SketchUp 2017 Ruby API'.freeze
+      LABELS_HOST_CONSTRUCTOR = 'Sketchup::Entities#add_text'.freeze
+      LABELS_SIZE_HOST_API_FACT =
+        'Sketchup::Text exposes neither glyph-size nor source run-width control'.freeze
+      LABELS_ROTATION_HOST_API_FACT =
+        'Text vector controls the leader and does not rotate label glyphs'.freeze
+      LABELS_SIZE_VERIFICATION =
+        'native annotation width and height cannot be matched to the source PDF'.freeze
+      LABELS_ROTATION_VERIFICATION =
+        'source rotation is nonzero and native label orientation is unsupported'.freeze
+      LABELS_TRANSITION_PROOF_KEYS = [
+        :affirmative_impossibility, :attempted_renderer, :category,
+        :cleaned_entity_ids, :cleanup_outcome, :created_entity_ids, :evidence,
+        :from_mode, :generic_failure, :importer_id, :page_number,
+        :proof_sha256, :reason_code, :reason_subtype, :requested_mode, :scope,
+        :source_span_id, :to_mode
+      ].freeze
+      LABELS_TRANSITION_EVIDENCE_KEYS = [
+        :capability_observation_only, :evidence_sha256, :expected_height,
+        :expected_width, :host_api_contract, :host_api_fact,
+        :host_constructor, :host_entity_type, :host_product, :import_scale,
+        :native_label_finite_bbox_control_available,
+        :native_label_glyph_rotation_control_available,
+        :native_label_run_width_control_available, :pdf_point_to_inch,
+        :proof_subtype, :requested_mode, :schema, :source_anchor,
+        :source_bbox_pdf, :source_dimensions_pdf, :source_rotation_degrees,
+        :source_rotation_radians, :source_span_id, :source_text_sha256,
+        :text_vector_role, :verification
+      ].freeze
 
       # Cross-product contract vocabulary. SketchUp's established runtime
       # symbol remains :text3d behind the adapter below so existing UI and host
@@ -123,16 +158,16 @@ module BlueCollarSystems
           @ladder[index + 1]
         end
 
-        def advance!(proof)
+        def advance!(proof, expected_reason = nil)
           raise ContractError, 'representation ladder is already terminal' if terminal?
-          normalized = validate_transition_proof!(proof)
+          normalized = validate_transition_proof!(proof, expected_reason)
           @transitions << normalized
           @current_mode = normalized[:to_mode]
         end
 
         private
 
-        def validate_transition_proof!(proof)
+        def validate_transition_proof!(proof, expected_reason = nil)
           raise ContractError, 'transition proof must be a Hash' unless proof.is_a?(Hash)
           source_id = RepresentationFidelity.source_span_id(proof[:source_span_id])
           unless source_id == @source_span_id
@@ -189,6 +224,16 @@ module BlueCollarSystems
           if from_mode == :text
             RepresentationFidelity.validate_flat_editable_text_transition!(
               proof, @requested_mode, @source_span_id, binding
+            )
+          elsif from_mode == :labels
+            proof = RepresentationFidelity.validate_labels_transition_proof!(
+              proof, expected_reason,
+              {
+                :source_span_id => @source_span_id,
+                :importer_id => binding[:importer_id],
+                :page_number => binding[:page_number],
+                :requested_mode => @requested_mode
+              }
             )
           end
 
@@ -501,6 +546,450 @@ module BlueCollarSystems
           raise ContractError, 'flat Text capability evidence digest is invalid'
         end
         true
+      end
+
+      def labels_transition_impossibility_proof(item, reason_subtype, values)
+        unless values.is_a?(Hash)
+          raise ContractError, 'Labels capability geometry must be a Hash'
+        end
+        source_id = source_span_id(item)
+        binding = proof_binding(source_id)
+        reason = normalized_labels_transition_reason(reason_subtype)
+        config = labels_transition_reason_config(reason)
+        source_text = item.respond_to?(:text) ? item.text.to_s : ''
+        raise ContractError, 'Labels capability source text is unavailable' if
+          source_text.empty?
+        bbox = strict_source_bbox_pdf(item)
+        dimensions = [
+          canonical_number((bbox[2] - bbox[0]).abs),
+          canonical_number((bbox[3] - bbox[1]).abs)
+        ]
+        unless dimensions.all? { |value| value > 0.0 }
+          raise ContractError, 'Labels capability source dimensions are degenerate'
+        end
+        anchor = canonical_finite_array!(values[:source_anchor], 3,
+                                         'Labels source anchor')
+        rotation_degrees = canonical_number(values[:source_rotation_degrees])
+        rotation_radians = canonical_number(
+          rotation_degrees * Math::PI / 180.0
+        )
+        raw_point_to_inch = values[:pdf_point_to_inch].to_f
+        unless raw_point_to_inch.finite?
+          raise ContractError, 'Labels capability point scale is non-finite'
+        end
+        point_to_inch = canonical_number(raw_point_to_inch)
+        import_scale = canonical_number(values[:import_scale])
+        unless point_to_inch > 0.0 && import_scale > 0.0
+          raise ContractError, 'Labels capability source scale is invalid'
+        end
+        expected_width = canonical_number(
+          dimensions[0] * raw_point_to_inch * import_scale
+        )
+        expected_height = canonical_number(
+          dimensions[1] * raw_point_to_inch * import_scale
+        )
+        evidence = {
+          :schema => LABELS_CAPABILITY_SCHEMA,
+          :proof_subtype => config[:proof_subtype],
+          :source_span_id => source_id,
+          :requested_mode => :labels,
+          :source_text_sha256 => Digest::SHA256.hexdigest(source_text),
+          :source_bbox_pdf => bbox.map { |value| canonical_number(value) },
+          :source_dimensions_pdf => dimensions,
+          :source_anchor => anchor,
+          :source_rotation_degrees => rotation_degrees,
+          :source_rotation_radians => rotation_radians,
+          :pdf_point_to_inch => point_to_inch,
+          :import_scale => import_scale,
+          :expected_width => expected_width,
+          :expected_height => expected_height,
+          :host_product => 'SketchUp',
+          :host_api_contract => LABELS_HOST_API_CONTRACT,
+          :host_entity_type => 'Sketchup::Text',
+          :host_constructor => LABELS_HOST_CONSTRUCTOR,
+          :native_label_finite_bbox_control_available => false,
+          :native_label_run_width_control_available => false,
+          :native_label_glyph_rotation_control_available => false,
+          :text_vector_role => 'leader_vector',
+          :capability_observation_only => true,
+          :host_api_fact => config[:host_api_fact],
+          :verification => config[:verification]
+        }
+        evidence[:evidence_sha256] = canonical_sha256(evidence)
+        proof = {
+          :source_span_id => source_id,
+          :importer_id => binding[:importer_id],
+          :page_number => binding[:page_number],
+          :requested_mode => :labels,
+          :scope => :item,
+          :category => :exact_representation_impossible,
+          :affirmative_impossibility => true,
+          :generic_failure => false,
+          :from_mode => :labels,
+          :to_mode => :text3d,
+          :reason_code => :host_representation_unsupported,
+          :reason_subtype => reason,
+          :attempted_renderer => 'sketchup_native_text',
+          :created_entity_ids => [],
+          :cleaned_entity_ids => [],
+          :cleanup_outcome => :not_required,
+          :evidence => evidence
+        }
+        proof[:proof_sha256] = canonical_sha256(proof)
+        validate_labels_transition_proof!(
+          proof, reason,
+          {
+            :source_span_id => source_id,
+            :importer_id => binding[:importer_id],
+            :page_number => binding[:page_number],
+            :requested_mode => :labels,
+            :reason_subtype => reason,
+            :source_text_sha256 => evidence[:source_text_sha256],
+            :source_bbox_pdf => evidence[:source_bbox_pdf],
+            :source_dimensions_pdf => dimensions,
+            :source_anchor => anchor,
+            :source_rotation_degrees => rotation_degrees,
+            :source_rotation_radians => rotation_radians,
+            :pdf_point_to_inch => point_to_inch,
+            :import_scale => import_scale,
+            :expected_width => expected_width,
+            :expected_height => expected_height
+          }
+        )
+      end
+
+      def validate_labels_transition_proof!(proof, expected_reason = nil,
+                                            expected_context = nil)
+        exact_contract_keys!(
+          proof, LABELS_TRANSITION_PROOF_KEYS, [:page],
+          'Labels transition proof'
+        )
+        source_id = source_span_id(contract_hash_value(proof, :source_span_id))
+        binding = proof_binding(source_id)
+        importer_id = contract_hash_value(proof, :importer_id).to_s
+        page_number = exact_positive_contract_integer!(
+          contract_hash_value(proof, :page_number),
+          'Labels transition page_number'
+        )
+        ledger_page = contract_hash_value(proof, :page)
+        unless ledger_page.nil?
+          ledger_page = exact_positive_contract_integer!(
+            ledger_page, 'Labels transition ledger page'
+          )
+        end
+        reason = normalized_labels_transition_reason(
+          contract_hash_value(proof, :reason_subtype)
+        )
+        expected = expected_reason.to_s.strip.empty? ? nil :
+          normalized_labels_transition_reason(expected_reason)
+        unless importer_id == binding[:importer_id] &&
+               page_number == binding[:page_number] &&
+               (ledger_page.nil? || ledger_page == page_number) &&
+               normalize_mode(contract_hash_value(proof, :requested_mode)) == :labels &&
+               contract_hash_value(proof, :scope).to_s == 'item' &&
+               contract_hash_value(proof, :category).to_s ==
+                 'exact_representation_impossible' &&
+               contract_hash_value(proof, :affirmative_impossibility) == true &&
+               contract_hash_value(proof, :generic_failure) == false &&
+               normalize_mode(contract_hash_value(proof, :from_mode)) == :labels &&
+               normalize_mode(contract_hash_value(proof, :to_mode)) == :text3d &&
+               contract_hash_value(proof, :reason_code).to_s ==
+                 'host_representation_unsupported' &&
+               (expected.nil? || reason == expected) &&
+               contract_hash_value(proof, :attempted_renderer).to_s ==
+                 'sketchup_native_text' &&
+               contract_hash_value(proof, :created_entity_ids) == [] &&
+               contract_hash_value(proof, :cleaned_entity_ids) == [] &&
+               contract_hash_value(proof, :cleanup_outcome).to_s == 'not_required'
+          raise ContractError,
+                'Labels transition is not an exact reason-bound host capability proof'
+        end
+
+        config = labels_transition_reason_config(reason)
+        evidence = contract_hash_value(proof, :evidence)
+        exact_contract_keys!(
+          evidence, LABELS_TRANSITION_EVIDENCE_KEYS, [],
+          'Labels transition evidence'
+        )
+        evidence_source = source_span_id(
+          contract_hash_value(evidence, :source_span_id)
+        )
+        source_sha = contract_hash_value(
+          evidence, :source_text_sha256
+        ).to_s.downcase
+        bbox = canonical_finite_array!(
+          contract_hash_value(evidence, :source_bbox_pdf), 4,
+          'Labels source bbox'
+        )
+        dimensions = canonical_finite_array!(
+          contract_hash_value(evidence, :source_dimensions_pdf), 2,
+          'Labels source dimensions'
+        )
+        anchor = canonical_finite_array!(
+          contract_hash_value(evidence, :source_anchor), 3,
+          'Labels source anchor'
+        )
+        rotation_degrees = canonical_number(
+          contract_hash_value(evidence, :source_rotation_degrees)
+        )
+        rotation_radians = canonical_number(
+          contract_hash_value(evidence, :source_rotation_radians)
+        )
+        point_to_inch = canonical_number(
+          contract_hash_value(evidence, :pdf_point_to_inch)
+        )
+        import_scale = canonical_number(
+          contract_hash_value(evidence, :import_scale)
+        )
+        expected_width = canonical_number(
+          contract_hash_value(evidence, :expected_width)
+        )
+        expected_height = canonical_number(
+          contract_hash_value(evidence, :expected_height)
+        )
+        derived_dimensions = [
+          canonical_number((bbox[2] - bbox[0]).abs),
+          canonical_number((bbox[3] - bbox[1]).abs)
+        ]
+        derived_radians = canonical_number(
+          rotation_degrees * Math::PI / 180.0
+        )
+        derived_width = canonical_number(
+          derived_dimensions[0] * (1.0 / 72.0) * import_scale
+        )
+        derived_height = canonical_number(
+          derived_dimensions[1] * (1.0 / 72.0) * import_scale
+        )
+        reason_rotation_valid = if reason ==
+          :label_source_size_unsupported_by_host
+                                  rotation_degrees == 0.0 &&
+                                    rotation_radians == 0.0
+                                else
+                                  rotation_degrees.abs > 1.0e-12 &&
+                                    rotation_radians.abs > 1.0e-12
+                                end
+        unless evidence_source == source_id &&
+               normalize_mode(contract_hash_value(evidence, :requested_mode)) == :labels &&
+               contract_hash_value(evidence, :schema).to_s ==
+                 LABELS_CAPABILITY_SCHEMA &&
+               contract_hash_value(evidence, :proof_subtype).to_s ==
+                 config[:proof_subtype] &&
+               source_sha =~ /\A[0-9a-f]{64}\z/ &&
+               dimensions == derived_dimensions &&
+               dimensions.all? { |value| value > 0.0 } &&
+               point_to_inch == canonical_number(1.0 / 72.0) &&
+               import_scale > 0.0 && expected_width > 0.0 &&
+               expected_height > 0.0 && expected_width == derived_width &&
+               expected_height == derived_height &&
+               rotation_radians == derived_radians && reason_rotation_valid &&
+               contract_hash_value(evidence, :host_product).to_s == 'SketchUp' &&
+               contract_hash_value(evidence, :host_api_contract).to_s ==
+                 LABELS_HOST_API_CONTRACT &&
+               contract_hash_value(evidence, :host_entity_type).to_s ==
+                 'Sketchup::Text' &&
+               contract_hash_value(evidence, :host_constructor).to_s ==
+                 LABELS_HOST_CONSTRUCTOR &&
+               contract_hash_value(
+                 evidence, :native_label_finite_bbox_control_available
+               ) == false &&
+               contract_hash_value(
+                 evidence, :native_label_run_width_control_available
+               ) == false &&
+               contract_hash_value(
+                 evidence, :native_label_glyph_rotation_control_available
+               ) == false &&
+               contract_hash_value(evidence, :text_vector_role).to_s ==
+                 'leader_vector' &&
+               contract_hash_value(evidence, :capability_observation_only) == true &&
+               contract_hash_value(evidence, :host_api_fact).to_s ==
+                 config[:host_api_fact] &&
+               contract_hash_value(evidence, :verification).to_s ==
+                 config[:verification]
+          raise ContractError,
+                'Labels transition geometry or host capability evidence is invalid'
+        end
+
+        normalized_evidence = {
+          :schema => LABELS_CAPABILITY_SCHEMA,
+          :proof_subtype => config[:proof_subtype],
+          :source_span_id => source_id,
+          :requested_mode => :labels,
+          :source_text_sha256 => source_sha,
+          :source_bbox_pdf => bbox,
+          :source_dimensions_pdf => dimensions,
+          :source_anchor => anchor,
+          :source_rotation_degrees => rotation_degrees,
+          :source_rotation_radians => rotation_radians,
+          :pdf_point_to_inch => point_to_inch,
+          :import_scale => import_scale,
+          :expected_width => expected_width,
+          :expected_height => expected_height,
+          :host_product => 'SketchUp',
+          :host_api_contract => LABELS_HOST_API_CONTRACT,
+          :host_entity_type => 'Sketchup::Text',
+          :host_constructor => LABELS_HOST_CONSTRUCTOR,
+          :native_label_finite_bbox_control_available => false,
+          :native_label_run_width_control_available => false,
+          :native_label_glyph_rotation_control_available => false,
+          :text_vector_role => 'leader_vector',
+          :capability_observation_only => true,
+          :host_api_fact => config[:host_api_fact],
+          :verification => config[:verification]
+        }
+        evidence_digest = contract_hash_value(
+          evidence, :evidence_sha256
+        ).to_s.downcase
+        unless evidence_digest =~ /\A[0-9a-f]{64}\z/ &&
+               canonical_sha256(normalized_evidence) == evidence_digest
+          raise ContractError, 'Labels capability evidence digest is invalid'
+        end
+        normalized_evidence[:evidence_sha256] = evidence_digest
+        normalized = {
+          :source_span_id => source_id,
+          :importer_id => importer_id,
+          :page_number => page_number,
+          :requested_mode => :labels,
+          :scope => :item,
+          :category => :exact_representation_impossible,
+          :affirmative_impossibility => true,
+          :generic_failure => false,
+          :from_mode => :labels,
+          :to_mode => :text3d,
+          :reason_code => :host_representation_unsupported,
+          :reason_subtype => reason,
+          :attempted_renderer => 'sketchup_native_text',
+          :created_entity_ids => [],
+          :cleaned_entity_ids => [],
+          :cleanup_outcome => :not_required,
+          :evidence => normalized_evidence
+        }
+        proof_digest = contract_hash_value(proof, :proof_sha256).to_s.downcase
+        unless proof_digest =~ /\A[0-9a-f]{64}\z/ &&
+               canonical_sha256(normalized) == proof_digest
+          raise ContractError, 'Labels transition proof digest is invalid'
+        end
+        normalized[:proof_sha256] = proof_digest
+        validate_labels_expected_context!(normalized, expected_context)
+        normalized
+      end
+
+      def normalized_labels_transition_reason(value)
+        reason = value.to_s.strip.downcase.to_sym
+        unless [
+          :label_source_size_unsupported_by_host,
+          :label_rotation_unsupported_by_host
+        ].include?(reason)
+          raise ContractError, 'Labels transition reason subtype is invalid'
+        end
+        reason
+      end
+
+      def labels_transition_reason_config(reason)
+        case normalized_labels_transition_reason(reason)
+        when :label_source_size_unsupported_by_host
+          {
+            :proof_subtype => LABELS_SIZE_PROOF_SUBTYPE,
+            :host_api_fact => LABELS_SIZE_HOST_API_FACT,
+            :verification => LABELS_SIZE_VERIFICATION
+          }
+        when :label_rotation_unsupported_by_host
+          {
+            :proof_subtype => LABELS_ROTATION_PROOF_SUBTYPE,
+            :host_api_fact => LABELS_ROTATION_HOST_API_FACT,
+            :verification => LABELS_ROTATION_VERIFICATION
+          }
+        end
+      end
+
+      def validate_labels_expected_context!(proof, context)
+        return true if context.nil?
+        unless context.is_a?(Hash)
+          raise ContractError, 'Labels expected transition context must be a Hash'
+        end
+        evidence = proof[:evidence]
+        {
+          :source_span_id => proof[:source_span_id],
+          :importer_id => proof[:importer_id],
+          :page_number => proof[:page_number],
+          :requested_mode => proof[:requested_mode],
+          :reason_subtype => proof[:reason_subtype],
+          :source_text_sha256 => evidence[:source_text_sha256],
+          :source_bbox_pdf => evidence[:source_bbox_pdf],
+          :source_dimensions_pdf => evidence[:source_dimensions_pdf],
+          :source_anchor => evidence[:source_anchor],
+          :source_rotation_degrees => evidence[:source_rotation_degrees],
+          :source_rotation_radians => evidence[:source_rotation_radians],
+          :pdf_point_to_inch => evidence[:pdf_point_to_inch],
+          :import_scale => evidence[:import_scale],
+          :expected_width => evidence[:expected_width],
+          :expected_height => evidence[:expected_height]
+        }.each do |key, actual|
+          next unless context.key?(key) || context.key?(key.to_s)
+          expected = contract_hash_value(context, key)
+          matches = if actual.is_a?(Array)
+                      begin
+                        canonical_finite_array!(
+                          expected, actual.length, "Labels expected #{key}"
+                        ) == actual
+                      rescue ContractError
+                        false
+                      end
+                    elsif actual.is_a?(Numeric)
+                      begin
+                        canonical_number(expected) == actual
+                      rescue ContractError
+                        false
+                      end
+                    elsif key == :requested_mode
+                      normalize_mode(expected) == actual
+                    elsif key == :reason_subtype
+                      normalized_labels_transition_reason(expected) == actual
+                    else
+                      expected.to_s == actual.to_s
+                    end
+          unless matches
+            raise ContractError,
+                  "Labels transition conflicts with expected #{key}"
+          end
+        end
+        true
+      end
+
+      def exact_contract_keys!(hash, required, optional, label)
+        raise ContractError, "#{label} must be a Hash" unless hash.is_a?(Hash)
+        names = hash.keys.map { |key| key.to_s }
+        if names.uniq.length != names.length
+          raise ContractError, "#{label} contains duplicate aliases"
+        end
+        expected = Array(required).map { |key| key.to_s }.sort
+        allowed = (Array(required) + Array(optional)).map { |key| key.to_s }.sort
+        missing = expected - names.sort
+        unknown = names.sort - allowed
+        unless missing.empty? && unknown.empty?
+          raise ContractError,
+                "#{label} fields differ (missing=#{missing.join(',')}; " \
+                "unknown=#{unknown.join(',')})"
+        end
+        true
+      end
+
+      def exact_positive_contract_integer!(value, label)
+        unless value.is_a?(Integer) && value > 0
+          raise ContractError, "#{label} must be a positive Integer"
+        end
+        value
+      end
+
+      def canonical_finite_array!(value, length, label)
+        unless value.is_a?(Array) && value.length == length
+          raise ContractError, "#{label} must contain #{length} values"
+        end
+        value.map do |entry|
+          unless entry.is_a?(Numeric)
+            raise ContractError, "#{label} contains a non-numeric value"
+          end
+          canonical_number(entry)
+        end
       end
 
       def contract_hash_value(hash, key)
@@ -1321,7 +1810,9 @@ module BlueCollarSystems
         {
           :name => material.respond_to?(:name) ? material.name.to_s : material.to_s,
           :color => material.respond_to?(:color) ? color_payload(material.color) : nil,
-          :alpha => material.respond_to?(:alpha) ? canonical_number(material.alpha) : nil
+          :alpha => material.respond_to?(:alpha) ? canonical_number(material.alpha) : nil,
+          :texture_present => material.respond_to?(:texture) ?
+            !material.texture.nil? : nil
         }
       rescue StandardError
         nil
@@ -1334,6 +1825,9 @@ module BlueCollarSystems
         payload = {
           :type => entity_type(entity),
           :entity_visible => visible_state(entity),
+          :hidden => entity.respond_to?(:hidden?) ? entity.hidden? : nil,
+          :soft => entity.respond_to?(:soft?) ? entity.soft? : nil,
+          :smooth => entity.respond_to?(:smooth?) ? entity.smooth? : nil,
           :layer_name => layer[:name],
           :layer_visible => layer[:visible],
           :material => entity.respond_to?(:material) ?

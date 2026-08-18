@@ -337,6 +337,39 @@ class SketchupBatchHostContractTest < Minitest::Test
                  'baseline, pre-heal, stabilized, and reopen must use compact physical partitions'
   end
 
+  def test_labels_visual_equivalent_profile_uses_authoritative_reopened_ownership
+    load_runner_library
+    session = SketchupBatchImport::RealHostSession.new
+    job = { :labels_visual_equivalent_acceptance => true }
+    stats = { :sentinel => 'stats' }
+    reopened = [{ 'sentinel' => 'reopened-owned' }]
+    census = { 'schema' => 'bcs.labels_visual_equivalent_acceptance/1.0' }
+    received = nil
+
+    if session.respond_to?(:verify_labels_visual_equivalent_profile!, true) &&
+       SketchupHostEvidence.respond_to?(:verify_labels_visual_equivalent_acceptance!)
+      verifier = lambda do |actual_stats, actual_reopened|
+        received = [actual_stats, actual_reopened]
+        census
+      end
+      result = SketchupHostEvidence.stub(
+        :verify_labels_visual_equivalent_acceptance!, verifier
+      ) do
+        session.send(
+          :verify_labels_visual_equivalent_profile!, job, stats, reopened
+        )
+      end
+    end
+
+    assert_equal census, result
+    assert_equal [stats, reopened], received
+    assert_includes source,
+                    "manifest_payload['labels_visual_equivalent_acceptance'] = true"
+    assert_includes source, "'labels_visual_equivalent_census' =>"
+    assert_includes source,
+                    "manifest_payload['reopened_owned_entities'] = reopened_owned_manifest"
+  end
+
   def test_runner_hashes_the_source_tree_before_load_and_after_import
     before = source.index('source_tree_sha256_before_load =')
     plugin_load = source.index("load File.join(plugin_root")
