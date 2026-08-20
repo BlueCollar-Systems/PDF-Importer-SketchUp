@@ -74,6 +74,13 @@ module BlueCollarSystems
         # were the two largest leaves in the table (22.9 s and 14.6 s of a 60 s import);
         # promoting them is what makes that 62% attributable instead of opaque.
         :text3d_render_ms, :text3d_record_ms,
+        # text_delivery_ms encloses the whole exact-3D-Text branch, including
+        # text3d_render_ms and text3d_record_ms above. It is the text-family
+        # counterpart of item_delivery_ms: before it existed, text/labels/3d_text
+        # reported item_delivery_ms = 0.0 and carried 68-70% of elapsed in
+        # unaccounted_ms (292 s of 429 s on the Alvord text cell). Summing it as a
+        # leaf would double-count its children.
+        :text_delivery_ms,
         # commit_ms encloses source_verify_ms + page_certify_ms + commit_operation_ms.
         :commit_ms,
         # geometry_explode_ms is recorded inside the geometry builder's own span, so the
@@ -92,6 +99,7 @@ module BlueCollarSystems
         :embedded_image_scan_ms, :text_extract_ms, :prebuild_analysis_ms,
         :svg_source_render_ms, :text3d_render_ms, :text3d_transform_ms,
         :text3d_record_ms, :item_page_inventory_ms, :item_delivery_ms,
+        :text_delivery_ms,
         :commit_ms, :source_verify_ms, :page_certify_ms, :commit_operation_ms,
         :post_commit_cleanup_ms, :entity_diff_ms, :view_fit_ms,
         :diagnostics_ms, :raster_render_ms, :raster_verify_ms, :raster_add_image_ms,

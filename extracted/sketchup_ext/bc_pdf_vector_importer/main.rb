@@ -4489,6 +4489,16 @@ module BlueCollarSystems
         # outlines. Arial/native-font substitution is never used as a visual
         # correction. Each source span owns one independently verified group.
         if use_svg_3d_text && builder.page_group
+          # Encloses this entire branch, the text-family counterpart of
+          # item_delivery_ms on the glyph path. Without it the text/labels/3d_text
+          # modes reported item_delivery_ms = 0.0 and left 68-70% of elapsed in
+          # unaccounted_ms: 292 s of 429 s on the Alvord text cell, 318 s of 454 s on
+          # labels, 283 s of 418 s on 3d_text, against 4.3-15.6 s on the same 1011
+          # modes. text3d_render_ms + text3d_record_ms + their sub-stages covered only
+          # about 60 s of that ~300 s, so the bulk of the slowest cells in the corpus
+          # was invisible and could not be optimised. Declared a PHASE_PARENT in
+          # qa_report.rb because it encloses those already-parented spans.
+          text_delivery_started = Time.now
           exact_3d_requested_mode =
             requested_text_mode == :text ? :text : :text3d
           svg_failure = {}
@@ -4656,6 +4666,13 @@ module BlueCollarSystems
               )
             end
           end
+          stats[:pipeline_performance][:text_delivery_ms] =
+            ((Time.now - text_delivery_started) * 1000.0).round(3)
+          report_pipeline_progress(
+            opts, 'text_delivery_completed',
+            "delivery_ms=#{stats[:pipeline_performance][:text_delivery_ms]}; " \
+              "mode=#{requested_text_mode}"
+          )
         end
 
         # Build hatching on separate layer if group mode
