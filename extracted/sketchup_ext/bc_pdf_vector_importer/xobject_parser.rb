@@ -131,6 +131,9 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       def track_placements(streams)
         return unless streams
+        # This method recomputes the supplied page streams. expanded_paths
+        # may call it after an explicit tracking pass; never append duplicates.
+        @form_xobjects.each_value { |form| form.instance_xforms = [] }
         # Streaming q/Q/cm/Do walk (ContentStreamParser.scan_operators): no
         # token array and no token cap, so a `Do` late in a dense sheet is
         # placed just like one at the top. The CTM stack persists across the

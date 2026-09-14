@@ -301,17 +301,9 @@ class LatePlacementAfterSixHundredThousandTokensTest < Minitest::Test
     parser.track_placements([@stream])
     assert_equal [[2.0, 0.0, 0.0, 2.0, 10.0, 20.0]], form.instance_xforms
     assert_equal 1, form.usage_count
-
-    # expanded_paths tracks placements itself, so it gets its own parser -
-    # tracking the same stream twice would legitimately place the form twice.
-    fresh_parser = XOBJ.new(pdf)
-    fresh_form = XOBJ::FormXObject.new(20, 'Fm0', [0, 0, 10, 10], nil, LatePlacementFakePDF::FORM_STREAM, 0, nil, [])
-    fresh_parser.instance_variable_set(:@form_xobjects, { 'Fm0' => fresh_form })
-    expanded = fresh_parser.expanded_paths([@stream])
+    # Repeated tracking is a recomputation, not another placement.
+    expanded = parser.expanded_paths([@stream])
     assert_equal 1, expanded.length
-    # "0 0 m 5 5 l" under the CTM captured at the late Do ([2 0 0 2 10 20]):
-    # (0,0) -> (10,20) and (5,5) -> (20,30). The moveto is its own one-point
-    # segment, so compare every point the subpath carries, in order.
     assert_equal [[10.0, 20.0], [10.0, 20.0], [20.0, 30.0]],
                  expanded[0].subpaths[0].segments.flat_map(&:points)
     refute LOGGER.warnings.any? { |w| w =~ /token limit/ }, LOGGER.warnings.inspect

@@ -1218,8 +1218,13 @@ module BlueCollarSystems
         stderr = ''
         attempt_number = 0
         rendered_with_cropbox = false
+        # The full host pipeline uses this helper as well as the CLI. Apply
+        # the same renderer-local font embedding as the interactive SVG path.
+        # Geometry extraction still reads the original, immutable drawing.
+        render_pdf = renderer[:kind] == :pdftocairo ?
+          SvgTextRenderer.ensure_renderable_pdf(pdf_path, renderer[:exe]) : pdf_path
         SvgTextRenderer.svg_render_arg_variants(
-          renderer, pdf_path, svg_path, page_num,
+          renderer, render_pdf, svg_path, page_num,
           opts[:use_cropbox] == true
         ).each do |args|
           attempt_number += 1

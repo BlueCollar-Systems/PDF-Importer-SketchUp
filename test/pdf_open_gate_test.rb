@@ -42,6 +42,15 @@ class PdfOpenGateTest < Minitest::Test
     end
   end
 
+  def test_accepts_pdf_path_with_spaces
+    Dir.mktmpdir("su_open_gate_") do |dir|
+      path = File.join(dir, "Large Sheet_ Section Details Rev.0 markup.pdf")
+      File.open(path, 'wb') { |f| f.write(valid_pdf_bytes) }
+      result = G.inspect_path(path)
+      assert_equal true, result[:ok]
+    end
+  end
+
   def test_rejects_encrypted_pdf_marker
     with_temp_pdf(valid_pdf_bytes(" /Encrypt 2 0 R ")) do |path|
       result = G.inspect_path(path)

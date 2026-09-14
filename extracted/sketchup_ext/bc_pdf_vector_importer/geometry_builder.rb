@@ -176,7 +176,8 @@ module BlueCollarSystems
 
             # Convert PDF → SketchUp coordinates
             su_points = points_list.map do |pt|
-              pdf_to_su(pt[0], pt[1], page_origin_x, page_origin_y)
+              sx, sy = self.class.sheet_xy(pt)
+              pdf_to_su(sx, sy, page_origin_x, page_origin_y)
             end
 
             su_points = remove_consecutive_duplicates(su_points)
@@ -471,6 +472,18 @@ module BlueCollarSystems
           Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
         else
           Time.now.to_f * 1000.0
+        end
+      end
+
+      def self.sheet_xy(pt)
+        values = Array(pt)
+        x = values[0].to_f
+        y = values.length > 1 ? values[1].to_f : 0.0
+        z = values.length > 2 ? values[2].to_f : 0.0
+        if z.abs > 1.0e-9 && y.abs <= 1.0e-9 && z.abs > (x.abs * 0.01)
+          [x, z]
+        else
+          [x, y]
         end
       end
 

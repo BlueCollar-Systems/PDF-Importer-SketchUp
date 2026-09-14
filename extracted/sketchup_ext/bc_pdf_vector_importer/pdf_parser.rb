@@ -523,56 +523,43 @@ module BlueCollarSystems
         nil
       end
 
-      # Apply PNG predictor decoding (predictors 10-15)
-      # Each row is [filter_byte, data...] where data is `columns` bytes.
-      def apply_png_predictor(data, columns, colors = 1, bits_per_component = 8)
-        columns = 1 if columns.to_i < 1
-        colors = 1 if colors.to_i < 1
-        bits_per_component = 8 if bits_per_component.to_i < 1
-        # Bytes per pixel, at least one: sub-byte depths share a byte, and PNG
-        # defines the left neighbour as one byte back in that case.
-        bpp = [(colors * bits_per_component + 7) / 8, 1].max
-        row_bytes = (columns * colors * bits_per_component + 7) / 8
-        row_size = row_bytes + 1 # 1 byte filter type + the row's data bytes
-        rows = data.bytesize / row_size
-        return data if rows == 0
-
+      # PNG filtering operates on bytes, with one filter byte per row.
+      # Columns count pixels; RGB rows and left neighbours span three samples.
+      def apply_png_predictor(data, columns, colors = 1, bits = 8)
+        unless columns > 0 && colors > 0 && [1, 2, 4, 8, 16].include?(bits)
+          raise ArgumentError, 'invalid PNG predictor sample dimensions'
+        end
+        row_bytes = (columns * colors * bits + 7) / 8
+        pixel_bytes = [(colors * bits + 7) / 8, 1].max
+        row_size = row_bytes + 1
+        unless data.bytesize % row_size == 0
+          raise ArgumentError, 'PNG predictor stream ends inside a row'
+        end
         out = ''.dup.force_encoding('BINARY')
         prev_row = Array.new(row_bytes, 0)
-
-        rows.times do |r|
+        (data.bytesize / row_size).times do |r|
           offset = r * row_size
-          filter_type = data.getbyte(offset) || 0
-          current_row = Array.new(row_bytes) { |c| data.getbyte(offset + 1 + c) || 0 }
-
-          case filter_type
-          when 0 # None
-            # data as-is
-          when 1 # Sub
-            (bpp...row_bytes).each do |c|
-              current_row[c] = (current_row[c] + current_row[c - bpp]) & 0xFF
-            end
-          when 2 # Up
-            row_bytes.times { |c| current_row[c] = (current_row[c] + prev_row[c]) & 0xFF }
-          when 3 # Average
-            row_bytes.times do |c|
-              left = c >= bpp ? current_row[c - bpp] : 0
-              up = prev_row[c]
-              current_row[c] = (current_row[c] + ((left + up) / 2)) & 0xFF
-            end
-          when 4 # Paeth
-            row_bytes.times do |c|
-              left = c >= bpp ? current_row[c - bpp] : 0
-              up = prev_row[c]
-              up_left = c >= bpp ? prev_row[c - bpp] : 0
-              current_row[c] = (current_row[c] + paeth_predict(left, up, up_left)) & 0xFF
-            end
+          filter_type = data.getbyte(offset)
+          unless (0..4).include?(filter_type)
+            raise ArgumentError, "unsupported PNG predictor filter #{filter_type}"
           end
-
+          current_row = Array.new(row_bytes) { |c| data.getbyte(offset + 1 + c) }
+          row_bytes.times do |c|
+            left = c >= pixel_bytes ? current_row[c - pixel_bytes] : 0
+            up = prev_row[c]
+            up_left = c >= pixel_bytes ? prev_row[c - pixel_bytes] : 0
+            prediction = case filter_type
+                         when 0 then 0
+                         when 1 then left
+                         when 2 then up
+                         when 3 then (left + up) / 2
+                         when 4 then paeth_predict(left, up, up_left)
+                         end
+            current_row[c] = (current_row[c] + prediction) & 0xFF
+          end
           out << current_row.pack('C*')
           prev_row = current_row
         end
-
         out
       end
 
