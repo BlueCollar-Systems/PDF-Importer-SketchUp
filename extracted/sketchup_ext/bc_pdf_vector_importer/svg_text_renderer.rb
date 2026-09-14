@@ -1252,12 +1252,15 @@ module BlueCollarSystems
       def self.ghostscript_embed_args(gs, in_pdf, out_pdf)
         [
           gs.to_s,
-          '-dNOSAFER', '-dBATCH', '-dNOPAUSE', '-dQUIET',
+          '-dSAFER', '-dBATCH', '-dNOPAUSE', '-dQUIET',
           '-sDEVICE=pdfwrite',
           '-dEmbedAllFonts=true',
           '-dSubsetFonts=true',
           '-dCompatibilityLevel=1.7',
           '-o', out_pdf.to_s,
+          # Embed the standard 14 fonts too. Ghostscript's default NeverEmbed
+          # list otherwise leaves Helvetica/Symbol unresolved for Poppler.
+          '-c', '<</NeverEmbed []>> setdistillerparams', '-f',
           in_pdf.to_s
         ]
       end

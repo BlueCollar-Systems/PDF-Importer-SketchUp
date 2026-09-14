@@ -40,7 +40,10 @@ class SvgTextEmbedTest < Minitest::Test
     assert_equal 'gs', args[0]
     assert_includes args, '-sDEVICE=pdfwrite'
     assert_includes args, '-dEmbedAllFonts=true'
-    assert_includes args, '-dNOSAFER'
+    assert_includes args, '-dSAFER'
+    refute_includes args, '-dNOSAFER'
+    assert_includes args, '<</NeverEmbed []>> setdistillerparams'
+    assert_operator args.index('-f'), :>, args.index('-c')
     oi = args.index('-o')
     assert_equal 'out.pdf', args[oi + 1]   # output path follows -o
     assert_equal 'in.pdf', args[-1]        # input path is last

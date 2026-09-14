@@ -2285,10 +2285,10 @@ module BlueCollarSystems
           end
         end
 
-        return nil if warnings.empty?
-
+        # A completed check with no warnings must remain present: the
+        # delivery gate distinguishes a clean result from a missing check.
         {
-          level: 'warn',
+          level: warnings.empty? ? 'ok' : 'warn',
           reasons: unique_strings(reasons),
           messages: unique_strings(warnings),
           banner: warnings.first
