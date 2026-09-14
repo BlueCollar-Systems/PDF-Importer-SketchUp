@@ -351,13 +351,20 @@ module BlueCollarSystems
 
           return nil unless decoded
 
-          # Apply PNG predictor if specified in DecodeParms
+          # Apply PNG predictor if specified in DecodeParms.
+          # /Columns counts pixels per row, not bytes: a row is
+          # Columns * Colors * BitsPerComponent / 8 bytes wide, and the Sub,
+          # Average and Paeth filters reference the pixel to the left, which
+          # is one whole pixel (Colors * BitsPerComponent / 8 bytes) back.
+          # Reading only /Columns un-filtered every colour image against the
+          # wrong row width and returned a buffer of the wrong length.
           if dict_part =~ /\/Predictor\s+(\d+)/
             predictor = $1.to_i
-            columns = 1
-            columns = $1.to_i if dict_part =~ /\/Columns\s+(\d+)/
+            columns = dict_part =~ /\/Columns\s+(\d+)/ ? $1.to_i : 1
+            colors = dict_part =~ /\/Colors\s+(\d+)/ ? $1.to_i : 1
+            bpc = dict_part =~ /\/BitsPerComponent\s+(\d+)/ ? $1.to_i : 8
             if predictor >= 10
-              decoded = apply_png_predictor(decoded, columns)
+              decoded = apply_png_predictor(decoded, columns, colors, bpc)
             end
           end
 
@@ -518,37 +525,46 @@ module BlueCollarSystems
 
       # Apply PNG predictor decoding (predictors 10-15)
       # Each row is [filter_byte, data...] where data is `columns` bytes.
-      def apply_png_predictor(data, columns)
-        row_size = columns + 1  # 1 byte filter type + columns data bytes
+      def apply_png_predictor(data, columns, colors = 1, bits_per_component = 8)
+        columns = 1 if columns.to_i < 1
+        colors = 1 if colors.to_i < 1
+        bits_per_component = 8 if bits_per_component.to_i < 1
+        # Bytes per pixel, at least one: sub-byte depths share a byte, and PNG
+        # defines the left neighbour as one byte back in that case.
+        bpp = [(colors * bits_per_component + 7) / 8, 1].max
+        row_bytes = (columns * colors * bits_per_component + 7) / 8
+        row_size = row_bytes + 1 # 1 byte filter type + the row's data bytes
         rows = data.bytesize / row_size
         return data if rows == 0
 
         out = ''.dup.force_encoding('BINARY')
-        prev_row = Array.new(columns, 0)
+        prev_row = Array.new(row_bytes, 0)
 
         rows.times do |r|
           offset = r * row_size
           filter_type = data.getbyte(offset) || 0
-          current_row = Array.new(columns) { |c| data.getbyte(offset + 1 + c) || 0 }
+          current_row = Array.new(row_bytes) { |c| data.getbyte(offset + 1 + c) || 0 }
 
           case filter_type
           when 0 # None
             # data as-is
           when 1 # Sub
-            (1...columns).each { |c| current_row[c] = (current_row[c] + current_row[c - 1]) & 0xFF }
+            (bpp...row_bytes).each do |c|
+              current_row[c] = (current_row[c] + current_row[c - bpp]) & 0xFF
+            end
           when 2 # Up
-            columns.times { |c| current_row[c] = (current_row[c] + prev_row[c]) & 0xFF }
+            row_bytes.times { |c| current_row[c] = (current_row[c] + prev_row[c]) & 0xFF }
           when 3 # Average
-            columns.times do |c|
-              left = c > 0 ? current_row[c - 1] : 0
+            row_bytes.times do |c|
+              left = c >= bpp ? current_row[c - bpp] : 0
               up = prev_row[c]
               current_row[c] = (current_row[c] + ((left + up) / 2)) & 0xFF
             end
           when 4 # Paeth
-            columns.times do |c|
-              left = c > 0 ? current_row[c - 1] : 0
+            row_bytes.times do |c|
+              left = c >= bpp ? current_row[c - bpp] : 0
               up = prev_row[c]
-              up_left = c > 0 ? prev_row[c - 1] : 0
+              up_left = c >= bpp ? prev_row[c - bpp] : 0
               current_row[c] = (current_row[c] + paeth_predict(left, up, up_left)) & 0xFF
             end
           end
