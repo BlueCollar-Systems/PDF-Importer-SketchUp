@@ -473,6 +473,17 @@ module BlueCollarSystems
         return [] if page_count.to_i <= 0
         return (1..page_count).to_a if spec == :all
 
+        # ImportDialog.build_opts has already turned the --pages text into an
+        # Array of page numbers (or :all) before the CLI sees it. Treating
+        # that Array as text ("[1]") yielded no valid page and silently fell
+        # back to every page, so `--pages 1` parsed and reported the whole
+        # document. Honour the Array directly.
+        if spec.is_a?(Array)
+          pages = spec.map { |p| p.to_i }.select { |p| p >= 1 && p <= page_count }
+          pages = pages.uniq.sort
+          return pages.empty? ? (1..page_count).to_a : pages
+        end
+
         text = spec.to_s.strip
         return (1..page_count).to_a if text.empty? || text.downcase == 'all'
 
