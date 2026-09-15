@@ -43,6 +43,170 @@ module BlueCollarSystems
         :points    # Array of [x, y] in PDF user space
       )
 
+      # ---------------------------------------------------------------
+      # Streaming operator scan (XObject placement / image discovery)
+      # ---------------------------------------------------------------
+      # Byte classes for the getbyte-based scanner below: the same sets as
+      # WHITESPACE_CHARS / DELIMITER_CHARS, indexed by byte value.
+      SCAN_WHITESPACE = Array.new(256, false)
+      WHITESPACE_CHARS.each_byte { |byte| SCAN_WHITESPACE[byte] = true }
+      SCAN_DELIMITER = Array.new(256, false)
+      DELIMITER_CHARS.each_byte { |byte| SCAN_DELIMITER[byte] = true }
+      SCAN_OPERAND_WINDOW = 32
+      SCAN_NUMBER_WORD = /\A[+-]?\d*\.?\d+\z/
+
+      # Walk a content stream operator by operator WITHOUT materialising a
+      # token array. The Form XObject placement tracker and the embedded
+      # image extractor only need q / Q / cm / Do (and BI for inline-image
+      # counting); they used to tokenize the whole stream into hashes under
+      # a 500,000-token cap, so on a dense sheet (S-505: 934k tokens, the
+      # only image `Do` at 86 % of the stream) every placement after the cap
+      # was silently dropped. This walk keeps at most SCAN_OPERAND_WINDOW
+      # operands, so it needs no cap and covers the stream end to end.
+      #
+      # Yields [operator, operands] for each operator named in `wanted`
+      # (an Array or Hash of operator strings). `operands` holds the Float
+      # numbers and "/Name" strings seen since the previous operator;
+      # literal strings, hex strings, dictionaries and arrays are skipped,
+      # exactly as the token scanners this replaces did. Inline image bodies
+      # (BI ... ID ... EI) are skipped; when 'BI' is wanted it is yielded
+      # with empty operands so callers can count inline images. Returns the
+      # number of operators yielded.
+      def self.scan_operators(stream, wanted)
+        return 0 unless stream.is_a?(String) && block_given?
+        wanted_map = wanted
+        unless wanted.is_a?(Hash)
+          wanted_map = {}
+          Array(wanted).each { |op| wanted_map[op.to_s] = true }
+        end
+        bin = stream
+        unless bin.encoding == Encoding::BINARY
+          bin = stream.dup.force_encoding(Encoding::BINARY)
+        end
+        whitespace = SCAN_WHITESPACE
+        delimiter = SCAN_DELIMITER
+        operands = []
+        yielded = 0
+        i = 0
+        len = bin.bytesize
+        while i < len
+          b = bin.getbyte(i)
+          if whitespace[b]
+            i += 1
+            next
+          end
+
+          case b
+          when 37 # '%' comment to end of line
+            j = i + 1
+            while j < len
+              nb = bin.getbyte(j)
+              break if nb == 13 || nb == 10
+              j += 1
+            end
+            i = j
+            next
+          when 40 # '(' literal string operand (skipped)
+            depth = 1
+            j = i + 1
+            while j < len && depth > 0
+              nb = bin.getbyte(j)
+              if nb == 92 # backslash escape
+                j += 2
+                next
+              end
+              depth += 1 if nb == 40
+              depth -= 1 if nb == 41
+              j += 1
+            end
+            i = j
+            next
+          when 60 # '<' hex string or '<<' dictionary (skipped)
+            if i + 1 < len && bin.getbyte(i + 1) == 60
+              depth = 1
+              j = i + 2
+              while j < len - 1 && depth > 0
+                nb = bin.getbyte(j)
+                if nb == 60 && bin.getbyte(j + 1) == 60
+                  depth += 1
+                  j += 2
+                elsif nb == 62 && bin.getbyte(j + 1) == 62
+                  depth -= 1
+                  j += 2
+                else
+                  j += 1
+                end
+              end
+              i = j
+            else
+              j = bin.index('>', i) || len
+              i = j + 1
+            end
+            next
+          when 62 # '>' -- a stray '>>' after a dictionary, or a lone '>'
+            i += (i + 1 < len && bin.getbyte(i + 1) == 62) ? 2 : 1
+            next
+          when 91 # '[' array operand (skipped)
+            depth = 1
+            j = i + 1
+            while j < len && depth > 0
+              nb = bin.getbyte(j)
+              depth += 1 if nb == 91
+              depth -= 1 if nb == 93
+              j += 1
+            end
+            i = j
+            next
+          when 93 # ']'
+            i += 1
+            next
+          when 47 # '/' name operand
+            j = i + 1
+            j += 1 while j < len && !delimiter[bin.getbyte(j)]
+            operands.shift if operands.length >= SCAN_OPERAND_WINDOW
+            operands << bin.byteslice(i, j - i)
+            i = j
+            next
+          end
+
+          # Number or operator keyword
+          j = i
+          j += 1 while j < len && !delimiter[bin.getbyte(j)]
+          if j == i
+            i += 1
+            next
+          end
+          word = bin.byteslice(i, j - i)
+          i = j
+
+          if word == 'BI'
+            # Inline image data can contain arbitrary bytes: skip to EI.
+            id_pos = bin.index(/\sID[\s\n\r]/, i)
+            if id_pos
+              ei_pos = bin.index(/[\s\n\r]EI(?=[\s\n\r\/\[<])/, id_pos + 3)
+              i = ei_pos ? ei_pos + 3 : len
+            end
+            if wanted_map['BI']
+              yield 'BI', []
+              yielded += 1
+            end
+            next
+          end
+
+          if word =~ SCAN_NUMBER_WORD
+            operands.shift if operands.length >= SCAN_OPERAND_WINDOW
+            operands << word.to_f
+          elsif wanted_map[word]
+            yield word, operands
+            yielded += 1
+            operands = []
+          else
+            operands.clear
+          end
+        end
+        yielded
+      end
+
       def initialize(streams, pdf_parser, ocg_map = {})
         @streams = streams       # Array of decoded stream strings
         @pdf_parser = pdf_parser

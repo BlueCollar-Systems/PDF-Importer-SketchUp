@@ -10,12 +10,17 @@
 require 'fileutils'
 require 'json'
 require 'zlib'
+require_relative 'content_stream_parser'
 require_relative 'png_cropper'
 
 module BlueCollarSystems
   module PDFVectorImporter
     class EmbeddedImageExtractor
-      MAX_TOKENS_PER_STREAM = 500_000
+      # Operators the image walk needs from a content stream (BI only to
+      # count inline images).
+      PLACEMENT_OPERATORS = {
+        'q' => true, 'Q' => true, 'cm' => true, 'Do' => true, 'BI' => true
+      }.freeze
       MAX_FORM_DEPTH = 12
       MAX_IMAGE_PIXELS = 25_000_000
 
@@ -126,44 +131,42 @@ module BlueCollarSystems
       def walk_streams(page_num, streams, resources, initial_ctm, output_dir, write_files, seen_forms, depth)
         return if depth > MAX_FORM_DEPTH
 
+        # Streaming q/Q/cm/Do walk (ContentStreamParser.scan_operators): no
+        # token array and no token cap, so an image placed late in a dense
+        # sheet is found just like one at the top.
         Array(streams).each do |stream|
           next unless stream
-          tokens = tokenize_stream(stream)
-          operands = []
           ctm_stack = [initial_ctm.dup]
           current_ctm = initial_ctm.dup
 
-          tokens.each do |tok|
-            if tok[:type] == :operator
-              case tok[:value]
-              when 'q'
-                ctm_stack << current_ctm.dup
-              when 'Q'
-                current_ctm = ctm_stack.pop || initial_ctm.dup
-              when 'cm'
-                nums = operands.select { |t| t[:type] == :number }.map { |t| t[:value] }
-                if nums.length >= 6
-                  current_ctm = multiply_matrices(
-                    [nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]],
-                    current_ctm
-                  )
-                end
-              when 'Do'
-                name_tok = operands.reverse.find { |t| t[:type] == :name }
-                handle_xobject_do(
-                  page_num,
-                  name_tok ? name_tok[:value] : nil,
-                  resources,
-                  current_ctm,
-                  output_dir,
-                  write_files,
-                  seen_forms,
-                  depth
+          ContentStreamParser.scan_operators(stream, PLACEMENT_OPERATORS) do |op, operands|
+            case op
+            when 'BI'
+              @inline_image_count += 1
+            when 'q'
+              ctm_stack << current_ctm.dup
+            when 'Q'
+              current_ctm = ctm_stack.pop || initial_ctm.dup
+            when 'cm'
+              nums = operands.select { |value| value.is_a?(Float) }
+              if nums.length >= 6
+                current_ctm = multiply_matrices(
+                  [nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]],
+                  current_ctm
                 )
               end
-              operands = []
-            else
-              operands << tok
+            when 'Do'
+              name_value = operands.reverse.find { |value| value.is_a?(String) }
+              handle_xobject_do(
+                page_num,
+                name_value,
+                resources,
+                current_ctm,
+                output_dir,
+                write_files,
+                seen_forms,
+                depth
+              )
             end
           end
         end
@@ -929,118 +932,6 @@ module BlueCollarSystems
       def safe_token(value)
         s = value.to_s.gsub(/[^A-Za-z0-9_.-]+/, '_')
         s.empty? ? 'image' : s
-      end
-
-      def tokenize_stream(stream)
-        tokens = []
-        i = 0
-        len = stream.length
-        while i < len
-          if tokens.length > MAX_TOKENS_PER_STREAM
-            Logger.warn('EmbeddedImages', "token limit reached (#{MAX_TOKENS_PER_STREAM})")
-            break
-          end
-
-          c = stream[i]
-          if c =~ /[\s\x00]/
-            i += 1
-            next
-          end
-          if c == '%'
-            eol = stream.index(/[\r\n]/, i) || len
-            i = eol + 1
-            next
-          end
-          if c == '('
-            depth = 1
-            j = i + 1
-            while j < len && depth > 0
-              if stream[j] == '\\'
-                j += 2
-                next
-              end
-              depth += 1 if stream[j] == '('
-              depth -= 1 if stream[j] == ')'
-              j += 1
-            end
-            tokens << { type: :string, value: stream[i...j] }
-            i = j
-            next
-          end
-          if c == '<' && (i + 1 >= len || stream[i + 1] != '<')
-            j = stream.index('>', i) || len
-            tokens << { type: :hex_string, value: stream[i..j] }
-            i = j + 1
-            next
-          end
-          if c == '<' && i + 1 < len && stream[i + 1] == '<'
-            depth = 1
-            j = i + 2
-            while j < len - 1 && depth > 0
-              if stream[j, 2] == '<<'
-                depth += 1
-                j += 2
-              elsif stream[j, 2] == '>>'
-                depth -= 1
-                j += 2
-              else
-                j += 1
-              end
-            end
-            tokens << { type: :dict, value: stream[i...j] }
-            i = j
-            next
-          end
-          if c == '['
-            depth = 1
-            j = i + 1
-            while j < len && depth > 0
-              depth += 1 if stream[j] == '['
-              depth -= 1 if stream[j] == ']'
-              j += 1
-            end
-            tokens << { type: :array, value: stream[i...j] }
-            i = j
-            next
-          end
-          if c == '/' 
-            j = i + 1
-            while j < len && stream[j] !~ /[\s\[\]<>(){}\/\%]/
-              j += 1
-            end
-            tokens << { type: :name, value: stream[i...j] }
-            i = j
-            next
-          end
-
-          j = i
-          while j < len && stream[j] !~ /[\s\[\]<>(){}\/\%]/
-            j += 1
-          end
-          if j == i
-            i += 1
-            next
-          end
-          word = stream[i...j]
-          if word == 'BI'
-            @inline_image_count += 1
-            id_pos = stream.index(/\sID[\s\n\r]/, j)
-            if id_pos
-              ei_pos = stream.index(/[\s\n\r]EI(?=[\s\n\r\/\[<])/, id_pos + 3)
-              i = ei_pos ? ei_pos + 3 : len
-            else
-              i = j
-            end
-            next
-          end
-          if word =~ /\A[+-]?\d*\.?\d+\z/
-            tokens << { type: :number, value: word.to_f }
-          else
-            tokens << { type: :operator, value: word }
-          end
-          i = j
-        end
-        tokens
       end
     end
   end
