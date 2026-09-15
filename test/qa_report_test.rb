@@ -315,6 +315,28 @@ class QAReportTest < Minitest::Test
     assert diagnostics[:recommended_actions].any? { |action| action.include?('Vector or Hybrid') }
   end
 
+  def test_clean_scale_crosscheck_is_present_for_delivery_gate
+    report = {
+      report_meta: { build_stamp: 'fixture-build' },
+      result: { text_entities: 0 },
+      extra: {
+        resolved_scale: { factor: 16, source: 'titleblock', confidence: 0.98 },
+        representation_fidelity: { ready: true }
+      }
+    }
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport
+    qa.enrich_report_extras!(report)
+    check = report[:extra][:scale_crosscheck]
+    assert_equal 'ok', check['level']
+    assert_empty check['reasons']
+    assert_empty check['messages']
+    assert_nil check['banner']
+    assert_equal true, report[:extra][:import_contract_ready][:ready]
+
+    report[:extra].delete(:scale_crosscheck)
+    assert_equal false, qa.build_import_contract_ready(report)[:ready]
+  end
+
   def test_scale_crosscheck_low_confidence
     stats = {
       pages: 1,

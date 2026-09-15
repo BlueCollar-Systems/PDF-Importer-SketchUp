@@ -52,7 +52,9 @@ module BlueCollarSystems
         # Estimate circle count from closed loops
         circles = 0
         prims.each do |p|
-          next unless p.type == :closed_loop && p.points && p.points.length >= 8
+          next unless p.type == :closed_loop && p.points
+          npts = p.points.length
+          next unless npts >= 8
           fit = nil
           begin
             fit = ArcFitter.circle_fit(p.points)

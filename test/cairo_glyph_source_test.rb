@@ -296,6 +296,49 @@ class CairoGlyphSourceTest < Minitest::Test
     end
   end
 
+  def test_font_preparation_is_local_to_the_poppler_render_input
+    [:pdftocairo, :mutool].each do |kind|
+      Dir.mktmpdir('cairo_font_prepare') do |dir|
+        path = File.join(dir, 'page.svg')
+        prepared_calls = []
+        render_inputs = []
+        prepare = lambda do |pdf, exe|
+          prepared_calls << [pdf, exe]
+          'temporary-embedded.pdf'
+        end
+        variants = lambda do |_renderer, pdf, output, _page, _crop|
+          render_inputs << pdf
+          [[kind.to_s, pdf, output]]
+        end
+        runner = lambda do |args, _opts|
+          File.write(path, '<svg width="100pt" height="100pt" viewBox="0 0 100 100"/>')
+          { ok: true, timed_out: false, stderr: '', stdout: '', argv: args }
+        end
+        result = SVG_R.stub(:find_svg_renderer, { kind: kind, exe: 'renderer' }) do
+          SVG_R.stub(:temp_svg_path, path) do
+            SVG_R.stub(:ensure_renderable_pdf, prepare) do
+              SVG_R.stub(:svg_render_arg_variants, variants) do
+                BlueCollarSystems::PDFVectorImporter::CommandRunner.stub(:run, runner) do
+                  BlueCollarSystems::PDFVectorImporter::PopplerResultValidator.stub(
+                    :validate, { ok: true, reason: nil, diagnostics: {} }
+                  ) { CGS.render_page_svg('immutable-original.pdf', 1) }
+                end
+              end
+            end
+          end
+        end
+        refute_nil result
+        if kind == :pdftocairo
+          assert_equal [['immutable-original.pdf', 'renderer']], prepared_calls
+          assert_equal ['temporary-embedded.pdf'], render_inputs
+        else
+          assert_empty prepared_calls
+          assert_equal ['immutable-original.pdf'], render_inputs
+        end
+      end
+    end
+  end
+
   def test_cropbox_retry_success_clears_stale_failure_and_reports_actual_media_box
     path = File.join(Dir.tmpdir, "bc_crop_retry_#{Process.pid}.svg")
     failure = {}

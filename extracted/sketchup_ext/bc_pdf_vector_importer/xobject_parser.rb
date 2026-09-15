@@ -12,7 +12,8 @@
 module BlueCollarSystems
   module PDFVectorImporter
     class XObjectParser
-      MAX_TOKENS_PER_STREAM = 500_000
+      # Operators the placement tracker needs from a content stream.
+      PLACEMENT_OPERATORS = { 'q' => true, 'Q' => true, 'cm' => true, 'Do' => true }.freeze
 
       # Represents a reusable Form XObject
       FormXObject = Struct.new(
@@ -130,46 +131,43 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       def track_placements(streams)
         return unless streams
-        # This requires parsing the content stream with CTM tracking
-        # We track q/Q state and cm operators to know the CTM at each Do
+        # This method recomputes the supplied page streams. expanded_paths
+        # may call it after an explicit tracking pass; never append duplicates.
+        @form_xobjects.each_value { |form| form.instance_xforms = [] }
+        # Streaming q/Q/cm/Do walk (ContentStreamParser.scan_operators): no
+        # token array and no token cap, so a `Do` late in a dense sheet is
+        # placed just like one at the top. The CTM stack persists across the
+        # page's stream array, as PDF requires.
         ctm_stack = [[1, 0, 0, 1, 0, 0]]
         current_ctm = [1, 0, 0, 1, 0, 0]
 
         streams.each do |stream|
           next unless stream
-          tokens = tokenize_stream(stream)
-          operands = []
-
-          tokens.each do |tok|
-            if tok[:type] == :operator
-              case tok[:value]
-              when 'q'
-                ctm_stack.push(current_ctm.dup)
-              when 'Q'
-                current_ctm = ctm_stack.pop || [1, 0, 0, 1, 0, 0]
-              when 'cm'
-                nums = operands.select { |t| t[:type] == :number }.map { |t| t[:value] }
-                if nums.length >= 6
-                  # PDF cm concatenation is pre-multiplied: CTM = M * CTM
-                  # (same order used by ContentStreamParser#concat_matrix).
-                  current_ctm = multiply_matrices(
-                    [nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]],
-                    current_ctm
-                  )
-                end
-              when 'Do'
-                name_tok = operands.find { |t| t[:type] == :name }
-                if name_tok
-                  name = name_tok[:value].gsub(/\A\//, '')
-                  if @form_xobjects[name]
-                    @form_xobjects[name].instance_xforms << current_ctm.dup
-                    @form_xobjects[name].usage_count = @form_xobjects[name].instance_xforms.length
-                  end
+          ContentStreamParser.scan_operators(stream, PLACEMENT_OPERATORS) do |op, operands|
+            case op
+            when 'q'
+              ctm_stack.push(current_ctm.dup)
+            when 'Q'
+              current_ctm = ctm_stack.pop || [1, 0, 0, 1, 0, 0]
+            when 'cm'
+              nums = operands.select { |value| value.is_a?(Float) }
+              if nums.length >= 6
+                # PDF cm concatenation is pre-multiplied: CTM = M * CTM
+                # (same order used by ContentStreamParser#concat_matrix).
+                current_ctm = multiply_matrices(
+                  [nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]],
+                  current_ctm
+                )
+              end
+            when 'Do'
+              name_value = operands.find { |value| value.is_a?(String) }
+              if name_value
+                name = name_value.gsub(/\A\//, '')
+                if @form_xobjects[name]
+                  @form_xobjects[name].instance_xforms << current_ctm.dup
+                  @form_xobjects[name].usage_count = @form_xobjects[name].instance_xforms.length
                 end
               end
-              operands.clear
-            else
-              operands << tok
             end
           end
         end
@@ -331,123 +329,6 @@ module BlueCollarSystems
           m1[4] * m2[1] + m1[5] * m2[3] + m2[5]
         ]
       end
-
-      def tokenize_stream(stream)
-        tokens = []
-        i = 0
-        len = stream.length
-        while i < len
-          if tokens.length > MAX_TOKENS_PER_STREAM
-            Logger.warn("XObjectParser", "token limit reached (#{MAX_TOKENS_PER_STREAM}) - truncating placement parse")
-            break
-          end
-
-          c = stream[i]
-          if c =~ /[\s\x00]/; i += 1; next; end
-          if c == '%'
-            eol = stream.index(/[\r\n]/, i) || len
-            i = eol + 1; next
-          end
-          if c == '('
-            depth = 1
-            j = i + 1
-            while j < len && depth > 0
-              if stream[j] == '\\'
-                j += 2
-                next
-              end
-              depth += 1 if stream[j] == '('
-              depth -= 1 if stream[j] == ')'
-              j += 1
-            end
-            tokens << { type: :string, value: stream[i...j] }
-            i = j
-            next
-          end
-          if c == '<' && (i + 1 >= len || stream[i + 1] != '<')
-            j = stream.index('>', i) || len
-            tokens << { type: :hex_string, value: stream[i..j] }
-            i = j + 1
-            next
-          end
-          if c == '<' && i + 1 < len && stream[i + 1] == '<'
-            depth = 1
-            j = i + 2
-            while j < len - 1 && depth > 0
-              if stream[j, 2] == '<<'
-                depth += 1
-                j += 2
-              elsif stream[j, 2] == '>>'
-                depth -= 1
-                j += 2
-              else
-                j += 1
-              end
-            end
-            tokens << { type: :dict, value: stream[i...j] }
-            i = j
-            next
-          end
-          if c == '>' && i + 1 < len && stream[i + 1] == '>'
-            i += 2
-            next
-          end
-          if c == '['
-            depth = 1
-            j = i + 1
-            while j < len && depth > 0
-              depth += 1 if stream[j] == '['
-              depth -= 1 if stream[j] == ']'
-              j += 1
-            end
-            tokens << { type: :array, value: stream[i...j] }
-            i = j
-            next
-          end
-          if c == ']'
-            i += 1
-            next
-          end
-          if c == '/'
-            j = i + 1
-            while j < len && stream[j] !~ /[\s\[\]<>(){}\/\%]/; j += 1; end
-            tokens << { type: :name, value: stream[i...j] }
-            i = j; next
-          end
-          j = i
-          while j < len && stream[j] !~ /[\s\[\]<>(){}\/\%]/; j += 1; end
-          if j == i
-            i += 1
-            next
-          end
-          word = stream[i...j]
-
-          # Inline image data can contain arbitrary bytes. Skip BI...ID...EI.
-          if word == 'BI'
-            id_pos = stream.index(/\sID[\s\n\r]/, j)
-            if id_pos
-              ei_pos = stream.index(/[\s\n\r]EI(?=[\s\n\r\/\[<])/, id_pos + 3)
-              if ei_pos
-                i = ei_pos + 3
-              else
-                i = len
-              end
-            else
-              i = j
-            end
-            next
-          end
-
-          if word =~ /\A[+-]?\d*\.?\d+\z/
-            tokens << { type: :number, value: word.to_f }
-          else
-            tokens << { type: :operator, value: word }
-          end
-          i = j
-        end
-        tokens
-      end
-
     end
   end
 end
