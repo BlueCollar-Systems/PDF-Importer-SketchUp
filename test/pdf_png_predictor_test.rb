@@ -23,7 +23,7 @@ class PdfPngPredictorTest < Minitest::Test
   def test_stream_decoder_passes_colors_and_bits_from_decode_parameters
     parser = PARSER.new('unused.pdf')
     bytes = Zlib::Deflate.deflate(FILTERED[4].pack('C*'))
-    raw = "1 0 obj\n<< /Length #{bytes.bytesize} /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /Columns 2 /BitsPerComponent 8 >> >>\nstream\n".b + bytes + "\nendstream\nendobj".b
+    raw = "1 0 obj\n<< /Length #{bytes.bytesize} /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /Columns 2 /BitsPerComponent 8 >> >>\nstream\n".force_encoding(Encoding::BINARY) + bytes + "\nendstream\nendobj".force_encoding(Encoding::BINARY)
     parser.stub(:get_raw_object, raw) { assert_equal RGB, parser.get_stream_data(1) }
   end
 
