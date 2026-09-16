@@ -44,7 +44,7 @@ options = {
 
 parser = OptionParser.new do |opts|
   opts.banner = <<-BANNER
-su_batch_cli — SketchUp PDF importer offline batch CLI (BlueCollar Systems)
+su_batch_cli — SketchUp PDF importer offline batch CLI (BlueCollar-Systems)
 
 Analyzes PDFs without SketchUp: open gate, vector parse, import_report.json.
 Optional geometry sidecar summarizes path/text/image counts.
