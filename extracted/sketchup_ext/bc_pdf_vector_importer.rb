@@ -2,7 +2,7 @@
 # Root loader for the PDF Vector Importer SketchUp Extension
 # CI-tested across Ruby 2.2 / 2.7 / 3.0 / 3.2 (SketchUp Make 2017 baseline through current releases).
 #
-# Copyright 2024-2026 BlueCollar Systems
+# Copyright 2024-2026 BlueCollar-Systems
 # License: MIT
 # BUILT. NOT BOUGHT.
 #
@@ -21,14 +21,14 @@ module BlueCollarSystems
     PLUGIN_DIR      = File.join(File.dirname(__FILE__), PLUGIN_ID).freeze
 
     extension = SketchupExtension.new(PLUGIN_NAME, File.join(PLUGIN_ID, 'main'))
-    extension.creator     = 'BlueCollar Systems'
+    extension.creator     = 'BlueCollar-Systems'
     extension.description = 'Import PDF vector geometry as native editable SketchUp edges. ' \
                             'Features arc reconstruction, color-based tag grouping, ' \
                             'text import, dash patterns, Scale by Reference tool, ' \
                             'scanned-page detection warnings, and full Bezier support. ' \
                             'CI-tested: Ruby 2.2, 2.7, 3.0, and 3.2 (SketchUp Make 2017+ baseline).'
     extension.version     = PLUGIN_VERSION
-    extension.copyright   = '2024-2026 BlueCollar Systems'
+    extension.copyright   = '2024-2026 BlueCollar-Systems'
 
     Sketchup.register_extension(extension, true)
 

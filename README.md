@@ -434,4 +434,4 @@ These AI tools were used as collaborative development partners throughout the pr
 
 ## Author
 
-**BlueCollar Systems** -- BUILT. NOT BOUGHT.
+**BlueCollar-Systems** -- BUILT. NOT BOUGHT.

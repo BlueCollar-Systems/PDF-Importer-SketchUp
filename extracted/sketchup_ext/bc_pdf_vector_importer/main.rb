@@ -2,7 +2,7 @@
 # Pipeline: PDF > Primitives > Cleanup > Profile > Generic Recognition
 #           > Optional Domain Pack > Validation > Host Build > Report
 #
-# Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
+# Copyright 2024-2026 BlueCollar-Systems — BUILT. NOT BOUGHT.
 
 require 'zlib'
 require 'digest'
@@ -6344,7 +6344,7 @@ module BlueCollarSystems
         end
         UI.messagebox(
           "PDF Vector Importer v#{version}\n" \
-          "by BlueCollar Systems\n\n" \
+          "by BlueCollar-Systems\n\n" \
           "Import PDF drawings as editable SketchUp geometry.\n\n" \
           "BUILT. NOT BOUGHT.")
       }
