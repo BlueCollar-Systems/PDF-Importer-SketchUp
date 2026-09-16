@@ -6,7 +6,7 @@
 #
 # Mirrors the FreeCAD PDFScaleTool functionality.
 #
-# Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
+# Copyright 2024-2026 BlueCollar-Systems — BUILT. NOT BOUGHT.
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -55,7 +55,7 @@ module BlueCollarSystems
           ]
 
           result = UI.inputbox(prompts, defaults, dropdowns,
-                               "Scale by Reference — BlueCollar Systems")
+                               "Scale by Reference — BlueCollar-Systems")
           return unless result
 
           _measured_display, real_dim_str, scale_target = result
@@ -103,7 +103,7 @@ module BlueCollarSystems
           dropdowns = ["", "", "All Groups|Selection Only|Active Group"]
 
           result = UI.inputbox(prompts, defaults, dropdowns,
-                               "Scale by Reference — BlueCollar Systems")
+                               "Scale by Reference — BlueCollar-Systems")
           return unless result
 
           real_dim_str, measured_str, scale_target = result
@@ -154,7 +154,7 @@ module BlueCollarSystems
         dropdowns = ["", "All Groups|Selection Only|Active Group"]
 
         result = UI.inputbox(prompts, defaults, dropdowns,
-                             "Quick Scale — BlueCollar Systems")
+                             "Quick Scale — BlueCollar-Systems")
         return unless result
 
         factor_str, scale_target = result

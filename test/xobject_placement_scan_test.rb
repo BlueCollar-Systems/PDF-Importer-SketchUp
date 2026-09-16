@@ -36,6 +36,11 @@ BlueCollarSystems::PDFVectorImporter::Logger.debug = false
 module LegacyPlacementTokenizer
   # Verbatim copy of the pre-fix XObjectParser#tokenize_stream minus the cap.
   def self.tokenize(stream)
+    # Content streams are binary: a PDF may carry any byte between operators
+    # (inline image data, an accented name). Scanning them as UTF-8 raises
+    # "invalid byte sequence", which is why the production scanner works on
+    # a BINARY copy; this reference tokenizer does the same.
+    stream = stream.dup.force_encoding(Encoding::BINARY) unless stream.encoding == Encoding::BINARY
     tokens = []
     i = 0
     len = stream.length
@@ -187,7 +192,7 @@ class ScanOperatorsParityTest < Minitest::Test
   def test_streaming_walk_matches_legacy_tokenizer_sequence
     FIXTURES.each do |fixture|
       [fixture, fixture.dup.force_encoding(Encoding::BINARY)].each do |stream|
-        expected = LegacyPlacementTokenizer.sequence(stream.dup.force_encoding(Encoding::BINARY), WANTED)
+        expected = LegacyPlacementTokenizer.sequence(stream, WANTED)
         actual = streaming_sequence(stream)
         assert_equal expected, actual, "parity mismatch for #{fixture.inspect}"
       end
@@ -296,10 +301,11 @@ class LatePlacementAfterSixHundredThousandTokensTest < Minitest::Test
     parser.track_placements([@stream])
     assert_equal [[2.0, 0.0, 0.0, 2.0, 10.0, 20.0]], form.instance_xforms
     assert_equal 1, form.usage_count
+    # Repeated tracking is a recomputation, not another placement.
     expanded = parser.expanded_paths([@stream])
     assert_equal 1, expanded.length
-    assert_equal [[10.0, 20.0], [20.0, 30.0]],
-                 expanded[0].subpaths[0].segments.map { |s| s.points[-1] }
+    assert_equal [[10.0, 20.0], [10.0, 20.0], [20.0, 30.0]],
+                 expanded[0].subpaths[0].segments.flat_map(&:points)
     refute LOGGER.warnings.any? { |w| w =~ /token limit/ }, LOGGER.warnings.inspect
   end
 

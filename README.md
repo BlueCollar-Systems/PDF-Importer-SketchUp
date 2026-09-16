@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.145-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.148-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -434,4 +434,4 @@ These AI tools were used as collaborative development partners throughout the pr
 
 ## Author
 
-**BlueCollar Systems** -- BUILT. NOT BOUGHT.
+**BlueCollar-Systems** -- BUILT. NOT BOUGHT.

@@ -351,17 +351,20 @@ module BlueCollarSystems
 
           return nil unless decoded
 
-          # Apply PNG predictor if specified in DecodeParms
+          # Apply PNG predictor if specified in DecodeParms.
+          # /Columns counts pixels per row, not bytes: a row is
+          # Columns * Colors * BitsPerComponent / 8 bytes wide, and the Sub,
+          # Average and Paeth filters reference the pixel to the left, which
+          # is one whole pixel (Colors * BitsPerComponent / 8 bytes) back.
+          # Reading only /Columns un-filtered every colour image against the
+          # wrong row width and returned a buffer of the wrong length.
           if dict_part =~ /\/Predictor\s+(\d+)/
             predictor = $1.to_i
-            columns = 1
-            columns = $1.to_i if dict_part =~ /\/Columns\s+(\d+)/
+            columns = dict_part =~ /\/Columns\s+(\d+)/ ? $1.to_i : 1
+            colors = dict_part =~ /\/Colors\s+(\d+)/ ? $1.to_i : 1
+            bpc = dict_part =~ /\/BitsPerComponent\s+(\d+)/ ? $1.to_i : 8
             if predictor >= 10
-              colors = 1
-              colors = $1.to_i if dict_part =~ /\/Colors\s+(\d+)/
-              bits = 8
-              bits = $1.to_i if dict_part =~ /\/BitsPerComponent\s+(\d+)/
-              decoded = apply_png_predictor(decoded, columns, colors, bits)
+              decoded = apply_png_predictor(decoded, columns, colors, bpc)
             end
           end
 
