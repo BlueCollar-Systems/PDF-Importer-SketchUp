@@ -111,6 +111,19 @@ module BlueCollarSystems
 
         append_text_renderer_lines(lines, stats)
 
+        failures = Array(stats[:text_delivery_failures])
+        unless failures.empty?
+          lines << ""
+          lines << "#{failures.length} text span(s) were not certified; " \
+                   'geometry and certified text were kept.'
+          failures.first(8).each do |failure|
+            source_id = (failure[:source_span_id] ||
+                         failure['source_span_id']).to_s
+            reason = (failure[:reason] || failure['reason']).to_s
+            lines << "  #{source_id}: #{reason}" unless source_id.empty?
+          end
+        end
+
         comps = stats[:components] || 0
         lines << "#{comps} repeated symbols converted to components." if comps > 0
 

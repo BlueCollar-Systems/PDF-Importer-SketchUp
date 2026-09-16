@@ -83,6 +83,9 @@ class QAReportTest < Minitest::Test
     assert_equal 1, accounting.fetch(:failed_count)
     assert_equal 0, accounting.fetch(:unaccounted_count)
     assert_equal true, accounting.fetch(:counts_reconciled)
+    assert_equal 1, report[:extra][:text_delivery_failures].length
+    assert_includes report[:extra][:diagnostics][:signals],
+                    'uncertified_text_spans'
   end
 
   def test_builds_import_report_schema
