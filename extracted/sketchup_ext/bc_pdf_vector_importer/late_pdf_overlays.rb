@@ -156,17 +156,24 @@ module BlueCollarSystems
             surface = group.entities.add_group
             surface.transformation = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
                                      Geom::Transformation.scaling(1.0 / PlanarWhiteKnockout::CONSTRUCTION_SCALE)
-            polygons.each do |paint|
-              face = surface.entities.add_face(paint[:points].map do |point|
+            paint_groups = polygons.map do |paint|
+              # Adjacent fill/stroke polygons have different alpha. Keep their
+              # native topology isolated while subtracting final-page crops;
+              # rediscovering coplanar faces across all five paints can create
+              # an overlapping combined face in the legacy host.
+              paint_group = surface.entities.add_group
+              face = paint_group.entities.add_face(paint[:points].map do |point|
                 PlanarWhiteKnockout.construction_point(point, origin)
               end)
               fail_contract('native final overlay face construction failed') unless face && face.valid?
               material = material_for(materials, paint[:rgb], paint[:opacity])
               face.material = face.back_material = material
               face.reverse! if face.normal.z < 0
-            end
-            surface.entities.to_a.each do |entity|
-              entity.hidden = true if entity.typename.to_s == 'Edge'
+              paint_group.entities.to_a.each do |entity|
+                next unless entity.valid?
+                entity.hidden = true if entity.typename.to_s == 'Edge'
+              end
+              paint_group
             end
             identity = Geom::Transformation.new
             faces = PlanarWhiteKnockout.snapshots(group, identity, false)
@@ -175,9 +182,13 @@ module BlueCollarSystems
             unless (actual - expected).abs <= [expected.abs * 1.0e-7, 1.0e-10].max
               fail_contract('native final overlay changed source paint area')
             end
-            box = PlanarWhiteKnockout.union_bounds(faces)
-            intersections = crops.select { |crop| PlanarWhiteKnockout.boxes_overlap?(box, crop[:bounds]) }
-            removed = intersections.empty? ? 0.0 : PlanarWhiteKnockout.compose_group!(group, identity, faces, intersections)
+            removed = paint_groups.inject(0.0) do |sum, paint_group|
+              paint_faces = PlanarWhiteKnockout.snapshots(paint_group, surface.transformation, false)
+              box = PlanarWhiteKnockout.union_bounds(paint_faces)
+              intersections = crops.select { |crop| PlanarWhiteKnockout.boxes_overlap?(box, crop[:bounds]) }
+              sum + (intersections.empty? ? 0.0 : PlanarWhiteKnockout.compose_group!(
+                paint_group, surface.transformation, paint_faces, intersections))
+            end
             depth = [top.to_f, 0.0].max + DISPLAY_GAP * (index + 1)
             group.transformation = Geom::Transformation.translation(Geom::Point3d.new(0, 0, depth))
             { 'late_pdf_overlay' => true, 'source_paint_order' => record[:paint_order],
