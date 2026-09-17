@@ -336,6 +336,12 @@ module BlueCollarSystems
       true
     end
 
+    def self.normalized_missing_font_names(values)
+      Array(values).map { |value| value.to_s.strip }.reject do |value|
+        value.empty?
+      end
+    end
+
     def self.svg_source_context(svg_document, page_num, failure_info = {})
       document = svg_document.is_a?(Hash) ? svg_document : {}
       failures = []
@@ -346,10 +352,15 @@ module BlueCollarSystems
           :reason_code => :renderer_runtime_error, :detail => reason
         }
       end
-      missing_fonts = Array(document[:missing_fonts]).map { |value| value.to_s }
-      missing_languages = Array(document[:missing_language_packs]).map do |value|
-        value.to_s
-      end
+      missing_fonts = normalized_missing_font_names(document[:missing_fonts])
+      missing_languages = normalized_missing_font_names(
+        document[:missing_language_packs]
+      )
+      render_status = document[:svg].to_s.empty? ? :failed : :complete
+      # Proven unused startup warnings are classified at the renderer boundary.
+      # Remaining missing fonts/language packs cannot certify absence of ink.
+      # Named font gaps can still be attributed to individual known fonts by
+      # the item renderer; generic language/runtime failures stay page-scoped.
       unless missing_fonts.empty? && missing_languages.empty?
         failures << {
           :scope => :page, :page_number => page_num.to_i,
@@ -357,15 +368,83 @@ module BlueCollarSystems
           :missing_fonts => missing_fonts,
           :missing_language_packs => missing_languages
         }
+        Logger.warn(
+          'Pipeline',
+          "Page #{page_num.to_i}: renderer listed " \
+          "missing_fonts=#{missing_fonts.inspect} " \
+          "missing_language_packs=#{missing_languages.inspect}; " \
+          'spans with source outlines can still certify 3D Text'
+        )
       end
+      inventory_complete = render_status == :complete && failures.empty?
       {
         :importer_id => RepresentationFidelity::IMPORTER_ID,
         :page_number => page_num.to_i,
         :renderer => document[:renderer],
-        :render_status => document[:svg].to_s.empty? ? :failed : :complete,
-        :font_inventory_status => failures.empty? ? :complete : :failed,
+        :render_status => render_status,
+        :font_inventory_status => inventory_complete ? :complete : :failed,
+        :missing_fonts => missing_fonts,
+        :missing_language_packs => missing_languages,
         :page_failures => failures
       }
+    end
+
+    def self.page_level_text_delivery_failures(failures)
+      Array(failures).select do |failure|
+        next true unless failure.respond_to?(:[])
+        source_id = (failure[:source_span_id] || failure['source_span_id']).to_s
+        source_id.empty?
+      end
+    end
+
+    def self.item_level_text_delivery_failures(failures)
+      Array(failures) - page_level_text_delivery_failures(failures)
+    end
+
+    def self.map_text_renderer_failures(failures)
+      Array(failures).map do |failure|
+        unless failure.respond_to?(:[])
+          next {
+            :source_span_id => nil,
+            :reason => 'unreported failure',
+            :detail => ''
+          }
+        end
+        {
+          :source_span_id => failure[:source_span_id] || failure['source_span_id'],
+          :reason => (
+            failure[:reason] || failure['reason'] ||
+            failure[:reason_code] || failure['reason_code']
+          ).to_s,
+          :detail => (failure[:detail] || failure['detail']).to_s
+        }
+      end
+    end
+
+    def self.record_uncertified_text_spans!(stats, page_num, failures)
+      return true unless stats.is_a?(Hash)
+      stats[:text_delivery_failures] ||= []
+      map_text_renderer_failures(failures).each do |mapped|
+        source_id = mapped[:source_span_id].to_s
+        source_id = 'unidentified source span' if source_id.empty?
+        reason = mapped[:reason].to_s
+        reason = 'unreported failure' if reason.empty?
+        detail = mapped[:detail].to_s
+        stats[:text_delivery_failures] << {
+          :page => page_num.to_i,
+          :source_span_id => source_id,
+          :reason => reason,
+          :detail => detail,
+          :certified => false
+        }
+        Logger.warn(
+          'Pipeline',
+          "Page #{page_num} #{source_id}: requested text was not certified " \
+          "(#{reason}#{detail.empty? ? '' : ': ' + detail}); geometry and " \
+          'certified text remain; no glyph substitution was used'
+        )
+      end
+      true
     end
 
     def self.failed_item_rung_from_transition(proof)
@@ -3613,7 +3692,8 @@ module BlueCollarSystems
                 recognition_skipped_pages: [],
                 import_session_id: new_import_session_id,
                  source_provenance_objects: [], text_source_span_ids: [],
-                 text_attempts: [], page_text_delivery_records: [],
+                 text_attempts: [], text_delivery_failures: [],
+                 page_text_delivery_records: [],
                  terminal_text_delivery_records: [],
                  terminal_cleanup_events: [], fallback_transitions: [],
                  page_representation_fallbacks: [],
@@ -3683,7 +3763,8 @@ module BlueCollarSystems
         text_offset_x = svg_page_box[0].to_f - media_box[0].to_f
         text_offset_y = svg_page_box[1].to_f - media_box[1].to_f
         Logger.info("Pipeline",
-          "Page #{page_num}: text_mode=#{requested_text_mode}, media_box=#{media_box.inspect}, " \
+          "Page #{page_num}: source=#{File.basename(path.to_s)}, " \
+          "text_mode=#{requested_text_mode}, media_box=#{media_box.inspect}, " \
           "crop_box=#{crop_box ? crop_box.inspect : 'nil'}, rotation=#{page_rotation}, " \
           "text_offset_pts=(#{text_offset_x.round(3)},#{text_offset_y.round(3)})")
         stack_box = svg_page_box
@@ -4460,6 +4541,10 @@ module BlueCollarSystems
             builder.page_group.entities : model.active_entities
           raster_delivery_started = Time.now
           Array(text_items).each_with_index do |source_item, item_index|
+            run_control_checkpoint!(
+              opts, :text_item, :completed => item_index,
+              :total => Array(text_items).length, :page => page_num
+            )
             source_id = RepresentationFidelity.source_span_id(source_item)
             controller = RepresentationFidelity::FallbackController.new(
               :raster, source_id
@@ -4516,24 +4601,32 @@ module BlueCollarSystems
             stats, :svg_source_render_ms,
             (Time.now - svg_source_started) * 1000.0
           )
-          unless svg_document && svg_document[:svg].to_s.length > 0
+          svg_payload_ready = svg_document &&
+            svg_document[:svg].to_s.length > 0
+          unless svg_payload_ready
             reason = svg_failure[:reason].to_s
             reason = 'svg_3d_text_renderer_failed' if reason.empty?
             if text_items.empty?
               raise RepresentationFidelity::ContractError,
                     "Page #{page_num}: exact 3D text source inspection failed: #{reason}"
             end
-            failures = text_items.map do |item|
-              {
-                :source_span_id => RepresentationFidelity.source_span_id(item),
-                :reason => reason
-              }
-            end
-            enforce_requested_text_delivery!(
-              page_num, exact_3d_requested_mode, failures
+            # Geometry is already in the page group. A missing SVG is not
+            # permission to fake 3D glyphs, and it is not permission to roll
+            # the whole page back. Keep lines/arcs/fills and report each
+            # uncertified span.
+            record_uncertified_text_spans!(
+              stats, page_num,
+              text_items.map do |item|
+                {
+                  :source_span_id => RepresentationFidelity.source_span_id(item),
+                  :reason => reason,
+                  :detail => 'page renderer/font inventory could not be proven'
+                }
+              end
             )
           end
 
+          if svg_payload_ready
           representation_parent = builder.page_group.entities
           depth = opts[:text_3d_depth]
           depth = Svg3DTextRenderer::DEFAULT_DEPTH_INCHES if depth.nil?
@@ -4566,18 +4659,19 @@ module BlueCollarSystems
           )
 
           unless Array(text3d_result[:failures]).empty?
-            failures = text3d_result[:failures].map do |failure|
-              {
-                :source_span_id => failure[:source_span_id],
-                :reason => failure[:reason_code].to_s,
-                # The renderer captured the real exception message here; dropping
-                # it made the page error say only 'host_3d_text_exception'.
-                :detail => failure[:detail].to_s
-              }
-            end
-            enforce_requested_text_delivery!(
-              page_num, exact_3d_requested_mode, failures
+            mapped_failures = map_text_renderer_failures(
+              text3d_result[:failures]
             )
+            page_failures = page_level_text_delivery_failures(mapped_failures)
+            item_failures = item_level_text_delivery_failures(mapped_failures)
+            unless page_failures.empty?
+              enforce_requested_text_delivery!(
+                page_num, exact_3d_requested_mode, page_failures
+              )
+            end
+            record_uncertified_text_spans!(
+              stats, page_num, item_failures
+            ) unless item_failures.empty?
           end
 
           transition_proofs = Array(text3d_result[:transition_proofs])
@@ -4665,6 +4759,7 @@ module BlueCollarSystems
                   flat_text_fallbacks : nil)
               )
             end
+          end
           end
           stats[:pipeline_performance][:text_delivery_ms] =
             ((Time.now - text_delivery_started) * 1000.0).round(3)

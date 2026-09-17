@@ -83,15 +83,18 @@ module BlueCollarSystems
           opts[:progress_callback], 'svg_item_selection_join_started',
           "source_id=#{source_id}; placements=#{Array(indices).length}; mode=#{mode}"
         )
+        # A span with no owned outlines is item-impossible. Do not walk the
+        # page-wide placement list first — on dense sheets that scan is tens
+        # of thousands of loops and SketchUp 2017 has died here with signal 11
+        # (S-505 text_span:1:287, 0 placements, geometry rung).
+        if Array(indices).empty?
+          return impossible_result(source_id, item, mode, placed, match,
+                                   opts[:source_context], selection)
+        end
         index_lookup = {}
         Array(indices).each { |index| index_lookup[index.to_i] = true }
         entries = Array(placed).select do |entry|
           index_lookup[entry[:placement_index].to_i] == true
-        end
-
-        if indices.empty?
-          return impossible_result(source_id, item, mode, placed, match,
-                                   opts[:source_context], selection)
         end
         unless entries.length == indices.length
           raise RepresentationFidelity::ContractError,

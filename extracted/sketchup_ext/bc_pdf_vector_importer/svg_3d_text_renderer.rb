@@ -195,7 +195,7 @@ module BlueCollarSystems
           if ink_evidence &&
              ink_evidence[:character_count_parity] == false
             page_failure = source_page_failure(
-              source_id, opts[:source_context]
+              source_id, opts[:source_context], item
             )
             if page_failure
               page_failure[:detail] =
@@ -224,7 +224,7 @@ module BlueCollarSystems
 
           if entries.empty?
             page_failure = source_page_failure(
-              source_id, opts[:source_context]
+              source_id, opts[:source_context], item
             )
             if page_failure
               result[:failures] << page_failure
@@ -294,7 +294,12 @@ module BlueCollarSystems
           )
         end
 
-        unless result[:failures].empty?
+        # Item failures already clean their own partial group. Preserve verified
+        # peers so the caller can report an incomplete import truthfully. Only a
+        # page-wide failure invalidates all source bindings on the page.
+        if result[:failures].any? { |failure| failure[:source_span_id].to_s.empty? } ||
+           (!result[:failures].empty? && result[:span_results].empty? &&
+            result[:unmatched_source_results].empty?)
           cleanup_all_owned!(entities, owned_groups, result)
           cleanup_solid_cache!(solid_cache, result)
           result[:span_results] = []
@@ -1686,7 +1691,82 @@ module BlueCollarSystems
       # An empty per-span match is affirmative absence only after the entire
       # renderer page inventory completed without a page-scoped/runtime error.
       # Otherwise a page failure could be mistaken for an item-specific fact.
-      def self.source_page_failure(source_id, source_context)
+      # poppler reports a display-font gap by NAME ("No display font for
+      # 'Helvetica'"). That is item-attributable evidence: it says nothing
+      # about a span set in an embedded face the renderer drew perfectly. A gap
+      # is attributable only when every page failure is a font gap that names
+      # real fonts -- a renderer runtime error, a language-pack gap, or an
+      # evidence exception names nothing an item can be cleared against, and
+      # keeps voiding the page.
+      def self.font_attributable_page_gap?(page_failures)
+        list = page_failures.is_a?(Array) ? page_failures : []
+        return false if list.empty?
+        list.all? do |failure|
+          next false unless failure.is_a?(Hash)
+          next false unless failure[:reason_code].to_s == 'font_inventory_runtime_error'
+          next false unless Array(failure[:missing_language_packs]).empty?
+          names = Array(failure[:missing_fonts]).map { |name| named_font(name) }
+          !names.empty? && names.all? { |name| !name.empty? }
+        end
+      end
+
+      # A usable font name, or '' for anything that is not one. Rejects the
+      # inspected-Hash strings an evidence exception leaves behind, which would
+      # otherwise read as a legitimate name.
+      def self.named_font(value)
+        text = value.to_s.strip
+        return '' if text.empty? || text.include?('{') || text.include?('=>')
+        text
+      end
+
+      # Compare families, not PDF font references: a subset prefix
+      # ("NNZECN+ArialNarrow") and punctuation are not part of the family
+      # poppler names.
+      def self.normalized_font_family(value)
+        text = named_font(value)
+        text = text.split('+', 2).last.to_s if text =~ /\A[A-Z]{6}\+/
+        text.downcase.gsub(/[^a-z0-9]/, '')
+      end
+
+      # True when this item's own font is one the renderer could not display,
+      # or when the item does not say what font it uses -- an unknown font is
+      # not evidence of anything, so it stays strict.
+      def self.item_font_in_gap?(item, page_failures)
+        raw_font = if item.is_a?(Hash)
+                     item[:font_name] || item['font_name']
+                   elsif item.respond_to?(:font_name)
+                     item.font_name
+                   end
+        # An extractor/source-resource label does not identify a font family.
+        return true if raw_font.to_s =~ /\A(?:pdftotext|unknown|TT\d+|F\d+)\z/i
+        family = normalized_font_family(raw_font)
+        return true if family.empty?
+        Array(page_failures).any? do |failure|
+          next false unless failure.is_a?(Hash)
+          Array(failure[:missing_fonts]).any? do |missing|
+            name = normalized_font_family(missing)
+            !name.empty? && (name == family ||
+              family.start_with?(name) || name.start_with?(family))
+          end
+        end
+      end
+
+      def self.inventory_failure_detail(page_failures)
+        names = Array(page_failures).flat_map do |failure|
+          failure.is_a?(Hash) ? Array(failure[:missing_fonts]) : []
+        end.map { |name| named_font(name) }.reject(&:empty?).uniq
+        packs = Array(page_failures).flat_map do |failure|
+          failure.is_a?(Hash) ? Array(failure[:missing_language_packs]) : []
+        end.map { |name| named_font(name) }.reject(&:empty?).uniq
+        parts = []
+        parts << "no display font for: #{names.join(', ')}" unless names.empty?
+        parts << "missing language pack: #{packs.join(', ')}" unless packs.empty?
+        base = 'page renderer/font inventory failed'
+        base += " (#{parts.join('; ')})" unless parts.empty?
+        base + '; exact source absence is unproven'
+      end
+
+      def self.source_page_failure(source_id, source_context, item = nil)
         unless source_context.is_a?(Hash)
           return hard_failure(
             source_id, :source_page_evidence_missing,
@@ -1720,6 +1800,17 @@ module BlueCollarSystems
           source_context[:font_inventory_status].to_s == 'complete'
         render_complete = source_context[:render_status].to_s == 'complete'
         return nil if render_complete && inventory_complete && !failures_present
+
+        # The page rendered, and the only thing missing is a named font this
+        # item does not use. That gap is not evidence about this item, so its
+        # absence stays certifiable -- while the span that does use the missing
+        # font still falls through to the failure below, which is the guarantee
+        # the strict rule was written for.
+        if render_complete && !item.nil? &&
+           font_attributable_page_gap?(page_failures) &&
+           !item_font_in_gap?(item, page_failures)
+          return nil
+        end
 
         hard_failure(
           source_id, :source_page_inventory_failed,
@@ -1758,7 +1849,8 @@ module BlueCollarSystems
             next if value.nil? || (value.respond_to?(:empty?) && value.empty?)
             values = value.is_a?(Array) ? value.first(6) : [value]
             text = values.map { |entry| inventory_diagnostic_text(entry) }.join(', ')
-            parts << key.to_s.tr('_', ' ') + ': ' + text
+            label = key == :missing_fonts ? 'no display font for' : key.to_s.tr('_', ' ')
+            parts << label + ': ' + text
           end
         end
         detail = parts.join('; ')

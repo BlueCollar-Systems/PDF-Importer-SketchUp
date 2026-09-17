@@ -1193,6 +1193,85 @@ class SvgText3DRendererTest < Minitest::Test
     assert coverage[:shaped_glyph_count_telemetry_only]
   end
 
+  def test_shaped_outlines_certify_when_named_font_gap_belongs_to_another_font
+    long_span = Svg3DSpan.new(
+      'TENLETTERS', 'Arial', 'text_span:1:84', 8.0, 18.0, 25.0, 35.0
+    )
+    context = complete_source_context.merge(
+      font_inventory_status: :failed,
+      missing_fonts: ['MissingEmbeddedFont'],
+      page_failures: [{
+        scope: :page, page_number: 1,
+        reason_code: :font_inventory_runtime_error,
+        missing_fonts: ['MissingEmbeddedFont'],
+        detail: 'page renderer/font inventory failed'
+      }]
+    )
+    entities = Svg3DEntities.new
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, [long_span], depth: 0.05,
+      source_context: context, preserve_unmatched_source_placements: false
+    )
+
+    assert_equal 1, result[:span_results].length
+    assert_empty result[:failures]
+    assert_empty result[:transition_proofs]
+    refute_empty entities.groups
+    coverage = result[:match][:source_ink_matches][0]
+    assert_equal false, coverage[:character_count_parity]
+  end
+
+  def test_inventory_failed_span_does_not_erase_certified_peer_3d_text
+    certified = span('text_span:1:0', [8.0, 18.0, 25.0, 35.0])
+    uncertified = span('text_span:1:286', [60.0, 60.0, 70.0, 70.0])
+    certified.font_name = 'Arial'
+    uncertified.font_name = 'Symbol'
+    context = complete_source_context.merge(
+      font_inventory_status: :failed,
+      page_failures: [{
+        scope: :page, page_number: 1,
+        reason_code: :font_inventory_runtime_error,
+        missing_fonts: ['Symbol'],
+        detail: 'page renderer/font inventory failed; exact source absence is unproven'
+      }]
+    )
+    entities = Svg3DEntities.new
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, [certified, uncertified],
+      depth: 0.05, source_context: context,
+      preserve_unmatched_source_placements: false
+    )
+
+    refute result[:ok]
+    assert_equal 1, result[:span_results].length, result[:failures].inspect
+    assert_equal 'text_span:1:0', result[:span_results][0][:source_span_id]
+    assert_equal 1, result[:failures].length
+    assert_equal 'text_span:1:286', result[:failures][0][:source_span_id]
+    assert_equal :source_page_inventory_failed,
+                 result[:failures][0][:reason_code]
+    assert_equal 1, entities.groups.length,
+                 'certified peer 3D Text must survive an inventory-failed sibling'
+  end
+
+  def test_listed_missing_fonts_do_not_block_identity_unavailable_proof
+    missing = span('text_span:1:7', [60.0, 60.0, 70.0, 70.0])
+    context = complete_source_context.merge(
+      missing_fonts: ['MissingEmbeddedFont']
+    )
+    result = RENDERER.render_svg(
+      Svg3DEntities.new, square_svg, MEDIA_BOX, [missing], depth: 0.05,
+      source_context: context, preserve_unmatched_source_placements: false
+    )
+
+    assert_empty result[:failures]
+    assert_equal 1, result[:transition_proofs].length
+    proof = result[:transition_proofs][0]
+    assert_equal :source_item_identity_unavailable, proof[:reason_code]
+    assert proof[:affirmative_impossibility]
+    refute_match(/no glyph placement|outlines? absent/i,
+                 proof[:evidence][:source_observation])
+  end
+
   def test_each_transition_proof_contains_only_its_item_coverage_evidence
     first = Svg3DSpan.new(
       'FIRST', 'pdftotext', 'text_span:1:0', 8.0, 18.0, 25.0, 35.0
@@ -1282,7 +1361,7 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal true, failure[:generic_failure]
     assert_equal false, failure[:affirmative_impossibility]
     ['render status: complete', 'font inventory status: failed',
-     'font_inventory_runtime_error', 'missing fonts: Symbol',
+     'font_inventory_runtime_error', 'no display font for: Symbol',
      'missing language packs: Japanese', 'helper timed out'].each do |text|
       assert_includes failure[:detail], text
     end

@@ -1391,6 +1391,14 @@ module BlueCollarSystems
             @embed_cache[key] = out
             return out
           end
+          # A silent nil here drops the caller back to the unembedded PDF, and
+          # the only downstream trace is poppler's "No display font for 'X'"
+          # turning into a page-wide font-inventory gap. Say so instead: this
+          # is the difference between a diagnosable log and an import that
+          # fails several steps later for no stated reason.
+          warn_safe(
+            "Ghostscript font embedding did not produce a usable PDF "             "(ok=#{run[:ok].inspect}, exists=#{File.exist?(out)}); "             "continuing with the unembedded source. Non-embedded fonts may "             "be reported missing. #{run[:stderr].to_s.strip[0, 300]}"
+          )
           File.delete(out) if File.exist?(out)
         rescue StandardError => e
           warn_safe("embed_fonts_cached failed: #{e.message}")
@@ -1408,6 +1416,11 @@ module BlueCollarSystems
           return pdf_path
         end
         embedded = embed_fonts_cached(pdf_path, gs)
+        unless embedded
+          warn_safe(
+            "PDF has non-embedded fonts and Ghostscript embedding did not "             "apply; rendering the source as-is."
+          )
+        end
         embedded || pdf_path
       rescue StandardError => e
         warn_safe("ensure_renderable_pdf failed: #{e.message}")
