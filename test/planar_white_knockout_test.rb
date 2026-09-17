@@ -485,4 +485,20 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     refute face.erased
     assert_nil entities.stage
   end
+
+  def test_closed_bounds_rejection_preserves_exact_concave_loop_predicates
+    loop = [[0, 0], [5, 0], [5, 1], [2, 1], [2, 5], [0, 5]].map { |p| p.map(&:to_r) }
+    box = Subject.loop_bounds2(loop)
+    (-2..12).each do |x|
+      (-2..12).each do |y|
+        point = [Rational(x, 2), Rational(y, 2)]
+        assert_equal Subject.strict_loop_inside?(point, loop), Subject.strict_loop_inside?(point, loop, box)
+      end
+    end
+    refute Subject.strict_loop_inside?([3.to_r, 3.to_r], loop, box)
+    refute Subject.strict_loop_inside?([5.to_r, 0.to_r], loop, box)
+    BlueCollarSystems::PDFVectorImporter::SvgRegionBoundary.stub(:winding, lambda { |*_args| raise 'unnecessary exact polygon walk' }) do
+      refute Subject.strict_loop_inside?([6.to_r, 2.to_r], loop, box)
+    end
+  end
 end

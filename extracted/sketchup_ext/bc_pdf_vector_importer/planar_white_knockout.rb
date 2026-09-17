@@ -428,7 +428,18 @@ module BlueCollarSystems
         end
       end
 
-      def self.strict_loop_inside?(point, loop)
+      def self.loop_bounds2(loop)
+        [loop.map { |p| p[0] }.min, loop.map { |p| p[1] }.min,
+         loop.map { |p| p[0] }.max, loop.map { |p| p[1] }.max]
+      end
+
+      def self.point_in_closed_bounds?(point, box)
+        point[0] >= box[0] && point[0] <= box[2] &&
+          point[1] >= box[1] && point[1] <= box[3]
+      end
+
+      def self.strict_loop_inside?(point, loop, box = nil)
+        return false if box && !point_in_closed_bounds?(point, box)
         return false if loop.each_index.any? do |i|
           SvgRegionBoundary.on_segment?(point, loop[i], loop[(i + 1) % loop.length])
         end
@@ -439,19 +450,23 @@ module BlueCollarSystems
         return false if loops.length < 2
         rational = loops.map { |loop| loop.map { |p| [p[0].to_r, p[1].to_r] } }
         outer, holes = rational.first, rational.drop(1)
+        outer_bounds = loop_bounds2(outer)
+        hole_bounds = holes.map { |hole| loop_bounds2(hole) }
         # Legacy find_faces can attach a hole outside its outer shell, or attach
         # a counter again inside an existing hole. Both produce invalid native
         # faces (even negative Face#area), although their edge coordinates remain.
         holes.each do |hole|
           return true if hole.any? do |p|
-            SvgRegionBoundary.winding(p, outer) == 0 &&
+            !point_in_closed_bounds?(p, outer_bounds) ||
+              (SvgRegionBoundary.winding(p, outer) == 0 &&
               !outer.each_index.any? { |i| SvgRegionBoundary.on_segment?(p, outer[i], outer[(i + 1) % outer.length]) }
+              )
           end
         end
         holes.each_with_index do |hole, index|
           holes.each_with_index do |other, other_index|
             next if index == other_index
-            return true if hole.any? { |p| strict_loop_inside?(p, other) }
+            return true if hole.any? { |p| strict_loop_inside?(p, other, hole_bounds[other_index]) }
           end
         end
         false
