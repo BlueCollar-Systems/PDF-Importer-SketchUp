@@ -47,7 +47,7 @@ module BlueCollarSystems
         candidate_dirs.uniq.each do |dir|
           begin
             FileUtils.mkdir_p(dir)
-            log_dir = Dir.mktmpdir('log-', dir)
+            log_dir = SafeTemp.mktmpdir('log-', dir)
             path = File.join(log_dir, 'last_import.log')
             file = File.open(path, 'w')
             # Buffered writes — per-line fsync (sync=true) forces one synchronous
