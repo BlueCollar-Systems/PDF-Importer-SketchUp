@@ -82,16 +82,23 @@ class PngPredictorColorsTest < Minitest::Test
     assert_equal 2 * 13, encoded.bytesize
     assert_equal 24, parser.send(:apply_png_predictor, encoded, 4, 3, 8).bytesize
     # 16-bit samples double the row and the pixel stride.
-    assert_equal 48, parser.send(:apply_png_predictor, 'x' * (2 * 25), 4, 3, 16).bytesize
+    rows16 = [(0...24).to_a, (24...48).to_a]
+    encoded16 = encode(rows16, 1, 6)
+    assert_equal rows16.flatten.pack('C*'),
+                 parser.send(:apply_png_predictor, encoded16, 4, 3, 16)
     # Sub-byte depths pack several pixels per byte and never go below 1 bpp.
-    assert_equal 2, parser.send(:apply_png_predictor, 'x' * 4, 8, 1, 1).bytesize
+    rows1 = [[129], [255]]
+    assert_equal rows1.flatten.pack('C*'),
+                 parser.send(:apply_png_predictor, encode(rows1, 1, 1), 8, 1, 1)
   end
 
-  def test_short_and_degenerate_buffers_are_returned_untouched
+  def test_empty_buffer_is_valid_but_malformed_predictors_are_rejected
     assert_equal '', parser.send(:apply_png_predictor, '', 4, 3, 8)
-    assert_equal 'ab', parser.send(:apply_png_predictor, 'ab', 4, 3, 8)
+    assert_raises(ArgumentError) { parser.send(:apply_png_predictor, 'ab', 4, 3, 8) }
+    assert_raises(ArgumentError) { parser.send(:apply_png_predictor, 'x' * 13, 4, 3, 8) }
     # Guards against zero or negative parameters from a malformed dictionary.
-    assert_equal 4, parser.send(:apply_png_predictor, "\x00abcd", 4, 0, 0).bytesize
+    assert_raises(ArgumentError) { parser.send(:apply_png_predictor, "\x00abcd", 4, 0, 0) }
+    assert_raises(ArgumentError) { parser.send(:apply_png_predictor, "\x00abcd", -4, 1, 8) }
   end
 
   def test_a_flate_rgb_image_stream_decodes_to_its_exact_pixel_count

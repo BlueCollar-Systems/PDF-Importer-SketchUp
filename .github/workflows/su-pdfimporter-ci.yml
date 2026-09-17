@@ -109,6 +109,27 @@ jobs:
           ruby test/rotated_run_merge_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
           ruby test/cairo_glyph_source_test.rb
+          ruby test/ghostscript_runtime_resolver_test.rb
+          ruby test/command_runner_environment_test.rb
+          ruby test/item_raster_page_renderer_test.rb
+          ruby test/item_raster_display_test.rb
+          ruby test/page_paint_bounds_test.rb
+          ruby test/embedded_image_affine_test.rb
+          ruby test/embedded_image_placement_test.rb
+          ruby test/poppler_active_boundary_validation_test.rb
+          ruby test/svg_text_embed_test.rb
+          ruby test/svg_text_3d_renderer_test.rb
+          ruby test/svg_item_representation_renderer_test.rb
+          ruby test/svg_item_filled_glyph_faces_test.rb
+          ruby test/page_representation_transform_test.rb
+          ruby test/svg_3d_text_font_gap_attribution_test.rb
+          ruby test/covered_clip_fill_test.rb
+          ruby test/planar_white_knockout_test.rb
+          ruby test/late_pdf_overlays_test.rb
+          ruby test/svg_paint_binding_test.rb
+          ruby test/svg_region_boundary_test.rb
+          ruby test/svg_paint_order_test.rb
+          ruby test/content_stream_opacity_test.rb
           ruby test/synthetic_public_corpus_test.rb
 
   poppler-prune:
@@ -141,5 +162,21 @@ jobs:
           python tools/test_build_steel_shapes_release.py
       - name: Smoke the checked-in Windows Poppler helpers
         run: python tools/smoke_poppler_helpers.py --required
+      - name: Verify separate Ghostscript runtime and relocated transparent rendering
+        run: |
+          python -m unittest tools.test_ghostscript_runtime
+          python tools/smoke_ghostscript_runtime.py --required
+      - name: Set up Ruby for bundled renderer fixtures
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: false
+      - name: Verify real bundled item raster fixtures
+        env:
+          BC_TEST_REQUIRE_BUNDLED_GS: '1'
+        run: |
+          ruby test/command_runner_environment_test.rb
+          ruby test/item_raster_page_renderer_test.rb
+          ruby test/item_raster_display_test.rb
       - name: Validate release publication state
         run: python tools/check_release_publication.py

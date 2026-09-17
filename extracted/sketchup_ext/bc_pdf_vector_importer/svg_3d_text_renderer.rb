@@ -294,7 +294,12 @@ module BlueCollarSystems
           )
         end
 
-        unless result[:failures].empty?
+        # Item failures already clean their own partial group. Preserve verified
+        # peers so the caller can report an incomplete import truthfully. Only a
+        # page-wide failure invalidates all source bindings on the page.
+        if result[:failures].any? { |failure| failure[:source_span_id].to_s.empty? } ||
+           (!result[:failures].empty? && result[:span_results].empty? &&
+            result[:unmatched_source_results].empty?)
           cleanup_all_owned!(entities, owned_groups, result)
           cleanup_solid_cache!(solid_cache, result)
           result[:span_results] = []
@@ -1727,7 +1732,14 @@ module BlueCollarSystems
       # or when the item does not say what font it uses -- an unknown font is
       # not evidence of anything, so it stays strict.
       def self.item_font_in_gap?(item, page_failures)
-        family = normalized_font_family(item.is_a?(Hash) ? item[:font_name] : nil)
+        raw_font = if item.is_a?(Hash)
+                     item[:font_name] || item['font_name']
+                   elsif item.respond_to?(:font_name)
+                     item.font_name
+                   end
+        # An extractor/source-resource label does not identify a font family.
+        return true if raw_font.to_s =~ /\A(?:pdftotext|unknown|TT\d+|F\d+)\z/i
+        family = normalized_font_family(raw_font)
         return true if family.empty?
         Array(page_failures).any? do |failure|
           next false unless failure.is_a?(Hash)
@@ -1802,13 +1814,61 @@ module BlueCollarSystems
 
         hard_failure(
           source_id, :source_page_inventory_failed,
-          inventory_failure_detail(page_failures)
+          source_page_inventory_detail(source_context)
         )
       rescue StandardError => e
         hard_failure(
           source_id, :source_page_inventory_failed,
-          "page source inventory evidence is unreadable: #{e.message}"
+          'page source inventory evidence is unreadable: ' +
+            inventory_diagnostic_text(e.message)
         )
+      end
+
+      # Diagnostics explain the same fail-closed decision; they are never
+      # evidence that authorizes another text representation. Do not dump the
+      # context hash: helper commands and source paths may contain private data.
+      def self.source_page_inventory_detail(source_context)
+        parts = [
+          'page renderer/font inventory failed; exact source absence is unproven',
+          'render status: ' + inventory_diagnostic_text(source_context[:render_status]),
+          'font inventory status: ' +
+            inventory_diagnostic_text(source_context[:font_inventory_status])
+        ]
+        failures = source_context[:page_failures]
+        if failures.is_a?(Hash)
+          failures = failures.key?(:reason_code) || failures.key?('reason_code') ?
+            [failures] : failures.values
+        end
+        Array(failures).first(4).each do |failure|
+          unless failure.is_a?(Hash)
+            parts << inventory_diagnostic_text(failure)
+            next
+          end
+          [:reason_code, :missing_fonts, :missing_language_packs, :detail].each do |key|
+            value = failure.key?(key) ? failure[key] : failure[key.to_s]
+            next if value.nil? || (value.respond_to?(:empty?) && value.empty?)
+            values = value.is_a?(Array) ? value.first(6) : [value]
+            text = values.map { |entry| inventory_diagnostic_text(entry) }.join(', ')
+            label = key == :missing_fonts ? 'no display font for' : key.to_s.tr('_', ' ')
+            parts << label + ': ' + text
+          end
+        end
+        detail = parts.join('; ')
+        detail.length > 640 ? detail[0, 637] + '...' : detail
+      end
+
+      def self.inventory_diagnostic_text(value)
+        return 'unknown' unless value.is_a?(String) || value.is_a?(Symbol)
+        text = value.to_s.encode('UTF-8', :invalid => :replace, :undef => :replace)
+        text = text.gsub(/[[:cntrl:]]/, ' ').gsub(/\s+/, ' ').strip
+        return 'unknown' if text.empty?
+        # Omit the whole field rather than risk disclosing part of a path or
+        # credential. Stable reason codes still explain these helper failures.
+        if text =~ /[\\\/]/ ||
+           text =~ /\b(?:token|password|passwd|secret|api[ _-]?key|authorization|bearer|credential)\b/i
+          return '[private diagnostic omitted]'
+        end
+        text.length > 160 ? text[0, 157] + '...' : text
       end
 
       def self.hard_failure(source_id, reason, detail, created = [], cleaned = [],

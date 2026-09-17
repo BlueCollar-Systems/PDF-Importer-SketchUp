@@ -146,6 +146,12 @@ class Svg3DTextFontGapAttributionTest < Minitest::Test
     assert_includes failure[:detail], 'no display font for'
   end
 
+  def test_extractor_and_resource_labels_do_not_prove_a_different_font
+    ['pdftotext', 'unknown', 'TT2', 'F12'].each do |name|
+      refute_nil R.source_page_failure(SPAN, context(font_gap), { :font_name => name })
+    end
+  end
+
   def test_the_message_names_a_missing_language_pack_too
     detail = R.inventory_failure_detail(font_gap(['Helvetica'], ['Adobe-GB1']))
     assert_includes detail, 'Helvetica'

@@ -17,6 +17,7 @@ module BlueCollarSystems
       # opts:
       #   :timeout_s => Float seconds
       #   :context   => log context string
+      #   :env       => per-process String => String/nil overrides (optional)
       #
       # Returns:
       #   {
@@ -35,6 +36,13 @@ module BlueCollarSystems
         raise ArgumentError, "args must be a non-empty Array" unless args.is_a?(Array) && !args.empty?
 
         cmd = args.map(&:to_s)
+        environment = opts[:env]
+        unless environment.nil? || (environment.is_a?(Hash) && environment.all? do |key, value|
+          key.is_a?(String) && (value.nil? || value.is_a?(String))
+        end)
+          raise ArgumentError, 'env must contain String keys and String or nil values'
+        end
+        spawn_args = environment.nil? ? cmd : [environment] + cmd
         stdout_s = ""
         stderr_s = ""
         status = nil
@@ -42,7 +50,7 @@ module BlueCollarSystems
         error = nil
 
         begin
-          Open3.popen3(*cmd) do |stdin, stdout, stderr, wait_thr|
+          Open3.popen3(*spawn_args) do |stdin, stdout, stderr, wait_thr|
             begin
               stdin.close
             rescue StandardError

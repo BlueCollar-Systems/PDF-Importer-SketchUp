@@ -40,6 +40,7 @@ module Geom
     def initialize(values)
       @matrix = Array(values).map(&:to_f)
     end
+    def to_a; @matrix.dup; end
   end unless const_defined?(:Transformation)
 end
 
@@ -344,7 +345,7 @@ class FilledGlyphEntities
 end
 
 class FilledGlyphGroup
-  attr_accessor :name, :layer, :material
+  attr_accessor :name, :layer, :material, :transformation
   attr_reader :persistent_id, :entities, :attributes
 
   def initialize(owner, id, options, counter)
@@ -353,6 +354,9 @@ class FilledGlyphGroup
     @options = options
     @entities = FilledGlyphEntities.new(self, options, counter)
     @attributes = {}
+    @transformation = Geom::Transformation.new([
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
+    ])
   end
 
   def typename; 'Group'; end
@@ -371,6 +375,11 @@ class FilledGlyphGroup
       points << box.min << box.max
     end
     raise 'empty group bounds' if points.empty?
+    points = points.map do |point|
+      xyz = BlueCollarSystems::PDFVectorImporter::SvgItemRepresentationRenderer.
+        transform_source_point([point.x, point.y, point.z], transformation.to_a)
+      Geom::Point3d.new(*xyz)
+    end
     FilledGlyphBounds.new(points)
   end
 end
@@ -541,6 +550,13 @@ class SvgItemFilledGlyphFacesTest < Minitest::Test
     assert_equal 4, inner.length
     assert_in_delta 4.0 * 4.0 / 72.0 / 72.0,
                     IMP::Svg3DTextRenderer.signed_area(inner).abs, 1e-9
+    extent = IMP::CairoGlyphSource.loops_extent(placed)
+    inner = inner.map do |point|
+      Geom::Point3d.new(
+        (point.x - extent[0]) * RENDERER::GEOMETRY_CONSTRUCTION_SCALE,
+        (point.y - extent[1]) * RENDERER::GEOMETRY_CONSTRUCTION_SCALE, 0
+      )
+    end
     entities, = entities_with_model(
       :split_on_outer_face => inner, :nil_add_face_for_existing => true
     )
@@ -604,7 +620,7 @@ class SvgItemFilledGlyphFacesTest < Minitest::Test
     error = assert_raises(FIDELITY::ContractError) do
       render(entities, :geometry)
     end
-    assert_match(/not a flat raw-edge representation/, error.message)
+    assert_match(/Geometry edges differ from exact source outlines/, error.message)
   end
 
   def test_structure_contract_lower_bound_is_the_delivered_edge_count

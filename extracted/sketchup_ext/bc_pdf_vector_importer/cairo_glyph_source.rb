@@ -717,7 +717,12 @@ module BlueCollarSystems
           next if contenders.empty?
           winner = contenders.sort_by do |entry|
             row = entry[0]
-            [-entry[2], entry[3], row[:candidates].length, row[:index]]
+            # Whitespace extractor boxes often overlap visible annotation
+            # text. Prefer a visible semantic owner when both claim real ink;
+            # retain whitespace-only candidates when no visible peer owns it.
+            # This is ownership ranking, never a zero-ink proof from Unicode.
+            [row[:expected_count].to_i > 0 ? 0 : 1,
+             -entry[2], entry[3], row[:candidates].length, row[:index]]
           end.first
           owned[winner[0][:index]] << winner[1]
         end
@@ -1284,7 +1289,9 @@ module BlueCollarSystems
           render_box_used: rendered_with_cropbox ? :crop_box : :media_box,
           cropbox_fallback: opts[:use_cropbox] == true &&
             !rendered_with_cropbox,
-          missing_fonts: SvgTextRenderer.missing_display_fonts(stderr),
+          missing_fonts: SvgTextRenderer.source_missing_display_fonts(
+            stderr, pdf_path, renderer[:exe]
+          ),
           missing_language_packs: SvgTextRenderer.missing_language_packs(stderr)
         }
       rescue StandardError => e
@@ -1367,6 +1374,7 @@ module BlueCollarSystems
             x: tx,
             y: ty,
             placement_index: placement_index,
+            source_svg_offset: p[:source_svg_offset],
             glyph_id: p[:glyph_id],
             fill_rgb: p[:fill_rgb] && p[:fill_rgb].dup,
             fill_opacity: p[:fill_opacity],
@@ -1582,6 +1590,7 @@ module BlueCollarSystems
           out << {
             glyph_id: p[:glyph_id],
             placement_index: placement_index,
+            source_svg_offset: p[:source_svg_offset],
             svg_matrix: m.is_a?(Array) ? m.map { |value| value.to_f } :
               [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             source_primary_axis: source_primary_axis_for_matrix(m),

@@ -30,6 +30,8 @@ module Geom
     def initialize(values)
       @matrix = Array(values).map(&:to_f)
     end
+
+    def to_a; @matrix.dup; end
   end unless const_defined?(:Transformation)
 end
 
@@ -78,15 +80,26 @@ class SvgItemRepresentationPointNormalizationTest < Minitest::Test
 
     assert_equal 3, normalized.length
   end
+
+  def test_small_real_foot_and_near_closing_vertex_are_preserved
+    points = [[0, 0], [1, 1], [2, 0], [0.00001, 0.00001], [0, 0]].map do |x, y|
+      Geom::Point3d.new(x, y, 0)
+    end
+    normalized = Renderer.normalized_points(points)
+    assert_equal points.map { |point| [point.x, point.y] },
+                 normalized.map { |point| [point.x, point.y] }
+  end
 end
 
 class ItemVectorEdge
+  attr_accessor :faces
   attr_reader :persistent_id, :attributes, :points
 
   def initialize(id, first, last)
     @persistent_id = id
     @points = [first, last]
     @attributes = {}
+    @faces = []
   end
 
   def typename; 'Edge'; end
@@ -101,22 +114,23 @@ end
 class ItemVectorDefinition
   attr_reader :name, :entities
 
-  def initialize(name, counter)
+  def initialize(name, counter, options = {})
     @name = name
-    @entities = ItemVectorEntities.new(self, {}, counter)
+    @entities = ItemVectorEntities.new(self, options, counter)
   end
 end
 
 class ItemVectorDefinitions
   attr_reader :items
 
-  def initialize(counter)
+  def initialize(counter, options = {})
     @counter = counter
+    @options = options
     @items = []
   end
 
   def add(name)
-    definition = ItemVectorDefinition.new(name, @counter)
+    definition = ItemVectorDefinition.new(name, @counter, @options)
     @items << definition
     definition
   end
@@ -125,8 +139,8 @@ end
 class ItemVectorModel
   attr_reader :definitions
 
-  def initialize(counter = [100])
-    @definitions = ItemVectorDefinitions.new(counter)
+  def initialize(counter = [100], options = {})
+    @definitions = ItemVectorDefinitions.new(counter, options)
   end
 end
 
@@ -204,8 +218,20 @@ class ItemVectorEntities
         Geom::Point3d.new(point.x + dx.to_f, point.y + dy.to_f, point.z)
       end
     end
+    if @options[:host_vertex_tolerance]
+      @host_vertices ||= []
+      points = points.map do |point|
+        previous = @host_vertices.find do |vertex|
+          vertex.distance(point) < @options[:host_vertex_tolerance]
+        end
+        @host_vertices << point unless previous
+        previous || point
+      end
+    end
     created = []
     Array(points).each_cons(2) do |first, last|
+      next if @options[:host_minimum_edge_length] &&
+        first.distance(last) < @options[:host_minimum_edge_length]
       edge = ItemVectorEdge.new(next_id, first, last)
       @items << edge
       created << edge
@@ -234,7 +260,7 @@ class ItemVectorEntities
 end
 
 class ItemVectorGroup
-  attr_accessor :name, :layer
+  attr_accessor :name, :layer, :transformation
   attr_reader :persistent_id, :entities, :attributes
 
   def initialize(owner, id, options, counter)
@@ -242,6 +268,9 @@ class ItemVectorGroup
     @persistent_id = id
     @entities = ItemVectorEntities.new(self, options, counter)
     @attributes = {}
+    @transformation = Geom::Transformation.new([
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
+    ])
   end
 
   def typename; 'Group'; end
@@ -259,6 +288,12 @@ class ItemVectorGroup
       points << box.min << box.max
     end
     raise 'empty group bounds' if points.empty?
+    values = transformation.to_a
+    points = points.map do |point|
+      xyz = BlueCollarSystems::PDFVectorImporter::SvgItemRepresentationRenderer.
+        transform_source_point([point.x, point.y, point.z], values)
+      Geom::Point3d.new(*xyz)
+    end
     ItemVectorBounds.new(points)
   end
 end
@@ -320,6 +355,68 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     assert_equal 'geometry', result[:group].attributes[
       ['BC_PDF_Importer', 'representation']
     ]
+  end
+
+  def test_geometry_constructs_close_letters_large_without_welding_source_vertices
+    entities = ItemVectorEntities.new(nil, :host_vertex_tolerance => 0.001)
+    group = entities.add_group
+    entries = [
+      [[0, 0], [1, 0], [0.5, 1], [0, 0]],
+      [[1.0005, 0], [1.5, 1], [2, 0], [1.0005, 0]]
+    ].each_with_index.map do |points, index|
+      { :glyph_id => "synthetic-#{index}", :placement_index => index,
+        :loops => [points.map { |x, y| Geom::Point3d.new(x, y, 0) }] }
+    end
+    build = RENDERER.build_flat_geometry!(group, entries, 'synthetic', nil)
+    assert RENDERER.verify_source_edges!(
+      group, build[:source_outline_segments], nil, 'synthetic'
+    )
+    assert_equal 0.001, group.transformation.to_a[0]
+    assert group.entities.to_a.all? { |entity| entity.typename == 'Edge' }
+    world_x = group.entities.to_a.map(&:points).flatten.map do |point|
+      RENDERER.transform_source_point(
+        [point.x, point.y, point.z], group.transformation.to_a
+      )[0]
+    end
+    assert_includes world_x, 1.0
+    assert_includes world_x, 1.0005
+    assert_equal 1.0005, entries[1][:loops][0][0].x
+  end
+
+  def test_source_edge_proof_accepts_subdivision_but_rejects_tiny_corner_drift
+    required = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
+    split = [
+      [[0.0, 0.0, 0.0], [0.4, 0.0, 0.0]],
+      [[0.4, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    ]
+    assert RENDERER.segment_sets_cover?(required, split)
+    assert RENDERER.segment_sets_cover?(split, required)
+    shifted = [[[0.0005, 0.0, 0.0], [1.0, 0.0, 0.0]]]
+    refute RENDERER.segment_sets_cover?(required, shifted)
+    extra = split + [[[0.0, 0.0, 0.0], [0.0, 0.0005, 0.0]]]
+    refute RENDERER.segment_sets_cover?(extra, required)
+  end
+
+  def test_final_geometry_proof_uses_page_transform_and_construction_transform
+    result = render(ItemVectorEntities.new, :geometry)
+    page = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 10, 20, 0, 1]
+    local = result[:source_construction_transformation]
+    combined = Array.new(16) do |index|
+      row = index % 4
+      column = index / 4
+      (0..3).inject(0.0) do |sum, k|
+        sum + page[k * 4 + row] * local[column * 4 + k]
+      end
+    end
+    result[:group].transformation = Geom::Transformation.new(combined)
+    result[:source_page_transformation] = page
+    assert RENDERER.verify_transformed_delivery!(result)
+    # Same overall extent can hide a shifted internal point. Source-segment
+    # coverage must reject it before a new physical hash can certify it.
+    result[:group].entities.to_a.first.points.first.x += 0.2
+    assert_raises(FIDELITY::ContractError) do
+      RENDERER.verify_transformed_delivery!(result)
+    end
   end
 
   def test_glyphs_are_physically_distinct_per_glyph_groups_not_flat_geometry
@@ -575,7 +672,7 @@ class SvgItemRepresentationRendererTest < Minitest::Test
       RENDERER.finalize_source_evidence!(result, item)
     end
 
-    assert_match(/final bounds differ from source outlines/i, error.message)
+    assert_match(/Geometry edges differ from exact source outlines/i, error.message)
   end
 
   def test_precomputed_page_inventory_avoids_reparsing_svg_per_item
@@ -754,6 +851,133 @@ class SvgItemRepresentationRendererTest < Minitest::Test
         ['BC_PDF_Importer', 'representation']
       ]
     end
+  end
+
+  def test_cached_glyphs_preserve_small_source_corners_and_affine_instances
+    source_points = [[0, 0], [1, 1], [2, 0], [0.00001, 0.00001], [0, 0]].map do |x, y|
+      Geom::Point3d.new(x, y, 0)
+    end
+    matrices = [
+      [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 3, 4, 0, 1],
+      [-2, 0.3, 0, 0, 0.4, 0.5, 0, 0, 0, 0, 1, 0, 7, -2, 0, 1]
+    ]
+    entries = matrices.each_with_index.map do |matrix, index|
+      { :glyph_id => 'synthetic-small-foot', :placement_index => index,
+        :cache_definition_loops => [source_points],
+        :cache_instance_transformation => matrix }
+    end
+    unchanged = Marshal.dump(entries)
+    tolerance = { :host_vertex_tolerance => 0.001,
+                  :host_minimum_edge_length => 0.001 }
+    # The old inch-sized definition loses the real closing edge in this host.
+    rejected = ItemVectorEntities.new(nil, tolerance)
+    assert_raises(FIDELITY::ContractError) do
+      RENDERER.add_definition_edges!(rejected, entries.first, nil)
+    end
+    entities = ItemVectorEntities.new
+    model = ItemVectorModel.new([200], tolerance)
+    cache = {}
+    group = entities.add_group
+    build = RENDERER.build_glyph_components!(
+      group.entities, entries, 'synthetic-source', nil, model, cache
+    )
+    assert_equal 1, build[:glyph_component_definition_builds]
+    assert_equal 1, build[:glyph_component_cache_hits]
+    assert_equal 2, build[:glyph_component_instances]
+    assert_equal 8, build[:edge_count]
+    assert_equal unchanged, Marshal.dump(entries), 'source loops and matrices are immutable'
+    group.entities.to_a.each_with_index do |instance, index|
+      assert_equal 'ComponentInstance', instance.typename
+      assert_equal 'synthetic-source', instance.attributes[
+        ['BC_PDF_Importer', 'source_span_id']
+      ]
+      assert_equal index.to_s, instance.attributes[
+        ['BC_PDF_Importer', 'source_placement_indices']
+      ]
+      actual = instance.definition.entities.to_a.map do |edge|
+        edge.points.map do |point|
+          RENDERER.transform_source_point([point.x, point.y, point.z], instance.transformation.to_a)
+        end
+      end
+      expected = source_points.each_cons(2).map do |pair|
+        pair.map do |point|
+          RENDERER.transform_source_point([point.x, point.y, point.z], matrices[index])
+        end
+      end
+      assert RENDERER.segment_sets_cover?(expected, actual)
+      assert RENDERER.segment_sets_cover?(actual, expected)
+      assert_equal matrices[index][12, 4], instance.transformation.to_a[12, 4]
+      assert instance.definition.entities.to_a.all? do |edge|
+        edge.points[0].distance(edge.points[1]) >= 0.001
+      end
+    end
+  end
+
+  def test_cached_glyphs_still_reject_native_edge_loss_at_construction_scale
+    points = [[0, 0], [1, 1], [2, 0], [0.0000002, 0.0000002], [0, 0]].map do |x, y|
+      Geom::Point3d.new(x, y, 0)
+    end
+    entry = { :glyph_id => 'synthetic-unbuildable', :placement_index => 0,
+              :cache_definition_loops => [points],
+              :cache_instance_transformation => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }
+    model = ItemVectorModel.new([200], :host_minimum_edge_length => 0.001)
+    cache = {}
+    error = assert_raises(FIDELITY::ContractError) do
+      RENDERER.build_glyph_components!(ItemVectorEntities.new, [entry], 'synthetic', nil, model, cache)
+    end
+    assert_match(/expected 4, created 3/, error.message)
+    assert_empty cache, 'an incomplete definition must not be cached as a successful glyph'
+  end
+
+  def test_cached_glyphs_reject_host_movement_even_when_edge_count_is_complete
+    points = [[0, 0], [1, 0], [0, 1], [0, 0]].map do |x, y|
+      Geom::Point3d.new(x, y, 0)
+    end
+    entry = { :glyph_id => 'synthetic-moved', :placement_index => 0,
+              :cache_definition_loops => [points],
+              :cache_instance_transformation => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }
+    model = ItemVectorModel.new([200], :translate_created_edges => [0.01, 0])
+    cache = {}
+    error = assert_raises(FIDELITY::ContractError) do
+      RENDERER.build_glyph_components!(ItemVectorEntities.new, [entry], 'synthetic', nil, model, cache)
+    end
+    assert_match(/edges differ from exact source outlines/, error.message)
+    assert_empty cache
+  end
+
+  def test_definition_cleanup_removes_only_exact_faceless_boundary_duplicates
+    definition = ItemVectorDefinition.new('synthetic', [200])
+    loops = [
+      [[0, 0], [1, 0], [0, 1], [0, 0]],
+      [[2, 0], [3, 0]]
+    ].map { |points| points.map { |x, y| Geom::Point3d.new(x, y, 0) } }
+    entry = { :glyph_id => 'synthetic', :cache_definition_loops => loops }
+    construction = RENDERER.glyph_construction_entry(entry)
+    edges = RENDERER.add_definition_edges!(definition.entities, construction, nil)
+    orphan = edges[2]
+    retained = definition.entities.add_preexisting(
+      ItemVectorEdge.new(300, orphan.points[1], orphan.points[0])
+    )
+    retained.faces = [Object.new]
+    # A second face-backed copy must never be erased by orphan cleanup.
+    face_backed_copy = definition.entities.add_preexisting(
+      ItemVectorEdge.new(301, retained.points[0], retained.points[1])
+    )
+    face_backed_copy.faces = [Object.new]
+    near = definition.entities.add_preexisting(
+      ItemVectorEdge.new(302,
+        Geom::Point3d.new(retained.points[0].x + 1.0e-10, retained.points[0].y, 0),
+        Geom::Point3d.new(retained.points[1].x + 1.0e-10, retained.points[1].y, 0))
+    )
+    assert RENDERER.verify_definition_source_edges!(definition, entry)
+    assert_equal 1, RENDERER.remove_duplicate_definition_orphans!(definition, 'synthetic')
+    assert_equal [orphan], definition.entities.erased
+    assert_includes definition.entities.to_a, edges[3], 'unfilled distinct source edge stays'
+    assert_includes definition.entities.to_a, retained
+    assert_includes definition.entities.to_a, face_backed_copy
+    assert_includes definition.entities.to_a, near, 'near coincidence is not exact equality'
+    assert RENDERER.verify_definition_source_edges!(definition, entry)
+    assert_equal 0, RENDERER.remove_duplicate_definition_orphans!(definition, 'synthetic')
   end
 
   def test_incomplete_page_inventory_is_a_hard_stop_not_a_fallback_proof

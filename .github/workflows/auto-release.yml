@@ -178,6 +178,16 @@ jobs:
           python -m unittest tools.test_complete_github_release tools.test_skp_probe_lock_contract
       - name: Smoke the checked-in Windows Poppler helpers
         run: python tools/smoke_poppler_helpers.py --required
+      - name: Verify separate Ghostscript runtime and relocated transparent rendering
+        env:
+          BC_TEST_REQUIRE_BUNDLED_GS: '1'
+        run: |
+          python -m unittest tools.test_ghostscript_runtime
+          python tools/smoke_ghostscript_runtime.py --required
+          ruby test/ghostscript_runtime_resolver_test.rb
+          ruby test/command_runner_environment_test.rb
+          ruby test/item_raster_page_renderer_test.rb
+          ruby test/item_raster_display_test.rb
       - name: Evaluate release publication gate
         id: publication
         run: python tools/check_release_publication.py
@@ -268,6 +278,13 @@ jobs:
           ruby test/ruby22_compat_test.rb
           ruby test/import_health_test.rb
           ruby test/dependency_resolver_test.rb
+          ruby test/command_runner_environment_test.rb
+          ruby test/item_raster_page_renderer_test.rb
+          ruby test/item_raster_display_test.rb
+          ruby test/page_paint_bounds_test.rb
+          ruby test/embedded_image_affine_test.rb
+          ruby test/embedded_image_placement_test.rb
+          ruby test/poppler_active_boundary_validation_test.rb
           ruby test/qa_report_test.rb
           ruby test/text_mode_routing_test.rb
           ruby test/mesh_text_scaling_test.rb

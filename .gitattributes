@@ -19,6 +19,8 @@
 # time by DependencyResolver.bundled_runtime_integrity_valid?, so any
 # line-ending rewrite would silently take the whole Poppler runtime offline.
 *.dll binary
+# Preserve the exact pinned upstream Ghostscript notices as well as binaries.
+/extracted/sketchup_ext/bc_pdf_vector_importer/Ghostscript/** -text
 *.exe binary
 *.pyd binary
 *.jpeg binary

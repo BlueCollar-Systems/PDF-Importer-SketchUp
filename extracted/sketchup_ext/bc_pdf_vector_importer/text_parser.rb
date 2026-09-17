@@ -33,7 +33,7 @@ module BlueCollarSystems
       # true value means every raw character code in this PDF text-show operand
       # was resolved by the selected source font map; nil/false fails closed.
       TextItem.class_eval do
-        attr_accessor :source_decode_complete
+        attr_accessor :source_decode_complete, :source_paint_order
       end
 
       # Common structural drawing fraction denominators
@@ -65,8 +65,9 @@ module BlueCollarSystems
       def parse
         @text_items = []
 
-        @streams.each do |stream|
+        @streams.each_with_index do |stream, stream_index|
           next unless stream && !stream.empty?
+          @source_stream_index = stream_index
           extract_text_from_stream(stream)
         end
 
@@ -173,6 +174,7 @@ module BlueCollarSystems
 
         tokens.each do |token|
           if token[:type] == :operator
+            @source_paint_order = [@source_stream_index, token[:source_offset]]
             op = token[:value]
             nums = operand_stack.select { |t| t[:type] == :number }.map { |t| t[:value] }
             strs = operand_stack.select { |t| t[:type] == :string }.map { |t| t[:value] }
@@ -331,6 +333,7 @@ module BlueCollarSystems
           nil, nil, nil, nil, @current_ocg_layer
         )
         item.source_decode_complete = source_decode_complete == true
+        item.source_paint_order = @source_paint_order && @source_paint_order.dup
         @text_items << item
       end
 
@@ -1235,7 +1238,7 @@ module BlueCollarSystems
           if word =~ /\A[+-]?\d*\.?\d+\z/
             tokens << { type: :number, value: word.to_f }
           else
-            tokens << { type: :operator, value: word }
+            tokens << { type: :operator, value: word, source_offset: i }
           end
           i = j
         end

@@ -3,13 +3,30 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.149-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.150-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.130)
+### Recent fixes (v3.7.150)
+
+- A temporary failed font inventory no longer disables font preparation for the rest of a session.
+- A Windows PDF renderer's Symbol startup warning is treated as unrelated only when a complete successful source-font inventory proves that the document has no Symbol font. Actual missing fonts, incomplete inventories and other renderer errors still require repair; text placement and geometry verification remain mandatory.
+- Failed text imports now identify the font, language pack or renderer inventory check that failed.
+- Covered compound clipping paths retain their exact contours and holes, so clipped logos and other filled details are not replaced by solid rectangles.
+- Partial rectangular fills are intersected with linear clipping contours exactly, including their holes, instead of losing the clip when a paint edge falls just short of it.
+- Geometry text builds at a safe local size to prevent SketchUp from merging nearby letter vertices. Complete source-edge coverage is checked before and after page placement while the delivered text remains raw edges and faces.
+- Fill-only backgrounds no longer gain visible border lines, and polygon outlines beside clipped artwork retain their source vertices instead of being fitted to conflicting circles.
+- Embedded PDF images preserve their original reflection, rotation and shear through page placement, including title-block logos whose PDF image axes run backwards.
+- Geometry whose complete painted bounds lie outside the PDF page is omitted, matching the page boundary used by PDF viewers. Stroke width, caps, joins and transforms are included in that decision; partially visible paths remain intact.
+- Overlapping blank annotation spans no longer take glyphs from neighboring visible text during source ownership matching.
+- Earlier opaque white PDF masks are composed around actual flat text faces using verified source glyph paint order. This preserves solid lettering, counters and interleaved replacement notes without changing text coordinates or the requested representation.
+- Invalid nested or misplaced holes created by the legacy SketchUp face builder are reconstructed as valid isolated regions, then checked again against the original white area and glyph boundaries. Cleanup tolerates edges that SketchUp has already removed.
+- Proven final translucent rectangle annotations retain their source fill opacity and centered stroke width above the text. Final-page text crops are accounted for once, preventing duplicate markup shading. Fill and stroke regions remain separate during crop subtraction so the host cannot merge their different paint styles. Empty construction groups are removed before page certification, preventing a false resume mismatch when SketchUp commits the import.
+- Includes the retained large-page recognition and glyph/raster performance improvements.
+
+### Earlier fixes (v3.7.130)
 
 - **Non-ASCII user profiles and file names**: helper output paths now live under an ASCII-safe temporary root, so imports work for accounts and PDF file names containing accented, Cyrillic, or CJK characters. Previously the bundled PDF renderers could not write beneath such paths and affected imports failed silently — including recovery of damaged PDFs whose own file name contained an accent.
 - **Actionable runtime diagnostics**: if the bundled PDF runtime cannot start or verify, the importer now names the exact missing piece and the fix, instead of silently disabling itself.
@@ -50,7 +67,7 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 - **3D Text performance**: glyph contour point culling and spatial-bucket duplicate detection dramatically reduce mesh complexity for large drawings, including the private large-sheet fixture.
 - **Flat Text / Labels stacked dimensions**: stacked vertical dimension numerals are no longer split into sub-items in flat Text mode, fixing source-span contract conflicts and improving alignment/rotation handling.
 
-Core vector import uses the built-in Ruby parser. Windows release RBZ files ship a free zero-ceremony Poppler runtime for higher-fidelity text/raster/SVG paths. MuPDF remains an optional free alternate; Ghostscript remains optional for non-embedded font repair.
+Core vector import uses the built-in Ruby parser. Windows release RBZ files ship free zero-ceremony Poppler and Ghostscript runtimes for higher-fidelity text, raster, and SVG paths. MuPDF remains an optional free alternate.
 
 ---
 
@@ -95,14 +112,28 @@ assets, checksums, license, and notes.
   the Raster import strategy records semantic text not evaluated; it
   must not claim that the page contains no text. Text-rendering Raster may use a
   page image only with verified zero-canonical-text proof bound to the exact PDF
-  bytes and page. Item crops come from one transparent RGBA page render per page
-  and use streaming Ruby cropping. A crop must retain alpha-channel provenance
+  bytes and page. Item crops come from one Ghostscript transparent RGBA page render
+  per page and use streaming Ruby cropping. The original MediaBox canvas, its
+  nonzero origin, and page rotation are retained; the original CropBox clips
+  visibility without resizing that canvas. Unlike the previous Cairo item-raster
+  path, marks outside the declared CropBox stay clipped. The source PDF is never
+  rewritten for item Raster. Renderer warnings, repairs, and arbitrary font
+  substitutions fail verification; only exact built-in standard-14 font programs
+  are accepted for those standard PDF fonts. A crop must retain alpha-channel provenance
   and visible pixels, but may be fully opaque; it is not rejected merely because
   it contains no `alpha < 255` pixel. One reference PDF digest is cached per
   import, while full bytes are checked immediately before/after each renderer and
   before commit—never once per item. Saved/reopened Raster acceptance exports the
   actual SketchUp texture and matches its decoded visual-pixel digest and size;
   importer attributes alone are not proof.
+
+  After white-mask and annotation composition, verified final-page item crops
+  display 0.001 inch above the highest native text on their page. This prevents
+  overlapping native letters from obscuring the crop's already composed PDF
+  colors. Source XY, the canonical source plane, crop pixels and native peer text
+  remain unchanged. A separate placement record is checked against source crop
+  coordinates and actual host text bounds before and after save/reopen; it does
+  not permit an arbitrary image offset.
 
   Use **3D Text** for go-live visual comparison against Adobe at equal zoom.
   Use **Labels** when you need the explicit Labels request and its audited
@@ -176,7 +207,7 @@ assets, checksums, license, and notes.
 
 The extension registers under **File > Import** and adds a PDF Vector Importer toolbar.
 
-**Offline install:** The GitHub Release `.rbz` installs without internet. Core vector import and the bundled free Poppler helpers work offline. MuPDF and Ghostscript are not in the RBZ; only those optional paths need a separate free install when used.
+**Offline install:** The GitHub Release `.rbz` installs without internet. Core vector import and the bundled free Poppler and Ghostscript helpers work offline. MuPDF is an optional separate free install.
 
 For SketchUp 2025 users: native PDF import discoverability changed in SketchUp UI,
 but this extension still provides dedicated PDF import menu and toolbar commands.
@@ -195,10 +226,10 @@ The importer must run on a supported PC without hardcoded local paths. Helpers
 are detected at runtime and reported through **Extensions > PDF Vector
 Importer > Compatibility Report**.
 
-Windows releases ship a free **zero-ceremony** Poppler runtime inside the RBZ
-(`Library/bin` + `share/poppler` + integrity manifest). Clean-machine users do
-not need to download Poppler separately for helper-dependent text, raster, or
-SVG paths. MuPDF and Ghostscript remain optional free/system installs when used.
+Windows releases ship free Poppler and Ghostscript runtimes inside the RBZ,
+with separate integrity manifests and third-party notices. Clean-machine users
+do not need to download them separately for helper-dependent text, item Raster,
+or SVG paths. MuPDF remains an optional free/system install when used.
 Use **Compatibility Report** to verify the exact helper path before importing.
 
 | Helper | Used for | If missing |
@@ -207,7 +238,7 @@ Use **Compatibility Report** to verify the exact helper path before importing.
 | Poppler `pdftocairo` | SVG/glyph text geometry and explicit raster page rendering | A separately verified same-representation source may be tried; otherwise that requested helper path stops |
 | Poppler `pdftotext` | Higher-fidelity text bounding boxes and line reconstruction | Internal text parser fallback is used |
 | Poppler `pdffonts` | Detecting non-embedded fonts before SVG text rendering | Font preflight is unavailable |
-| Ghostscript | Embedding non-embedded fonts into a temporary render copy when needed | An outline attempt with unresolved or skipped glyphs fails its fidelity proof; it is not silently approximated |
+| Ghostscript | Verified transparent page rendering for item Raster; embedding non-embedded fonts into a temporary SVG render copy when needed | Item Raster stops if its renderer is unavailable; an outline attempt with unresolved or skipped glyphs fails its fidelity proof |
 
 Poppler return code zero and a nonempty output file do not prove complete text.
 The one qualified Adobe-GB1 diagnostic exception is tied to an exact public

@@ -1,0 +1,11 @@
+Ghostscript/GhostPDL 10.07.1 corresponding source
+The bundled gswin64c.exe and gsdll64.dll are unmodified official Windows binaries.
+Download the complete corresponding upstream source (including component sources and build files):
+https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10071/ghostpdl-10.07.1.tar.gz
+SHA256: 5c580ed888ce42ce4d76b8afac302e8b507e08d05e52e05b3649e0732559bfe4
+Upstream Windows binary installer:
+https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10071/gs10071w64.exe
+SHA256: 3a4c28d0aac47aa7cccd35a5932c55110376e9dbd966898dde388b7faba444a4
+Verify the archive SHA256, extract it, and follow doc/Make.htm or the documentation sources under doc/src/ for build instructions.
+Upstream release: https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/tag/gs10071
+The importer invokes this program as a separate command-line process; no Ghostscript API is linked into the Ruby extension.

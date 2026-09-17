@@ -29,7 +29,7 @@ module BlueCollarSystems
       SMALL_FACE_CONSTRUCTION_SCALE = 1000.0
 
       attr_reader :page_group, :text_group, :text_delivery_failures,
-                  :text_attempts
+                  :text_attempts, :fill_only_groups
 
       def initialize(model, paths, text_items, media_box, opts = {})
         @model = model
@@ -110,10 +110,15 @@ module BlueCollarSystems
 
         # Color group cache
         @color_groups = {}
+        fill_targets = {}
+        @fill_only_groups = []
 
         page_width  = PageTransform.effective_width(@media_box, @page_rotation)
         page_height_pts = PageTransform.effective_height(@media_box, @page_rotation)
         page_area_pts = page_width * page_height_pts
+        clipped_fill_boxes = @paths.select do |path|
+          path.respond_to?(:clip_fill_rule) && path.clip_fill_rule
+        end.map { |path| compute_path_bbox(path) }.compact
 
         # ── Vector geometry ──
         heavy_page = @paths.length >= GEOMETRY_STAGING_PATH_THRESHOLD
@@ -147,6 +152,7 @@ module BlueCollarSystems
           # paths are often real sheet borders or title-block frames and must
           # be preserved for drawing accuracy.
           path_bbox = compute_path_bbox(path)
+          next if path_bbox && paint_entirely_outside_page?(path, path_bbox)
           if path_bbox && discardable_page_artifact?(path, path_bbox, page_area_pts)
             next
           end
@@ -168,6 +174,43 @@ module BlueCollarSystems
           if @map_dashes && path.dash_pattern
             dash_spec = normalize_dash_pattern(path.dash_pattern, path.ctm)
             dash_layer = classify_dash(path.dash_pattern)
+          end
+
+          if should_fill && path.respond_to?(:clip_fill_rule) && path.clip_fill_rule
+            loops = path.subpaths.map do |subpath|
+              subpath_to_points(subpath).map do |pt|
+                sx, sy = self.class.sheet_xy(pt)
+                pdf_to_su(sx, sy, page_origin_x, page_origin_y)
+              end
+            end
+            clip_group = draw_compound_clip_fill(
+              staged_geometry_target(dest, path_idx), loops,
+              path.clip_fill_rule, path_layer, path.fill_color
+            )
+             @fill_only_groups << { :group => clip_group, :fill_rgb => path.fill_color,
+               :paint_order => path.source_paint_order,
+               :opacity => (path.respond_to?(:source_fill_opacity) ? path.source_fill_opacity : nil)
+             } if path.respond_to?(:source_paint_order)
+            next
+          end
+
+          # Fill-only faces own their boundaries separately from true strokes.
+          # This permits hidden fill edges without hiding neighboring linework,
+          # while retaining the existing batching for tiny host-tolerance fills.
+          if should_fill && !should_stroke
+            white = Array(path.fill_color).length >= 3 &&
+              path.fill_color.first(3).all? { |v| (v.to_f - 1.0).abs < 1.0e-9 }
+            order = path.respond_to?(:source_paint_order) ? path.source_paint_order : nil
+            fill_key = white && order ? [dest.object_id, order] : dest.object_id
+            unless fill_targets[fill_key]
+              fill_targets[fill_key] = dest.add_group
+               @fill_only_groups << { :group => fill_targets[fill_key],
+                 :fill_rgb => path.fill_color, :paint_order => order,
+                 :opacity => (path.respond_to?(:source_fill_opacity) ? path.source_fill_opacity : nil) }
+            end
+            fill_group = fill_targets[fill_key]
+            fill_group.name = 'PDF Fill'
+            dest = fill_group.entities
           end
 
           path.subpaths.each do |subpath|
@@ -192,12 +235,13 @@ module BlueCollarSystems
             # exact source boundary for fills and reserve editable arc fitting
             # for unfilled stroke geometry.
             if @detect_arcs && !should_fill && dash_spec.nil? &&
-               su_points.length >= 5
+               su_points.length >= 5 &&
+               !self.class.overlaps_clip_fill?(path_bbox, clipped_fill_boxes)
               draw_with_arc_detection(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color)
             else
-              draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed)
+              draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed) if should_stroke
               if should_fill && subpath.closed && su_points.length >= 3
-                draw_face(draw_dest, su_points, path_layer, path.fill_color)
+                draw_face(draw_dest, su_points, path_layer, path.fill_color, !should_stroke)
               end
             end
           end
@@ -814,17 +858,105 @@ module BlueCollarSystems
         !build_face_loop(points).nil?
       end
 
-      def draw_face(entities, points, layer, fill_rgb = nil)
+      def self.contour_winding(point, loops)
+        x, y = point.x.to_f, point.y.to_f
+        winding = 0
+        loops.each do |loop|
+          loop.each_with_index do |a, index|
+            b = loop[(index + 1) % loop.length]
+            cross = (b.x - a.x) * (y - a.y) - (x - a.x) * (b.y - a.y)
+            winding += 1 if a.y <= y && b.y > y && cross > 0
+            winding -= 1 if a.y > y && b.y <= y && cross < 0
+          end
+        end
+        winding
+      end
+
+      # Source polygon strokes sharing a clipped fill boundary must retain
+      # their exact vertices. A best-fit circle can visibly cut across the fill.
+      def self.overlaps_clip_fill?(box, clips)
+        return false unless box
+        clips.any? do |clip|
+          box[0] <= clip[2] && box[2] >= clip[0] &&
+            box[1] <= clip[3] && box[3] >= clip[1]
+        end
+      end
+
+      def draw_compound_clip_fill(entities, source_loops, rule, layer, fill_rgb)
+        loops = source_loops.map { |points| remove_consecutive_duplicates(points) }
+        loops = loops.select { |points| points.length >= 3 }
+        raise 'clipped fill has no usable source contours' if loops.empty?
+        origin = loops[0][0]
+        factor = SMALL_FACE_CONSTRUCTION_SCALE
+        large_loops = loops.map do |points|
+          points.map do |point|
+            Geom::Point3d.new((point.x - origin.x) * factor,
+                              (point.y - origin.y) * factor, 0.0)
+          end
+        end
+        group = entities.add_group
+        group.name = 'PDF Clipped Fill'
+        set_layer(group, layer)
+        group.transformation = Geom::Transformation.translation(origin) *
+          Geom::Transformation.scaling(1.0 / factor, 1.0 / factor, 1.0 / factor)
+        ordered = large_loops.sort_by do |points|
+          area = 0.0
+          points.each_with_index do |a, index|
+            b = points[(index + 1) % points.length]
+            area += a.x * b.y - b.x * a.y
+          end
+          -area.abs
+        end
+        ordered.each do |points|
+          face = group.entities.add_face(points)
+          raise 'host could not build a clipped fill contour' unless face
+        end
+        faces = group.entities.grep(Sketchup::Face)
+        raise 'host produced no clipped fill faces' if faces.empty?
+        faces.each do |face|
+          mesh = face.mesh(0)
+          polygon = mesh.polygons.find { |indices| indices.length >= 3 }
+          raise 'clipped fill face has no physical interior triangle' unless polygon
+          triangle = polygon.first(3).map { |index| mesh.point_at(index.abs) }
+          point = Geom::Point3d.new(
+            triangle.inject(0.0) { |sum, p| sum + p.x } / 3.0,
+            triangle.inject(0.0) { |sum, p| sum + p.y } / 3.0, 0.0
+          )
+          winding = self.class.contour_winding(point, large_loops)
+          inside = rule.to_s == 'evenodd' ? winding.abs.odd? : winding != 0
+          if inside
+            style_face(face, layer, fill_rgb)
+            @face_count += 1
+          else
+            face.erase!
+          end
+        end
+        edges = group.entities.grep(Sketchup::Edge)
+        edges.each do |edge|
+          set_layer(edge, layer)
+          # A PDF fill has no stroke unless a separate painting operator
+          # requests it. Isolated ownership keeps real neighboring strokes visible.
+          edge.hidden = true
+        end
+        @edge_count += edges.length
+        group
+      rescue StandardError
+        group.erase! if group && group.valid?
+        raise
+      end
+
+      def draw_face(entities, points, layer, fill_rgb = nil, hide_edges = false)
         return false if points.length < 3
         clean = build_face_loop(points)
         return false unless clean
         if face_loop_max_extent(clean) < SMALL_FACE_DIRECT_MAX_EXTENT
-          return draw_scaled_face_instance(entities, clean, layer, fill_rgb)
+          return draw_scaled_face_instance(entities, clean, layer, fill_rgb, hide_edges)
         end
         begin
           face = entities.add_face(clean)
           if face
             style_face(face, layer, fill_rgb)
+            hide_fill_edges(face) if hide_edges
             @face_count += 1
             return true
           end
@@ -834,7 +966,7 @@ module BlueCollarSystems
              face_loop_max_extent(clean) < 0.01
             begin
               return true if draw_scaled_face_instance(
-                entities, clean, layer, fill_rgb
+                entities, clean, layer, fill_rgb, hide_edges
               )
             rescue StandardError
               # Report the original host rejection below; it is the most
@@ -852,7 +984,7 @@ module BlueCollarSystems
         [(xs.max - xs.min).abs, (ys.max - ys.min).abs].max
       end
 
-      def draw_scaled_face_instance(entities, points, layer, fill_rgb)
+      def draw_scaled_face_instance(entities, points, layer, fill_rgb, hide_edges = false)
         unless entities.respond_to?(:add_instance) &&
                @model.respond_to?(:definitions) &&
                @model.definitions.respond_to?(:add) &&
@@ -861,13 +993,14 @@ module BlueCollarSystems
         end
         stable_entities =
           @geometry_staging[:stable_targets][entities.object_id] || entities
-        key = small_face_batch_key(stable_entities, layer, fill_rgb)
+        key = small_face_batch_key(stable_entities, layer, fill_rgb) + "|#{hide_edges}"
         batch = @deferred_small_face_batches[key]
         unless batch
           batch = {
             :entities => stable_entities,
             :layer => layer,
             :fill_rgb => Array(fill_rgb),
+            :hide_edges => hide_edges,
             :loops => []
           }
           @deferred_small_face_batches[key] = batch
@@ -917,6 +1050,7 @@ module BlueCollarSystems
             face = definition.entities.add_face(large)
             raise 'scaled sub-tolerance construction returned no face' unless face
             style_face(face, batch[:layer], batch[:fill_rgb])
+            hide_fill_edges(face) if batch[:hide_edges]
           end
           inverse_factor = 1.0 / factor
           transformation =
@@ -970,6 +1104,11 @@ module BlueCollarSystems
           face.back_material = material
         end
         face
+      end
+
+      def hide_fill_edges(face)
+        return unless face.respond_to?(:edges)
+        face.edges.each { |edge| edge.hidden = true }
       end
 
       # ---------------------------------------------------------------
@@ -3028,6 +3167,50 @@ module BlueCollarSystems
         end
         return nil if xs.empty?
         [xs.min, ys.min, xs.max, ys.max]
+      end
+
+      # PDF viewers clip paint to the page. Cull only paint whose conservative
+      # bounds are wholly outside it; never trim a partially visible path.
+      # The path bbox includes every Bezier control point, not just endpoints.
+      def paint_entirely_outside_page?(path, bbox)
+        return false unless finite_page_bounds?(bbox) && finite_page_bounds?(@media_box)
+        return false unless @media_box[2] > @media_box[0] && @media_box[3] > @media_box[1]
+        pad_x = pad_y = 0.0
+        if path.stroke
+          return false unless path.respond_to?(:source_stroke_style_proven) &&
+                              path.source_stroke_style_proven == true
+          width = path.line_width
+          return false unless width.is_a?(Numeric) && width.to_f.finite? && width > 0
+          ctm = path.ctm
+          return false unless ctm.is_a?(Array) && ctm.length == 6 &&
+                              ctm.all? { |value| value.is_a?(Numeric) && value.to_f.finite? }
+          return false unless [0, 1, 2].include?(path.line_cap) && [0, 1, 2].include?(path.line_join)
+          factor = path.line_cap == 2 ? Math.sqrt(2.0) : 1.0
+          # A lone open straight segment has caps but no joins. Otherwise the
+          # full miter limit bounds even an acute corner without guessing its angle.
+          isolated_lines = path.subpaths.all? do |subpath|
+            !subpath.closed && subpath.segments.map(&:type) == [:move, :line]
+          end
+          if path.line_join == 0 && !isolated_lines
+            limit = path.source_miter_limit
+            return false unless limit.is_a?(Numeric) && limit.to_f.finite? && limit >= 1.0
+            factor = [factor, limit].max
+          end
+          radius = 0.5 * width * factor
+          pad_x = radius * Math.sqrt(ctm[0] * ctm[0] + ctm[2] * ctm[2])
+          pad_y = radius * Math.sqrt(ctm[1] * ctm[1] + ctm[3] * ctm[3])
+          return false unless pad_x.finite? && pad_y.finite?
+        end
+        bbox[2] + pad_x < @media_box[0] || bbox[0] - pad_x > @media_box[2] ||
+          bbox[3] + pad_y < @media_box[1] || bbox[1] - pad_y > @media_box[3]
+      rescue StandardError
+        false
+      end
+
+      def finite_page_bounds?(bounds)
+        bounds.is_a?(Array) && bounds.length == 4 &&
+          bounds.all? { |value| value.is_a?(Numeric) && value.to_f.finite? } &&
+          bounds[0] <= bounds[2] && bounds[1] <= bounds[3]
       end
 
       def discardable_page_artifact?(path, bbox, page_area_pts)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,10 @@ import build_release as br  # noqa: E402
 
 
 def _write_runtime(support: Path) -> None:
+    shutil.copytree(
+        REPO_ROOT / "extracted/sketchup_ext/bc_pdf_vector_importer/Ghostscript",
+        support / "Ghostscript",
+    )
     bin_dir = support / "Library" / "bin"
     data = support / "share" / "poppler" / "cidToUnicode"
     licenses = support / "Library" / "licenses"

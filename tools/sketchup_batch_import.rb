@@ -121,7 +121,7 @@ module SketchupBatchImport
         owned_manifest.empty?
       unless pure_terminal_page_raster
         SketchupHostEvidence.verify_delivery_evidence!(
-          stats, owned_manifest, requested_mode, job[:pages]
+          stats, owned_manifest, requested_mode, job[:pages], true
         )
       end
       source_delivery_manifest = owned_manifest
@@ -173,6 +173,10 @@ module SketchupBatchImport
           job, binding, 'host_heal_not_required_for_terminal_page_raster'
         )
       end
+
+      SketchupHostEvidence.verify_item_raster_display!(
+        stats, stabilized_owned_manifest, true
+      )
 
       report_source = stats[:import_report_path]
       report_copy = File.join(job[:output_dir], 'import_report.json')
@@ -251,13 +255,16 @@ module SketchupBatchImport
             after_manifest, reopened_manifest
           )
           SketchupHostEvidence.verify_delivery_evidence!(
-            stats, reopened_owned_manifest, requested_mode, job[:pages]
+            stats, reopened_owned_manifest, requested_mode, job[:pages], true
           )
         else
           SketchupHostEvidence.verify_reopen_continuity!(
             after_manifest, reopened_manifest
           )
         end
+        SketchupHostEvidence.verify_item_raster_display!(
+          stats, reopened_owned_manifest, true
+        )
         labels_visual_equivalent_census =
           verify_labels_visual_equivalent_profile!(
             job, stats, reopened_owned_manifest
@@ -348,6 +355,8 @@ module SketchupBatchImport
         'page_representation_fallbacks' =>
           Array(stats[:page_representation_fallbacks]),
         'raster_delivery_records' => Array(stats[:raster_delivery_records]),
+        'item_raster_display_placements' => Array(stats[:item_raster_display_placements]),
+        'item_raster_display_verified' => true,
         'inline_image_page_raster_fallbacks' =>
           Array(stats[:inline_image_page_raster_fallbacks]),
         'inline_images_detected' => stats[:inline_images_detected].to_i,

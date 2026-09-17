@@ -1,0 +1,1379 @@
+{
+  "corresponding_source": {
+    "sha256": "5c580ed888ce42ce4d76b8afac302e8b507e08d05e52e05b3649e0732559bfe4",
+    "url": "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10071/ghostpdl-10.07.1.tar.gz"
+  },
+  "license_notices": [
+    "DroidSansFallback.NOTICE",
+    "LICENSE",
+    "Resource/CMap/78-EUC-H.notice.txt",
+    "Resource/CMap/78-EUC-V.notice.txt",
+    "Resource/CMap/78-H.notice.txt",
+    "Resource/CMap/78-RKSJ-H.notice.txt",
+    "Resource/CMap/78-RKSJ-V.notice.txt",
+    "Resource/CMap/78-V.notice.txt",
+    "Resource/CMap/78ms-RKSJ-H.notice.txt",
+    "Resource/CMap/78ms-RKSJ-V.notice.txt",
+    "Resource/CMap/83pv-RKSJ-H.notice.txt",
+    "Resource/CMap/90ms-RKSJ-H.notice.txt",
+    "Resource/CMap/90ms-RKSJ-V.notice.txt",
+    "Resource/CMap/90msp-RKSJ-H.notice.txt",
+    "Resource/CMap/90msp-RKSJ-V.notice.txt",
+    "Resource/CMap/90pv-RKSJ-H.notice.txt",
+    "Resource/CMap/90pv-RKSJ-V.notice.txt",
+    "Resource/CMap/Add-H.notice.txt",
+    "Resource/CMap/Add-RKSJ-H.notice.txt",
+    "Resource/CMap/Add-RKSJ-V.notice.txt",
+    "Resource/CMap/Add-V.notice.txt",
+    "Resource/CMap/Adobe-CNS1-0.notice.txt",
+    "Resource/CMap/Adobe-CNS1-1.notice.txt",
+    "Resource/CMap/Adobe-CNS1-2.notice.txt",
+    "Resource/CMap/Adobe-CNS1-3.notice.txt",
+    "Resource/CMap/Adobe-CNS1-4.notice.txt",
+    "Resource/CMap/Adobe-CNS1-5.notice.txt",
+    "Resource/CMap/Adobe-CNS1-6.notice.txt",
+    "Resource/CMap/Adobe-CNS1-7.notice.txt",
+    "Resource/CMap/Adobe-GB1-0.notice.txt",
+    "Resource/CMap/Adobe-GB1-1.notice.txt",
+    "Resource/CMap/Adobe-GB1-2.notice.txt",
+    "Resource/CMap/Adobe-GB1-3.notice.txt",
+    "Resource/CMap/Adobe-GB1-4.notice.txt",
+    "Resource/CMap/Adobe-GB1-5.notice.txt",
+    "Resource/CMap/Adobe-Japan1-0.notice.txt",
+    "Resource/CMap/Adobe-Japan1-1.notice.txt",
+    "Resource/CMap/Adobe-Japan1-2.notice.txt",
+    "Resource/CMap/Adobe-Japan1-3.notice.txt",
+    "Resource/CMap/Adobe-Japan1-4.notice.txt",
+    "Resource/CMap/Adobe-Japan1-5.notice.txt",
+    "Resource/CMap/Adobe-Japan1-6.notice.txt",
+    "Resource/CMap/Adobe-Japan2-0.notice.txt",
+    "Resource/CMap/Adobe-Korea1-0.notice.txt",
+    "Resource/CMap/Adobe-Korea1-1.notice.txt",
+    "Resource/CMap/Adobe-Korea1-2.notice.txt",
+    "Resource/CMap/B5-H.notice.txt",
+    "Resource/CMap/B5-V.notice.txt",
+    "Resource/CMap/B5pc-H.notice.txt",
+    "Resource/CMap/B5pc-V.notice.txt",
+    "Resource/CMap/CNS-EUC-H.notice.txt",
+    "Resource/CMap/CNS-EUC-V.notice.txt",
+    "Resource/CMap/CNS1-H.notice.txt",
+    "Resource/CMap/CNS1-V.notice.txt",
+    "Resource/CMap/CNS2-H.notice.txt",
+    "Resource/CMap/CNS2-V.notice.txt",
+    "Resource/CMap/ETHK-B5-H.notice.txt",
+    "Resource/CMap/ETHK-B5-V.notice.txt",
+    "Resource/CMap/ETen-B5-H.notice.txt",
+    "Resource/CMap/ETen-B5-V.notice.txt",
+    "Resource/CMap/ETenms-B5-H.notice.txt",
+    "Resource/CMap/ETenms-B5-V.notice.txt",
+    "Resource/CMap/EUC-H.notice.txt",
+    "Resource/CMap/EUC-V.notice.txt",
+    "Resource/CMap/Ext-H.notice.txt",
+    "Resource/CMap/Ext-RKSJ-H.notice.txt",
+    "Resource/CMap/Ext-RKSJ-V.notice.txt",
+    "Resource/CMap/Ext-V.notice.txt",
+    "Resource/CMap/GB-EUC-H.notice.txt",
+    "Resource/CMap/GB-EUC-V.notice.txt",
+    "Resource/CMap/GB-H.notice.txt",
+    "Resource/CMap/GB-V.notice.txt",
+    "Resource/CMap/GBK-EUC-H.notice.txt",
+    "Resource/CMap/GBK-EUC-V.notice.txt",
+    "Resource/CMap/GBK2K-H.notice.txt",
+    "Resource/CMap/GBK2K-V.notice.txt",
+    "Resource/CMap/GBKp-EUC-H.notice.txt",
+    "Resource/CMap/GBKp-EUC-V.notice.txt",
+    "Resource/CMap/GBT-EUC-H.notice.txt",
+    "Resource/CMap/GBT-EUC-V.notice.txt",
+    "Resource/CMap/GBT-H.notice.txt",
+    "Resource/CMap/GBT-V.notice.txt",
+    "Resource/CMap/GBTpc-EUC-H.notice.txt",
+    "Resource/CMap/GBTpc-EUC-V.notice.txt",
+    "Resource/CMap/GBpc-EUC-H.notice.txt",
+    "Resource/CMap/GBpc-EUC-V.notice.txt",
+    "Resource/CMap/H.notice.txt",
+    "Resource/CMap/HKdla-B5-H.notice.txt",
+    "Resource/CMap/HKdla-B5-V.notice.txt",
+    "Resource/CMap/HKdlb-B5-H.notice.txt",
+    "Resource/CMap/HKdlb-B5-V.notice.txt",
+    "Resource/CMap/HKgccs-B5-H.notice.txt",
+    "Resource/CMap/HKgccs-B5-V.notice.txt",
+    "Resource/CMap/HKm314-B5-H.notice.txt",
+    "Resource/CMap/HKm314-B5-V.notice.txt",
+    "Resource/CMap/HKm471-B5-H.notice.txt",
+    "Resource/CMap/HKm471-B5-V.notice.txt",
+    "Resource/CMap/HKscs-B5-H.notice.txt",
+    "Resource/CMap/HKscs-B5-V.notice.txt",
+    "Resource/CMap/Hankaku.notice.txt",
+    "Resource/CMap/Hiragana.notice.txt",
+    "Resource/CMap/Hojo-EUC-H.notice.txt",
+    "Resource/CMap/Hojo-EUC-V.notice.txt",
+    "Resource/CMap/Hojo-H.notice.txt",
+    "Resource/CMap/Hojo-V.notice.txt",
+    "Resource/CMap/Identity-H.notice.txt",
+    "Resource/CMap/Identity-V.notice.txt",
+    "Resource/CMap/KSC-EUC-H.notice.txt",
+    "Resource/CMap/KSC-EUC-V.notice.txt",
+    "Resource/CMap/KSC-H.notice.txt",
+    "Resource/CMap/KSC-Johab-H.notice.txt",
+    "Resource/CMap/KSC-Johab-V.notice.txt",
+    "Resource/CMap/KSC-V.notice.txt",
+    "Resource/CMap/KSCms-UHC-H.notice.txt",
+    "Resource/CMap/KSCms-UHC-HW-H.notice.txt",
+    "Resource/CMap/KSCms-UHC-HW-V.notice.txt",
+    "Resource/CMap/KSCms-UHC-V.notice.txt",
+    "Resource/CMap/KSCpc-EUC-H.notice.txt",
+    "Resource/CMap/KSCpc-EUC-V.notice.txt",
+    "Resource/CMap/Katakana.notice.txt",
+    "Resource/CMap/NWP-H.notice.txt",
+    "Resource/CMap/NWP-V.notice.txt",
+    "Resource/CMap/RKSJ-H.notice.txt",
+    "Resource/CMap/RKSJ-V.notice.txt",
+    "Resource/CMap/Roman.notice.txt",
+    "Resource/CMap/UniCNS-UCS2-H.notice.txt",
+    "Resource/CMap/UniCNS-UCS2-V.notice.txt",
+    "Resource/CMap/UniCNS-UTF16-H.notice.txt",
+    "Resource/CMap/UniCNS-UTF16-V.notice.txt",
+    "Resource/CMap/UniCNS-UTF32-H.notice.txt",
+    "Resource/CMap/UniCNS-UTF32-V.notice.txt",
+    "Resource/CMap/UniCNS-UTF8-H.notice.txt",
+    "Resource/CMap/UniCNS-UTF8-V.notice.txt",
+    "Resource/CMap/UniGB-UCS2-H.notice.txt",
+    "Resource/CMap/UniGB-UCS2-V.notice.txt",
+    "Resource/CMap/UniGB-UTF16-H.notice.txt",
+    "Resource/CMap/UniGB-UTF16-V.notice.txt",
+    "Resource/CMap/UniGB-UTF32-H.notice.txt",
+    "Resource/CMap/UniGB-UTF32-V.notice.txt",
+    "Resource/CMap/UniGB-UTF8-H.notice.txt",
+    "Resource/CMap/UniGB-UTF8-V.notice.txt",
+    "Resource/CMap/UniHojo-UCS2-H.notice.txt",
+    "Resource/CMap/UniHojo-UCS2-V.notice.txt",
+    "Resource/CMap/UniHojo-UTF16-H.notice.txt",
+    "Resource/CMap/UniHojo-UTF16-V.notice.txt",
+    "Resource/CMap/UniHojo-UTF32-H.notice.txt",
+    "Resource/CMap/UniHojo-UTF32-V.notice.txt",
+    "Resource/CMap/UniHojo-UTF8-H.notice.txt",
+    "Resource/CMap/UniHojo-UTF8-V.notice.txt",
+    "Resource/CMap/UniJIS-UCS2-H.notice.txt",
+    "Resource/CMap/UniJIS-UCS2-HW-H.notice.txt",
+    "Resource/CMap/UniJIS-UCS2-HW-V.notice.txt",
+    "Resource/CMap/UniJIS-UCS2-V.notice.txt",
+    "Resource/CMap/UniJIS-UTF16-H.notice.txt",
+    "Resource/CMap/UniJIS-UTF16-V.notice.txt",
+    "Resource/CMap/UniJIS-UTF32-H.notice.txt",
+    "Resource/CMap/UniJIS-UTF32-V.notice.txt",
+    "Resource/CMap/UniJIS-UTF8-H.notice.txt",
+    "Resource/CMap/UniJIS-UTF8-V.notice.txt",
+    "Resource/CMap/UniJIS2004-UTF16-H.notice.txt",
+    "Resource/CMap/UniJIS2004-UTF16-V.notice.txt",
+    "Resource/CMap/UniJIS2004-UTF32-H.notice.txt",
+    "Resource/CMap/UniJIS2004-UTF32-V.notice.txt",
+    "Resource/CMap/UniJIS2004-UTF8-H.notice.txt",
+    "Resource/CMap/UniJIS2004-UTF8-V.notice.txt",
+    "Resource/CMap/UniJISPro-UCS2-HW-V.notice.txt",
+    "Resource/CMap/UniJISPro-UCS2-V.notice.txt",
+    "Resource/CMap/UniJISPro-UTF8-V.notice.txt",
+    "Resource/CMap/UniJISX0213-UTF32-H.notice.txt",
+    "Resource/CMap/UniJISX0213-UTF32-V.notice.txt",
+    "Resource/CMap/UniJISX02132004-UTF32-H.notice.txt",
+    "Resource/CMap/UniJISX02132004-UTF32-V.notice.txt",
+    "Resource/CMap/UniKS-UCS2-H.notice.txt",
+    "Resource/CMap/UniKS-UCS2-V.notice.txt",
+    "Resource/CMap/UniKS-UTF16-H.notice.txt",
+    "Resource/CMap/UniKS-UTF16-V.notice.txt",
+    "Resource/CMap/UniKS-UTF32-H.notice.txt",
+    "Resource/CMap/UniKS-UTF32-V.notice.txt",
+    "Resource/CMap/UniKS-UTF8-H.notice.txt",
+    "Resource/CMap/UniKS-UTF8-V.notice.txt",
+    "Resource/CMap/V.notice.txt",
+    "Resource/CMap/WP-Symbol.notice.txt",
+    "brotli/LICENSE",
+    "contrib/chp2200/COPYING",
+    "contrib/lxm3200-tweaked/LICENSE",
+    "cups/LICENSE.txt",
+    "doc/COPYING",
+    "expat/COPYING",
+    "extract/COPYING",
+    "freetype/LICENSE.TXT",
+    "freetype/docs/FTL.TXT",
+    "freetype/docs/GPLv2.TXT",
+    "ijs/ijs.h.txt",
+    "jbig2dec/COPYING",
+    "jbig2dec/LICENSE",
+    "jpeg/README",
+    "jpegxr/COPYRIGHT.txt",
+    "jpegxr/my_getopt-1.5/LICENSE",
+    "lcms2mt/COPYING",
+    "lcms2mt/plugins/fast_float/COPYING.GPL3",
+    "lcms2mt/utils/jpgicc/LICENSE_iccjpeg",
+    "leptonica/leptonica-license.txt",
+    "leptonica/prog/leptonica-license.txt",
+    "leptonica/src/leptonica-license.txt",
+    "libpng/LICENSE",
+    "libpng/ci/LICENSE_MIT.txt",
+    "libpng/contrib/gregbook/COPYING",
+    "libpng/contrib/gregbook/LICENSE",
+    "libpng/contrib/pngexif/LICENSE_MIT.txt",
+    "libpng/contrib/pngminus/LICENSE.txt",
+    "openjpeg/LICENSE",
+    "pcl/COPYING.AFPL",
+    "pcl/LICENSE",
+    "tesseract/LICENSE",
+    "tiff/LICENSE.md",
+    "tiff/doc/html-prebuilt/_sources/project/license.rst.txt",
+    "tiff/doc/html-prebuilt/project/license.html",
+    "tiff/doc/project/license.rst",
+    "zlib/LICENSE",
+    "zlib/contrib/dotzlib/LICENSE_1_0.txt",
+    "zlib/contrib/minizip/LICENSE.Info-Zip"
+  ],
+  "members": [
+    {
+      "bytes": 960,
+      "path": "SOURCE.txt",
+      "sha256": "bca5565f18f2d478b9313f6fc56e668f87c112281090002ea57d7993f1a492b7"
+    },
+    {
+      "bytes": 3004,
+      "path": "THIRD_PARTY_NOTICES.txt",
+      "sha256": "f55d15152316dabcde73fa1720aedefffb7ac7786fb71ea2d3bb53a4048b795a"
+    },
+    {
+      "bytes": 25114112,
+      "path": "bin/gsdll64.dll",
+      "sha256": "af9bcd9313956aea105fd38da35413d50e446548ba21b6e85b87da3f24e8c546"
+    },
+    {
+      "bytes": 93696,
+      "path": "bin/gswin64c.exe",
+      "sha256": "de3bce7c03dfce0dfd78af8bf1d464c6a21fbcb7237f127ec5c027179d2c2741"
+    },
+    {
+      "bytes": 643512,
+      "path": "bin/msvcp140.dll",
+      "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
+    },
+    {
+      "bytes": 178616,
+      "path": "bin/vcruntime140.dll",
+      "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
+    },
+    {
+      "bytes": 50112,
+      "path": "bin/vcruntime140_1.dll",
+      "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
+    },
+    {
+      "bytes": 10694,
+      "path": "licenses/DroidSansFallback.NOTICE",
+      "sha256": "92d336191c9ec51cc39f0b2fc44e5153f685c661c3d1e44e088fad4e68358ab2"
+    },
+    {
+      "bytes": 1976,
+      "path": "licenses/LICENSE",
+      "sha256": "8ce064f423b7c24a011b6ebf9431b8bf9861a5255e47c84bfb23fc526d030a8b"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/78-EUC-H.notice.txt",
+      "sha256": "815c9954811b6bb85adeedfb232853287ad156d7c16f77f378be23c222467d9c"
+    },
+    {
+      "bytes": 2369,
+      "path": "licenses/Resource/CMap/78-EUC-V.notice.txt",
+      "sha256": "fb0bdab7a8ac193957bedd33b071c81632b3f508dbbb18bd588e0ddb6fd05c62"
+    },
+    {
+      "bytes": 2283,
+      "path": "licenses/Resource/CMap/78-H.notice.txt",
+      "sha256": "dd4c1b80390d222585bf1a83127c86e6fcbe812ee77f805b47aff665caa2c3fb"
+    },
+    {
+      "bytes": 2293,
+      "path": "licenses/Resource/CMap/78-RKSJ-H.notice.txt",
+      "sha256": "6c6abff90745d482bd7cf2ce3f16876fe84051be9ce64e35d2c28b8ecebc1558"
+    },
+    {
+      "bytes": 2373,
+      "path": "licenses/Resource/CMap/78-RKSJ-V.notice.txt",
+      "sha256": "d9397a11d45c2fcbdf3311a385457e3ca7418a010dcca7647bd86a5ec404c2d3"
+    },
+    {
+      "bytes": 2353,
+      "path": "licenses/Resource/CMap/78-V.notice.txt",
+      "sha256": "28ca838ee4f304abf75338d27837c8fb22b3d7ca449759b1e5cf4a1372e6539c"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/78ms-RKSJ-H.notice.txt",
+      "sha256": "3824c7a60891074e45a99013f13ae70cbd7333551735e169527394409c1a6893"
+    },
+    {
+      "bytes": 2381,
+      "path": "licenses/Resource/CMap/78ms-RKSJ-V.notice.txt",
+      "sha256": "60a7d58850d9702e9b4ba92bbe2a4d0e80ad9154b99c4b6d61c5988b85459ca5"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/83pv-RKSJ-H.notice.txt",
+      "sha256": "6ea2e432251d919b4b403e5da3418924c7cd0946c510951e3d8744043e7e67b8"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/90ms-RKSJ-H.notice.txt",
+      "sha256": "31ff8708284906d72f7cd70875f3c190097f533c42c438cef93f6b38f0454a2e"
+    },
+    {
+      "bytes": 2381,
+      "path": "licenses/Resource/CMap/90ms-RKSJ-V.notice.txt",
+      "sha256": "88d3e055dbd6ef4ddbddb3f930c937a747eb166ba3259418fd5c8ef6e77c0d75"
+    },
+    {
+      "bytes": 2299,
+      "path": "licenses/Resource/CMap/90msp-RKSJ-H.notice.txt",
+      "sha256": "0d2b092664ac4929cb0019e2b96461a79ba24c0fb80c3bd6c4eb9b5f5fab8b8f"
+    },
+    {
+      "bytes": 2385,
+      "path": "licenses/Resource/CMap/90msp-RKSJ-V.notice.txt",
+      "sha256": "bd5618953b1c06be134e3cbba995171bffc1ebe352df2fdbab3920f0995de58e"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/90pv-RKSJ-H.notice.txt",
+      "sha256": "b37326d389b7069f88533d78d1e9bfe29d7347db0fe3dc53294f2b3f1d01e119"
+    },
+    {
+      "bytes": 2381,
+      "path": "licenses/Resource/CMap/90pv-RKSJ-V.notice.txt",
+      "sha256": "245a3957f944cbe7755ef7c5e47f1710fa0f280b7cc71b6b753d3573c99be7a5"
+    },
+    {
+      "bytes": 2285,
+      "path": "licenses/Resource/CMap/Add-H.notice.txt",
+      "sha256": "a82f5678e617165ef57d0c7b38c15226eed01bb3dfef9df6e7cdfaef27360737"
+    },
+    {
+      "bytes": 2295,
+      "path": "licenses/Resource/CMap/Add-RKSJ-H.notice.txt",
+      "sha256": "887dac16b597d28ee5879714e2adff296d20b496af16030967baa19dde04880c"
+    },
+    {
+      "bytes": 2377,
+      "path": "licenses/Resource/CMap/Add-RKSJ-V.notice.txt",
+      "sha256": "8f1c1e5ee5bd61d5d8253ad56f1821617a016a12771facfc297c847ccc1b6d79"
+    },
+    {
+      "bytes": 2357,
+      "path": "licenses/Resource/CMap/Add-V.notice.txt",
+      "sha256": "e0c9766c12bfe722d4bb80f6c95d6ee8dcf1e6e09ed12f4e9d43c3287821f747"
+    },
+    {
+      "bytes": 2289,
+      "path": "licenses/Resource/CMap/Adobe-CNS1-0.notice.txt",
+      "sha256": "2e7d7584c0cad70ff00f2ab4992e5f97044ba56ff635b0a84af0846b8c9417a5"
+    },
+    {
+      "bytes": 2288,
+      "path": "licenses/Resource/CMap/Adobe-CNS1-1.notice.txt",
+      "sha256": "5c132e256977491aae970981b08063c12b171ecbb4675c77b722e8ca1c146236"
+    },
+    {
+      "bytes": 2288,
+      "path": "licenses/Resource/CMap/Adobe-CNS1-2.notice.txt",
+      "sha256": "bbae8133739e64637fb9260174d781aec72b26f92c21dd1b403e6485e127331a"
+    },
+    {
+      "bytes": 2288,
+      "path": "licenses/Resource/CMap/Adobe-CNS1-3.notice.txt",
+      "sha256": "282cd0185bdd9329f79017e67b10fbc8080a861f686207125f9dab1627e0733b"
+    },
+    {
+      "bytes": 2288,
+      "path": "licenses/Resource/CMap/Adobe-CNS1-4.notice.txt",
+      "sha256": "119ac23545c71b9dfa1fd0a53b7b3633ee10ed93d0d739a6bb8091f31dc56555"
+    },
+    {
+      "bytes": 2288,
+      "path": "licenses/Resource/CMap/Adobe-CNS1-5.notice.txt",
+      "sha256": "e0b7b56a15889d10959509015f0fe72262d85e4b8727f4a1fb75a8ced25645e6"
+    },
+    {
+      "bytes": 2288,
+      "path": "licenses/Resource/CMap/Adobe-CNS1-6.notice.txt",
+      "sha256": "9c60b742a9521dcb1e39607065fb47f9bfce87e8f8b3f69a7e7daf1e9c10c415"
+    },
+    {
+      "bytes": 2288,
+      "path": "licenses/Resource/CMap/Adobe-CNS1-7.notice.txt",
+      "sha256": "cc2f91a303b75c6b25c3e54b2195bde51dbb9f9867238f02b25bdc16f6cd44f4"
+    },
+    {
+      "bytes": 2287,
+      "path": "licenses/Resource/CMap/Adobe-GB1-0.notice.txt",
+      "sha256": "05890f27c2f57f0fc3055533af720df4a51d34ee144f00007ddd47810bed8fcd"
+    },
+    {
+      "bytes": 2288,
+      "path": "licenses/Resource/CMap/Adobe-GB1-1.notice.txt",
+      "sha256": "9434eca33808a24f6a10fd944c9473b38b910222c39b843fcae304e378f8dd58"
+    },
+    {
+      "bytes": 2288,
+      "path": "licenses/Resource/CMap/Adobe-GB1-2.notice.txt",
+      "sha256": "a2f8cfe1c6b34e404bed753467a7e5223a502e6d21339c929564e8789f450a73"
+    },
+    {
+      "bytes": 2287,
+      "path": "licenses/Resource/CMap/Adobe-GB1-3.notice.txt",
+      "sha256": "f4aabd5be53c784c0909538d97c58889b44720bba1ad2e44626dff98d2aa4e87"
+    },
+    {
+      "bytes": 2287,
+      "path": "licenses/Resource/CMap/Adobe-GB1-4.notice.txt",
+      "sha256": "bc9dabcd8f2c149fb32e4d1c11fc061fb9f61932982aab63879aa2da208fc3ce"
+    },
+    {
+      "bytes": 2287,
+      "path": "licenses/Resource/CMap/Adobe-GB1-5.notice.txt",
+      "sha256": "4fab89245977c6178296658a83e3ba0f8a53dc47e13bd8de52677d4e552eb6ee"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/Adobe-Japan1-0.notice.txt",
+      "sha256": "e9cb0ee167b5fc7842c5462d08adcd301db07d649812440816b330999c578e64"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/Adobe-Japan1-1.notice.txt",
+      "sha256": "fe1a60ccb75532819164e243c4c394ec211c7350b34e18c3f13066f14bdef6ef"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/Adobe-Japan1-2.notice.txt",
+      "sha256": "c51bb8677538cae82762c6d71d368ec4b1e28fcfb4dd13deb9be40fb40b6fe23"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/Adobe-Japan1-3.notice.txt",
+      "sha256": "54103d1edd40a25ae123d951e60989a177e882f912fbb4e8467da008eb0aee65"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/Adobe-Japan1-4.notice.txt",
+      "sha256": "5d2c2e460b81f8dac98a355e372bb5684c78d3d71e6a4b69abdcd0cd72009cc1"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/Adobe-Japan1-5.notice.txt",
+      "sha256": "34f612df085e813ec041eaec0667f7eb8c8c7c081dbbbf5a477cdab057e07add"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/Adobe-Japan1-6.notice.txt",
+      "sha256": "3b59b8e08a8737e390236bf87895ad21244cccd007371b804b430a407d9eb455"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/Adobe-Japan2-0.notice.txt",
+      "sha256": "1a19291fd347910f338d81d3631fc9637c33126b1266dba625db311b403146e4"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/Adobe-Korea1-0.notice.txt",
+      "sha256": "fa9e497192325021b326b139aab79841339eccc0b4cc43e22af8184fefaa9725"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/Adobe-Korea1-1.notice.txt",
+      "sha256": "f1bbe8044d1cacc5ca58f27ff59098c62755dc251b8f4c83b97fb95e0554e2d5"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/Adobe-Korea1-2.notice.txt",
+      "sha256": "d4f8ab4a7f16a97b678bc03095a8658d53285a9a7a9373e582f0967e2f1467e9"
+    },
+    {
+      "bytes": 2281,
+      "path": "licenses/Resource/CMap/B5-H.notice.txt",
+      "sha256": "955e8ba08150ca2df9e3963d8e26306661bf5c43cd32f1086b6fb7170d76b4e3"
+    },
+    {
+      "bytes": 2351,
+      "path": "licenses/Resource/CMap/B5-V.notice.txt",
+      "sha256": "8df5af24ff4e6ecbdc7f5c35534c85707dff689c5daa9138309e26c6076ef5bd"
+    },
+    {
+      "bytes": 2285,
+      "path": "licenses/Resource/CMap/B5pc-H.notice.txt",
+      "sha256": "427810cc13594ca3fbe41d8121fe43ff1b77ee0a497928705f79c75cce4e8132"
+    },
+    {
+      "bytes": 2359,
+      "path": "licenses/Resource/CMap/B5pc-V.notice.txt",
+      "sha256": "ec474d4c063dd90843c790abfb9479d7e3b8a560b8ce036d28ae0f5eb745729d"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/CNS-EUC-H.notice.txt",
+      "sha256": "3b3e0b2b3f535c78a8f2f6b7cdfac17079b09ae49f0d59a95efc32c8647ca058"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/CNS-EUC-V.notice.txt",
+      "sha256": "ad480fb6f654dcc2f5248aee51e9d1877fa2957c3fc2273cd909dcffbad7789f"
+    },
+    {
+      "bytes": 2285,
+      "path": "licenses/Resource/CMap/CNS1-H.notice.txt",
+      "sha256": "273938e4f77c70e742caa6a68db27093d77e8786a168d9f5afb508c2a3168cdf"
+    },
+    {
+      "bytes": 2359,
+      "path": "licenses/Resource/CMap/CNS1-V.notice.txt",
+      "sha256": "c65f9b05aadd6577c1728bae19ac78c6fbadefbfbfe21d24c0381bb3fb4b0b76"
+    },
+    {
+      "bytes": 2285,
+      "path": "licenses/Resource/CMap/CNS2-H.notice.txt",
+      "sha256": "8a7fe6b22f931b2af1a25268cd225d29aa4b0f7a25732a299fd2910cb799e525"
+    },
+    {
+      "bytes": 2359,
+      "path": "licenses/Resource/CMap/CNS2-V.notice.txt",
+      "sha256": "ea1801807c58c4ab804402e2bdbb279ceb52e3a5a4b70a909d3cc512a310e768"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/ETHK-B5-H.notice.txt",
+      "sha256": "f0b95b18964c30005fe6bc8fb1205617658cbc672da542afe772104b6678b899"
+    },
+    {
+      "bytes": 2371,
+      "path": "licenses/Resource/CMap/ETHK-B5-V.notice.txt",
+      "sha256": "08b1816c6b06a249745382b6a3e1415f296df0d8d2beac66304193eb8d26741f"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/ETen-B5-H.notice.txt",
+      "sha256": "08162e57d1f3fb5c8969b936cb55cb8d4220c69117241e576d246cbcf474052c"
+    },
+    {
+      "bytes": 2371,
+      "path": "licenses/Resource/CMap/ETen-B5-V.notice.txt",
+      "sha256": "44de2bb877f9d72681fb39ab657daa4d119c1f560066420a3c8e1afc65ec8ab5"
+    },
+    {
+      "bytes": 2375,
+      "path": "licenses/Resource/CMap/ETenms-B5-H.notice.txt",
+      "sha256": "036571afd48850752aef46216c7f8cbd18d60cb95e48571a37185e964b3407e0"
+    },
+    {
+      "bytes": 2379,
+      "path": "licenses/Resource/CMap/ETenms-B5-V.notice.txt",
+      "sha256": "0d8ff84cbeea5a13730070abc9a8b148fb41d60d84d15eb3f615908cc31c2ae1"
+    },
+    {
+      "bytes": 2285,
+      "path": "licenses/Resource/CMap/EUC-H.notice.txt",
+      "sha256": "d626cf62f786f89de6a28ea1b73b2dc0d9c8956e576d7318eea9900d79c97ce8"
+    },
+    {
+      "bytes": 2357,
+      "path": "licenses/Resource/CMap/EUC-V.notice.txt",
+      "sha256": "93b55713b817da8ad8a5cee4ef580344719dabe7d71329c6fb9df5fd7dd77133"
+    },
+    {
+      "bytes": 2285,
+      "path": "licenses/Resource/CMap/Ext-H.notice.txt",
+      "sha256": "b10a37462adca0b2c5bbcdf14645e4f39e3d506ad889874e892ac473df5ccad3"
+    },
+    {
+      "bytes": 2295,
+      "path": "licenses/Resource/CMap/Ext-RKSJ-H.notice.txt",
+      "sha256": "a5d89f88fca9c09cf12c6c8756d6bbe9fdb5665cb4db979c25c99bb66f44c4b0"
+    },
+    {
+      "bytes": 2377,
+      "path": "licenses/Resource/CMap/Ext-RKSJ-V.notice.txt",
+      "sha256": "5b3936d63021b3e935d1eb3529de2b571bc9adf6226f5ae87439a1a6000fab04"
+    },
+    {
+      "bytes": 2357,
+      "path": "licenses/Resource/CMap/Ext-V.notice.txt",
+      "sha256": "cda62be013340530f743ec72327d49cc3a34463e7da0017d3903a4196322f9d4"
+    },
+    {
+      "bytes": 2287,
+      "path": "licenses/Resource/CMap/GB-EUC-H.notice.txt",
+      "sha256": "2886e10fba440d1e56ef29ece991f40bb3c4fddd9ff836d8ef8a4ddace678455"
+    },
+    {
+      "bytes": 2365,
+      "path": "licenses/Resource/CMap/GB-EUC-V.notice.txt",
+      "sha256": "08c8059429c3e35c35c4069be3a5acfc05acee0d73cc2d5af29b2a44480ea385"
+    },
+    {
+      "bytes": 2279,
+      "path": "licenses/Resource/CMap/GB-H.notice.txt",
+      "sha256": "37eb20819061f30f04081c9009de6d910c85ad5360c77f42ab18c4770ee5405d"
+    },
+    {
+      "bytes": 2349,
+      "path": "licenses/Resource/CMap/GB-V.notice.txt",
+      "sha256": "44c4225ad6731ffd40dd0db6e48cc5850e9d2ffcbbc40a6318978d9d9644ae53"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/GBK-EUC-H.notice.txt",
+      "sha256": "6118819eaf25a4817847fd5c5d3570073ac9629741827b93c32d56a9a52f70f9"
+    },
+    {
+      "bytes": 2370,
+      "path": "licenses/Resource/CMap/GBK-EUC-V.notice.txt",
+      "sha256": "034a5861ebfb5d521e9659b7a563f2254187f9c55c02cb348eea31a582cc278d"
+    },
+    {
+      "bytes": 2285,
+      "path": "licenses/Resource/CMap/GBK2K-H.notice.txt",
+      "sha256": "ca130b56683c59209556fe45ee4c3d7e956956849fe9968e07269490f57f688f"
+    },
+    {
+      "bytes": 2361,
+      "path": "licenses/Resource/CMap/GBK2K-V.notice.txt",
+      "sha256": "68bd84fb7fae702ab0761182bfa23d12ee4d46e9f95584bc5d1d6eb51845d076"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/GBKp-EUC-H.notice.txt",
+      "sha256": "9065e718ab8597d2787b3f0d3b77d426a3b4596b914693ccde68ba72898cc75f"
+    },
+    {
+      "bytes": 2374,
+      "path": "licenses/Resource/CMap/GBKp-EUC-V.notice.txt",
+      "sha256": "627a9ed0411ac48213edf0f5b54fb50f79bc03203ec00dec1c24ef16f63a468a"
+    },
+    {
+      "bytes": 2290,
+      "path": "licenses/Resource/CMap/GBT-EUC-H.notice.txt",
+      "sha256": "00c44bb7087a7d660c8a79415c1c5404f6ea208f10d0e0b990557d11db1f94a1"
+    },
+    {
+      "bytes": 2370,
+      "path": "licenses/Resource/CMap/GBT-EUC-V.notice.txt",
+      "sha256": "967f8d2fdcb77a9b562337a05e363ccb65bbdb69c924ae25e419dcdfda503776"
+    },
+    {
+      "bytes": 2282,
+      "path": "licenses/Resource/CMap/GBT-H.notice.txt",
+      "sha256": "334156adf85906853af29017ada0f110a132d9b072d05e37746f9cd4722b05e8"
+    },
+    {
+      "bytes": 2354,
+      "path": "licenses/Resource/CMap/GBT-V.notice.txt",
+      "sha256": "e90dbbb72213c5eb211bbc987b1bd3d84fa998c8023a442bf17401165cf426c2"
+    },
+    {
+      "bytes": 2294,
+      "path": "licenses/Resource/CMap/GBTpc-EUC-H.notice.txt",
+      "sha256": "594b5ea4e5f37d5bc4e7c46c8eba379b7d12891577bf735e67401931ea1a5888"
+    },
+    {
+      "bytes": 2378,
+      "path": "licenses/Resource/CMap/GBTpc-EUC-V.notice.txt",
+      "sha256": "5633ad777c0e98f2bb339b322c0deb066604eecf0f09b4d8d02761e194650737"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/GBpc-EUC-H.notice.txt",
+      "sha256": "343fb44e67b3e71ffd9b2fedb6885b5561f5d0ea04aac9a12a29d0efea4cbec3"
+    },
+    {
+      "bytes": 2373,
+      "path": "licenses/Resource/CMap/GBpc-EUC-V.notice.txt",
+      "sha256": "9e7b375bb7700532819861f24be60f8548b04842a0c3ce203bd2e4ddd9cda246"
+    },
+    {
+      "bytes": 2277,
+      "path": "licenses/Resource/CMap/H.notice.txt",
+      "sha256": "3d84fe530985165bb486d33ba1f6eebbeca3837701c5675b4236e56cfd4248af"
+    },
+    {
+      "bytes": 2292,
+      "path": "licenses/Resource/CMap/HKdla-B5-H.notice.txt",
+      "sha256": "648a71bb9c403ba1026e1c68034d469c284f4d42f1a1e2e79c347dbc1d5935b6"
+    },
+    {
+      "bytes": 2375,
+      "path": "licenses/Resource/CMap/HKdla-B5-V.notice.txt",
+      "sha256": "d5a72f575d2db6794629fa6a60a57354d1e109437624d017e6bc74ce0080ab3f"
+    },
+    {
+      "bytes": 2292,
+      "path": "licenses/Resource/CMap/HKdlb-B5-H.notice.txt",
+      "sha256": "e3128d35b2b5f3ad76da81f85696329b2cad3de40046367c0792ca4b41766b61"
+    },
+    {
+      "bytes": 2375,
+      "path": "licenses/Resource/CMap/HKdlb-B5-V.notice.txt",
+      "sha256": "7d7b37cb3d212ba63768693dd6f0cffbf300c6d4f8c7d0617edb4d9d5d03eca9"
+    },
+    {
+      "bytes": 2294,
+      "path": "licenses/Resource/CMap/HKgccs-B5-H.notice.txt",
+      "sha256": "d0df9d4f372183b54bbb8075a30b754f7e4763b700d22cf11c8d94bbe1be3afb"
+    },
+    {
+      "bytes": 2379,
+      "path": "licenses/Resource/CMap/HKgccs-B5-V.notice.txt",
+      "sha256": "bdce37c61de98b919f508adb028c527122dfe638ad0961aa8e8fa897300f084d"
+    },
+    {
+      "bytes": 2294,
+      "path": "licenses/Resource/CMap/HKm314-B5-H.notice.txt",
+      "sha256": "fef7fea87641929be621a1dd82519e85fc7a9a3602e304ef5c0cdaa71fa4eb3d"
+    },
+    {
+      "bytes": 2379,
+      "path": "licenses/Resource/CMap/HKm314-B5-V.notice.txt",
+      "sha256": "513e889c0c3b1cf3a8f38af1baebbc31a49b5484db17cd8e1bfce7b63b873c74"
+    },
+    {
+      "bytes": 2294,
+      "path": "licenses/Resource/CMap/HKm471-B5-H.notice.txt",
+      "sha256": "67494390d10b7518b1060b824a041a036d075236309bc7ac6040b19c846a3b75"
+    },
+    {
+      "bytes": 2379,
+      "path": "licenses/Resource/CMap/HKm471-B5-V.notice.txt",
+      "sha256": "8e88b525e4168f68f164740a2ab8a3092619c091ab6de7af4de854b73d8b34b2"
+    },
+    {
+      "bytes": 2292,
+      "path": "licenses/Resource/CMap/HKscs-B5-H.notice.txt",
+      "sha256": "5d9e380c2939bc9e845b16d9f60c6535fdb2b0207d2f314b21be938a3309f755"
+    },
+    {
+      "bytes": 2375,
+      "path": "licenses/Resource/CMap/HKscs-B5-V.notice.txt",
+      "sha256": "a88f6e294e533964ac9890192bbb264661c6aeac386b03a3fb384baefc0649e9"
+    },
+    {
+      "bytes": 2289,
+      "path": "licenses/Resource/CMap/Hankaku.notice.txt",
+      "sha256": "908c57e83799dc900a8ce2daebe667d10d1da0035458cde72232707aeb75c2e2"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/Hiragana.notice.txt",
+      "sha256": "931fc5e42efe81980c84abba1af9b67267c3beb4a2fafc70b10a0997acc10a6b"
+    },
+    {
+      "bytes": 2294,
+      "path": "licenses/Resource/CMap/Hojo-EUC-H.notice.txt",
+      "sha256": "47e0516275b5b39bb2b76e2b58a3bc5b40d101f09dde11058613f8d804451f7a"
+    },
+    {
+      "bytes": 2376,
+      "path": "licenses/Resource/CMap/Hojo-EUC-V.notice.txt",
+      "sha256": "0eb0dd6640ee6edab3edbcb7a27310dac811c037f7d12193faa50ee778ad5a6d"
+    },
+    {
+      "bytes": 2286,
+      "path": "licenses/Resource/CMap/Hojo-H.notice.txt",
+      "sha256": "ea86a22740398826638742b0df8efc9329a4a2f1bb82e3704689449fc80fcdc5"
+    },
+    {
+      "bytes": 2360,
+      "path": "licenses/Resource/CMap/Hojo-V.notice.txt",
+      "sha256": "e2b332615ffa00ab2bc93885b3a88ae50b5841468c265889739395e922796e80"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/Identity-H.notice.txt",
+      "sha256": "cace143ee844f4f207dbdeeeb2fed29be0c0f6894c71891925a229391516b095"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/Identity-V.notice.txt",
+      "sha256": "0570562f683c6bca7a234c898d5511de3880890f780f883a753a502397b2f37f"
+    },
+    {
+      "bytes": 2292,
+      "path": "licenses/Resource/CMap/KSC-EUC-H.notice.txt",
+      "sha256": "f09159356dc88a8b2cc57c375cb32c8c3d9f9676aff8ce4886989e90b330779c"
+    },
+    {
+      "bytes": 2372,
+      "path": "licenses/Resource/CMap/KSC-EUC-V.notice.txt",
+      "sha256": "92c3804deca556440e26edadc48375281afac66d84360162e92268dd9b68349b"
+    },
+    {
+      "bytes": 2284,
+      "path": "licenses/Resource/CMap/KSC-H.notice.txt",
+      "sha256": "c3615d1c254427780495239778173880346805a4c8865d56d98687723cdb3935"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/KSC-Johab-H.notice.txt",
+      "sha256": "c80b193e0a801e8bcb1b1b8115b1043d0452973239d377dfdd56fd3457a82de1"
+    },
+    {
+      "bytes": 2381,
+      "path": "licenses/Resource/CMap/KSC-Johab-V.notice.txt",
+      "sha256": "d194740614a44986d63d18303520e1621286374fdbcc42744ae2ad683963e7d5"
+    },
+    {
+      "bytes": 2356,
+      "path": "licenses/Resource/CMap/KSC-V.notice.txt",
+      "sha256": "cd9f5e8d7fab0a05ae67ceb125269c9e3eedebaad7a1133364216589f671af79"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/KSCms-UHC-H.notice.txt",
+      "sha256": "e47160ec7e7f67ffffc2bd041d84f104663c62d4b0c0d578e9a0f18c0c6389c7"
+    },
+    {
+      "bytes": 2303,
+      "path": "licenses/Resource/CMap/KSCms-UHC-HW-H.notice.txt",
+      "sha256": "0751320dc0c80eeceb0952821be66070074bff50648202c1c16a22b599482d0e"
+    },
+    {
+      "bytes": 2393,
+      "path": "licenses/Resource/CMap/KSCms-UHC-HW-V.notice.txt",
+      "sha256": "6423f6a69a5a476a04dbef70afbb117fd3f0f9e4484b8aafee180306b162515a"
+    },
+    {
+      "bytes": 2381,
+      "path": "licenses/Resource/CMap/KSCms-UHC-V.notice.txt",
+      "sha256": "b10be4fb5890334951ee5cae54735834fa3f5219660f12fc825d1e6726d486c6"
+    },
+    {
+      "bytes": 2296,
+      "path": "licenses/Resource/CMap/KSCpc-EUC-H.notice.txt",
+      "sha256": "8d1dce7c84900ac6f0a88f5b98bbd6d5335493c0b1db8d10c8d5ce4d619a11e9"
+    },
+    {
+      "bytes": 2380,
+      "path": "licenses/Resource/CMap/KSCpc-EUC-V.notice.txt",
+      "sha256": "3e655ff6ab28a6e7a061bae45af393784b498defaa62f05300404ddb96ab44d8"
+    },
+    {
+      "bytes": 2291,
+      "path": "licenses/Resource/CMap/Katakana.notice.txt",
+      "sha256": "bb53d10fedd9d99aa4dbb82e22bd7a5984f5498ceaf640072684889a6d61ab89"
+    },
+    {
+      "bytes": 2285,
+      "path": "licenses/Resource/CMap/NWP-H.notice.txt",
+      "sha256": "34d12102bb93c63906398f21f5647cb526b72b280c1046ef25b978b70f71530f"
+    },
+    {
+      "bytes": 2357,
+      "path": "licenses/Resource/CMap/NWP-V.notice.txt",
+      "sha256": "33977d429bf3786c6e5abd893419bcf7d494817d64c43a4d80ec81f69d8464f3"
+    },
+    {
+      "bytes": 2287,
+      "path": "licenses/Resource/CMap/RKSJ-H.notice.txt",
+      "sha256": "fc0dd1d55f1d593bfc74aa4ab6ef1b23c7cace8313eab90a385c7dc8fca65637"
+    },
+    {
+      "bytes": 2361,
+      "path": "licenses/Resource/CMap/RKSJ-V.notice.txt",
+      "sha256": "2e584f0e64ad93c3c76284b47f30cfe141cfbfe1df8c56253f650462c7ea3740"
+    },
+    {
+      "bytes": 2285,
+      "path": "licenses/Resource/CMap/Roman.notice.txt",
+      "sha256": "e928076463f27db2f840e327b5b3eb462a5dcf6ddadd29a7c6218e6f3352804d"
+    },
+    {
+      "bytes": 2299,
+      "path": "licenses/Resource/CMap/UniCNS-UCS2-H.notice.txt",
+      "sha256": "629ae99b626626e90b5a1461a74178338528f35b40ff5cd980a7b4e524f1468f"
+    },
+    {
+      "bytes": 2387,
+      "path": "licenses/Resource/CMap/UniCNS-UCS2-V.notice.txt",
+      "sha256": "528acecc26e6dc6f45113593b965a2d4675cd1a10d85a09be297470805da22d9"
+    },
+    {
+      "bytes": 2300,
+      "path": "licenses/Resource/CMap/UniCNS-UTF16-H.notice.txt",
+      "sha256": "e32dd4a72265d6820f9c20e99fccfe93d65de8495a2c0c04d9d64602f112a7ea"
+    },
+    {
+      "bytes": 2390,
+      "path": "licenses/Resource/CMap/UniCNS-UTF16-V.notice.txt",
+      "sha256": "179af8df961983232b4f9303535cc9984dd982f646beb36e49841001674ed6da"
+    },
+    {
+      "bytes": 2300,
+      "path": "licenses/Resource/CMap/UniCNS-UTF32-H.notice.txt",
+      "sha256": "3f1fc2538a54573dc11f1845caf71b8fd2e40bf1cce7655ee8dbbc7c11f1994d"
+    },
+    {
+      "bytes": 2390,
+      "path": "licenses/Resource/CMap/UniCNS-UTF32-V.notice.txt",
+      "sha256": "acf1003919f5055841c4a64dcc31f502ac0a1a12d4e8dfba39ca388a0afd0d1b"
+    },
+    {
+      "bytes": 2299,
+      "path": "licenses/Resource/CMap/UniCNS-UTF8-H.notice.txt",
+      "sha256": "5834456b0136aab15b1b8bba1e45e14b4525faf04bfc004c4b169d9b55407458"
+    },
+    {
+      "bytes": 2387,
+      "path": "licenses/Resource/CMap/UniCNS-UTF8-V.notice.txt",
+      "sha256": "baa61b2120b905c6b70ce7b7e9008d959221cc092556b5fdc6e8b291e82fa5d4"
+    },
+    {
+      "bytes": 2296,
+      "path": "licenses/Resource/CMap/UniGB-UCS2-H.notice.txt",
+      "sha256": "967d4665e45d7be6a821a981daf4a28d724fb3802a761a52d8258395c80de07c"
+    },
+    {
+      "bytes": 2382,
+      "path": "licenses/Resource/CMap/UniGB-UCS2-V.notice.txt",
+      "sha256": "eb73f084ba54e6c17ed71526dfde3c34298f4dae1c578f5d628f02952a10052f"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/UniGB-UTF16-H.notice.txt",
+      "sha256": "8c15db73c2ce67bf34d1e4e3e089a0c8c021464272559f45a758b45eb8abd2e7"
+    },
+    {
+      "bytes": 2385,
+      "path": "licenses/Resource/CMap/UniGB-UTF16-V.notice.txt",
+      "sha256": "7aee9a9a37ab122ef00c0a476a229d59f7a69a107d5436073749762321736c0f"
+    },
+    {
+      "bytes": 2297,
+      "path": "licenses/Resource/CMap/UniGB-UTF32-H.notice.txt",
+      "sha256": "0e1ace3425e89f65723fd33d3eceec6ad61e6473fec770368076ed988587cf50"
+    },
+    {
+      "bytes": 2385,
+      "path": "licenses/Resource/CMap/UniGB-UTF32-V.notice.txt",
+      "sha256": "68fea5abb1db9c20294a87d164cfceb7846be6202f637e797335b769ef467dce"
+    },
+    {
+      "bytes": 2296,
+      "path": "licenses/Resource/CMap/UniGB-UTF8-H.notice.txt",
+      "sha256": "0aabd4d267ad131619b6d1a0b0251fd03a157236d1eece979de85b4a21b642a4"
+    },
+    {
+      "bytes": 2382,
+      "path": "licenses/Resource/CMap/UniGB-UTF8-V.notice.txt",
+      "sha256": "6622e746a5ff3bd3efde4c179ec26051b9f455291e223df979e33d1e214348dd"
+    },
+    {
+      "bytes": 2302,
+      "path": "licenses/Resource/CMap/UniHojo-UCS2-H.notice.txt",
+      "sha256": "43329b6a83997d5de0ce99f37f6c552ede5ee1b485e7df19285209be558e57f7"
+    },
+    {
+      "bytes": 2392,
+      "path": "licenses/Resource/CMap/UniHojo-UCS2-V.notice.txt",
+      "sha256": "724b08f8076551e1e5414a1bcf354bc785a9c322497328f8a54c276a88a7fdf8"
+    },
+    {
+      "bytes": 2304,
+      "path": "licenses/Resource/CMap/UniHojo-UTF16-H.notice.txt",
+      "sha256": "906fa2e125b2ac533a73300715af952e459b54dbbac4b1c6f0c8311f410d5b1a"
+    },
+    {
+      "bytes": 2396,
+      "path": "licenses/Resource/CMap/UniHojo-UTF16-V.notice.txt",
+      "sha256": "855ae193c78b65259ae9eec4db127d75c50778ba405cd559ed69a2e80aa4aef7"
+    },
+    {
+      "bytes": 2304,
+      "path": "licenses/Resource/CMap/UniHojo-UTF32-H.notice.txt",
+      "sha256": "e067ed733ab9c8a4db68beb3d693209a7b082f0fa979f0cfda24fecba06c4820"
+    },
+    {
+      "bytes": 2396,
+      "path": "licenses/Resource/CMap/UniHojo-UTF32-V.notice.txt",
+      "sha256": "6d263938280825ccfcefa0b30817693c747ae5ff53072932aae82e55257320c6"
+    },
+    {
+      "bytes": 2303,
+      "path": "licenses/Resource/CMap/UniHojo-UTF8-H.notice.txt",
+      "sha256": "0d103a364f06f5adc365b7a906cfc2b45b27e5f985be809db7a2475264c74500"
+    },
+    {
+      "bytes": 2393,
+      "path": "licenses/Resource/CMap/UniHojo-UTF8-V.notice.txt",
+      "sha256": "103fb7a28df7f26b777f2d0aad6db4ee696ab946eec32c9e344347504760a92e"
+    },
+    {
+      "bytes": 2301,
+      "path": "licenses/Resource/CMap/UniJIS-UCS2-H.notice.txt",
+      "sha256": "800687a67f296f3fa68eb41ae7fd3cbf108918c8bd2487800c9397eb249125aa"
+    },
+    {
+      "bytes": 2395,
+      "path": "licenses/Resource/CMap/UniJIS-UCS2-HW-H.notice.txt",
+      "sha256": "1f33b017163b54066a94b8895a4ab34df413eaf128dbe26d71815054379b994a"
+    },
+    {
+      "bytes": 2395,
+      "path": "licenses/Resource/CMap/UniJIS-UCS2-HW-V.notice.txt",
+      "sha256": "5fd015a7dc4fa556f0e263f739de4dded1fadfd61798c112b2948f61f940503e"
+    },
+    {
+      "bytes": 2389,
+      "path": "licenses/Resource/CMap/UniJIS-UCS2-V.notice.txt",
+      "sha256": "bc2055a763c4b00ecba50000ccec5dd209ffeb2f180ab8fae8d4aa813978b625"
+    },
+    {
+      "bytes": 2302,
+      "path": "licenses/Resource/CMap/UniJIS-UTF16-H.notice.txt",
+      "sha256": "7857ac79ba5477da23ea9c6f2bd7064f2868173b0f92390905a737a4dc506a7a"
+    },
+    {
+      "bytes": 2392,
+      "path": "licenses/Resource/CMap/UniJIS-UTF16-V.notice.txt",
+      "sha256": "3d312ec22223dc0285577658e86936664816a4c11dbf3ee3c55d6dd3867a1f5e"
+    },
+    {
+      "bytes": 2302,
+      "path": "licenses/Resource/CMap/UniJIS-UTF32-H.notice.txt",
+      "sha256": "ec363c70d17eeeafadbb7cfd218b1ca7d352f8b4f1b20ca1a728c7f57a2d7232"
+    },
+    {
+      "bytes": 2392,
+      "path": "licenses/Resource/CMap/UniJIS-UTF32-V.notice.txt",
+      "sha256": "5cb1a6135e23ae0728c45f2fe2dbe668edc54e0c8acd6dfbe089500dfe98093c"
+    },
+    {
+      "bytes": 2301,
+      "path": "licenses/Resource/CMap/UniJIS-UTF8-H.notice.txt",
+      "sha256": "6af60dd0af120238a53f7ab4f4e667499cdbec46cbba757ce446b82673579cae"
+    },
+    {
+      "bytes": 2389,
+      "path": "licenses/Resource/CMap/UniJIS-UTF8-V.notice.txt",
+      "sha256": "75dffc87209630390aa4e4b35629fc944481e3782e0c6057ccb3eddafe01e664"
+    },
+    {
+      "bytes": 2310,
+      "path": "licenses/Resource/CMap/UniJIS2004-UTF16-H.notice.txt",
+      "sha256": "2b88e8d72759dfd41d18f4a61b8d53f1938d504efc621e31b3b8fc9be3376e25"
+    },
+    {
+      "bytes": 2408,
+      "path": "licenses/Resource/CMap/UniJIS2004-UTF16-V.notice.txt",
+      "sha256": "2c71a355ec6ab94fe0b2f0da61cd7a82eadf32fbb1e492167be7bc61590378e4"
+    },
+    {
+      "bytes": 2310,
+      "path": "licenses/Resource/CMap/UniJIS2004-UTF32-H.notice.txt",
+      "sha256": "9d8d9ba41173a6409c860c0735dd875b77ebd64ea47c93fd5cf4e406a4e39ab6"
+    },
+    {
+      "bytes": 2408,
+      "path": "licenses/Resource/CMap/UniJIS2004-UTF32-V.notice.txt",
+      "sha256": "43cf3b02d81279fa659cf17f3460258e3a4fd8149bb043db70d54d268f9701b9"
+    },
+    {
+      "bytes": 2308,
+      "path": "licenses/Resource/CMap/UniJIS2004-UTF8-H.notice.txt",
+      "sha256": "209fe2c589427928e5e6ac8ab9632d9c9d52787210a334ea63c78bfa7fd4d472"
+    },
+    {
+      "bytes": 2404,
+      "path": "licenses/Resource/CMap/UniJIS2004-UTF8-V.notice.txt",
+      "sha256": "046d2ea5f7dc3065129054cafe9d0ad9c794415f9d243c279a49d3159a783b67"
+    },
+    {
+      "bytes": 2400,
+      "path": "licenses/Resource/CMap/UniJISPro-UCS2-HW-V.notice.txt",
+      "sha256": "32d3fe5aba3710cb1a67747702f34adb7faa0ae976e9402d76c2e9bb2095da5b"
+    },
+    {
+      "bytes": 2394,
+      "path": "licenses/Resource/CMap/UniJISPro-UCS2-V.notice.txt",
+      "sha256": "03b9692c86272a062ba756ea0e465c759845d7af75e38c3531c58b08db1e3465"
+    },
+    {
+      "bytes": 2394,
+      "path": "licenses/Resource/CMap/UniJISPro-UTF8-V.notice.txt",
+      "sha256": "744f55dff645933efe59fb6434fd6dddd4b7df92be02aa0db388fe56720215cf"
+    },
+    {
+      "bytes": 2312,
+      "path": "licenses/Resource/CMap/UniJISX0213-UTF32-H.notice.txt",
+      "sha256": "33602956669b94496ab0799fa61f8ea66781d0de2f54ba02c3abfd47fc20bacc"
+    },
+    {
+      "bytes": 2412,
+      "path": "licenses/Resource/CMap/UniJISX0213-UTF32-V.notice.txt",
+      "sha256": "18396fe20bb0036e70e0fd6622ed459af0bdb68712a9133162822e8a48941d1c"
+    },
+    {
+      "bytes": 2320,
+      "path": "licenses/Resource/CMap/UniJISX02132004-UTF32-H.notice.txt",
+      "sha256": "3205192fb38495d0ef07ee37dec3cf17c54d25d2624ee3d37977a31f1e2371ae"
+    },
+    {
+      "bytes": 2428,
+      "path": "licenses/Resource/CMap/UniJISX02132004-UTF32-V.notice.txt",
+      "sha256": "6a26c438f66c7dd8cfb0acf0a4598640cd6c043ec3edb2a2e12c9135e69724d6"
+    },
+    {
+      "bytes": 2299,
+      "path": "licenses/Resource/CMap/UniKS-UCS2-H.notice.txt",
+      "sha256": "77d283149be9150094713a9b5c991335ac1e42baa9ebc9bdb51994887c22f526"
+    },
+    {
+      "bytes": 2386,
+      "path": "licenses/Resource/CMap/UniKS-UCS2-V.notice.txt",
+      "sha256": "d71eb69c5af001c2eaa92e36217573a9f86d53cafa7396c1f207872225817289"
+    },
+    {
+      "bytes": 2300,
+      "path": "licenses/Resource/CMap/UniKS-UTF16-H.notice.txt",
+      "sha256": "1e6a103f691a363edff3936edd3ea623ee9a3b27d95146e3531604c235212870"
+    },
+    {
+      "bytes": 2388,
+      "path": "licenses/Resource/CMap/UniKS-UTF16-V.notice.txt",
+      "sha256": "6d11b8086c72de9d1b3e62bb62edf51886a941a852159b36e657a4be591eed53"
+    },
+    {
+      "bytes": 2300,
+      "path": "licenses/Resource/CMap/UniKS-UTF32-H.notice.txt",
+      "sha256": "7e67e3bc3542f752f70299176781eb5916224262d349fca568316252f08a7527"
+    },
+    {
+      "bytes": 2388,
+      "path": "licenses/Resource/CMap/UniKS-UTF32-V.notice.txt",
+      "sha256": "89427449605176bed5e98218af59bfaa98e953aaeff41f420b86bf28081876fe"
+    },
+    {
+      "bytes": 2299,
+      "path": "licenses/Resource/CMap/UniKS-UTF8-H.notice.txt",
+      "sha256": "d3954e23c538a04d542336e473df5bce4f155062b8b069edcf003a042ac1d5ed"
+    },
+    {
+      "bytes": 2385,
+      "path": "licenses/Resource/CMap/UniKS-UTF8-V.notice.txt",
+      "sha256": "daca6405d805f452aa26129af305fc3dccf4077a63744faa5e85da86a4c90f1b"
+    },
+    {
+      "bytes": 2341,
+      "path": "licenses/Resource/CMap/V.notice.txt",
+      "sha256": "928f140b78309f2ecc12b9df66405bc3e3a95adb70a7fa2c07b6891685a85bfd"
+    },
+    {
+      "bytes": 2294,
+      "path": "licenses/Resource/CMap/WP-Symbol.notice.txt",
+      "sha256": "660bb5ee3357bbf98a07c8bd085b0cedc864fa6ca1bbd7391302d11c57ff713f"
+    },
+    {
+      "bytes": 1084,
+      "path": "licenses/brotli/LICENSE",
+      "sha256": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94"
+    },
+    {
+      "bytes": 17992,
+      "path": "licenses/contrib/chp2200/COPYING",
+      "sha256": "32b1062f7da84967e7019d01ab805935caa7ab7321a7ced0e30ebe75e5df1670"
+    },
+    {
+      "bytes": 18090,
+      "path": "licenses/contrib/lxm3200-tweaked/LICENSE",
+      "sha256": "0c1c962a6ced7082e3b66244db5fc3927443188d8e75e2f4c334af549356db83"
+    },
+    {
+      "bytes": 49023,
+      "path": "licenses/cups/LICENSE.txt",
+      "sha256": "fb59ef73a2e0d6eb0e018b7f5d48f4a00946696ea7dadf7f5e5f2575e5642e14"
+    },
+    {
+      "bytes": 34520,
+      "path": "licenses/doc/COPYING",
+      "sha256": "57c8ff33c9c0cfc3ef00e650a1cc910d7ee479a8bc509f6c9209a7c2a11399d6"
+    },
+    {
+      "bytes": 1144,
+      "path": "licenses/expat/COPYING",
+      "sha256": "122f2c27000472a201d337b9b31f7eb2b52d091b02857061a8880371612d9534"
+    },
+    {
+      "bytes": 34520,
+      "path": "licenses/extract/COPYING",
+      "sha256": "57c8ff33c9c0cfc3ef00e650a1cc910d7ee479a8bc509f6c9209a7c2a11399d6"
+    },
+    {
+      "bytes": 2149,
+      "path": "licenses/freetype/LICENSE.TXT",
+      "sha256": "bd36c8b474855fa294c2ec5c184544478ef3720aad37d65a6296a4f264fd2d3b"
+    },
+    {
+      "bytes": 6743,
+      "path": "licenses/freetype/docs/FTL.TXT",
+      "sha256": "5a5ee54c5001bbad1cdc1a57cc3dd4c42199b2da09d39c7ee41fab002d02967f"
+    },
+    {
+      "bytes": 17994,
+      "path": "licenses/freetype/docs/GPLv2.TXT",
+      "sha256": "c4120c6752c910c299e3bd9cb3a46ff262c268303ca2069b61f92f10a5656c18"
+    },
+    {
+      "bytes": 1139,
+      "path": "licenses/ijs/ijs.h.txt",
+      "sha256": "88e72a6e22393de8cfc42f55c258742349c703cec137b9f8b50b7565beeb9e38"
+    },
+    {
+      "bytes": 34520,
+      "path": "licenses/jbig2dec/COPYING",
+      "sha256": "57c8ff33c9c0cfc3ef00e650a1cc910d7ee479a8bc509f6c9209a7c2a11399d6"
+    },
+    {
+      "bytes": 1170,
+      "path": "licenses/jbig2dec/LICENSE",
+      "sha256": "1bf5258afe453934484fd0cea97508b72301633a6a78b0ae8a9ee44ac78f26d9"
+    },
+    {
+      "bytes": 18711,
+      "path": "licenses/jpeg/README",
+      "sha256": "913af09f785683accdf660b85dcf27fdd567d4ad649daa95cb8771b040db79d1"
+    },
+    {
+      "bytes": 3522,
+      "path": "licenses/jpegxr/COPYRIGHT.txt",
+      "sha256": "b1e71ae51c8413b180fa3dd418e9281cb0a1196fa4eda19aee824b0447412c54"
+    },
+    {
+      "bytes": 1106,
+      "path": "licenses/jpegxr/my_getopt-1.5/LICENSE",
+      "sha256": "7448f6f3b9b053ff08f89ce103439c69094fac313edbce30002d7b0cac6cc882"
+    },
+    {
+      "bytes": 1078,
+      "path": "licenses/lcms2mt/COPYING",
+      "sha256": "753bf4b01fef36ad934cf8baff7b8a49b4778d3154de7df610695c90985bd03c"
+    },
+    {
+      "bytes": 35146,
+      "path": "licenses/lcms2mt/plugins/fast_float/COPYING.GPL3",
+      "sha256": "c53a65c2fd561c87eaabf1072ef5dcab8653042bc15308465f52413585eb6271"
+    },
+    {
+      "bytes": 3167,
+      "path": "licenses/lcms2mt/utils/jpgicc/LICENSE_iccjpeg",
+      "sha256": "42055f388d8b1e2d9c0a9d9441b83a3cb4e765f8804dbb788b3a09e7a45bdcf6"
+    },
+    {
+      "bytes": 1521,
+      "path": "licenses/leptonica/leptonica-license.txt",
+      "sha256": "87829abb5bbb00b55a107365da89e9a33f86c4250169e5a1e5588505be7d5806"
+    },
+    {
+      "bytes": 1521,
+      "path": "licenses/leptonica/prog/leptonica-license.txt",
+      "sha256": "87829abb5bbb00b55a107365da89e9a33f86c4250169e5a1e5588505be7d5806"
+    },
+    {
+      "bytes": 1521,
+      "path": "licenses/leptonica/src/leptonica-license.txt",
+      "sha256": "87829abb5bbb00b55a107365da89e9a33f86c4250169e5a1e5588505be7d5806"
+    },
+    {
+      "bytes": 5345,
+      "path": "licenses/libpng/LICENSE",
+      "sha256": "bdb0a645ea18c60507d0368379b1ac5474b92255fcc2d115e07486a7672ba526"
+    },
+    {
+      "bytes": 1036,
+      "path": "licenses/libpng/ci/LICENSE_MIT.txt",
+      "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+    },
+    {
+      "bytes": 18097,
+      "path": "licenses/libpng/contrib/gregbook/COPYING",
+      "sha256": "d6cb0e9e560f51085556949a84af12b79a00f10ab8b66c752537faf7cd665572"
+    },
+    {
+      "bytes": 2373,
+      "path": "licenses/libpng/contrib/gregbook/LICENSE",
+      "sha256": "b6a03c1803eb58ffb1f1278d5c7d4096c4c116e66dce8a7553e8c77d163c3438"
+    },
+    {
+      "bytes": 1036,
+      "path": "licenses/libpng/contrib/pngexif/LICENSE_MIT.txt",
+      "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+    },
+    {
+      "bytes": 1164,
+      "path": "licenses/libpng/contrib/pngminus/LICENSE.txt",
+      "sha256": "1806f1f10d393e9e377b3a8d1b968452b54f1a90378f14eeef45426946ace330"
+    },
+    {
+      "bytes": 2112,
+      "path": "licenses/openjpeg/LICENSE",
+      "sha256": "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"
+    },
+    {
+      "bytes": 13313,
+      "path": "licenses/pcl/COPYING.AFPL",
+      "sha256": "216e6604ba97d88d42e12ec585c1f1cf2c1e161c5c65eb5b40ea931a956e870b"
+    },
+    {
+      "bytes": 1639,
+      "path": "licenses/pcl/LICENSE",
+      "sha256": "a2b62cb85130c201dff250aaa521a9444518e2c0c770aa99eab26f59decc7c00"
+    },
+    {
+      "bytes": 11358,
+      "path": "licenses/tesseract/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "bytes": 1164,
+      "path": "licenses/tiff/LICENSE.md",
+      "sha256": "0780558a8bfba0af1160ec1ff11ade4f41c0d7deafd6ecfc796b492a788e380d"
+    },
+    {
+      "bytes": 1181,
+      "path": "licenses/tiff/doc/html-prebuilt/_sources/project/license.rst.txt",
+      "sha256": "02e86af3b805e0f2075ebb5ac512831f6ab2a97ddeb186de076c418956418ba1"
+    },
+    {
+      "bytes": 5718,
+      "path": "licenses/tiff/doc/html-prebuilt/project/license.html",
+      "sha256": "fe543a09ba633b6c113d2850e39887df3a5d90b67b1df9d033ef60d391b13319"
+    },
+    {
+      "bytes": 1181,
+      "path": "licenses/tiff/doc/project/license.rst",
+      "sha256": "02e86af3b805e0f2075ebb5ac512831f6ab2a97ddeb186de076c418956418ba1"
+    },
+    {
+      "bytes": 1002,
+      "path": "licenses/zlib/LICENSE",
+      "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+    },
+    {
+      "bytes": 1337,
+      "path": "licenses/zlib/contrib/dotzlib/LICENSE_1_0.txt",
+      "sha256": "8d8291caf1cee26d23acf3eb67c9f9a2d58f1c681b16a4fbe8cbfb9e3c0b5a9b"
+    },
+    {
+      "bytes": 3509,
+      "path": "licenses/zlib/contrib/minizip/LICENSE.Info-Zip",
+      "sha256": "fc686023047ce5ce3a18a9b8a777156f0e475929d3de06bac279f3c025d2b2ca"
+    }
+  ],
+  "resources": "compiled ROM",
+  "schema": 1,
+  "separate_unmodified_subprocess": true,
+  "upstream_installer": {
+    "sha256": "3a4c28d0aac47aa7cccd35a5932c55110376e9dbd966898dde388b7faba444a4",
+    "url": "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10071/gs10071w64.exe"
+  },
+  "version": "10.07.1"
+}

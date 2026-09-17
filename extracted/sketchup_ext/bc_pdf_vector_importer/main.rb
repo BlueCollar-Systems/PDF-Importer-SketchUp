@@ -23,6 +23,7 @@ module BlueCollarSystems
     require File.join(dir, 'logger')
     require File.join(dir, 'command_runner')
     require File.join(dir, 'png_cropper')
+    require File.join(dir, 'item_raster_page_renderer')
     require File.join(dir, 'dependency_resolver')
     require File.join(dir, 'batch_host_policy')
     require File.join(dir, 'pdf_open_gate')
@@ -39,6 +40,7 @@ module BlueCollarSystems
     require File.join(dir, 'layer_manager')
     require File.join(dir, 'xobject_parser')
     require File.join(dir, 'embedded_image_extractor')
+    require File.join(dir, 'embedded_image_placement')
     require File.join(dir, 'source_provenance')
     require File.join(dir, 'batch_pipeline')
     require File.join(dir, 'primitive_extractor')
@@ -56,6 +58,11 @@ module BlueCollarSystems
     require File.join(dir, 'embedded_image_extractor')
     require File.join(dir, 'extrude_3d')
     require File.join(dir, 'geometry_builder')
+    require File.join(dir, 'planar_white_knockout')
+    require File.join(dir, 'svg_paint_order')
+    require File.join(dir, 'svg_paint_binding')
+    require File.join(dir, 'late_pdf_overlays')
+    require File.join(dir, 'item_raster_display')
     require File.join(dir, 'model_3d_extruder')
     require File.join(dir, 'geometry_cleanup')
     require File.join(dir, 'hatch_detector')
@@ -357,12 +364,17 @@ module BlueCollarSystems
         document[:missing_language_packs]
       )
       render_status = document[:svg].to_s.empty? ? :failed : :complete
-      # Listed missing fonts / CID language packs are a completed inventory
-      # finding, not a crash of the inventory process. Recasting them as
-      # font_inventory_runtime_error used to poison every ligature or unmatched
-      # span on an otherwise renderable page and abort geometry already built.
-      inventory_complete = render_status == :complete && failures.empty?
+      # Proven unused startup warnings are classified at the renderer boundary.
+      # Remaining missing fonts/language packs cannot certify absence of ink.
+      # Named font gaps can still be attributed to individual known fonts by
+      # the item renderer; generic language/runtime failures stay page-scoped.
       unless missing_fonts.empty? && missing_languages.empty?
+        failures << {
+          :scope => :page, :page_number => page_num.to_i,
+          :reason_code => :font_inventory_runtime_error,
+          :missing_fonts => missing_fonts,
+          :missing_language_packs => missing_languages
+        }
         Logger.warn(
           'Pipeline',
           "Page #{page_num.to_i}: renderer listed " \
@@ -371,6 +383,7 @@ module BlueCollarSystems
           'spans with source outlines can still certify 3D Text'
         )
       end
+      inventory_complete = render_status == :complete && failures.empty?
       {
         :importer_id => RepresentationFidelity::IMPORTER_ID,
         :page_number => page_num.to_i,
@@ -861,7 +874,7 @@ module BlueCollarSystems
       record_fallback_transitions!(stats, page_num, transitions)
       record_text_renderer(
         stats, page_num,
-        :renderer => :pdftocairo_real_item_raster,
+        :renderer => :ghostscript_real_item_raster,
         :mode => :raster,
         :requested_mode => requested,
         :delivered_mode => :raster,
@@ -2200,23 +2213,60 @@ module BlueCollarSystems
                                                             scale, rotation,
                                                             y_offset,
                                                             evidence_record = nil)
-      expected = page_representation_transform(
+      page_transform = page_representation_transform(
         media_box, scale, rotation, y_offset
       )
-      return false unless group.respond_to?(:transform!)
-      group.transform!(expected)
-      return false unless group.respond_to?(:transformation)
+      return false unless group.respond_to?(:transform!) &&
+                          group.respond_to?(:transformation)
+      expected = page_transform
+      construction = evidence_record.is_a?(Hash) &&
+        evidence_record[:source_construction_transformation]
+      if construction
+        # Only the renderer's independently source-verified Geometry
+        # construction is allowed before page placement. Do not bless an
+        # arbitrary existing group transform as the expected position.
+        return false unless evidence_record[:mode] == :geometry
+        extent = evidence_record[:source_extent]
+        return false unless extent.is_a?(Array) && extent.length == 4 &&
+          extent.all? { |value| value.is_a?(Numeric) && value.to_f.finite? }
+        inverse_scale = 1.0 /
+          SvgItemRepresentationRenderer::GEOMETRY_CONSTRUCTION_SCALE
+        allowed = [
+          inverse_scale, 0.0, 0.0, 0.0,
+          0.0, inverse_scale, 0.0, 0.0,
+          0.0, 0.0, inverse_scale, 0.0,
+          extent[0].to_f, extent[1].to_f, 0.0, 1.0
+        ]
+        return false unless construction.is_a?(Array) &&
+          construction.length == 16 &&
+          construction.each_with_index.all? do |value, index|
+            value.is_a?(Numeric) && value.to_f.finite? &&
+              (value.to_f - allowed[index]).abs <= 1.0e-12
+          end
+        initial = group.transformation
+        return false unless initial.respond_to?(:to_a)
+        initial_values = initial.to_a
+        return false unless initial_values.length == 16 &&
+          initial_values.each_with_index.all? do |value, index|
+            value.is_a?(Numeric) && value.to_f.finite? &&
+              (value.to_f - allowed[index]).abs <= 1.0e-12
+          end
+        expected = page_transform * Geom::Transformation.new(allowed)
+      end
+      group.transform!(page_transform)
       actual = group.transformation
       return false unless actual.respond_to?(:to_a) && expected.respond_to?(:to_a)
       expected_values = expected.to_a
       actual_values = actual.to_a
-      return false unless expected_values.length == actual_values.length
+      return false unless expected_values.length == 16 && actual_values.length == 16
       verified = expected_values.each_with_index.all? do |value, index|
-        (value.to_f - actual_values[index].to_f).abs <= 1.0e-8
+        value.is_a?(Numeric) && value.to_f.finite? &&
+          actual_values[index].is_a?(Numeric) && actual_values[index].to_f.finite? &&
+          (value.to_f - actual_values[index].to_f).abs <= 1.0e-8
       end
       if verified && evidence_record.is_a?(Hash)
         evidence_record[:source_page_transformation] =
-          expected_values.map { |value| value.to_f }
+          page_transform.to_a.map { |value| value.to_f }
         evidence_record[:page_transform_verified] = true
       end
       verified
@@ -2495,6 +2545,76 @@ module BlueCollarSystems
       text_items
     end
 
+    def self.compose_page_white_masks!(builder, text_items, media_box, opts = {})
+      return nil unless builder.respond_to?(:fill_only_groups) && builder.page_group
+      masks = Array(builder.fill_only_groups)
+      masks_by_id = {}
+      masks.each do |record|
+        group = record[:group]
+        masks_by_id[group.entityID] = record if group && group.valid?
+      end
+      source_ids = {}
+      Array(text_items).each do |item|
+        source_ids[item.source_span_id.to_s] = true if item.respond_to?(:source_span_id)
+      end
+      roots = []
+      walk = lambda do |entities, parent_transform|
+        entities.to_a.each do |entity|
+          kind = entity.respond_to?(:typename) ? entity.typename.to_s : ''
+          next unless ['Group', 'ComponentInstance', 'Image'].include?(kind)
+          transform = parent_transform * entity.transformation
+          mask = masks_by_id[entity.entityID]
+          mask[:transformation] = transform if mask
+          source_id = entity.get_attribute('BC_PDF_Importer', 'source_span_id', '').to_s
+          if source_ids.key?(source_id)
+            roots << { :group => entity, :transformation => transform,
+              :parent_transform => parent_transform }
+          elsif kind != 'Image'
+            children = entity.respond_to?(:entities) ? entity.entities : entity.definition.entities
+            walk.call(children, transform)
+          end
+        end
+      end
+      walk.call(builder.page_group.entities, Geom::Transformation.new)
+      highest_text_z = 0.0
+      roots.each do |root|
+        bounds = root[:group].bounds
+        8.times do |index|
+          z = bounds.corner(index).transform(root[:parent_transform]).z.to_f
+          highest_text_z = z if z > highest_text_z
+        end
+      end
+      inventory = { :white_paths => [], :glyphs => [] }
+      unless roots.all? { |root| root[:group].typename.to_s == 'Image' }
+        document = opts[:svg_provider].call
+        unless document && !document[:svg].to_s.empty?
+          raise RepresentationFidelity::ContractError,
+            'source SVG is unavailable for native paint-order verification'
+        end
+        inventory = SvgPaintOrder.build(document[:svg], media_box,
+          :scale => opts[:scale], :svg_page_box => opts[:svg_page_box], :y_offset => 0.0)
+        transform = page_representation_transform(media_box, opts[:scale],
+          opts[:page_rotation], opts[:y_offset])
+        [:white_paths, :glyphs].each do |key|
+          inventory[key] = Array(inventory[key]).map do |record|
+            copy = record.dup
+            copy[:loops] = Array(record[:loops]).map do |loop|
+              loop.map do |point|
+                local = point.respond_to?(:x) ? point : Geom::Point3d.new(*point)
+                local.transform(transform)
+              end
+            end
+            copy
+          end
+        end
+      end
+      bound = SvgPaintBinding.prepare(masks, roots, inventory, :scale => opts[:scale])
+      report = PlanarWhiteKnockout.compose!(bound[:masks], roots, :ink_faces => bound[:ink_faces])
+      report[:source_binding] = bound[:binding]
+      { :report => report, :highest_text_z => highest_text_z,
+        :final_page_crops => bound[:ink_faces].select { |face| face[:final_page_crop] == true } }
+    end
+
     # True when all four PDF media-space bbox corners are present (may be 0.0).
     def self.source_text_bbox_complete?(item)
       return false unless item
@@ -2555,6 +2675,8 @@ module BlueCollarSystems
          item.respond_to?(:source_decode_complete)
         clone.source_decode_complete = item.source_decode_complete
       end
+      clone.source_paint_order = item.source_paint_order if
+        item.respond_to?(:source_paint_order) && clone.respond_to?(:source_paint_order=)
       clone
     end
 
@@ -2661,6 +2783,8 @@ module BlueCollarSystems
           hint.source_decode_complete : nil
         clone.source_decode_complete = complete == true
       end
+      clone.source_paint_order = hint.source_paint_order if
+        hint.respond_to?(:source_paint_order) && clone.respond_to?(:source_paint_order=)
       clone
     rescue StandardError
       item
@@ -3778,7 +3902,8 @@ module BlueCollarSystems
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Reading paths... [#{elapsed}s]"
         content_parse_started = Time.now
         ocg_map = parser.page_ocg_map(page_num)
-        cs = ContentStreamParser.new(streams, parser, ocg_map)
+        opacity_effects = ContentStreamParser.page_fill_opacity_effects(parser, page_num)
+        cs = ContentStreamParser.new(streams, parser, ocg_map, opacity_effects)
         paths = cs.parse
         record_pipeline_timing!(
           stats, :content_stream_parse_ms,
@@ -4328,6 +4453,7 @@ module BlueCollarSystems
         end
 
         # ── Hatch detection ──
+        source_paths_for_paint_order = paths.dup
         hatch_mode = opts[:hatch_mode] || :import
         hatch_paths = []
         if hatch_mode != :import && paths.length > 20
@@ -4380,6 +4506,20 @@ module BlueCollarSystems
             :effective_group_per_page => true,
             :reason_code => group_policy[:reason_code]
           }
+        end
+        # Only a completely proved final paint suffix may be displayed over
+        # native text. The original text geometry and its certificates stay intact.
+        late_overlays = []
+        if group_policy[:effective_group_per_page] &&
+           (opts[:import_fills] || force_import_fills_for_page)
+          late_overlays = LatePdfOverlays.eligible_records(
+            source_paths_for_paint_order, cs.other_paint_orders)
+          visible_paths = {}
+          paths.each { |source_path| visible_paths[source_path.object_id] = true }
+          late_overlays.select! { |record| visible_paths.key?(record[:path].object_id) }
+          late_ids = {}
+          late_overlays.each { |record| late_ids[record[:path].object_id] = true }
+          paths = paths.reject { |source_path| late_ids.key?(source_path.object_id) }
         end
         provenance_opts = {
           provenance_bucket: stats[:source_provenance_objects],
@@ -4535,6 +4675,10 @@ module BlueCollarSystems
             builder.page_group.entities : model.active_entities
           raster_delivery_started = Time.now
           Array(text_items).each_with_index do |source_item, item_index|
+            run_control_checkpoint!(
+              opts, :text_item, :completed => item_index,
+              :total => Array(text_items).length, :page => page_num
+            )
             source_id = RepresentationFidelity.source_span_id(source_item)
             controller = RepresentationFidelity::FallbackController.new(
               :raster, source_id
@@ -4940,7 +5084,53 @@ module BlueCollarSystems
           )
         end
 
+        paint_svg_provider = lambda do
+          source_svg_document || svg_document || CairoGlyphSource.render_page_svg(
+            path, page_num, :use_cropbox => use_cropbox == true)
+        end
+        composition = compose_page_white_masks!(builder, text_items, media_box,
+          :scale => opts[:scale], :svg_page_box => svg_page_box,
+          :page_rotation => page_rotation, :y_offset => page_y_offset,
+          :svg_provider => paint_svg_provider)
+        if composition
+          stats[:planar_white_knockout] ||= []
+          stats[:planar_white_knockout] << composition[:report].merge(:page => page_num)
+        end
+
         # ── Closed-shape extrusion (disabled; independent of 3D text) ───
+        unless late_overlays.empty?
+          unless composition && builder.page_group
+            raise RepresentationFidelity::ContractError,
+              'final vector annotations require the complete page text inventory'
+          end
+          factor = opts[:scale].to_f / 72.0
+          mapper = lambda do |pdf_x, pdf_y|
+            xy = PageTransform.transform_point(pdf_x, pdf_y, media_box, page_rotation)
+            Geom::Point3d.new(xy[0] * factor, xy[1] * factor + page_y_offset, 0.0)
+          end
+          built_overlays = LatePdfOverlays.build!(builder.page_group.entities, late_overlays,
+            :point_mapper => mapper, :materials => model.materials,
+            :highest_text_z => composition[:highest_text_z], :page_number => page_num,
+            :source_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
+            :final_page_crops => composition[:final_page_crops])
+          stats[:late_pdf_overlays] ||= []
+          stats[:late_pdf_overlays] << {
+            :page => page_num, :count => built_overlays.length,
+            :source_xy_preserved => true, :source_opacity_preserved => true,
+            :text_geometry_unchanged => true,
+            :display_depth_inches => built_overlays.map { |record| record[:display_depth] },
+            :final_crop_overlap_area => built_overlays.inject(0.0) { |sum, record| sum + record[:cropped_area] }
+          }
+        end
+
+        if composition && builder.page_group
+          ItemRasterDisplay.apply!(builder.page_group, stats,
+            :page => page_num, :media_box => media_box, :page_rotation => page_rotation,
+            :scale => opts[:scale].to_f, :page_y_offset => page_y_offset,
+            :source_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
+            :final_page_crops => composition[:final_page_crops])
+        end
+
         if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0 && builder.page_group &&
            opts[:import_mode].to_s != 'raster'
           begin
@@ -5176,25 +5366,36 @@ module BlueCollarSystems
           next
         end
 
-        bbox = embedded_image_su_bbox(asset, media_box, opts[:scale], y_offset, page_rotation)
-        next unless bbox
-        x0, y0, x1, y1 = bbox
-        width = (x1 - x0).abs
-        height = (y1 - y0).abs
-        next if width <= 0.0 || height <= 0.0
-
+        image = nil
         begin
-          image = entities.add_image(asset.file_path, Geom::Point3d.new(x0, y0, 0.0), width, height)
+          placement = EmbeddedImagePlacement.affine(
+            asset.corners_pts, media_box, opts[:scale], y_offset, page_rotation
+          )
+          # add_image sets its own pixel-to-inch scale. Apply our affine map to
+          # an actual 1x1-inch image; do not replace that intrinsic transform.
+          image = entities.add_image(asset.file_path, Geom::Point3d.new(0.0, 0.0, 0.0), 1.0, 1.0)
           if image
+            transform = Geom::Transformation.new(placement[:matrix])
+            expected = transform * image.transformation
+            image.transform!(transform)
+            unless EmbeddedImagePlacement.same_matrix?(image.transformation.to_a, expected.to_a)
+              raise RepresentationFidelity::ContractError,
+                    'native embedded image did not retain its source affine transform'
+            end
             begin
               image.layer = layer if layer
             rescue StandardError => e
               Logger.warn('EmbeddedImages', "Image layer assignment failed: #{e.message}")
             end
             placed += 1
+          else
+            raise RepresentationFidelity::ContractError,
+                  'native embedded image creation returned no Image'
           end
         rescue StandardError => e
-          Logger.warn('EmbeddedImages', "add_image failed for #{asset.name}: #{e.message}")
+          image.erase! if image && image.respond_to?(:valid?) && image.valid?
+          raise RepresentationFidelity::ContractError,
+                "Embedded image #{asset.name} placement failed: #{e.message}"
         end
       end
       placed
@@ -5427,7 +5628,8 @@ module BlueCollarSystems
               'item raster source PDF is missing'
       end
       argv = Array(arguments).map { |value| value.to_s }
-      command_source = argv.length >= 2 ? argv[-2] : nil
+      ghostscript = ItemRasterPageRenderer.ghostscript_command?(argv)
+      command_source = ghostscript ? argv[-1] : (argv.length >= 2 ? argv[-2] : nil)
       unless command_source &&
              File.expand_path(command_source).downcase == source_path.downcase
         raise RepresentationFidelity::ContractError,
@@ -5456,14 +5658,16 @@ module BlueCollarSystems
       end
       requested_page = page_num.to_i
       args = Array(arguments).map { |value| value.to_s }
-      unless raster_command_value(args, '-f').to_i == requested_page &&
+      if ghostscript
+        ItemRasterPageRenderer.verify_command!(args, source_path, requested_page, crop_geometry[:dpi].to_i)
+      elsif !(raster_command_value(args, '-f').to_i == requested_page &&
              raster_command_value(args, '-l').to_i == requested_page &&
              args.include?('-singlefile') && args.include?('-transp') &&
-             !args.include?('-cropbox')
+             !args.include?('-cropbox'))
         raise RepresentationFidelity::ContractError,
               'item raster command is not bound to exactly one MediaBox page'
       end
-      unless raster_command_value(args, '-r').to_i == crop_geometry[:dpi].to_i
+      unless ghostscript || raster_command_value(args, '-r').to_i == crop_geometry[:dpi].to_i
         raise RepresentationFidelity::ContractError,
               'item raster command DPI is not bound to crop geometry'
       end
@@ -5715,9 +5919,6 @@ module BlueCollarSystems
 
     def self.prepare_item_raster_page!(pdf_path, page_num, media_box,
                                        page_rotation, opts)
-      exe = safe_find_pdftocairo
-      raise RepresentationFidelity::ContractError,
-            'pdftocairo is unavailable for item Raster' unless exe
       page_width = PageTransform.effective_width(media_box, page_rotation)
       page_height = PageTransform.effective_height(media_box, page_rotation)
       dpi_plan = compute_effective_raster_dpi(opts, page_width, page_height)
@@ -5733,35 +5934,18 @@ module BlueCollarSystems
         owned_temp_dir = SafeTemp.mktmpdir("bc_item_page_p#{page_num}_")
         png_path = File.join(owned_temp_dir, 'page.png')
         raw_path = File.join(owned_temp_dir, 'page.rgba')
-        base_path = png_path.sub(/\.png\z/, '')
-        candidates = [
-          png_path, "#{base_path}-#{page_num}.png",
-          "#{base_path}-01.png", "#{base_path}-1.png"
-        ]
-        args = [
-          exe, '-png', '-transp', '-singlefile', '-r', dpi.to_s,
-          '-f', page_num.to_i.to_s, '-l', page_num.to_i.to_s,
-          source_path, base_path
-        ]
+        candidates = [png_path]
+        plan = ItemRasterPageRenderer.plan(
+          DependencyResolver.find_ghostscript, source_path, page_num.to_i, dpi, png_path
+        )
+        args = plan[:arguments]
         source_binding = begin_source_pdf_render_binding!(opts, source_path)
         run = CommandRunner.run(
-          args, :timeout_s => 180, :context => 'Raster.item_page.pdftocairo'
+          args, :timeout_s => 180, :context => 'Raster.item_page.ghostscript',
+          :env => plan[:environment]
         )
         verify_source_pdf_render_binding!(source_binding)
-        validation = PopplerResultValidator.validate(
-          run,
-          :executable => exe, :argv => args,
-          :context => 'Raster.item_page.pdftocairo',
-          :page => page_num, :attempt => 1,
-          :representation => :item_raster_page,
-          :artifacts => candidates, :artifact_policy => :any_nonempty
-        )
-        PopplerResultValidator.log_rejection(validation, 'Raster') unless
-          validation[:ok]
-        unless validation[:ok] && !run[:timed_out]
-          raise RepresentationFidelity::ContractError,
-                'transparent item Raster page render was rejected'
-        end
+        ItemRasterPageRenderer.validate_result!(run, plan)
         actual_png = candidates.find { |candidate| File.file?(candidate) }
         raise RepresentationFidelity::ContractError,
               'transparent item Raster page PNG is missing' unless actual_png
@@ -5778,6 +5962,10 @@ module BlueCollarSystems
           :page_rotation => PageTransform.normalize_rotation(page_rotation),
           :dpi => dpi,
           :arguments => args,
+          :render_engine => plan[:engine],
+          :renderer => plan[:renderer],
+          :render_executable_sha256 => plan[:executable_sha256],
+          :render_environment => plan[:environment],
           :source_pdf_path => source_path,
           :source_pdf_sha256 => source_sha,
           :source_pdf_render_binding => source_binding,
@@ -5856,6 +6044,9 @@ module BlueCollarSystems
         png_path, item, page_num, crop, page_render[:arguments], pdf_path,
         crop_proof, page_render[:source_pdf_sha256]
       )
+      artifact[:render_engine] = page_render[:render_engine]
+      artifact[:render_executable_sha256] = page_render[:render_executable_sha256]
+      artifact[:render_environment] = page_render[:render_environment]
       scale = opts[:scale].to_f
       scale = 1.0 if scale <= 0.0
       factor = (1.0 / 72.0) * scale
@@ -5886,8 +6077,10 @@ module BlueCollarSystems
           image.set_attribute(dictionary, 'source_kind', 'text_span')
           image.set_attribute(dictionary, 'representation', 'raster')
           image.set_attribute(
-            dictionary, 'renderer', 'pdftocairo_transparent_page_crop'
+            dictionary, 'renderer', page_render[:renderer]
           )
+          image.set_attribute(dictionary, 'raster_render_engine', page_render[:render_engine].to_s)
+          image.set_attribute(dictionary, 'raster_render_executable_sha256', page_render[:render_executable_sha256])
           image.set_attribute(dictionary, 'raster_page_number', page_num.to_i)
           image.set_attribute(
             dictionary, 'raster_page_rotation',
