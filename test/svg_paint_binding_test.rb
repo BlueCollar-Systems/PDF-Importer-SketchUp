@@ -227,4 +227,23 @@ class SvgPaintBindingTest < Minitest::Test
     assert Binding.boundary_segment_covered?(square[0],square[1],square,tolerance)
     refute Binding.boundary_segment_covered?(square[1],square[0],square,tolerance)
   end
+
+  def test_partial_interior_capsule_coverage_does_not_require_nearby_endpoints
+    boundary=[[-10,-0.5,0],[10,0.5,0],[-10,8,0]]
+    before=Marshal.dump(boundary)
+    # Neither endpoint of the forward sloping edge lies within the strip
+    # around this short horizontal test edge. Its interior is still within
+    # the same Euclidean tolerance along the complete test interval.
+    assert Binding.boundary_segment_covered?([0,0,0],[2,0,0],boundary,0.1)
+    refute Binding.boundary_segment_covered?([0,0,0],[3,0,0],boundary,0.1)
+    refute Binding.boundary_segment_covered?([2,0,0],[0,0,0],boundary,0.1)
+    assert_equal before,Marshal.dump(boundary)
+  end
+
+  def test_capsule_interior_is_bounded_by_the_actual_finite_segment
+    boundary=[[0,0,0],[1,0,0],[0,5,0]]
+    assert Binding.boundary_segment_covered?([0,0,0],[1.05,0,0],boundary,0.1)
+    refute Binding.boundary_segment_covered?([0,0,0],[1.2,0,0],boundary,0.1)
+    refute Binding.boundary_segment_covered?([0,0.11,0],[0.8,0.11,0],boundary,0.1)
+  end
 end
