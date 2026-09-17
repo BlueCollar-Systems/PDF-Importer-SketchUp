@@ -601,6 +601,9 @@ module BlueCollarSystems
           late_pdf_overlays: normalize_json(
             stats[:late_pdf_overlays] || stats['late_pdf_overlays'] || []
           ),
+          item_raster_display_placements: normalize_json(
+            stats[:item_raster_display_placements] || stats['item_raster_display_placements'] || []
+          ),
           pipeline_performance: normalize_json(
             stats[:pipeline_performance] || stats['pipeline_performance'] || {}
           ),

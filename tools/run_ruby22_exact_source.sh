@@ -163,6 +163,7 @@ readonly SMOKE_TESTS=(
   test/cairo_glyph_source_test.rb
   test/command_runner_environment_test.rb
   test/item_raster_page_renderer_test.rb
+  test/item_raster_display_test.rb
   test/page_paint_bounds_test.rb
   test/embedded_image_affine_test.rb
   test/embedded_image_placement_test.rb

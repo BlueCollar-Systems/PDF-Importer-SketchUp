@@ -127,6 +127,14 @@ assets, checksums, license, and notes.
   actual SketchUp texture and matches its decoded visual-pixel digest and size;
   importer attributes alone are not proof.
 
+  After white-mask and annotation composition, verified final-page item crops
+  display 0.001 inch above the highest native text on their page. This prevents
+  overlapping native letters from obscuring the crop's already composed PDF
+  colors. Source XY, the canonical source plane, crop pixels and native peer text
+  remain unchanged. A separate placement record is checked against source crop
+  coordinates and actual host text bounds before and after save/reopen; it does
+  not permit an arbitrary image offset.
+
   Use **3D Text** for go-live visual comparison against Adobe at equal zoom.
   Use **Labels** when you need the explicit Labels request and its audited
   closest-representation ladder. On SketchUp 2017, finite-bbox spans are delivered

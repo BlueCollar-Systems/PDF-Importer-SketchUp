@@ -62,6 +62,7 @@ module BlueCollarSystems
     require File.join(dir, 'svg_paint_order')
     require File.join(dir, 'svg_paint_binding')
     require File.join(dir, 'late_pdf_overlays')
+    require File.join(dir, 'item_raster_display')
     require File.join(dir, 'model_3d_extruder')
     require File.join(dir, 'geometry_cleanup')
     require File.join(dir, 'hatch_detector')
@@ -5120,6 +5121,14 @@ module BlueCollarSystems
             :display_depth_inches => built_overlays.map { |record| record[:display_depth] },
             :final_crop_overlap_area => built_overlays.inject(0.0) { |sum, record| sum + record[:cropped_area] }
           }
+        end
+
+        if composition && builder.page_group
+          ItemRasterDisplay.apply!(builder.page_group, stats,
+            :page => page_num, :media_box => media_box, :page_rotation => page_rotation,
+            :scale => opts[:scale].to_f, :page_y_offset => page_y_offset,
+            :source_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
+            :final_page_crops => composition[:final_page_crops])
         end
 
         if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0 && builder.page_group &&

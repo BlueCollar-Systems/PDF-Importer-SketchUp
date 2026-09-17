@@ -187,6 +187,7 @@ jobs:
           ruby test/ghostscript_runtime_resolver_test.rb
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
+          ruby test/item_raster_display_test.rb
       - name: Evaluate release publication gate
         id: publication
         run: python tools/check_release_publication.py
@@ -279,6 +280,7 @@ jobs:
           ruby test/dependency_resolver_test.rb
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
+          ruby test/item_raster_display_test.rb
           ruby test/page_paint_bounds_test.rb
           ruby test/embedded_image_affine_test.rb
           ruby test/embedded_image_placement_test.rb

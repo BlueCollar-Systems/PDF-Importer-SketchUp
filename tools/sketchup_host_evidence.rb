@@ -23,6 +23,10 @@ require File.join(
   SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
   'bc_pdf_vector_importer', 'png_cropper'
 )
+require File.join(
+  SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
+  'bc_pdf_vector_importer', 'item_raster_display'
+)
 
 module SketchupHostEvidence
   class EvidenceError < StandardError; end
@@ -955,7 +959,8 @@ module SketchupHostEvidence
   private_class_method :host_heal_geometry_equivalent?
 
   def self.verify_delivery_evidence!(stats, manifest, requested_mode = nil,
-                                     selected_pages = nil)
+                                     selected_pages = nil,
+                                     require_item_raster_display = false)
     raise EvidenceError, 'pipeline stats are missing' unless stats.is_a?(Hash)
     if !manifest.is_a?(Array) || manifest.empty?
       raise EvidenceError, 'entity manifest is missing or empty'
@@ -1016,6 +1021,7 @@ module SketchupHostEvidence
       verify_raster_deliveries!(
         stats, manifest, requested_mode, selected_pages
       )
+      verify_item_raster_display!(stats, manifest, require_item_raster_display)
       verify_page_representation_fallbacks!(
         stats, requested_mode, selected_pages
       )
@@ -1025,6 +1031,15 @@ module SketchupHostEvidence
       )
     end
     true
+  end
+
+  def self.verify_item_raster_display!(stats, manifest, required = false)
+    helper = BlueCollarSystems::PDFVectorImporter::ItemRasterDisplay
+    return true unless hash_key?(stats, :item_raster_display_placements) ||
+      (required && !helper.item_records(stats).empty?)
+    helper.verify_manifest!(stats, manifest)
+  rescue BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError => error
+    raise EvidenceError, error.message
   end
 
   def self.verify_attempt_claim_ownership!(attempts, rows_by_claim)

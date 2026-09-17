@@ -287,7 +287,7 @@ class SketchupHostEvidenceTest < Minitest::Test
     Dir.mktmpdir('su-evidence-source') do |dir|
       plugin_dir = File.join(dir, 'bc_pdf_vector_importer')
       FileUtils.mkdir_p(plugin_dir)
-      %w[representation_fidelity.rb png_cropper.rb].each do |name|
+      %w[representation_fidelity.rb png_cropper.rb item_raster_display.rb page_transform.rb].each do |name|
         FileUtils.cp(
           File.join(
             REPO_ROOT, 'extracted', 'sketchup_ext',
@@ -2087,6 +2087,11 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert SketchupHostEvidence.verify_delivery_evidence!(
       stats, image_manifest, :raster, [1]
     )
+
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
+      SketchupHostEvidence.verify_delivery_evidence!(stats, image_manifest, :raster, [1], true)
+    end
+    assert_match(/display-placement ledger is missing/, error.message)
 
     fallback = Marshal.load(Marshal.dump(stats))
     fallback[:raster_fallback_used] = true
