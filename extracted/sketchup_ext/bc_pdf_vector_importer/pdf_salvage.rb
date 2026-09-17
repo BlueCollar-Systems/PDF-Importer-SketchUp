@@ -38,18 +38,37 @@ module BlueCollarSystems
           key = memo_key(pdf_path)
           @memo ||= {}
           cached = key ? @memo[key] : nil
-          if cached
-            raise SalvageError, cached[:error] if cached[:error]
+          source_sha256 = Digest::SHA256.file(pdf_path).hexdigest
+          if valid_cached_result?(cached, source_sha256)
             return [cached[:path], cached[:note]]
           end
+          @memo.delete(key) if key
           begin
             result = prepare_uncached(pdf_path)
-            @memo[key] = { :path => result[0], :note => result[1] } if key
+            unless Digest::SHA256.file(pdf_path).hexdigest == source_sha256
+              raise SalvageError, 'PDF changed during import preparation.'
+            end
+            @memo[key] = { :path => result[0], :note => result[1],
+              :source_sha256 => source_sha256,
+              :normalized_sha256 => Digest::SHA256.file(result[0]).hexdigest } if key
             result
           rescue SalvageError => e
-            @memo[key] = { :error => e.message } if key
+            # A repaired helper or source must be retryable in the same session.
+            @memo.delete(key) if key
             raise
           end
+        rescue SalvageError
+          raise
+        rescue StandardError => error
+          raise SalvageError, 'PDF preparation could not be verified: ' + error.message
+        end
+
+        def valid_cached_result?(cached, source_sha256)
+          cached && cached[:source_sha256] == source_sha256 &&
+            File.file?(cached[:path].to_s) &&
+            Digest::SHA256.file(cached[:path]).hexdigest == cached[:normalized_sha256]
+        rescue StandardError
+          false
         end
 
         def memo_key(pdf_path)
@@ -70,9 +89,20 @@ module BlueCollarSystems
 
           out = salvage_with_poppler(pdf_path, reason)
           if out
-            note = "salvaged via poppler (#{reason})"
-            log_info("#{File.basename(pdf_path)}: #{note}")
-            return [out, note]
+            # Cairo is a page-count recovery oracle only: its PDF output uses
+            # print flags, so importing it could lose visible non-print notes.
+            # Normalize the ORIGINAL source with screen visibility instead.
+            begin
+              inventory = PDFParser.new(out)
+              inventory.parse
+              normalized = normalize_annotation_appearances(pdf_path, inventory.page_count)
+              note = "recovered PDF with screen-visible annotation appearances (#{reason})"
+              log_info("#{File.basename(pdf_path)}: #{note}")
+              return [normalized, note]
+            ensure
+              inventory.release if inventory
+              cleanup(out)
+            end
           end
 
           if reason == 'encrypted'
@@ -134,13 +164,17 @@ module BlueCollarSystems
         # pdfwrite preserves text/vectors and image resolution. Screen flags
         # matter: pdftocairo -pdf uses print visibility and drops non-printing
         # visible notes (or exposes print-only hidden notes). Never use it here.
-        def normalize_annotation_appearances(pdf_path)
+        def normalize_annotation_appearances(pdf_path, recovered_page_count = nil)
           exe = DependencyResolver.find_ghostscript
           raise SalvageError, 'Visible PDF annotations require the bundled Ghostscript helper; repair the importer installation.' unless exe
           before = Digest::SHA256.file(pdf_path).hexdigest
-          source = PDFParser.new(pdf_path)
-          source.parse
-          count = source.page_count
+          count = recovered_page_count
+          unless count
+            source = PDFParser.new(pdf_path)
+            source.parse
+            count = source.page_count
+          end
+          raise SalvageError, 'Source page count was not verified.' unless count.is_a?(Integer) && count > 0
           out = SafeTemp.join('bc_annotations_' + Process.pid.to_s + '_' + Time.now.to_i.to_s + '_' + rand(1_000_000).to_s + '.pdf')
           accepted = false
           args = [exe, '-q', '-dSAFER', '-dBATCH', '-dNOPAUSE', '-dPDFSTOPONERROR',
@@ -168,8 +202,11 @@ module BlueCollarSystems
           raise SalvageError, 'PDF changed during annotation normalization.' unless Digest::SHA256.file(pdf_path).hexdigest == before
           check = PDFParser.new(out)
           check.parse
-          unless check.page_count == count && (1..count).none? { |page| check.page_has_annotations?(page) }
-            raise SalvageError, 'Annotation normalization did not preserve every page as complete page content.'
+          remaining = (1..check.page_count).select { |page| check.page_has_annotations?(page) }
+          unless check.page_count == count && remaining.empty?
+            raise SalvageError, 'Annotation normalization did not preserve every page as complete page content ' +
+              '(expected ' + count.to_s + ' pages, found ' + check.page_count.to_s +
+              '; remaining annotation pages: ' + remaining.join(',') + ').'
           end
           temp_salvages << out
           accepted = true
@@ -181,7 +218,11 @@ module BlueCollarSystems
         ensure
           source.release if source
           check.release if check
-          File.delete(out) if out && !accepted && File.file?(out)
+          begin
+            File.delete(out) if out && !accepted && File.file?(out)
+          rescue StandardError => cleanup_error
+            log_warn('Rejected annotation artifact cleanup failed: ' + cleanup_error.message)
+          end
         end
 
         # Track all temporary salvaged files so they can be removed at
@@ -252,6 +293,7 @@ module BlueCollarSystems
         def cleanup(path)
           return nil unless path.is_a?(String)
           return nil unless temp_salvages.delete(path)
+          @memo.delete_if { |_key, value| value[:path] == path } if @memo
           File.delete(path) if File.file?(path)
           nil
         rescue StandardError
@@ -262,6 +304,7 @@ module BlueCollarSystems
         def cleanup_all
           paths = temp_salvages.dup
           temp_salvages.clear
+          @memo.delete_if { |_key, value| paths.include?(value[:path]) } if @memo
           paths.each do |p|
             File.delete(p) if File.file?(p)
           end

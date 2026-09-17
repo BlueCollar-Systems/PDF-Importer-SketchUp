@@ -115,6 +115,7 @@ module BlueCollarSystems
         value = dict['/Annots']
         return false if value.nil? || value == 'null'
         entries = resolve_object(value)
+        return false if entries == 'null'
         if entries.is_a?(String) && entries.strip.start_with?('[')
           entries = parse_array_string(entries)
         end

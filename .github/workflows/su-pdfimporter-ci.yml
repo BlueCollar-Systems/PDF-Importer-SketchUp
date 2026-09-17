@@ -104,6 +104,8 @@ jobs:
           ruby test/finalize_diagnostics_isolation_test.rb
           ruby test/batch_geometry_sidecar_isolation_test.rb
           ruby test/pdf_annotation_normalization_test.rb
+          ruby test/pdf_salvage_memo_integrity_test.rb
+          ruby test/pdf_salvage_screen_recovery_test.rb
           ruby test/logger_isolation_test.rb
           ruby test/logger_buffer_test.rb
           ruby test/poppler_output_path_alphabet_test.rb
