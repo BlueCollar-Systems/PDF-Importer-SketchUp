@@ -47,4 +47,12 @@ class CoveredClipFillTest < Minitest::Test
     assert_equal 2, Builder.contour_winding(Point.new(5,5), [outer, inner])
     assert_equal 0, Builder.contour_winding(Point.new(12,5), [outer, inner])
   end
+
+  def test_source_polygon_overlapping_clip_is_not_an_arc_fit_candidate
+    clips = [[10, 10, 20, 20]]
+    assert Builder.overlaps_clip_fill?([9, 9, 21, 21], clips)
+    assert Builder.overlaps_clip_fill?([12, 12, 18, 18], clips)
+    refute Builder.overlaps_clip_fill?([21, 21, 30, 30], clips)
+    refute Builder.overlaps_clip_fill?(nil, clips)
+  end
 end

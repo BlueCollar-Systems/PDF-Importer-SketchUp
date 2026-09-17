@@ -673,6 +673,23 @@ class CairoGlyphSourceTest < Minitest::Test
     assert evidence[:source_ink_coverage_verified]
   end
 
+  def test_overlapping_whitespace_does_not_take_visible_peer_ink
+    visible = SpanItem.new('AB', 'pdftotext', 'text_span:1:visible', 0.0, 0.0, 20.0, 10.0)
+    blank = SpanItem.new('  ', 'Arial', 'text_span:1:blank', 10.0, 0.0, 20.0, 10.0)
+    pens = [
+      {x: 1.0, y: 5.0, placement_index: 0, ink_bbox_pdf: [0.0, 1.0, 10.0, 9.0]},
+      {x: 11.0, y: 5.0, placement_index: 1, ink_bbox_pdf: [10.0, 1.0, 20.0, 9.0]}
+    ]
+    match = CGS.match_spans(pens, [visible, blank], FIXTURE_MEDIA_BOX)
+    assert_equal ['text_span:1:visible', 'text_span:1:visible'],
+                 match[:placement_matches].map { |entry| entry[:source_span_id] }
+    # A source font can paint a Unicode space. Its independently rendered ink
+    # is retained when it is not already attributable to a visible peer.
+    alone = CGS.match_spans([pens[1]], [blank], FIXTURE_MEDIA_BOX)
+    assert_equal ['text_span:1:blank'],
+                 alone[:placement_matches].map { |entry| entry[:source_span_id] }
+  end
+
   def test_finite_ascii_shaping_bound_does_not_excuse_unrelated_missing_glyphs
     assert_equal 10, CGS.minimum_shaped_glyph_count(
       SpanItem.new('TENLETTERS')

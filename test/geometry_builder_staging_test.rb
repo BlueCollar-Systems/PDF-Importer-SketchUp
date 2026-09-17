@@ -89,7 +89,7 @@ class GeometryBuilderStagingTest < Minitest::Test
   end
 
   class Edge
-    attr_accessor :layer
+    attr_accessor :layer, :hidden
     attr_reader :start_point, :end_point
 
     def initialize(start_point, end_point)
@@ -100,10 +100,11 @@ class GeometryBuilderStagingTest < Minitest::Test
 
   class Face
     attr_accessor :layer, :material, :back_material
-    attr_reader :points
+    attr_reader :points, :edges
 
     def initialize(points = [])
       @points = Array(points)
+      @edges = @points.each_with_index.map { |p, i| Edge.new(p, @points[(i + 1) % @points.length]) }
     end
 
     def normal
@@ -339,7 +340,8 @@ class GeometryBuilderStagingTest < Minitest::Test
 
     assert_equal 2, result[:faces],
                  'every host-sub-tolerance PDF fill must still create a face'
-    assert_equal 0, model.active_entities.groups_created
+    assert_equal 1, model.active_entities.groups_created,
+                 'fill boundaries must be isolated from real source strokes'
     assert_equal 0, model.active_entities.groups_exploded,
                  'the tiny batch instance must never be exploded in SketchUp 2017'
     assert_equal 1, model.definitions.items.length,
@@ -347,7 +349,8 @@ class GeometryBuilderStagingTest < Minitest::Test
     definition = model.definitions.items.first
     assert_equal 2, definition.entities.faces_created,
                  'every exact source fill must remain a physical face'
-    instances = model.active_entities.to_a.select do |entity|
+    fill_target = model.active_entities.to_a.grep(Group).first.entities
+    instances = fill_target.to_a.select do |entity|
       entity.is_a?(ComponentInstance)
     end
     assert_equal 1, instances.length,
@@ -361,6 +364,8 @@ class GeometryBuilderStagingTest < Minitest::Test
     end
     assert_operator definition_xs.max, :>=, 1000.0,
                     'the second source fill must remain one inch from the first'
+    assert definition.entities.to_a.grep(Face).flat_map(&:edges).all?(&:hidden),
+           'fill-only source boundaries must not gain visible strokes'
   end
 
   def test_heavy_page_keeps_micro_fill_batch_outside_exploded_staging_groups
@@ -377,17 +382,15 @@ class GeometryBuilderStagingTest < Minitest::Test
     assert_equal true, result[:geometry_staging][:enabled]
     assert_equal 0, result[:geometry_staging][:explode_count]
     assert_equal true, result[:geometry_staging][:explode_skipped]
-    assert_equal 2, result[:geometry_staging][:retained_group_count]
+    assert_equal 0, result[:geometry_staging][:retained_group_count]
     assert_equal 500, result[:faces]
     groups = model.active_entities.to_a.grep(Group)
-    assert_equal 2, groups.length
-    instances = model.active_entities.to_a.grep(ComponentInstance)
+    assert_equal 1, groups.length
+    instances = groups.first.entities.to_a.grep(ComponentInstance)
     assert_equal 1, instances.length,
                  'one stable destination/style must retain one tiny-fill batch'
-    groups.each do |group|
-      assert_equal 0, group.entities.to_a.grep(ComponentInstance).length,
-                   'the tiny batch instance must stay on the stable parent'
-    end
+    assert_equal 0, groups.first.entities.groups_exploded,
+                 'the fill owner is stable across geometry staging'
     assert_equal 500, instances.first.definition.entities.faces_created
   end
 

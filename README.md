@@ -15,6 +15,8 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 - A Windows PDF renderer's Symbol startup warning is treated as unrelated only when a complete successful source-font inventory proves that the document has no Symbol font. Actual missing fonts, incomplete inventories and other renderer errors still require repair; text placement and geometry verification remain mandatory.
 - Failed text imports now identify the font, language pack or renderer inventory check that failed.
 - Covered compound clipping paths retain their exact contours and holes, so clipped logos and other filled details are not replaced by solid rectangles.
+- Fill-only backgrounds no longer gain visible border lines, and polygon outlines beside clipped artwork retain their source vertices instead of being fitted to conflicting circles.
+- Overlapping blank annotation spans no longer take glyphs from neighboring visible text during source ownership matching.
 - Includes the retained large-page recognition and glyph/raster performance improvements.
 
 ### Earlier fixes (v3.7.130)

@@ -717,7 +717,12 @@ module BlueCollarSystems
           next if contenders.empty?
           winner = contenders.sort_by do |entry|
             row = entry[0]
-            [-entry[2], entry[3], row[:candidates].length, row[:index]]
+            # Whitespace extractor boxes often overlap visible annotation
+            # text. Prefer a visible semantic owner when both claim real ink;
+            # retain whitespace-only candidates when no visible peer owns it.
+            # This is ownership ranking, never a zero-ink proof from Unicode.
+            [row[:expected_count].to_i > 0 ? 0 : 1,
+             -entry[2], entry[3], row[:candidates].length, row[:index]]
           end.first
           owned[winner[0][:index]] << winner[1]
         end

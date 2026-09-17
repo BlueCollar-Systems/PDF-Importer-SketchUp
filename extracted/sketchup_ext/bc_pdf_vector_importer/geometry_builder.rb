@@ -110,10 +110,14 @@ module BlueCollarSystems
 
         # Color group cache
         @color_groups = {}
+        fill_targets = {}
 
         page_width  = PageTransform.effective_width(@media_box, @page_rotation)
         page_height_pts = PageTransform.effective_height(@media_box, @page_rotation)
         page_area_pts = page_width * page_height_pts
+        clipped_fill_boxes = @paths.select do |path|
+          path.respond_to?(:clip_fill_rule) && path.clip_fill_rule
+        end.map { |path| compute_path_bbox(path) }.compact
 
         # ── Vector geometry ──
         heavy_page = @paths.length >= GEOMETRY_STAGING_PATH_THRESHOLD
@@ -184,6 +188,16 @@ module BlueCollarSystems
             next
           end
 
+          # Fill-only faces own their boundaries separately from true strokes.
+          # This permits hidden fill edges without hiding neighboring linework,
+          # while retaining the existing batching for tiny host-tolerance fills.
+          if should_fill && !should_stroke
+            fill_targets[dest.object_id] ||= dest.add_group
+            fill_group = fill_targets[dest.object_id]
+            fill_group.name = 'PDF Fill'
+            dest = fill_group.entities
+          end
+
           path.subpaths.each do |subpath|
             points_list = subpath_to_points(subpath)
             next if points_list.empty?
@@ -206,12 +220,13 @@ module BlueCollarSystems
             # exact source boundary for fills and reserve editable arc fitting
             # for unfilled stroke geometry.
             if @detect_arcs && !should_fill && dash_spec.nil? &&
-               su_points.length >= 5
+               su_points.length >= 5 &&
+               !self.class.overlaps_clip_fill?(path_bbox, clipped_fill_boxes)
               draw_with_arc_detection(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color)
             else
-              draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed)
+              draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed) if should_stroke
               if should_fill && subpath.closed && su_points.length >= 3
-                draw_face(draw_dest, su_points, path_layer, path.fill_color)
+                draw_face(draw_dest, su_points, path_layer, path.fill_color, !should_stroke)
               end
             end
           end
@@ -842,6 +857,16 @@ module BlueCollarSystems
         winding
       end
 
+      # Source polygon strokes sharing a clipped fill boundary must retain
+      # their exact vertices. A best-fit circle can visibly cut across the fill.
+      def self.overlaps_clip_fill?(box, clips)
+        return false unless box
+        clips.any? do |clip|
+          box[0] <= clip[2] && box[2] >= clip[0] &&
+            box[1] <= clip[3] && box[3] >= clip[1]
+        end
+      end
+
       def draw_compound_clip_fill(entities, source_loops, rule, layer, fill_rgb)
         loops = source_loops.map { |points| remove_consecutive_duplicates(points) }
         loops = loops.select { |points| points.length >= 3 }
@@ -892,7 +917,12 @@ module BlueCollarSystems
           end
         end
         edges = group.entities.grep(Sketchup::Edge)
-        edges.each { |edge| set_layer(edge, layer) }
+        edges.each do |edge|
+          set_layer(edge, layer)
+          # A PDF fill has no stroke unless a separate painting operator
+          # requests it. Isolated ownership keeps real neighboring strokes visible.
+          edge.hidden = true
+        end
         @edge_count += edges.length
         group
       rescue StandardError
@@ -900,17 +930,18 @@ module BlueCollarSystems
         raise
       end
 
-      def draw_face(entities, points, layer, fill_rgb = nil)
+      def draw_face(entities, points, layer, fill_rgb = nil, hide_edges = false)
         return false if points.length < 3
         clean = build_face_loop(points)
         return false unless clean
         if face_loop_max_extent(clean) < SMALL_FACE_DIRECT_MAX_EXTENT
-          return draw_scaled_face_instance(entities, clean, layer, fill_rgb)
+          return draw_scaled_face_instance(entities, clean, layer, fill_rgb, hide_edges)
         end
         begin
           face = entities.add_face(clean)
           if face
             style_face(face, layer, fill_rgb)
+            hide_fill_edges(face) if hide_edges
             @face_count += 1
             return true
           end
@@ -920,7 +951,7 @@ module BlueCollarSystems
              face_loop_max_extent(clean) < 0.01
             begin
               return true if draw_scaled_face_instance(
-                entities, clean, layer, fill_rgb
+                entities, clean, layer, fill_rgb, hide_edges
               )
             rescue StandardError
               # Report the original host rejection below; it is the most
@@ -938,7 +969,7 @@ module BlueCollarSystems
         [(xs.max - xs.min).abs, (ys.max - ys.min).abs].max
       end
 
-      def draw_scaled_face_instance(entities, points, layer, fill_rgb)
+      def draw_scaled_face_instance(entities, points, layer, fill_rgb, hide_edges = false)
         unless entities.respond_to?(:add_instance) &&
                @model.respond_to?(:definitions) &&
                @model.definitions.respond_to?(:add) &&
@@ -947,13 +978,14 @@ module BlueCollarSystems
         end
         stable_entities =
           @geometry_staging[:stable_targets][entities.object_id] || entities
-        key = small_face_batch_key(stable_entities, layer, fill_rgb)
+        key = small_face_batch_key(stable_entities, layer, fill_rgb) + "|#{hide_edges}"
         batch = @deferred_small_face_batches[key]
         unless batch
           batch = {
             :entities => stable_entities,
             :layer => layer,
             :fill_rgb => Array(fill_rgb),
+            :hide_edges => hide_edges,
             :loops => []
           }
           @deferred_small_face_batches[key] = batch
@@ -1003,6 +1035,7 @@ module BlueCollarSystems
             face = definition.entities.add_face(large)
             raise 'scaled sub-tolerance construction returned no face' unless face
             style_face(face, batch[:layer], batch[:fill_rgb])
+            hide_fill_edges(face) if batch[:hide_edges]
           end
           inverse_factor = 1.0 / factor
           transformation =
@@ -1056,6 +1089,11 @@ module BlueCollarSystems
           face.back_material = material
         end
         face
+      end
+
+      def hide_fill_edges(face)
+        return unless face.respond_to?(:edges)
+        face.edges.each { |edge| edge.hidden = true }
       end
 
       # ---------------------------------------------------------------
