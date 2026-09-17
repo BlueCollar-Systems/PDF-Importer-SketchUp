@@ -1258,6 +1258,71 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal false, failure[:affirmative_impossibility]
   end
 
+  def test_page_inventory_diagnostics_include_fonts_languages_and_helper_reason
+    missing = span('text_span:1:84', [60.0, 60.0, 70.0, 70.0])
+    context = complete_source_context.merge(
+      font_inventory_status: :failed,
+      page_failures: [
+        { reason_code: :font_inventory_runtime_error,
+          missing_fonts: ['Symbol'], missing_language_packs: ['Japanese'] },
+        { reason_code: :renderer_runtime_error, detail: 'helper timed out' }
+      ]
+    )
+    result = RENDERER.render_svg(
+      Svg3DEntities.new, square_svg, MEDIA_BOX, [missing], depth: 0.05,
+      source_context: context
+    )
+
+    refute result[:ok]
+    assert_empty result[:transition_proofs]
+    assert_equal 1, result[:failures].length
+    failure = result[:failures][0]
+    assert_equal 'text_span:1:84', failure[:source_span_id]
+    assert_equal :source_page_inventory_failed, failure[:reason_code]
+    assert_equal true, failure[:generic_failure]
+    assert_equal false, failure[:affirmative_impossibility]
+    ['render status: complete', 'font inventory status: failed',
+     'font_inventory_runtime_error', 'missing fonts: Symbol',
+     'missing language packs: Japanese', 'helper timed out'].each do |text|
+      assert_includes failure[:detail], text
+    end
+  end
+
+  def test_page_inventory_diagnostics_are_bounded_and_omit_private_fields
+    private_values = [
+      'C:\\Users\\Private Customer\\source.pdf',
+      '/home/private-customer/source.pdf',
+      'https://helper.example/private?token=sample-secret',
+      'Authorization: Bearer sample-secret'
+    ]
+    private_values.each do |private_value|
+      context = complete_source_context.merge(
+        page_failures: { '' => {
+          reason_code: :font_inventory_runtime_error, missing_fonts: ['Symbol'],
+          detail: private_value, source_path: private_value, token: 'sample-secret'
+        } }
+      )
+      failure = RENDERER.source_page_failure('text_span:1:84', context)
+      assert_includes failure[:detail], 'font_inventory_runtime_error'
+      assert_includes failure[:detail], 'Symbol'
+      assert_includes failure[:detail], '[private diagnostic omitted]'
+      refute_includes failure[:detail], private_value
+      refute_includes failure[:detail], 'sample-secret'
+      assert_equal true, failure[:generic_failure]
+      assert_equal false, failure[:affirmative_impossibility]
+    end
+    context = complete_source_context.merge(
+      page_failures: Array.new(10) {
+        { reason_code: :font_inventory_runtime_error,
+          missing_fonts: Array.new(10) { 'Font' * 100 }, detail: 'diagnostic' * 100 }
+      }
+    )
+    failure = RENDERER.source_page_failure('text_span:1:286', context)
+    assert_operator failure[:detail].length, :<=, 640
+    assert_includes failure[:detail], '...'
+    assert_equal :source_page_inventory_failed, failure[:reason_code]
+  end
+
   def test_source_page_context_must_match_item_importer_and_page
     missing = span('text_span:1:7', [60.0, 60.0, 70.0, 70.0])
     contexts = [

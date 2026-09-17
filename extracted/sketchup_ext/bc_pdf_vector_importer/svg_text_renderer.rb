@@ -445,7 +445,9 @@ module BlueCollarSystems
           end
         end
 
-        missing_fonts = missing_display_fonts(render_stderr)
+        missing_fonts = source_missing_display_fonts(
+          render_stderr, pdf_path, renderer[:exe]
+        )
         if skipped_collapsed > 0
           note = missing_fonts.empty? ? "" : " (unresolved font#{missing_fonts.length > 1 ? 's' : ''}: #{missing_fonts.join(', ')})"
           begin
@@ -1233,6 +1235,37 @@ module BlueCollarSystems
         stderr.scan(/No display font for '([^']+)'/).map { |mm| mm[0] }.uniq
       end
 
+      # Windows Poppler initializes its base-font table before rendering and
+      # can warn about Symbol even when no source font references Symbol.
+      # Only a complete, successful document inventory can prove that this
+      # specific startup warning is unrelated. Other diagnostics and actual
+      # Symbol fonts remain failures; glyph matching still certifies the ink.
+      def self.source_missing_display_fonts(stderr, pdf_path, renderer_exe)
+        missing = missing_display_fonts(stderr)
+        return missing unless missing.include?('Symbol') &&
+          symbol_startup_diagnostics_only?(stderr)
+        key = cache_key(pdf_path)
+        @font_inventory_cache ||= {}
+        pdf_needs_embedding?(pdf_path, renderer_exe) unless
+          @font_inventory_cache.key?(key)
+        inventory = @font_inventory_cache[key]
+        return missing unless inventory &&
+          symbol_startup_diagnostics_only?(inventory[:stderr]) &&
+          pdffonts_inventory_complete?(inventory[:stdout])
+        rows = inventory[:stdout].lines.map(&:strip).reject(&:empty?)[2..-1]
+        return missing if rows.any? { |row| row =~ /symbol/i }
+        missing.reject { |name| name == 'Symbol' }
+      rescue StandardError
+        missing || missing_display_fonts(stderr)
+      end
+
+      def self.symbol_startup_diagnostics_only?(stderr)
+        stderr.to_s.lines.all? do |line|
+          line.strip.empty? ||
+            line.strip == "Syntax Error: No display font for 'Symbol'"
+        end
+      end
+
       # R23: poppler exits 0 while dropping every run of a CID font whose
       # language pack (e.g. Adobe-GB1) is not packaged — the only trace is
       # this stderr line. Surface it so reports can show the loss instead
@@ -1295,24 +1328,53 @@ module BlueCollarSystems
         nil
       end
 
+      # A false cache entry means a completed inventory found no font that
+      # needs embedding. Empty/truncated helper output cannot establish that.
+      # Accept the standard table, including a valid table with no font rows.
+      def self.pdffonts_inventory_complete?(output)
+        return false unless output.is_a?(String)
+        lines = output.lines.map { |line| line.strip }.reject(&:empty?)
+        return false unless lines.length >= 2
+        return false unless lines[0] =~
+          /\Aname\s+type\s+encoding\s+emb\s+sub\s+uni\s+object\s+ID\z/
+        return false unless lines[1] =~ /\A-+(?:\s+-+){6}\z/
+        lines[2..-1].all? do |line|
+          line =~ /\A\S+(?:\s+\S+){2,}\s+(yes|no)\s+(yes|no)\s+(yes|no)\s+\d+\s+\d+\z/
+        end
+      end
+
       def self.pdf_needs_embedding?(pdf_path, pdftocairo_exe)
         @font_check_cache ||= {}
         key = cache_key(pdf_path)
         return @font_check_cache[key] if @font_check_cache.key?(key)
-        result = false
-        begin
-          pf = find_pdffonts(pdftocairo_exe)
-          if pf
-            run = CommandRunner.run([pf.to_s, '--', pdf_path.to_s],
-              timeout_s: 30, context: 'SvgTextRenderer.pdffonts')
-            result = run[:ok] && pdffonts_reports_unembedded?(run[:stdout].to_s)
-          end
-        rescue StandardError => e
-          warn_safe("pdf_needs_embedding? failed: #{e.message}")
-          result = false
+        pf = find_pdffonts(pdftocairo_exe)
+        return false unless pf
+
+        run = CommandRunner.run([pf.to_s, '--', pdf_path.to_s],
+          timeout_s: 30, context: 'SvgTextRenderer.pdffonts')
+        return false unless run[:ok]
+
+        result = pdffonts_reports_unembedded?(run[:stdout])
+        if pdffonts_inventory_complete?(run[:stdout]) &&
+           symbol_startup_diagnostics_only?(run[:stderr])
+          @font_inventory_cache ||= {}
+          @font_inventory_cache[key] = {
+            :stdout => run[:stdout].dup, :stderr => run[:stderr].to_s.dup
+          }
         end
-        @font_check_cache[key] = result
+        # Keep failed/incomplete inventories retryable within this SketchUp
+        # session. A known unembedded row can still request the existing font
+        # repair now. An affirmative unembedded row is cacheable even when
+        # Poppler reports an unrelated standard-font warning; a negative
+        # result additionally requires diagnostic-free inventory output.
+        if pdffonts_inventory_complete?(run[:stdout]) &&
+           (result || run[:stderr].to_s.strip.empty?)
+          @font_check_cache[key] = result
+        end
         result
+      rescue StandardError => e
+        warn_safe("pdf_needs_embedding? failed: #{e.message}")
+        false
       end
 
       def self.embed_fonts_cached(pdf_path, gs)

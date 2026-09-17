@@ -3,13 +3,20 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.148-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.149-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.130)
+### Recent fixes (v3.7.149)
+
+- A temporary failed font inventory no longer disables font preparation for the rest of a session.
+- A Windows PDF renderer's Symbol startup warning is treated as unrelated only when a complete successful source-font inventory proves that the document has no Symbol font. Actual missing fonts, incomplete inventories and other renderer errors still require repair; text placement and geometry verification remain mandatory.
+- Failed text imports now identify the font, language pack or renderer inventory check that failed.
+- Includes the retained large-page recognition and glyph/raster performance improvements.
+
+### Earlier fixes (v3.7.130)
 
 - **Non-ASCII user profiles and file names**: helper output paths now live under an ASCII-safe temporary root, so imports work for accounts and PDF file names containing accented, Cyrillic, or CJK characters. Previously the bundled PDF renderers could not write beneath such paths and affected imports failed silently — including recovery of damaged PDFs whose own file name contained an accent.
 - **Actionable runtime diagnostics**: if the bundled PDF runtime cannot start or verify, the importer now names the exact missing piece and the fix, instead of silently disabling itself.

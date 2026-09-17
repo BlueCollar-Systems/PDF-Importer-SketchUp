@@ -1284,7 +1284,9 @@ module BlueCollarSystems
           render_box_used: rendered_with_cropbox ? :crop_box : :media_box,
           cropbox_fallback: opts[:use_cropbox] == true &&
             !rendered_with_cropbox,
-          missing_fonts: SvgTextRenderer.missing_display_fonts(stderr),
+          missing_fonts: SvgTextRenderer.source_missing_display_fonts(
+            stderr, pdf_path, renderer[:exe]
+          ),
           missing_language_packs: SvgTextRenderer.missing_language_packs(stderr)
         }
       rescue StandardError => e
