@@ -10,6 +10,19 @@ class ItemRasterPageRendererTest < Minitest::Test
   Subject = BlueCollarSystems::PDFVectorImporter::ItemRasterPageRenderer
   ContractError = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError
 
+  def native_fixture_executable
+    resolver = BlueCollarSystems::PDFVectorImporter::DependencyResolver
+    if ENV['BC_TEST_REQUIRE_BUNDLED_GS'] == '1'
+      executable = resolver.bundled_ghostscript_executable
+      refute_nil executable, 'required bundled Ghostscript must resolve; no skip or system fallback'
+      executable
+    else
+      executable = resolver.find_ghostscript
+      skip 'Ghostscript runtime unavailable for native PNG fixture' unless executable
+      executable
+    end
+  end
+
   def test_exact_command_binds_original_media_page_rgba_and_dpi
     args = Subject.arguments('gs', '/source with spaces.pdf', 3, 144, '/page image.png')
     assert Subject.verify_command!(args, '/source with spaces.pdf', 3, 144)
@@ -70,8 +83,7 @@ class ItemRasterPageRendererTest < Minitest::Test
 
   def test_real_rgba_render_preserves_media_canvas_origin_rotation_and_declared_crop_clip
     importer = BlueCollarSystems::PDFVectorImporter
-    executable = importer::DependencyResolver.find_ghostscript
-    skip 'Ghostscript runtime unavailable for native PNG fixture' unless executable
+    executable = native_fixture_executable
     Dir.mktmpdir('rgba-page-fixture') do |folder|
       source = File.join(folder, 'source.pdf')
       content = "1 0 0 rg -15 35 10 10 re f\n0 1 0 rg 165 35 10 10 re f\n" \
@@ -131,8 +143,7 @@ class ItemRasterPageRendererTest < Minitest::Test
 
   def test_real_missing_font_cannot_be_silently_certified_as_standard_font_resolution
     importer = BlueCollarSystems::PDFVectorImporter
-    executable = importer::DependencyResolver.find_ghostscript
-    skip 'Ghostscript runtime unavailable for font fixture' unless executable
+    executable = native_fixture_executable
     poisoned = { 'GS_OPTIONS' => '-dFILTERTEXT', 'GS_DLL' => 'C:/missing/foreign-gs.dll',
                  'GS_LIB' => 'C:/missing/foreign-resources' }
     previous = {}

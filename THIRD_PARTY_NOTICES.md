@@ -1,7 +1,11 @@
 # Third-Party Notices — SketchUp PDF Importer
 
-**Poppler review status:** approved for the exact Poppler inventory below. This
-record does not extend to the separately documented Ghostscript runtime.
+## Poppler review
+
+**Status:** approved
+
+This review applies only to the exact Poppler inventory below. It does not
+extend to the separately documented Ghostscript runtime.
 
 Windows release RBZ files ship a free zero-ceremony Poppler runtime so clean
 machines can import without a separate helper download. Publication remains

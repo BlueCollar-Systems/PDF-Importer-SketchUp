@@ -499,10 +499,12 @@ class PopplerActiveBoundaryValidationTest < Minitest::Test
     artifacts = []
     success = method(:successful_run)
     original_run = RUNNER.method(:run)
-    original_find = NS.method(:safe_find_pdftocairo)
+    original_find = RESOLVER.method(:find_ghostscript)
     original_crop = NS.method(:item_raster_crop_geometry)
     original_verify = NS.method(:verify_item_raster_artifact!)
-    NS.define_singleton_method(:safe_find_pdftocairo) { 'pdftocairo.exe' }
+    # The runner below is a fake; use a real file only for the renderer's
+    # executable identity hash and avoid unrelated helper version probes.
+    RESOLVER.define_singleton_method(:find_ghostscript) { __FILE__ }
     NS.define_singleton_method(:item_raster_crop_geometry) do |*_args|
       {
         :dpi => 150,
@@ -521,7 +523,8 @@ class PopplerActiveBoundaryValidationTest < Minitest::Test
       }
     end
     RUNNER.define_singleton_method(:run) do |args, _opts = {}|
-      path = args[-1] + '.png'
+      raise 'unexpected renderer command' unless args.include?('-sDEVICE=pngalpha')
+      path = args.fetch(args.index('-o') + 1)
       artifacts << path
       File.open(path, 'wb') { |file| file.write('partial png') }
       success.call(DIAGNOSTIC_CLUSTER)
@@ -535,6 +538,7 @@ class PopplerActiveBoundaryValidationTest < Minitest::Test
     )
 
     refute result
+    assert_equal 1, artifacts.length, 'exercise the renderer failure boundary'
     assert_equal 0, target_entities.add_image_calls.length,
       'a rejected item artifact must never reach SketchUp'
     artifacts.each do |path|
@@ -542,7 +546,7 @@ class PopplerActiveBoundaryValidationTest < Minitest::Test
     end
   ensure
     RUNNER.define_singleton_method(:run, original_run) if original_run
-    NS.define_singleton_method(:safe_find_pdftocairo, original_find) if original_find
+    RESOLVER.define_singleton_method(:find_ghostscript, original_find) if original_find
     NS.define_singleton_method(:item_raster_crop_geometry, original_crop) if original_crop
     NS.define_singleton_method(
       :verify_item_raster_artifact!, original_verify

@@ -161,6 +161,12 @@ readonly SMOKE_TESTS=(
   test/textmode1_invariant_test.rb
   test/geometry_builder_text_fallback_test.rb
   test/cairo_glyph_source_test.rb
+  test/command_runner_environment_test.rb
+  test/item_raster_page_renderer_test.rb
+  test/page_paint_bounds_test.rb
+  test/embedded_image_affine_test.rb
+  test/embedded_image_placement_test.rb
+  test/poppler_active_boundary_validation_test.rb
 )
 for test_file in "${SMOKE_TESTS[@]}"; do
   "$RUBY_EXE" --disable-gems "$test_file"
