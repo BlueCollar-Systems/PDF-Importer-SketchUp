@@ -109,6 +109,10 @@ jobs:
           ruby test/rotated_run_merge_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
           ruby test/cairo_glyph_source_test.rb
+          ruby test/svg_text_embed_test.rb
+          ruby test/svg_text_3d_renderer_test.rb
+          ruby test/svg_3d_text_font_gap_attribution_test.rb
+          ruby test/covered_clip_fill_test.rb
           ruby test/synthetic_public_corpus_test.rb
 
   poppler-prune:

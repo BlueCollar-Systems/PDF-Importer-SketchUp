@@ -314,7 +314,8 @@ module BlueCollarSystems
             path.line_join,
             path.dash_pattern ? path.dash_pattern.dup : nil,
             matrix.dup,
-            path.layer_name
+            path.layer_name,
+            path.clip_fill_rule
           )
         end
       end

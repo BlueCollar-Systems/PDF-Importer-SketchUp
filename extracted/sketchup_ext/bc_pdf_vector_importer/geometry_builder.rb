@@ -170,6 +170,20 @@ module BlueCollarSystems
             dash_layer = classify_dash(path.dash_pattern)
           end
 
+          if should_fill && path.respond_to?(:clip_fill_rule) && path.clip_fill_rule
+            loops = path.subpaths.map do |subpath|
+              subpath_to_points(subpath).map do |pt|
+                sx, sy = self.class.sheet_xy(pt)
+                pdf_to_su(sx, sy, page_origin_x, page_origin_y)
+              end
+            end
+            draw_compound_clip_fill(
+              staged_geometry_target(dest, path_idx), loops,
+              path.clip_fill_rule, path_layer, path.fill_color
+            )
+            next
+          end
+
           path.subpaths.each do |subpath|
             points_list = subpath_to_points(subpath)
             next if points_list.empty?
@@ -812,6 +826,78 @@ module BlueCollarSystems
 
       def face_buildable?(points)
         !build_face_loop(points).nil?
+      end
+
+      def self.contour_winding(point, loops)
+        x, y = point.x.to_f, point.y.to_f
+        winding = 0
+        loops.each do |loop|
+          loop.each_with_index do |a, index|
+            b = loop[(index + 1) % loop.length]
+            cross = (b.x - a.x) * (y - a.y) - (x - a.x) * (b.y - a.y)
+            winding += 1 if a.y <= y && b.y > y && cross > 0
+            winding -= 1 if a.y > y && b.y <= y && cross < 0
+          end
+        end
+        winding
+      end
+
+      def draw_compound_clip_fill(entities, source_loops, rule, layer, fill_rgb)
+        loops = source_loops.map { |points| remove_consecutive_duplicates(points) }
+        loops = loops.select { |points| points.length >= 3 }
+        raise 'clipped fill has no usable source contours' if loops.empty?
+        origin = loops[0][0]
+        factor = SMALL_FACE_CONSTRUCTION_SCALE
+        large_loops = loops.map do |points|
+          points.map do |point|
+            Geom::Point3d.new((point.x - origin.x) * factor,
+                              (point.y - origin.y) * factor, 0.0)
+          end
+        end
+        group = entities.add_group
+        group.name = 'PDF Clipped Fill'
+        set_layer(group, layer)
+        group.transformation = Geom::Transformation.translation(origin) *
+          Geom::Transformation.scaling(1.0 / factor, 1.0 / factor, 1.0 / factor)
+        ordered = large_loops.sort_by do |points|
+          area = 0.0
+          points.each_with_index do |a, index|
+            b = points[(index + 1) % points.length]
+            area += a.x * b.y - b.x * a.y
+          end
+          -area.abs
+        end
+        ordered.each do |points|
+          face = group.entities.add_face(points)
+          raise 'host could not build a clipped fill contour' unless face
+        end
+        faces = group.entities.grep(Sketchup::Face)
+        raise 'host produced no clipped fill faces' if faces.empty?
+        faces.each do |face|
+          mesh = face.mesh(0)
+          polygon = mesh.polygons.find { |indices| indices.length >= 3 }
+          raise 'clipped fill face has no physical interior triangle' unless polygon
+          triangle = polygon.first(3).map { |index| mesh.point_at(index.abs) }
+          point = Geom::Point3d.new(
+            triangle.inject(0.0) { |sum, p| sum + p.x } / 3.0,
+            triangle.inject(0.0) { |sum, p| sum + p.y } / 3.0, 0.0
+          )
+          winding = self.class.contour_winding(point, large_loops)
+          inside = rule.to_s == 'evenodd' ? winding.abs.odd? : winding != 0
+          if inside
+            style_face(face, layer, fill_rgb)
+            @face_count += 1
+          else
+            face.erase!
+          end
+        end
+        edges = group.entities.grep(Sketchup::Edge)
+        edges.each { |edge| set_layer(edge, layer) }
+        @edge_count += edges.length
+        group
+      rescue StandardError
+        group.erase! if group && group.valid?
+        raise
       end
 
       def draw_face(entities, points, layer, fill_rgb = nil)

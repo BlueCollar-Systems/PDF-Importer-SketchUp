@@ -30,7 +30,8 @@ module BlueCollarSystems
         :line_join,      # 0=miter, 1=round, 2=bevel
         :dash_pattern,   # [array, phase] or nil
         :ctm,            # [a, b, c, d, e, f] transformation matrix at time of painting
-        :layer_name      # String — OCG layer name, or nil
+        :layer_name,     # String — OCG layer name, or nil
+        :clip_fill_rule  # Exact covered clip contour: :nonzero / :evenodd
       )
 
       SubPath = Struct.new(
@@ -257,6 +258,8 @@ module BlueCollarSystems
         @dash_pattern = nil
         @color_space_stroke = '/DeviceGray'
         @color_space_fill = '/DeviceGray'
+        @clip_regions = []
+        @pending_clip_rule = nil
       end
 
       def save_graphics_state
@@ -269,7 +272,8 @@ module BlueCollarSystems
           line_join: @line_join,
           dash_pattern: @dash_pattern,
           color_space_stroke: @color_space_stroke,
-          color_space_fill: @color_space_fill
+          color_space_fill: @color_space_fill,
+          clip_regions: @clip_regions.dup
         })
       end
 
@@ -285,6 +289,7 @@ module BlueCollarSystems
         @dash_pattern = gs[:dash_pattern]
         @color_space_stroke = gs[:color_space_stroke]
         @color_space_fill = gs[:color_space_fill]
+        @clip_regions = gs[:clip_regions]
       end
 
       # ---------------------------------------------------------------
@@ -749,8 +754,12 @@ module BlueCollarSystems
           finish_subpath(true)
           emit_path(true, true)
 
+        when 'W', 'W*'
+          @pending_clip_rule = op == 'W*' ? :evenodd : :nonzero
+
         when 'n'   # End path without painting (clipping boundary)
           finish_subpath
+          apply_pending_clip!
           clear_path
 
         # --- Text (we skip text content but track state) ---
@@ -829,12 +838,13 @@ module BlueCollarSystems
         return if @current_subpaths.empty?
 
         # Transform all points by current CTM
-        transformed_subpaths = @current_subpaths.map do |sp|
-          new_segments = sp.segments.map do |seg|
-            new_points = seg.points.map { |pt| transform_point(pt[0], pt[1]) }
-            Segment.new(seg.type, new_points)
+        transformed_subpaths = transformed_current_subpaths
+        clip_fill_rule = nil
+        if fill && !stroke
+          resolved = covered_clip_fill(transformed_subpaths)
+          if resolved
+            transformed_subpaths, clip_fill_rule = resolved
           end
-          SubPath.new(new_segments, sp.closed)
         end
 
         path = VectorPath.new(
@@ -848,11 +858,76 @@ module BlueCollarSystems
           @line_join,
           @dash_pattern ? @dash_pattern.dup : nil,
           @ctm.dup,
-          @current_ocg_layer
+          @current_ocg_layer,
+          clip_fill_rule
         )
 
         @paths << path
+        apply_pending_clip!
         clear_path
+      end
+
+      def transformed_current_subpaths
+        @current_subpaths.map do |sp|
+          new_segments = sp.segments.map do |seg|
+            new_points = seg.points.map { |pt| transform_point(pt[0], pt[1]) }
+            Segment.new(seg.type, new_points)
+          end
+          SubPath.new(new_segments, sp.closed)
+        end
+      end
+
+      def apply_pending_clip!
+        return unless @pending_clip_rule
+        paths = transformed_current_subpaths.map { |sp| SubPath.new(sp.segments, true) }
+        @clip_regions << { :paths => paths, :rule => @pending_clip_rule }
+        @pending_clip_rule = nil
+      end
+
+      def contour_bounds(paths)
+        points = Array(paths).flat_map { |sp| sp.segments.flat_map(&:points) }
+        return nil if points.empty?
+        xs = points.map { |pt| pt[0] }
+        ys = points.map { |pt| pt[1] }
+        [xs.min, ys.min, xs.max, ys.max]
+      end
+
+      def rectangle_bounds(paths)
+        return nil unless paths.length == 1
+        segments = paths[0].segments
+        return nil unless segments.all? { |seg| [:move, :line].include?(seg.type) }
+        points = segments.flat_map(&:points).uniq
+        return nil unless points.length == 4
+        box = contour_bounds(paths)
+        return nil unless points.all? do |pt|
+          [box[0], box[2]].include?(pt[0]) && [box[1], box[3]].include?(pt[1])
+        end
+        return nil unless segments.select { |seg| seg.type == :line }.all? do |seg|
+          seg.points[0][0] == seg.points[1][0] || seg.points[0][1] == seg.points[1][1]
+        end
+        box
+      end
+
+      def box_covers?(outer, inner)
+        outer && inner && outer[0] <= inner[0] && outer[1] <= inner[1] &&
+          outer[2] >= inner[2] && outer[3] >= inner[3]
+      end
+
+      # A fill rectangle covering a compound clipping contour paints exactly
+      # that contour. Preserve its curves and winding rule, including holes.
+      # This is a proved containment case, not a general Boolean approximation.
+      def covered_clip_fill(paint_paths)
+        paint_box = rectangle_bounds(paint_paths)
+        return nil unless paint_box && @clip_regions && !@clip_regions.empty?
+        complex = @clip_regions.reject { |clip| rectangle_bounds(clip[:paths]) }
+        return nil unless complex.length == 1
+        clip = complex[0]
+        clip_box = contour_bounds(clip[:paths])
+        return nil unless box_covers?(paint_box, clip_box)
+        return nil unless @clip_regions.all? do |other|
+          other.equal?(clip) || box_covers?(rectangle_bounds(other[:paths]), clip_box)
+        end
+        [clip[:paths], clip[:rule]]
       end
 
       def clear_path
