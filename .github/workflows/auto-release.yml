@@ -178,6 +178,11 @@ jobs:
           python -m unittest tools.test_complete_github_release tools.test_skp_probe_lock_contract
       - name: Smoke the checked-in Windows Poppler helpers
         run: python tools/smoke_poppler_helpers.py --required
+      - name: Verify separate Ghostscript runtime and relocated transparent rendering
+        run: |
+          python -m unittest tools.test_ghostscript_runtime
+          python tools/smoke_ghostscript_runtime.py --required
+          ruby test/ghostscript_runtime_resolver_test.rb
       - name: Evaluate release publication gate
         id: publication
         run: python tools/check_release_publication.py

@@ -35,6 +35,7 @@ import zipfile
 from pathlib import Path
 
 from tools import build_poppler_runtime_manifest as runtime_manifest
+from tools import ghostscript_runtime
 
 REPO_ROOT   = Path(__file__).parent.resolve()
 EXT_ROOT    = REPO_ROOT / "extracted" / "sketchup_ext"
@@ -200,6 +201,7 @@ def _run_poppler_smoke(*, required: bool = False) -> None:
 
 
 def _require_bundled_runtime() -> None:
+    ghostscript_runtime.validate(SUPPORT_DIR)
     legacy = SUPPORT_DIR / "bin"
     if legacy.exists():
         raise RuntimeError(
@@ -256,6 +258,10 @@ def build(
     if require_poppler_smoke:
         if os.name == "nt":
             _run_poppler_smoke(required=True)
+            subprocess.run(
+                [sys.executable, str(REPO_ROOT / "tools/smoke_ghostscript_runtime.py"),
+                 "--support", str(SUPPORT_DIR), "--required"], check=True,
+            )
         else:
             print(
                 "SKIP: Poppler helper smoke requires Windows; "

@@ -180,8 +180,9 @@ module BlueCollarSystems
       # Generic transparent images do not have that property and are excluded.
       def self.image_snapshot(image, transform)
         return nil unless source_owner?(image)
-        return nil unless image.get_attribute(DICTIONARY, 'renderer', '') ==
-                          'pdftocairo_transparent_page_crop'
+        return nil unless ['pdftocairo_transparent_page_crop',
+                           'ghostscript_transparent_page_crop'].include?(
+          image.get_attribute(DICTIONARY, 'renderer', ''))
         proof_keys = ['raster_alpha_verified', 'raster_transparent_background_verified',
                       'raster_page_render_once_verified', 'raster_visible_pixel_verified']
         return nil unless proof_keys.all? { |key| image.get_attribute(DICTIONARY, key, false) == true }

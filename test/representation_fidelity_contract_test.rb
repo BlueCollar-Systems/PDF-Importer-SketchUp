@@ -2725,6 +2725,17 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal 'd' * 64, proof[:visual_pixel_sha256]
     assert_equal true, proof[:visual_pixel_binding_verified]
 
+    gs_args = IMP::ItemRasterPageRenderer.arguments('gs', pdf_path, 1, 144, '/page.png')
+    gs_proof = IMP.verify_item_raster_artifact!(
+      path, item, 1, crop, gs_args, pdf_path, crop_proof,
+      Digest::SHA256.file(pdf_path).hexdigest
+    )
+    assert_equal proof, gs_proof
+    assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.verify_item_raster_artifact!(path, item, 1, crop,
+        gs_args + ['-dUseCropBox'], pdf_path, crop_proof, Digest::SHA256.file(pdf_path).hexdigest)
+    end
+
     bad = args.dup
     bad.delete('-transp')
     assert_raises(IMP::RepresentationFidelity::ContractError) do
@@ -2745,6 +2756,47 @@ class RepresentationFidelityContractTest < Minitest::Test
     File.delete(pdf_path) if pdf_path && File.exist?(pdf_path)
   end
 
+  def test_ghostscript_item_page_retains_one_render_cache_and_original_source_binding
+    Dir.mktmpdir('bc_gs_page_contract') do |folder|
+      pdf, exe = File.join(folder, 'source.pdf'), File.join(folder, 'gs.exe')
+      File.binwrite(pdf, "%PDF-1.4\nsource\n%%EOF\n")
+      File.binwrite(exe, 'fixture executable')
+      calls, resolutions = [], 0
+      opts = { :raster_dpi => 150 }
+        command = lambda do |args, options|
+          calls << args
+          assert_equal '', options[:env]['GS_OPTIONS']
+          assert_includes options[:env]['GS_LIB'], '%rom%Resource/Init/'
+        IMP::ItemRasterPageRenderer.verify_command!(args, pdf, 1, 150)
+        pixels = Array.new(150 * 75) { [0, 0, 0, 0] }
+        pixels[151] = [0, 0, 0, 255]
+          write_rgba_png(args[-3], 150, 75, pixels)
+        { :ok => true, :exitstatus => 0, :timed_out => false, :stdout => '', :stderr => '' }
+      end
+      begin
+        IMP::DependencyResolver.stub(:find_ghostscript, lambda { resolutions += 1; exe }) do
+          IMP::CommandRunner.stub(:run, command) do
+            first = IMP.prepare_item_raster_page!(pdf, 1, [0, 0, 72, 36], 0, opts)
+            second = IMP.prepare_item_raster_page!(pdf, 1, [0, 0, 72, 36], 0, opts)
+            assert_same first, second
+            assert_equal 1, calls.length
+            assert_equal 1, resolutions
+            assert_equal :ghostscript, first[:render_engine]
+            assert_equal 'ghostscript_transparent_page_crop', first[:renderer]
+            assert_equal Digest::SHA256.file(pdf).hexdigest, first[:source_pdf_sha256]
+            assert first[:source_pdf_render_binding][:pre_render_verified]
+            assert first[:source_pdf_render_binding][:post_render_verified]
+            assert first[:alpha_channel_verified]
+            assert first[:page_render_once_verified]
+            assert_equal Digest::SHA256.file(exe).hexdigest, first[:render_executable_sha256]
+          end
+        end
+      ensure
+        IMP.cleanup_item_raster_page_cache!(opts)
+      end
+    end
+  end
+
   def test_item_raster_renderer_persists_source_claim_representation_identity
     main = File.read(
       File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
@@ -2757,7 +2809,7 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_includes body, "'source_kind', 'text_span'"
     assert_includes body, "'representation', 'raster'"
     assert_includes body,
-                    "'renderer', 'pdftocairo_transparent_page_crop'"
+                    "'renderer', page_render[:renderer]"
     assert_includes body, "'raster_alpha_verified'"
     assert_includes body, "'raster_transparent_background_verified'"
     assert_includes body, "'raster_visible_pixel_verified'"

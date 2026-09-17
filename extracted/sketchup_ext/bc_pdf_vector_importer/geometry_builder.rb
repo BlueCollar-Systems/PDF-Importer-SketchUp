@@ -152,6 +152,7 @@ module BlueCollarSystems
           # paths are often real sheet borders or title-block frames and must
           # be preserved for drawing accuracy.
           path_bbox = compute_path_bbox(path)
+          next if path_bbox && paint_entirely_outside_page?(path, path_bbox)
           if path_bbox && discardable_page_artifact?(path, path_bbox, page_area_pts)
             next
           end
@@ -3166,6 +3167,50 @@ module BlueCollarSystems
         end
         return nil if xs.empty?
         [xs.min, ys.min, xs.max, ys.max]
+      end
+
+      # PDF viewers clip paint to the page. Cull only paint whose conservative
+      # bounds are wholly outside it; never trim a partially visible path.
+      # The path bbox includes every Bezier control point, not just endpoints.
+      def paint_entirely_outside_page?(path, bbox)
+        return false unless finite_page_bounds?(bbox) && finite_page_bounds?(@media_box)
+        return false unless @media_box[2] > @media_box[0] && @media_box[3] > @media_box[1]
+        pad_x = pad_y = 0.0
+        if path.stroke
+          return false unless path.respond_to?(:source_stroke_style_proven) &&
+                              path.source_stroke_style_proven == true
+          width = path.line_width
+          return false unless width.is_a?(Numeric) && width.finite? && width > 0
+          ctm = path.ctm
+          return false unless ctm.is_a?(Array) && ctm.length == 6 &&
+                              ctm.all? { |value| value.is_a?(Numeric) && value.finite? }
+          return false unless [0, 1, 2].include?(path.line_cap) && [0, 1, 2].include?(path.line_join)
+          factor = path.line_cap == 2 ? Math.sqrt(2.0) : 1.0
+          # A lone open straight segment has caps but no joins. Otherwise the
+          # full miter limit bounds even an acute corner without guessing its angle.
+          isolated_lines = path.subpaths.all? do |subpath|
+            !subpath.closed && subpath.segments.map(&:type) == [:move, :line]
+          end
+          if path.line_join == 0 && !isolated_lines
+            limit = path.source_miter_limit
+            return false unless limit.is_a?(Numeric) && limit.finite? && limit >= 1.0
+            factor = [factor, limit].max
+          end
+          radius = 0.5 * width * factor
+          pad_x = radius * Math.sqrt(ctm[0] * ctm[0] + ctm[2] * ctm[2])
+          pad_y = radius * Math.sqrt(ctm[1] * ctm[1] + ctm[3] * ctm[3])
+          return false unless pad_x.finite? && pad_y.finite?
+        end
+        bbox[2] + pad_x < @media_box[0] || bbox[0] - pad_x > @media_box[2] ||
+          bbox[3] + pad_y < @media_box[1] || bbox[1] - pad_y > @media_box[3]
+      rescue StandardError
+        false
+      end
+
+      def finite_page_bounds?(bounds)
+        bounds.is_a?(Array) && bounds.length == 4 &&
+          bounds.all? { |value| value.is_a?(Numeric) && value.finite? } &&
+          bounds[0] <= bounds[2] && bounds[1] <= bounds[3]
       end
 
       def discardable_page_artifact?(path, bbox, page_area_pts)

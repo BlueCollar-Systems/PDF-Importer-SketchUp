@@ -365,6 +365,14 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     assert_empty Subject.collect_text_faces([image])
   end
 
+  def test_ghostscript_crop_requires_the_same_full_page_and_pixel_evidence
+    image = image_fixture
+    image.attributes['renderer'] = 'ghostscript_transparent_page_crop'
+    assert Subject.image_snapshot(image, image.transformation)[:final_page_crop]
+    image.attributes['raster_alpha_verified'] = false
+    assert_nil Subject.image_snapshot(image, image.transformation)
+  end
+
   def test_image_with_unproven_source_page_never_gets_final_composite_order_evidence
     image = image_fixture
     image.attributes['raster_page_number'] = 2

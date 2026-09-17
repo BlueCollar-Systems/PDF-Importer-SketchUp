@@ -23,6 +23,7 @@ module BlueCollarSystems
     require File.join(dir, 'logger')
     require File.join(dir, 'command_runner')
     require File.join(dir, 'png_cropper')
+    require File.join(dir, 'item_raster_page_renderer')
     require File.join(dir, 'dependency_resolver')
     require File.join(dir, 'batch_host_policy')
     require File.join(dir, 'pdf_open_gate')
@@ -39,6 +40,7 @@ module BlueCollarSystems
     require File.join(dir, 'layer_manager')
     require File.join(dir, 'xobject_parser')
     require File.join(dir, 'embedded_image_extractor')
+    require File.join(dir, 'embedded_image_placement')
     require File.join(dir, 'source_provenance')
     require File.join(dir, 'batch_pipeline')
     require File.join(dir, 'primitive_extractor')
@@ -871,7 +873,7 @@ module BlueCollarSystems
       record_fallback_transitions!(stats, page_num, transitions)
       record_text_renderer(
         stats, page_num,
-        :renderer => :pdftocairo_real_item_raster,
+        :renderer => :ghostscript_real_item_raster,
         :mode => :raster,
         :requested_mode => requested,
         :delivered_mode => :raster,
@@ -5355,25 +5357,36 @@ module BlueCollarSystems
           next
         end
 
-        bbox = embedded_image_su_bbox(asset, media_box, opts[:scale], y_offset, page_rotation)
-        next unless bbox
-        x0, y0, x1, y1 = bbox
-        width = (x1 - x0).abs
-        height = (y1 - y0).abs
-        next if width <= 0.0 || height <= 0.0
-
+        image = nil
         begin
-          image = entities.add_image(asset.file_path, Geom::Point3d.new(x0, y0, 0.0), width, height)
+          placement = EmbeddedImagePlacement.affine(
+            asset.corners_pts, media_box, opts[:scale], y_offset, page_rotation
+          )
+          # add_image sets its own pixel-to-inch scale. Apply our affine map to
+          # an actual 1x1-inch image; do not replace that intrinsic transform.
+          image = entities.add_image(asset.file_path, Geom::Point3d.new(0.0, 0.0, 0.0), 1.0, 1.0)
           if image
+            transform = Geom::Transformation.new(placement[:matrix])
+            expected = transform * image.transformation
+            image.transform!(transform)
+            unless EmbeddedImagePlacement.same_matrix?(image.transformation.to_a, expected.to_a)
+              raise RepresentationFidelity::ContractError,
+                    'native embedded image did not retain its source affine transform'
+            end
             begin
               image.layer = layer if layer
             rescue StandardError => e
               Logger.warn('EmbeddedImages', "Image layer assignment failed: #{e.message}")
             end
             placed += 1
+          else
+            raise RepresentationFidelity::ContractError,
+                  'native embedded image creation returned no Image'
           end
         rescue StandardError => e
-          Logger.warn('EmbeddedImages', "add_image failed for #{asset.name}: #{e.message}")
+          image.erase! if image && image.respond_to?(:valid?) && image.valid?
+          raise RepresentationFidelity::ContractError,
+                "Embedded image #{asset.name} placement failed: #{e.message}"
         end
       end
       placed
@@ -5606,7 +5619,8 @@ module BlueCollarSystems
               'item raster source PDF is missing'
       end
       argv = Array(arguments).map { |value| value.to_s }
-      command_source = argv.length >= 2 ? argv[-2] : nil
+      ghostscript = ItemRasterPageRenderer.ghostscript_command?(argv)
+      command_source = ghostscript ? argv[-1] : (argv.length >= 2 ? argv[-2] : nil)
       unless command_source &&
              File.expand_path(command_source).downcase == source_path.downcase
         raise RepresentationFidelity::ContractError,
@@ -5635,14 +5649,16 @@ module BlueCollarSystems
       end
       requested_page = page_num.to_i
       args = Array(arguments).map { |value| value.to_s }
-      unless raster_command_value(args, '-f').to_i == requested_page &&
+      if ghostscript
+        ItemRasterPageRenderer.verify_command!(args, source_path, requested_page, crop_geometry[:dpi].to_i)
+      elsif !(raster_command_value(args, '-f').to_i == requested_page &&
              raster_command_value(args, '-l').to_i == requested_page &&
              args.include?('-singlefile') && args.include?('-transp') &&
-             !args.include?('-cropbox')
+             !args.include?('-cropbox'))
         raise RepresentationFidelity::ContractError,
               'item raster command is not bound to exactly one MediaBox page'
       end
-      unless raster_command_value(args, '-r').to_i == crop_geometry[:dpi].to_i
+      unless ghostscript || raster_command_value(args, '-r').to_i == crop_geometry[:dpi].to_i
         raise RepresentationFidelity::ContractError,
               'item raster command DPI is not bound to crop geometry'
       end
@@ -5894,9 +5910,6 @@ module BlueCollarSystems
 
     def self.prepare_item_raster_page!(pdf_path, page_num, media_box,
                                        page_rotation, opts)
-      exe = safe_find_pdftocairo
-      raise RepresentationFidelity::ContractError,
-            'pdftocairo is unavailable for item Raster' unless exe
       page_width = PageTransform.effective_width(media_box, page_rotation)
       page_height = PageTransform.effective_height(media_box, page_rotation)
       dpi_plan = compute_effective_raster_dpi(opts, page_width, page_height)
@@ -5912,35 +5925,18 @@ module BlueCollarSystems
         owned_temp_dir = SafeTemp.mktmpdir("bc_item_page_p#{page_num}_")
         png_path = File.join(owned_temp_dir, 'page.png')
         raw_path = File.join(owned_temp_dir, 'page.rgba')
-        base_path = png_path.sub(/\.png\z/, '')
-        candidates = [
-          png_path, "#{base_path}-#{page_num}.png",
-          "#{base_path}-01.png", "#{base_path}-1.png"
-        ]
-        args = [
-          exe, '-png', '-transp', '-singlefile', '-r', dpi.to_s,
-          '-f', page_num.to_i.to_s, '-l', page_num.to_i.to_s,
-          source_path, base_path
-        ]
+        candidates = [png_path]
+        plan = ItemRasterPageRenderer.plan(
+          DependencyResolver.find_ghostscript, source_path, page_num.to_i, dpi, png_path
+        )
+        args = plan[:arguments]
         source_binding = begin_source_pdf_render_binding!(opts, source_path)
         run = CommandRunner.run(
-          args, :timeout_s => 180, :context => 'Raster.item_page.pdftocairo'
+          args, :timeout_s => 180, :context => 'Raster.item_page.ghostscript',
+          :env => plan[:environment]
         )
         verify_source_pdf_render_binding!(source_binding)
-        validation = PopplerResultValidator.validate(
-          run,
-          :executable => exe, :argv => args,
-          :context => 'Raster.item_page.pdftocairo',
-          :page => page_num, :attempt => 1,
-          :representation => :item_raster_page,
-          :artifacts => candidates, :artifact_policy => :any_nonempty
-        )
-        PopplerResultValidator.log_rejection(validation, 'Raster') unless
-          validation[:ok]
-        unless validation[:ok] && !run[:timed_out]
-          raise RepresentationFidelity::ContractError,
-                'transparent item Raster page render was rejected'
-        end
+        ItemRasterPageRenderer.validate_result!(run, plan)
         actual_png = candidates.find { |candidate| File.file?(candidate) }
         raise RepresentationFidelity::ContractError,
               'transparent item Raster page PNG is missing' unless actual_png
@@ -5957,6 +5953,10 @@ module BlueCollarSystems
           :page_rotation => PageTransform.normalize_rotation(page_rotation),
           :dpi => dpi,
           :arguments => args,
+          :render_engine => plan[:engine],
+          :renderer => plan[:renderer],
+          :render_executable_sha256 => plan[:executable_sha256],
+          :render_environment => plan[:environment],
           :source_pdf_path => source_path,
           :source_pdf_sha256 => source_sha,
           :source_pdf_render_binding => source_binding,
@@ -6035,6 +6035,9 @@ module BlueCollarSystems
         png_path, item, page_num, crop, page_render[:arguments], pdf_path,
         crop_proof, page_render[:source_pdf_sha256]
       )
+      artifact[:render_engine] = page_render[:render_engine]
+      artifact[:render_executable_sha256] = page_render[:render_executable_sha256]
+      artifact[:render_environment] = page_render[:render_environment]
       scale = opts[:scale].to_f
       scale = 1.0 if scale <= 0.0
       factor = (1.0 / 72.0) * scale
@@ -6065,8 +6068,10 @@ module BlueCollarSystems
           image.set_attribute(dictionary, 'source_kind', 'text_span')
           image.set_attribute(dictionary, 'representation', 'raster')
           image.set_attribute(
-            dictionary, 'renderer', 'pdftocairo_transparent_page_crop'
+            dictionary, 'renderer', page_render[:renderer]
           )
+          image.set_attribute(dictionary, 'raster_render_engine', page_render[:render_engine].to_s)
+          image.set_attribute(dictionary, 'raster_render_executable_sha256', page_render[:render_executable_sha256])
           image.set_attribute(dictionary, 'raster_page_number', page_num.to_i)
           image.set_attribute(
             dictionary, 'raster_page_rotation',

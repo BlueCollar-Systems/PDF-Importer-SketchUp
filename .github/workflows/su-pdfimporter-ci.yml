@@ -109,6 +109,7 @@ jobs:
           ruby test/rotated_run_merge_test.rb
           ruby test/geometry_builder_text_fallback_test.rb
           ruby test/cairo_glyph_source_test.rb
+          ruby test/ghostscript_runtime_resolver_test.rb
           ruby test/svg_text_embed_test.rb
           ruby test/svg_text_3d_renderer_test.rb
           ruby test/svg_item_representation_renderer_test.rb
@@ -154,5 +155,9 @@ jobs:
           python tools/test_build_steel_shapes_release.py
       - name: Smoke the checked-in Windows Poppler helpers
         run: python tools/smoke_poppler_helpers.py --required
+      - name: Verify separate Ghostscript runtime and relocated transparent rendering
+        run: |
+          python -m unittest tools.test_ghostscript_runtime
+          python tools/smoke_ghostscript_runtime.py --required
       - name: Validate release publication state
         run: python tools/check_release_publication.py

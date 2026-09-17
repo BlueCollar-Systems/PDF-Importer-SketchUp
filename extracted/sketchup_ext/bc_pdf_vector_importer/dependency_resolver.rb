@@ -14,6 +14,8 @@ module BlueCollarSystems
       PREF_NOTICE = 'dependency_notice_shown'.freeze
       PINNED_MEMBER_INVENTORY_SHA256 =
         'b21c01736d399b3b88b8f1b6cf74b6cf5619d13959433463ad820c94f81379a3'.freeze
+      PINNED_GHOSTSCRIPT_INVENTORY_SHA256 =
+        '0eed39d13b9e56e6c48f5b0b86e95bd5ff90cf51ec0172bfe41e93b1a6cd4924'.freeze
       RUNTIME_MEMBER_KEYS = %w[bytes category path sha256].freeze
 
       DOWNLOADS = {
@@ -24,9 +26,9 @@ module BlueCollarSystems
                   'Report still shows helpers missing, reinstall the latest RBZ.'
         },
         ghostscript: {
-          label: 'Ghostscript 64-bit (font repair for non-embedded PDF fonts)',
+          label: 'Ghostscript 64-bit (transparent Raster and non-embedded font repair)',
           url: 'https://ghostscript.com/releases/gsdnld.html',
-          detail: 'Install the 64-bit Windows release. The importer finds gswin64c.exe automatically.'
+          detail: 'Windows RBZ releases include a separately verified free Ghostscript runtime. Reinstall the latest RBZ if it is missing or damaged.'
         }
       }.freeze
 
@@ -268,11 +270,63 @@ module BlueCollarSystems
         end
 
         def find_ghostscript
+          configured = ENV['BC_GHOSTSCRIPT_PATH'].to_s
+          return configured if !configured.empty? && File.file?(configured)
+          bundled = bundled_ghostscript_executable
+          return bundled if bundled
           find_executable(
             windows? ? ['gswin64c.exe', 'gswin32c.exe'] : ['gs'],
             env_var: 'BC_GHOSTSCRIPT_PATH',
             extra_candidates: ghostscript_system_candidates
           )
+        end
+
+        # Separate inventory: never modify or borrow Poppler's approval record.
+        def bundled_ghostscript_executable
+          return nil unless windows?
+          root = File.expand_path(File.join(support_dir, 'Ghostscript'))
+          return nil unless runtime_path_components_symlink_free?(root)
+          manifest_path = File.join(root, 'runtime-manifest.json')
+          return nil unless File.file?(manifest_path) && !File.symlink?(manifest_path)
+          manifest = JSON.parse(File.read(manifest_path))
+          return nil unless manifest['schema'] == 1 && manifest['version'] == '10.07.1'
+          entries = manifest['members']
+          return nil unless entries.is_a?(Array) && !entries.empty?
+          normalized = []
+          expected = {}
+          entries.each do |entry|
+            return nil unless entry.is_a?(Hash) && entry.keys.sort == %w[bytes path sha256]
+            rel = entry['path']
+            return nil unless rel.is_a?(String) && !rel.empty? &&
+              rel !~ /[\\:]/ && !rel.start_with?('/') &&
+              rel.split('/').none? { |part| part.empty? || part == '.' || part == '..' }
+            return nil if expected.key?(rel)
+            return nil unless entry['bytes'].is_a?(Integer) && entry['bytes'] >= 0 &&
+              entry['sha256'].is_a?(String) && entry['sha256'] =~ /\A[0-9a-f]{64}\z/
+            expected[rel] = entry
+            normalized << { 'bytes' => entry['bytes'], 'path' => rel, 'sha256' => entry['sha256'] }
+          end
+          canonical = JSON.generate(normalized.sort_by { |entry| entry['path'] })
+          return nil unless Digest::SHA256.hexdigest(canonical) == PINNED_GHOSTSCRIPT_INVENTORY_SHA256
+          actual = {}
+          Dir.glob(File.join(root, '**', '*'), File::FNM_DOTMATCH).each do |path|
+            next if ['.', '..'].include?(File.basename(path))
+            return nil if File.symlink?(path)
+            next if File.directory?(path)
+            return nil unless File.file?(path)
+            next if path == manifest_path
+            actual[path[(root.length + 1)..-1].tr('\\', '/')] = path
+          end
+          return nil unless actual.keys.sort == expected.keys.sort
+          actual.each do |rel, path|
+            return nil unless File.size(path) == expected[rel]['bytes'] &&
+              sha256_file(path) == expected[rel]['sha256']
+          end
+          path = File.join(root, 'bin', 'gswin64c.exe')
+          bundled_executable_launchable?(path) ? path : nil
+        rescue StandardError => e
+          safe_warn('DependencyResolver', "bundled Ghostscript verification failed: #{e.message}")
+          nil
         end
 
         private
