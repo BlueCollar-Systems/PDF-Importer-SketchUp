@@ -20,6 +20,7 @@ module BlueCollarSystems
       SIZE_TOLERANCE_INCHES = 0.001
       COLLINEAR_DISTANCE_TOLERANCE_INCHES = 1.0e-9
       GEOMETRY_CONSTRUCTION_SCALE = 1000.0
+      GLYPH_CONSTRUCTION_SCALE = 1000.0
       SOURCE_EDGE_TOLERANCE_INCHES = 1.0e-9
       SUPPORTED_MODES = [:glyphs, :geometry].freeze
       PEER_OWNER_GRID_SIZE_PT = 32.0
@@ -963,27 +964,41 @@ module BlueCollarSystems
               raise RepresentationFidelity::ContractError,
                     'Glyphs component definition was not created'
             end
+            # A cached glyph is still source outline geometry. Build its small
+            # corners large enough to survive SketchUp's vertex tolerance,
+            # then undo only that construction scale on every instance.
+            construction_entry = glyph_construction_entry(entry)
             definition_edges = add_definition_edges!(
-              definition.entities, entry, layer
+              definition.entities, construction_entry, layer
             )
             definition_edge_count = definition_edges.length
             definition_fill = add_definition_faces!(
-              definition.entities, entry, layer
+              definition.entities, construction_entry, layer
             )
+            verify_definition_source_edges!(definition, entry)
+            removed_orphans = remove_duplicate_definition_orphans!(
+              definition, entry[:glyph_id]
+            )
+            verify_definition_source_edges!(definition, entry) if
+              removed_orphans > 0
             component_cache[key] = {
               :definition => definition,
               :edge_count => definition_edge_count,
-              :fill => definition_fill
+              :fill => definition_fill,
+              :duplicate_orphan_edges_removed => removed_orphans
             }
             definition_builds += 1
           end
           edge_count += definition_edge_count
           merge_fill_summary!(fill, definition_fill)
 
-          matrix = Array(entry[:cache_instance_transformation])
+          matrix = Array(entry[:cache_instance_transformation]).dup
           unless matrix.length == 16
             raise RepresentationFidelity::ContractError,
                   "#{source_id}: Glyphs component transform is unavailable"
+          end
+          [0, 1, 2, 4, 5, 6, 8, 9, 10].each do |index|
+            matrix[index] = matrix[index].to_f / GLYPH_CONSTRUCTION_SCALE
           end
           instance = entities.add_instance(
             definition, Geom::Transformation.new(matrix)
@@ -1027,8 +1042,93 @@ module BlueCollarSystems
                 'Glyphs canonical component geometry is unavailable'
         end
         Digest::SHA256.hexdigest(
-          "#{entry[:glyph_id]}\0#{serialized}"
+          "#{entry[:glyph_id]}\0#{serialized}\0#{GLYPH_CONSTRUCTION_SCALE}"
         )
+      end
+
+      def self.glyph_construction_entry(entry)
+        entry.merge(:cache_definition_loops =>
+          Array(entry[:cache_definition_loops]).map do |loop_points|
+            Array(loop_points).map do |point|
+              Geom::Point3d.new(
+                point.x.to_f * GLYPH_CONSTRUCTION_SCALE,
+                point.y.to_f * GLYPH_CONSTRUCTION_SCALE,
+                point.z.to_f * GLYPH_CONSTRUCTION_SCALE
+              )
+            end
+          end)
+      end
+
+      def self.verify_definition_source_edges!(definition, entry)
+        expected = outline_segments([
+          { :loops => entry[:cache_definition_loops] }
+        ])
+        actual = entity_members(definition).select do |entity|
+          entity_type(entity) == 'Edge'
+        end.map do |edge|
+          points = if edge.respond_to?(:start) && edge.respond_to?(:end)
+                     [edge.start.position, edge.end.position]
+                   elsif edge.respond_to?(:points)
+                     edge.points
+                   end
+          unless Array(points).length == 2
+            raise RepresentationFidelity::ContractError,
+                  'Glyphs component edge endpoints are unavailable'
+          end
+          points.map do |point|
+            [point.x, point.y, point.z].map do |value|
+              value.to_f / GLYPH_CONSTRUCTION_SCALE
+            end
+          end
+        end
+        unless !expected.empty? && segment_sets_cover?(expected, actual) &&
+               segment_sets_cover?(actual, expected)
+          raise RepresentationFidelity::ContractError,
+                'Glyphs component edges differ from exact source outlines'
+        end
+        true
+      end
+
+      # SketchUp's add_edges deliberately leaves the closing vertices of a
+      # closed polyline unmerged. Facing can therefore add a second closing
+      # edge. Remove only an exact faceless duplicate of a real face boundary
+      # in this new definition, between complete source-coverage checks.
+      # https://ruby.sketchup.com/Sketchup/Entities.html#add_edges-instance_method
+      def self.remove_duplicate_definition_orphans!(definition, glyph_id)
+        edges = entity_members(definition).select do |entity|
+          (!entity.respond_to?(:valid?) || entity.valid?) &&
+            entity_type(entity) == 'Edge' && entity.respond_to?(:faces)
+        end
+        boundaries = {}
+        edges.each do |edge|
+          next if edge.faces.empty?
+          boundaries[exact_definition_edge_key(edge)] = edge
+        end
+        removed = 0
+        edges.each do |edge|
+          next if edge.respond_to?(:valid?) && !edge.valid?
+          next unless edge.faces.empty?
+          key = exact_definition_edge_key(edge)
+          retained = boundaries[key]
+          next unless retained && !retained.equal?(edge)
+          next if retained.respond_to?(:valid?) && !retained.valid?
+          next if retained.faces.empty? || exact_definition_edge_key(retained) != key
+          assign_shared_glyph_identity!(retained, glyph_id)
+          definition.entities.erase_entities(edge)
+          removed += 1
+        end
+        removed
+      end
+
+      def self.exact_definition_edge_key(edge)
+        points = if edge.respond_to?(:start) && edge.respond_to?(:end)
+                   [edge.start.position, edge.end.position]
+                 else
+                   edge.points
+                 end
+        points.map do |point|
+          [point.x.to_f, point.y.to_f, point.z.to_f]
+        end.sort
       end
 
       def self.add_definition_edges!(entities, entry, layer)
@@ -1051,7 +1151,9 @@ module BlueCollarSystems
         end
         unless expected > 0 && created.length == expected
           raise RepresentationFidelity::ContractError,
-                'Glyphs component definition edge count is incomplete'
+                'Glyphs component definition edge count is incomplete ' \
+                "(glyph #{entry[:glyph_id]}, expected #{expected}, " \
+                "created #{created.length})"
         end
         created
       end
