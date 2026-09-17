@@ -1,6 +1,5 @@
 require 'minitest/autorun'
 require 'rbconfig'
-require 'json'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/command_runner'
 
 class CommandRunnerEnvironmentTest < Minitest::Test
@@ -10,17 +9,19 @@ class CommandRunnerEnvironmentTest < Minitest::Test
     name = 'BC_COMMAND_ENV_FIXTURE'
     previous = ENV[name]
     ENV[name] = 'parent'
-    args = [RbConfig.ruby, '-e', "require 'json'; print JSON.generate(ENV[#{name.inspect}])"]
+    # Match the source-built Ruby 2.2 gate's --disable-gems invocation. This
+    # subprocess tests ENV only, so it needs no RubyGems startup or JSON gem.
+    args = [RbConfig.ruby, '--disable-gems', '-e', "STDOUT.write(ENV[#{name.inspect}].inspect)"]
     changed = Subject.run(args, :env => { name => 'child' })
-    assert changed[:ok]
-    assert_equal 'child', JSON.parse(changed[:stdout])
+    assert changed[:ok], changed.inspect
+    assert_equal 'child'.inspect, changed[:stdout]
     assert_equal 'parent', ENV[name]
     removed = Subject.run(args, :env => { name => nil })
-    assert removed[:ok]
-    assert_nil JSON.parse(removed[:stdout])
+    assert removed[:ok], removed.inspect
+    assert_equal 'nil', removed[:stdout]
     unchanged = Subject.run(args)
-    assert unchanged[:ok]
-    assert_equal 'parent', JSON.parse(unchanged[:stdout])
+    assert unchanged[:ok], unchanged.inspect
+    assert_equal 'parent'.inspect, unchanged[:stdout]
   ensure
     ENV[name] = previous
   end
