@@ -362,6 +362,42 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     assert_empty entities.to_a
   end
 
+  def test_empty_item_selection_skips_page_wide_placement_join
+    entities = ItemVectorEntities.new
+    placed = Class.new(Array) do
+      attr_reader :select_calls
+      def initialize(*args)
+        super
+        @select_calls = 0
+      end
+      def select(*args, &block)
+        @select_calls += 1
+        super
+      end
+    end.new(5000) { |index| { :placement_index => index } }
+    match = {
+      :placement_matches => [],
+      :coverage_failures => []
+    }
+
+    result = RENDERER.render_svg(
+      entities, square_svg(70, 20), MEDIA_BOX, item('text_span:1:287'),
+      :geometry,
+      :scale => 1.0,
+      :svg_page_box => MEDIA_BOX,
+      :source_context => source_context,
+      :precomputed_placed => placed,
+      :precomputed_pens => [],
+      :precomputed_match => match
+    )
+
+    refute result[:ok]
+    assert_equal 0, placed.select_calls
+    assert_equal :geometry, result[:transition_proof][:from_mode]
+    assert_equal :raster, result[:transition_proof][:to_mode]
+    assert_empty entities.to_a
+  end
+
   def test_missing_bbox_returns_item_specific_impossibility_for_each_rung
     source = item('text_span:1:7', nil, nil, nil, nil)
 
