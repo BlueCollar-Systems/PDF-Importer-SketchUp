@@ -151,6 +151,13 @@ readonly SMOKE_TESTS=(
   test/ruby22_compat_test.rb
   test/import_health_test.rb
   test/compatibility_report_test.rb
+  test/compatibility_report_isolation_test.rb
+  test/qa_report_isolation_test.rb
+  test/finalize_diagnostics_isolation_test.rb
+  test/batch_geometry_sidecar_isolation_test.rb
+  test/logger_isolation_test.rb
+  test/logger_buffer_test.rb
+  test/poppler_output_path_alphabet_test.rb
   test/corpus_harness_test.rb
   test/arc_fitter_test.rb
   test/unit_parser_test.rb
