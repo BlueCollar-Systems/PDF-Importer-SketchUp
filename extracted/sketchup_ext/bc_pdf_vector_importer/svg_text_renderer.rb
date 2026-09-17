@@ -866,6 +866,7 @@ module BlueCollarSystems
           :opacity_product => 1.0
         }]
         svg.to_s.scan(/<\/?\s*[A-Za-z][A-Za-z0-9:_-]*\b[^>]*>/m) do |m|
+          source_svg_offset = Regexp.last_match.begin(0)
           tag = m.is_a?(Array) ? m.first.to_s : m.to_s
           if tag =~ /\A<\s*\/\s*([A-Za-z][A-Za-z0-9:_-]*)\b/i
             paint_stack.pop if paint_stack.length > 1
@@ -939,6 +940,7 @@ module BlueCollarSystems
                 )
                 a << {
                   glyph_id: id,
+                  source_svg_offset: source_svg_offset,
                   x: x,
                   y: y,
                   matrix: matrix,

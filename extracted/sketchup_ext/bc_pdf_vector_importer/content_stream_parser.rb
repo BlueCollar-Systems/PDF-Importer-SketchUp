@@ -9,6 +9,9 @@ module BlueCollarSystems
   module PDFVectorImporter
     class ContentStreamParser
       MAX_TOKENS_PER_STREAM = 1_000_000
+      attr_reader :nonpath_paint_orders, :other_paint_orders
+      OTHER_PAINT_OPERATORS = { 'Do' => true, 'sh' => true, 'Tj' => true,
+                                'TJ' => true, "'" => true, '"' => true }.freeze
 
       # Fast character-class lookup tables used by the hot-path tokenizer.
       # Matches prior /[\s\x00]/ and /[\s\[\]<>(){}\/\%]/ classes exactly
@@ -33,6 +36,11 @@ module BlueCollarSystems
         :layer_name,     # String — OCG layer name, or nil
         :clip_fill_rule  # Exact covered clip contour: :nonzero / :evenodd
       )
+      VectorPath.class_eval do
+        attr_accessor :source_paint_order, :source_fill_opacity,
+                      :source_stroke_opacity, :source_clip_clear,
+                      :source_miter_limit, :source_stroke_style_proven
+      end
 
       SubPath = Struct.new(
         :segments,     # Array of Segment
@@ -208,10 +216,84 @@ module BlueCollarSystems
         yielded
       end
 
-      def initialize(streams, pdf_parser, ocg_map = {})
+      # Inline Form expansion removes resource-scope markers. A resource name
+      # is usable for opacity evidence only when every actual scoped invocation
+      # has the same relevant effect. Conflicting/missing resources stay unknown.
+      # Omitted ca/CA/BM/SMask entries preserve the current graphics state.
+      def self.page_fill_opacity_effects(parser, page_number)
+        page_ref = parser.pages.fetch(page_number.to_i - 1)
+        page_dict = parser.send(:to_dict, parser.resolve_object(page_ref))
+        resources = parser.send(:find_inherited, page_dict, '/Resources')
+        resources = parser.send(:to_dict, parser.resolve_object(resources)) || {}
+        streams = parser.send(:collect_content_streams, page_dict['/Contents'])
+        effects = {}
+        visit = lambda do |raw_streams, scope, depth|
+          raise 'Form resource proof exceeds expansion depth' if depth > 6
+          states = parser.send(:to_dict, parser.resolve_object(scope['/ExtGState'])) || {}
+          xobjects = parser.send(:to_dict, parser.resolve_object(scope['/XObject'])) || {}
+          Array(raw_streams).each do |stream|
+            scan_operators(stream, ['gs', 'Do']) do |operator, operands|
+              name = operands.reverse.find { |value| value.is_a?(String) && value.start_with?('/') }
+              if operator == 'gs'
+                dictionary = parser.send(:to_dict, parser.resolve_object(states[name]))
+                effect = fill_opacity_effect(dictionary, parser)
+                effects[name] = effect unless effects.key?(name)
+                effects[name] = nil unless effects[name] == effect
+              elsif name && xobjects[name]
+                reference = xobjects[name]
+                form = parser.send(:to_dict, parser.resolve_object(reference))
+                next unless form && form['/Subtype'] == '/Form'
+                raise 'unresolved Form stream' unless reference.is_a?(String) && reference =~ /\A(\d+)\s+\d+\s+R\z/
+                body = parser.get_stream_data(Regexp.last_match(1).to_i)
+                raise 'missing Form stream' unless body.is_a?(String)
+                nested = form.key?('/Resources') ?
+                  parser.send(:to_dict, parser.resolve_object(form['/Resources'])) : scope
+                raise 'unresolved Form resources' unless nested.is_a?(Hash)
+                visit.call([body], nested, depth + 1)
+              end
+            end
+          end
+        end
+        visit.call(streams, resources, 0)
+        effects
+      rescue StandardError
+        # This proof is optional; rendering is unchanged and every gs becomes
+        # unknown if its resource provenance cannot be established completely.
+        {}
+      end
+
+      def self.fill_opacity_effect(dictionary, parser)
+        return nil unless dictionary.is_a?(Hash)
+        alphas = {}
+        ['/ca', '/CA'].each do |key|
+          alphas[key] = :preserve
+          next unless dictionary.key?(key)
+          raw = parser.resolve_object(dictionary[key])
+          return nil unless raw.is_a?(Numeric) ||
+                            (raw.is_a?(String) && raw =~ /\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)\z/)
+          value = raw.to_f
+          return nil unless value.finite? && value >= 0.0 && value <= 1.0
+          alphas[key] = value
+        end
+        mask = :preserve
+        mask = parser.resolve_object(dictionary['/SMask']) == '/None' if dictionary.key?('/SMask')
+        blend = :preserve
+        if dictionary.key?('/BM')
+          raw = parser.resolve_object(dictionary['/BM'])
+          blend = raw == '/Normal' || raw == '/Compatible'
+        end
+        # Ordinary rendering does not resolve these ExtGState stroke settings.
+        # Mark the optional late-overlay proof unsafe instead of guessing them.
+        style = ['/LW', '/LC', '/LJ', '/ML', '/D'].any? { |key| dictionary.key?(key) } ? false : :preserve
+        { :alpha => alphas['/ca'], :stroke_alpha => alphas['/CA'],
+          :mask_clear => mask, :blend_normal => blend, :stroke_style_proven => style }
+      end
+
+      def initialize(streams, pdf_parser, ocg_map = {}, opacity_effects = {})
         @streams = streams       # Array of decoded stream strings
         @pdf_parser = pdf_parser
         @ocg_map = ocg_map       # { "MC0" => "Layer Name", ... }
+        @opacity_effects = opacity_effects.is_a?(Hash) ? opacity_effects : {}
         @paths = []
       end
 
@@ -220,6 +302,8 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       def parse
         @paths = []
+        @nonpath_paint_orders = []
+        @other_paint_orders = []
 
         # Graphics state stack
         @gs_stack = []
@@ -234,8 +318,9 @@ module BlueCollarSystems
         @mc_layer_stack = []
         @current_ocg_layer = nil
 
-        @streams.each do |stream|
+        @streams.each_with_index do |stream, stream_index|
           next unless stream && !stream.empty?
+          @source_stream_index = stream_index
           tokens = tokenize_content_stream(stream)
           execute_operators(tokens)
         end
@@ -252,14 +337,26 @@ module BlueCollarSystems
         @ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]  # Identity matrix
         @stroke_color = [0.0, 0.0, 0.0]
         @fill_color = [0.0, 0.0, 0.0]
+        # Evidence for planar white-mask composition only. The renderer's
+        # existing material behavior is unchanged. PDF's initial nonstroking
+        # alpha is 1; an unresolved ExtGState makes that evidence unknown.
+        @fill_opacity = 1.0
+        @stroke_opacity = 1.0
+        @stroke_style_proven = true
+        @fill_mask_clear = true
+        @fill_blend_normal = true
         @line_width = 1.0
         @line_cap = 0
         @line_join = 0
+        @miter_limit = 10.0
         @dash_pattern = nil
         @color_space_stroke = '/DeviceGray'
         @color_space_fill = '/DeviceGray'
         @clip_regions = []
         @pending_clip_rule = nil
+        @text_render_mode = 0
+        @text_clip_active = false
+        @text_clip_pending = false
       end
 
       def save_graphics_state
@@ -267,13 +364,22 @@ module BlueCollarSystems
           ctm: @ctm.dup,
           stroke_color: @stroke_color.dup,
           fill_color: @fill_color.dup,
+          fill_opacity: @fill_opacity,
+          stroke_opacity: @stroke_opacity,
+          stroke_style_proven: @stroke_style_proven,
+          fill_mask_clear: @fill_mask_clear,
+          fill_blend_normal: @fill_blend_normal,
           line_width: @line_width,
           line_cap: @line_cap,
           line_join: @line_join,
+          miter_limit: @miter_limit,
           dash_pattern: @dash_pattern,
           color_space_stroke: @color_space_stroke,
           color_space_fill: @color_space_fill,
-          clip_regions: @clip_regions.dup
+          clip_regions: @clip_regions.dup,
+          text_render_mode: @text_render_mode,
+          text_clip_active: @text_clip_active,
+          text_clip_pending: @text_clip_pending
         })
       end
 
@@ -283,13 +389,22 @@ module BlueCollarSystems
         @ctm = gs[:ctm]
         @stroke_color = gs[:stroke_color]
         @fill_color = gs[:fill_color]
+        @fill_opacity = gs[:fill_opacity]
+        @stroke_opacity = gs[:stroke_opacity]
+        @stroke_style_proven = gs[:stroke_style_proven]
+        @fill_mask_clear = gs[:fill_mask_clear]
+        @fill_blend_normal = gs[:fill_blend_normal]
         @line_width = gs[:line_width]
         @line_cap = gs[:line_cap]
         @line_join = gs[:line_join]
+        @miter_limit = gs[:miter_limit]
         @dash_pattern = gs[:dash_pattern]
         @color_space_stroke = gs[:color_space_stroke]
         @color_space_fill = gs[:color_space_fill]
         @clip_regions = gs[:clip_regions]
+        @text_render_mode = gs[:text_render_mode]
+        @text_clip_active = gs[:text_clip_active]
+        @text_clip_pending = gs[:text_clip_pending]
       end
 
       # ---------------------------------------------------------------
@@ -390,6 +505,8 @@ module BlueCollarSystems
 
         while i < len
           if tokens.length > MAX_TOKENS_PER_STREAM
+            @nonpath_paint_orders << nil if @nonpath_paint_orders
+            @other_paint_orders << nil if @other_paint_orders
             Logger.warn("ContentParser", "Token limit reached (#{MAX_TOKENS_PER_STREAM}) — truncating stream parse")
             break
           end
@@ -512,6 +629,8 @@ module BlueCollarSystems
           # Inline image: BI <key-value pairs> ID <binary data> EI
           # When we see 'BI', skip forward past the binary data to 'EI'.
           if word == 'BI'
+            @nonpath_paint_orders << [@source_stream_index, i] if @nonpath_paint_orders
+            @other_paint_orders << [@source_stream_index, i] if @other_paint_orders
             # Find 'ID' marker (signals start of binary image data)
             id_pos = inline_image_id_marker(stream, j)
             if id_pos
@@ -522,9 +641,13 @@ module BlueCollarSystems
               if ei_pos
                 i = ei_pos + 3  # skip past 'EI'
               else
+                @nonpath_paint_orders << nil if @nonpath_paint_orders
+                @other_paint_orders << nil if @other_paint_orders
                 i = len  # malformed — skip to end
               end
             else
+              @nonpath_paint_orders << nil if @nonpath_paint_orders
+              @other_paint_orders << nil if @other_paint_orders
               i = j  # no ID found — just skip the BI token
             end
             next
@@ -533,7 +656,13 @@ module BlueCollarSystems
           if numeric_literal?(word)
             tokens << { type: :number, value: word.to_f }
           else
-            tokens << { type: :operator, value: word }
+            if @nonpath_paint_orders && (word == 'Do' || word == 'sh')
+              @nonpath_paint_orders << [@source_stream_index, i]
+            end
+            if @other_paint_orders && OTHER_PAINT_OPERATORS[word]
+              @other_paint_orders << [@source_stream_index, i]
+            end
+            tokens << { type: :operator, value: word, source_offset: i }
           end
           i = j
         end
@@ -549,6 +678,7 @@ module BlueCollarSystems
 
         tokens.each do |token|
           if token[:type] == :operator
+            @source_paint_order = [@source_stream_index, token[:source_offset]]
             op = token[:value]
             handle_operator(op, operand_stack)
             operand_stack.clear
@@ -570,6 +700,31 @@ module BlueCollarSystems
         when 'Q'
           restore_graphics_state
 
+        when 'gs'
+          # Expanded Form streams can shadow page ExtGState resource names.
+          # Use only the resolver's proven equivalent resource-scope effects;
+          # never infer opaque paint from an unresolved name or from RGB alone.
+          # q/Q still restores the exact previously known/unknown evidence.
+          name = operands.reverse.find { |token| token[:type] == :name }
+          effect = name && @opacity_effects[name[:value]]
+          if effect.is_a?(Hash)
+            @fill_opacity = effect[:alpha] unless effect[:alpha] == :preserve
+            if effect.key?(:stroke_alpha) && effect[:stroke_alpha] != :preserve
+              @stroke_opacity = effect[:stroke_alpha]
+            end
+            if effect.key?(:stroke_style_proven) && effect[:stroke_style_proven] != :preserve
+              @stroke_style_proven = effect[:stroke_style_proven]
+            end
+            @fill_mask_clear = effect[:mask_clear] unless effect[:mask_clear] == :preserve
+            @fill_blend_normal = effect[:blend_normal] unless effect[:blend_normal] == :preserve
+          else
+            @fill_opacity = nil
+            @stroke_opacity = nil
+            @stroke_style_proven = false
+            @fill_mask_clear = nil
+            @fill_blend_normal = nil
+          end
+
         when 'cm'
           if nums.length >= 6
             concat_matrix(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5])
@@ -583,6 +738,9 @@ module BlueCollarSystems
 
         when 'j'
           @line_join = (nums[0] || 0).to_i
+
+        when 'M'
+          @miter_limit = nums[0]
 
         when 'd'
           # Dash pattern: array phase
@@ -762,9 +920,19 @@ module BlueCollarSystems
           apply_pending_clip!
           clear_path
 
-        # --- Text (we skip text content but track state) ---
-        when 'BT', 'ET', 'Tf', 'Td', 'TD', 'Tm', 'T*',
-             'Tj', 'TJ', "'", '"', 'Tc', 'Tw', 'Tz', 'TL', 'Tr', 'Ts'
+        # Text-clipping evidence only; native text rendering stays elsewhere.
+        # PDF accumulates clipping glyphs until ET, then intersects the clip.
+        when 'BT'
+          @text_clip_pending = false
+        when 'ET'
+          @text_clip_active ||= @text_clip_pending
+          @text_clip_pending = false
+        when 'Tr'
+          value = nums[0]
+          @text_render_mode = value && value >= 0 && value <= 7 && value == value.to_i ? value.to_i : nil
+        when 'Tj', 'TJ', "'", '"'
+          @text_clip_pending = true if @text_render_mode.nil? || @text_render_mode >= 4
+        when 'Tf', 'Td', 'TD', 'Tm', 'T*', 'Tc', 'Tw', 'Tz', 'TL', 'Ts'
           # Text operators — skip for vector import
 
         # --- Inline image (skip) ---
@@ -863,6 +1031,14 @@ module BlueCollarSystems
         )
 
         @paths << path
+        path.source_paint_order = @source_paint_order.dup
+        path.source_fill_opacity =
+          (@fill_mask_clear == true && @fill_blend_normal == true) ? @fill_opacity : nil
+        path.source_stroke_opacity =
+          (@fill_mask_clear == true && @fill_blend_normal == true) ? @stroke_opacity : nil
+        path.source_clip_clear = @clip_regions.empty? && !@text_clip_active && !@text_clip_pending
+        path.source_miter_limit = @miter_limit
+        path.source_stroke_style_proven = @stroke_style_proven
         apply_pending_clip!
         clear_path
       end

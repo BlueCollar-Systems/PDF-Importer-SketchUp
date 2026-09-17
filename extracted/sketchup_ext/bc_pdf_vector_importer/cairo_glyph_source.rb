@@ -1374,6 +1374,7 @@ module BlueCollarSystems
             x: tx,
             y: ty,
             placement_index: placement_index,
+            source_svg_offset: p[:source_svg_offset],
             glyph_id: p[:glyph_id],
             fill_rgb: p[:fill_rgb] && p[:fill_rgb].dup,
             fill_opacity: p[:fill_opacity],
@@ -1589,6 +1590,7 @@ module BlueCollarSystems
           out << {
             glyph_id: p[:glyph_id],
             placement_index: placement_index,
+            source_svg_offset: p[:source_svg_offset],
             svg_matrix: m.is_a?(Array) ? m.map { |value| value.to_f } :
               [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             source_primary_axis: source_primary_axis_for_matrix(m),

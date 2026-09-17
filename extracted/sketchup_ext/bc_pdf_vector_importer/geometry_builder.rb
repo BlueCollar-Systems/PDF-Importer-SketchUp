@@ -29,7 +29,7 @@ module BlueCollarSystems
       SMALL_FACE_CONSTRUCTION_SCALE = 1000.0
 
       attr_reader :page_group, :text_group, :text_delivery_failures,
-                  :text_attempts
+                  :text_attempts, :fill_only_groups
 
       def initialize(model, paths, text_items, media_box, opts = {})
         @model = model
@@ -111,6 +111,7 @@ module BlueCollarSystems
         # Color group cache
         @color_groups = {}
         fill_targets = {}
+        @fill_only_groups = []
 
         page_width  = PageTransform.effective_width(@media_box, @page_rotation)
         page_height_pts = PageTransform.effective_height(@media_box, @page_rotation)
@@ -181,10 +182,14 @@ module BlueCollarSystems
                 pdf_to_su(sx, sy, page_origin_x, page_origin_y)
               end
             end
-            draw_compound_clip_fill(
+            clip_group = draw_compound_clip_fill(
               staged_geometry_target(dest, path_idx), loops,
               path.clip_fill_rule, path_layer, path.fill_color
             )
+             @fill_only_groups << { :group => clip_group, :fill_rgb => path.fill_color,
+               :paint_order => path.source_paint_order,
+               :opacity => (path.respond_to?(:source_fill_opacity) ? path.source_fill_opacity : nil)
+             } if path.respond_to?(:source_paint_order)
             next
           end
 
@@ -192,8 +197,17 @@ module BlueCollarSystems
           # This permits hidden fill edges without hiding neighboring linework,
           # while retaining the existing batching for tiny host-tolerance fills.
           if should_fill && !should_stroke
-            fill_targets[dest.object_id] ||= dest.add_group
-            fill_group = fill_targets[dest.object_id]
+            white = Array(path.fill_color).length >= 3 &&
+              path.fill_color.first(3).all? { |v| (v.to_f - 1.0).abs < 1.0e-9 }
+            order = path.respond_to?(:source_paint_order) ? path.source_paint_order : nil
+            fill_key = white && order ? [dest.object_id, order] : dest.object_id
+            unless fill_targets[fill_key]
+              fill_targets[fill_key] = dest.add_group
+               @fill_only_groups << { :group => fill_targets[fill_key],
+                 :fill_rgb => path.fill_color, :paint_order => order,
+                 :opacity => (path.respond_to?(:source_fill_opacity) ? path.source_fill_opacity : nil) }
+            end
+            fill_group = fill_targets[fill_key]
             fill_group.name = 'PDF Fill'
             dest = fill_group.entities
           end

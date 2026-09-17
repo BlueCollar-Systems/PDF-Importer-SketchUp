@@ -56,6 +56,10 @@ module BlueCollarSystems
     require File.join(dir, 'embedded_image_extractor')
     require File.join(dir, 'extrude_3d')
     require File.join(dir, 'geometry_builder')
+    require File.join(dir, 'planar_white_knockout')
+    require File.join(dir, 'svg_paint_order')
+    require File.join(dir, 'svg_paint_binding')
+    require File.join(dir, 'late_pdf_overlays')
     require File.join(dir, 'model_3d_extruder')
     require File.join(dir, 'geometry_cleanup')
     require File.join(dir, 'hatch_detector')
@@ -2501,6 +2505,76 @@ module BlueCollarSystems
       text_items
     end
 
+    def self.compose_page_white_masks!(builder, text_items, media_box, opts = {})
+      return nil unless builder.respond_to?(:fill_only_groups) && builder.page_group
+      masks = Array(builder.fill_only_groups)
+      masks_by_id = {}
+      masks.each do |record|
+        group = record[:group]
+        masks_by_id[group.entityID] = record if group && group.valid?
+      end
+      source_ids = {}
+      Array(text_items).each do |item|
+        source_ids[item.source_span_id.to_s] = true if item.respond_to?(:source_span_id)
+      end
+      roots = []
+      walk = lambda do |entities, parent_transform|
+        entities.to_a.each do |entity|
+          kind = entity.respond_to?(:typename) ? entity.typename.to_s : ''
+          next unless ['Group', 'ComponentInstance', 'Image'].include?(kind)
+          transform = parent_transform * entity.transformation
+          mask = masks_by_id[entity.entityID]
+          mask[:transformation] = transform if mask
+          source_id = entity.get_attribute('BC_PDF_Importer', 'source_span_id', '').to_s
+          if source_ids.key?(source_id)
+            roots << { :group => entity, :transformation => transform,
+              :parent_transform => parent_transform }
+          elsif kind != 'Image'
+            children = entity.respond_to?(:entities) ? entity.entities : entity.definition.entities
+            walk.call(children, transform)
+          end
+        end
+      end
+      walk.call(builder.page_group.entities, Geom::Transformation.new)
+      highest_text_z = 0.0
+      roots.each do |root|
+        bounds = root[:group].bounds
+        8.times do |index|
+          z = bounds.corner(index).transform(root[:parent_transform]).z.to_f
+          highest_text_z = z if z > highest_text_z
+        end
+      end
+      inventory = { :white_paths => [], :glyphs => [] }
+      unless roots.all? { |root| root[:group].typename.to_s == 'Image' }
+        document = opts[:svg_provider].call
+        unless document && !document[:svg].to_s.empty?
+          raise RepresentationFidelity::ContractError,
+            'source SVG is unavailable for native paint-order verification'
+        end
+        inventory = SvgPaintOrder.build(document[:svg], media_box,
+          :scale => opts[:scale], :svg_page_box => opts[:svg_page_box], :y_offset => 0.0)
+        transform = page_representation_transform(media_box, opts[:scale],
+          opts[:page_rotation], opts[:y_offset])
+        [:white_paths, :glyphs].each do |key|
+          inventory[key] = Array(inventory[key]).map do |record|
+            copy = record.dup
+            copy[:loops] = Array(record[:loops]).map do |loop|
+              loop.map do |point|
+                local = point.respond_to?(:x) ? point : Geom::Point3d.new(*point)
+                local.transform(transform)
+              end
+            end
+            copy
+          end
+        end
+      end
+      bound = SvgPaintBinding.prepare(masks, roots, inventory, :scale => opts[:scale])
+      report = PlanarWhiteKnockout.compose!(bound[:masks], roots, :ink_faces => bound[:ink_faces])
+      report[:source_binding] = bound[:binding]
+      { :report => report, :highest_text_z => highest_text_z,
+        :final_page_crops => bound[:ink_faces].select { |face| face[:final_page_crop] == true } }
+    end
+
     # True when all four PDF media-space bbox corners are present (may be 0.0).
     def self.source_text_bbox_complete?(item)
       return false unless item
@@ -2561,6 +2635,8 @@ module BlueCollarSystems
          item.respond_to?(:source_decode_complete)
         clone.source_decode_complete = item.source_decode_complete
       end
+      clone.source_paint_order = item.source_paint_order if
+        item.respond_to?(:source_paint_order) && clone.respond_to?(:source_paint_order=)
       clone
     end
 
@@ -2667,6 +2743,8 @@ module BlueCollarSystems
           hint.source_decode_complete : nil
         clone.source_decode_complete = complete == true
       end
+      clone.source_paint_order = hint.source_paint_order if
+        hint.respond_to?(:source_paint_order) && clone.respond_to?(:source_paint_order=)
       clone
     rescue StandardError
       item
@@ -3784,7 +3862,8 @@ module BlueCollarSystems
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Reading paths... [#{elapsed}s]"
         content_parse_started = Time.now
         ocg_map = parser.page_ocg_map(page_num)
-        cs = ContentStreamParser.new(streams, parser, ocg_map)
+        opacity_effects = ContentStreamParser.page_fill_opacity_effects(parser, page_num)
+        cs = ContentStreamParser.new(streams, parser, ocg_map, opacity_effects)
         paths = cs.parse
         record_pipeline_timing!(
           stats, :content_stream_parse_ms,
@@ -4334,6 +4413,7 @@ module BlueCollarSystems
         end
 
         # ── Hatch detection ──
+        source_paths_for_paint_order = paths.dup
         hatch_mode = opts[:hatch_mode] || :import
         hatch_paths = []
         if hatch_mode != :import && paths.length > 20
@@ -4386,6 +4466,20 @@ module BlueCollarSystems
             :effective_group_per_page => true,
             :reason_code => group_policy[:reason_code]
           }
+        end
+        # Only a completely proved final paint suffix may be displayed over
+        # native text. The original text geometry and its certificates stay intact.
+        late_overlays = []
+        if group_policy[:effective_group_per_page] &&
+           (opts[:import_fills] || force_import_fills_for_page)
+          late_overlays = LatePdfOverlays.eligible_records(
+            source_paths_for_paint_order, cs.other_paint_orders)
+          visible_paths = {}
+          paths.each { |source_path| visible_paths[source_path.object_id] = true }
+          late_overlays.select! { |record| visible_paths.key?(record[:path].object_id) }
+          late_ids = {}
+          late_overlays.each { |record| late_ids[record[:path].object_id] = true }
+          paths = paths.reject { |source_path| late_ids.key?(source_path.object_id) }
         end
         provenance_opts = {
           provenance_bucket: stats[:source_provenance_objects],
@@ -4950,7 +5044,45 @@ module BlueCollarSystems
           )
         end
 
+        paint_svg_provider = lambda do
+          source_svg_document || svg_document || CairoGlyphSource.render_page_svg(
+            path, page_num, :use_cropbox => use_cropbox == true)
+        end
+        composition = compose_page_white_masks!(builder, text_items, media_box,
+          :scale => opts[:scale], :svg_page_box => svg_page_box,
+          :page_rotation => page_rotation, :y_offset => page_y_offset,
+          :svg_provider => paint_svg_provider)
+        if composition
+          stats[:planar_white_knockout] ||= []
+          stats[:planar_white_knockout] << composition[:report].merge(:page => page_num)
+        end
+
         # ── Closed-shape extrusion (disabled; independent of 3D text) ───
+        unless late_overlays.empty?
+          unless composition && builder.page_group
+            raise RepresentationFidelity::ContractError,
+              'final vector annotations require the complete page text inventory'
+          end
+          factor = opts[:scale].to_f / 72.0
+          mapper = lambda do |pdf_x, pdf_y|
+            xy = PageTransform.transform_point(pdf_x, pdf_y, media_box, page_rotation)
+            Geom::Point3d.new(xy[0] * factor, xy[1] * factor + page_y_offset, 0.0)
+          end
+          built_overlays = LatePdfOverlays.build!(builder.page_group.entities, late_overlays,
+            :point_mapper => mapper, :materials => model.materials,
+            :highest_text_z => composition[:highest_text_z], :page_number => page_num,
+            :source_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
+            :final_page_crops => composition[:final_page_crops])
+          stats[:late_pdf_overlays] ||= []
+          stats[:late_pdf_overlays] << {
+            :page => page_num, :count => built_overlays.length,
+            :source_xy_preserved => true, :source_opacity_preserved => true,
+            :text_geometry_unchanged => true,
+            :display_depth_inches => built_overlays.map { |record| record[:display_depth] },
+            :final_crop_overlap_area => built_overlays.inject(0.0) { |sum, record| sum + record[:cropped_area] }
+          }
+        end
+
         if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0 && builder.page_group &&
            opts[:import_mode].to_s != 'raster'
           begin

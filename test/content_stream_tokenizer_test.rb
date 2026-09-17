@@ -190,7 +190,12 @@ FIXTURES = [
 FIXTURES.each_with_index do |stream, idx|
   expected = regex_tokenize(stream)
   actual = fast_tokenize(stream)
-  assert_equal(expected, actual, "fixture ##{idx} token stream mismatch")
+  semantic_tokens = actual.map { |token| token.reject { |key, _| key == :source_offset } }
+  assert_equal(expected, semantic_tokens, "fixture ##{idx} token stream mismatch")
+  actual.select { |token| token[:type] == :operator }.each do |token|
+    assert_equal(token[:value], stream[token[:source_offset], token[:value].length],
+                 "fixture ##{idx} operator paint-order offset must identify the original bytes")
+  end
 end
 
 # Explicit numeric classification parity
