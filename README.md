@@ -20,6 +20,7 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 - Fill-only backgrounds no longer gain visible border lines, and polygon outlines beside clipped artwork retain their source vertices instead of being fitted to conflicting circles.
 - Overlapping blank annotation spans no longer take glyphs from neighboring visible text during source ownership matching.
 - Earlier opaque white PDF masks are composed around actual flat text faces using verified source glyph paint order. This preserves solid lettering, counters and interleaved replacement notes without changing text coordinates or the requested representation.
+- Invalid nested or misplaced holes created by the legacy SketchUp face builder are reconstructed as valid isolated regions, then checked again against the original white area and glyph boundaries. Cleanup tolerates edges that SketchUp has already removed.
 - Proven final translucent rectangle annotations retain their source fill opacity and centered stroke width above the text. Final-page text crops are accounted for once, preventing duplicate markup shading.
 - Includes the retained large-page recognition and glyph/raster performance improvements.
 

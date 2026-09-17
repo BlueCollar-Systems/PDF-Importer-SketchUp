@@ -114,6 +114,20 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     def set_attribute(_dict, key, value); attributes[key] = value; end
   end
 
+  class CascadingEdge
+    attr_accessor :hidden, :on_erase, :on_find
+    def initialize(attached = false); @valid, @attached = true, attached; end
+    def valid?; @valid; end
+    def invalidate!; @valid = false; end
+    def typename
+      raise TypeError, 'reference to deleted Entity' unless valid?
+      'Edge'
+    end
+    def faces; @attached ? [:retained_face] : []; end
+    def erase!; invalidate!; on_erase.call if on_erase; end
+    def find_faces; on_find.call if on_find; end
+  end
+
   class Affine
     def initialize(values); @values = values; end
     def to_a; @values; end
@@ -398,5 +412,77 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     assert duplicate.erased
     refute filled_counter.erased
     refute near.erased
+  end
+
+  def test_orphan_cleanup_ignores_only_snapshot_edges_invalidated_by_an_earlier_erase
+    white, text, original, ink = fixture
+    before = Marshal.dump(ink.raw)
+    first, second, retained = CascadingEdge.new, CascadingEdge.new, CascadingEdge.new(true)
+    first.on_erase = lambda { second.invalidate! }
+    white.entities.stage_faces.concat([first, second, retained])
+    receipt = Subject.compose!([{ :group => white, :fill_rgb => [1, 1, 1], :before_text => true }], [text])
+    assert_in_delta 3.0, receipt[:removed_area], 1.0e-10
+    assert original.erased
+    assert_equal before, Marshal.dump(ink.raw)
+    refute first.valid?
+    refute second.valid?
+    assert retained.valid?
+    assert retained.hidden
+  end
+
+  def test_discovery_does_not_query_a_cached_edge_invalidated_by_previous_discovery
+    first, second = CascadingEdge.new, CascadingEdge.new
+    first.on_find = lambda { second.invalidate! }
+    Subject.subdivide_native_boundaries!(Entities.new([first, second]))
+    assert first.valid?
+    refute second.valid?
+  end
+
+  def test_duplicate_cleanup_does_not_query_later_invalidated_snapshot_entities
+    original = Face.new([rect(0, 0, 1, 1)])
+    duplicate = Face.new([rect(0, 0, 1, 1)])
+    disposable = CascadingEdge.new
+    duplicate.define_singleton_method(:erase!) do
+      @erased = true
+      disposable.invalidate!
+    end
+    Subject.remove_duplicate_faces!(Entities.new([original, duplicate, disposable]))
+    refute original.erased
+    assert duplicate.erased
+    refute disposable.valid?
+  end
+
+  def test_nested_and_external_native_holes_are_detected_without_changing_valid_counters
+    outer, counter = rect(0, 0, 10, 10), rect(2, 2, 8, 8)
+    refute Subject.invalid_native_holes?([outer, counter])
+    refute Subject.invalid_native_holes?([outer, rect(1, 1, 2, 2), rect(7, 7, 9, 9)])
+    assert Subject.invalid_native_holes?([outer, counter, rect(3, 3, 4, 4)])
+    assert Subject.invalid_native_holes?([outer, rect(12, 2, 13, 3)])
+    assert Subject.invalid_native_holes?([outer, rect(9, 2, 11, 3)])
+    normalized = BlueCollarSystems::PDFVectorImporter::SvgRegionBoundary.normalize(
+      [{ :loops => [outer, counter, rect(3, 3, 4, 4), rect(12, 2, 13, 3)] }], :native_union)
+    assert_equal 2, normalized.length
+    assert_in_delta 64.0, Subject.source_area([record(*normalized)]), 1.0e-12
+    refute Subject.contains?(record(*normalized), [3.5, 3.5, 0])
+  end
+
+  def test_valid_native_counter_partition_keeps_original_faces_and_avoids_reconstruction
+    face = Face.new([rect(0, 0, 10, 10), rect(2, 2, 8, 8)])
+    entities = Entities.new([face])
+    before = Marshal.dump(face.raw)
+    Subject.repair_native_hole_topology!(entities)
+    refute face.erased
+    assert_nil entities.stage
+    assert_equal before, Marshal.dump(face.raw)
+  end
+
+  def test_unproved_native_topology_is_not_accepted_by_changing_area_math
+    face = Face.new([rect(0, 0, 10, 10), rect(12, 2, 13, 3)])
+    entities = Entities.new([face])
+    BlueCollarSystems::PDFVectorImporter::SvgRegionBoundary.stub(:normalize, nil) do
+      assert_raises(ContractError) { Subject.repair_native_hole_topology!(entities) }
+    end
+    refute face.erased
+    assert_nil entities.stage
   end
 end

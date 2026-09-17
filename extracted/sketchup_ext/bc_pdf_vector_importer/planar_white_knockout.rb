@@ -2,6 +2,7 @@
 # The caller owns the import operation and must abort it if this module raises.
 # No text geometry, representation, identity, or depth is changed here.
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
+require File.join(File.dirname(__FILE__), 'svg_region_boundary')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -356,7 +357,8 @@ module BlueCollarSystems
             end
           end
           subdivide_native_boundaries!(stage.entities)
-          cells = stage.entities.to_a.select { |entity| entity.typename.to_s == 'Face' }
+          repair_native_hole_topology!(stage.entities)
+          cells = partition_faces(stage.entities)
           fail_contract('native white-mask subdivision produced no faces') if cells.empty?
           white_index = spatial_index(white)
           ink_index = spatial_index(ink)
@@ -384,14 +386,7 @@ module BlueCollarSystems
               face.erase!
             end
           end
-          stage.entities.to_a.each do |entity|
-            next unless entity.typename.to_s == 'Edge'
-            if entity.faces.empty?
-              entity.erase!
-            else
-              entity.hidden = true
-            end
-          end
+          clean_partition_edges!(stage.entities)
           entities.erase_entities(originals)
           stage.set_attribute(DICTIONARY, 'planar_white_knockout', true)
           removed.inject(0.0) { |sum, cell| sum + cell[:area] }
@@ -404,6 +399,93 @@ module BlueCollarSystems
                           "ink_faces=#{ink.length}; spans=#{owners}")
           end
           raise
+        end
+      end
+
+      def self.partition_faces(entities)
+        entities.to_a.inject([]) do |faces, entity|
+          next faces unless entity.valid?
+          if entity.typename.to_s == 'Face'
+            faces << entity
+          elsif entity.typename.to_s == 'Group'
+            # Only the identity-transform groups created by topology repair are
+            # present inside this private construction stage.
+            faces.concat(partition_faces(entity.entities))
+          end
+          faces
+        end
+      end
+
+      def self.clean_partition_edges!(entities)
+        entities.to_a.each do |entity|
+          # An earlier edge erase can invalidate a later cached edge.
+          next unless entity.valid?
+          if entity.typename.to_s == 'Group'
+            clean_partition_edges!(entity.entities)
+          elsif entity.typename.to_s == 'Edge'
+            entity.faces.empty? ? entity.erase! : (entity.hidden = true)
+          end
+        end
+      end
+
+      def self.strict_loop_inside?(point, loop)
+        return false if loop.each_index.any? do |i|
+          SvgRegionBoundary.on_segment?(point, loop[i], loop[(i + 1) % loop.length])
+        end
+        SvgRegionBoundary.winding(point, loop) != 0
+      end
+
+      def self.invalid_native_holes?(loops)
+        return false if loops.length < 2
+        rational = loops.map { |loop| loop.map { |p| [p[0].to_r, p[1].to_r] } }
+        outer, holes = rational.first, rational.drop(1)
+        # Legacy find_faces can attach a hole outside its outer shell, or attach
+        # a counter again inside an existing hole. Both produce invalid native
+        # faces (even negative Face#area), although their edge coordinates remain.
+        holes.each do |hole|
+          return true if hole.any? do |p|
+            SvgRegionBoundary.winding(p, outer) == 0 &&
+              !outer.each_index.any? { |i| SvgRegionBoundary.on_segment?(p, outer[i], outer[(i + 1) % outer.length]) }
+          end
+        end
+        holes.each_with_index do |hole, index|
+          holes.each_with_index do |other, other_index|
+            next if index == other_index
+            return true if hole.any? { |p| strict_loop_inside?(p, other) }
+          end
+        end
+        false
+      end
+
+      def self.repair_native_hole_topology!(entities)
+        partition_faces(entities).each do |face|
+          ordered = [face.outer_loop] + face.loops.to_a.reject { |loop| loop == face.outer_loop }
+          raw = ordered.map do |loop|
+            loop.vertices.map { |v| [v.position.x.to_f, v.position.y.to_f, v.position.z.to_f] }
+          end
+          next unless invalid_native_holes?(raw)
+          normalized = SvgRegionBoundary.normalize([{ :loops => raw }], :native_union)
+          fail_contract('native white-mask hole topology could not be reconstructed') unless normalized
+          outers, holes = normalized.partition { |loop| SvgRegionBoundary.signed_area2(loop) > 0 }
+          # Keep each connected region isolated: putting it back into the same
+          # legacy edge graph can recreate the malformed nested/outside holes.
+          groups = outers.map do |outer|
+            group = entities.add_group
+            created = group.entities.add_face(outer.map { |p| Geom::Point3d.new(*p) })
+            fail_contract('native white-mask outer reconstruction failed') unless created
+            [outer, group]
+          end
+          holes.each do |hole|
+            point = hole.first.first(2).map(&:to_r)
+            owners = groups.select do |pair|
+              strict_loop_inside?(point, pair[0].map { |p| p.first(2).map(&:to_r) })
+            end
+            fail_contract('native white-mask counter has no unique reconstructed shell') unless owners.length == 1
+            cut = owners[0][1].entities.add_face(hole.map { |p| Geom::Point3d.new(*p) })
+            fail_contract('native white-mask counter reconstruction failed') unless cut
+            cut.erase!
+          end
+          face.erase!
         end
       end
 
@@ -422,7 +504,8 @@ module BlueCollarSystems
         # Remove only those exact loop duplicates, not overlapping polygons or
         # approximate neighbors. All boundary/area/coverage checks remain active.
         entities.to_a.each do |entity|
-          entity.find_faces if entity.typename.to_s == 'Edge' && entity.valid?
+          next unless entity.valid?
+          entity.find_faces if entity.typename.to_s == 'Edge'
         end
         remove_duplicate_faces!(entities)
       end
@@ -453,7 +536,8 @@ module BlueCollarSystems
       def self.remove_duplicate_faces!(entities)
         seen = {}
         entities.to_a.each do |entity|
-          next unless entity.typename.to_s == 'Face' && entity.valid?
+          next unless entity.valid?
+          next unless entity.typename.to_s == 'Face'
           key = face_loop_signature(entity)
           if seen.key?(key)
             entity.erase!
