@@ -598,4 +598,42 @@ class PlanarWhiteKnockoutTest < Minitest::Test
                  Subject.construction_ink_loops([first, other_page])
     assert_equal first[:loops], Subject.construction_ink_loops([first])
   end
+
+  def test_same_page_source_ordered_glyphs_and_final_crop_construct_exact_union
+    glyph = record(rect(0, 0, 4, 4), rect(1, 1, 3, 3)).merge(
+      :source_span_id => 'text_span:1:1', :paint_order => [0, 20])
+    nested = record(rect(3, 1, 4, 2)).merge(
+      :source_span_id => 'text_span:1:1', :paint_order => [0, 21])
+    crop = crop_record(rect(2, -1, 5, 5))
+    ink = [glyph, nested, crop]
+    before = Marshal.dump(ink)
+    loops = Subject.construction_ink_loops(ink)
+    assert_equal 2, loops.length, 'the remaining source counter stays open'
+    (-2..12).each do |x|
+      (-4..14).each do |y|
+        point = [Rational(x, 2) + Rational(1, 13), Rational(y, 2) + Rational(1, 17)]
+        expected = ink.any? { |face| Subject.contains?(face, point) }
+        actual = loops.inject(0) do |sum, loop|
+          sum + BlueCollarSystems::PDFVectorImporter::SvgRegionBoundary.winding(
+            point, loop.map { |v| v.first(2).map(&:to_r) })
+        end != 0
+        assert_equal expected, actual
+      end
+    end
+    assert_equal before, Marshal.dump(ink)
+    refute_equal ink.flat_map { |face| face[:loops] }, loops
+  end
+
+  def test_mixed_union_requires_bound_same_page_glyph_order_and_keeps_pure_vectors
+    crop = crop_record(rect(1, 0, 4, 3))
+    glyph = record(rect(0, 0, 3, 3)).merge(
+      :source_span_id => 'text_span:1:1', :paint_order => [0, 20])
+    [glyph.merge(:paint_order => nil), glyph.merge(:source_span_id => 'text_span:2:1'),
+     glyph.merge(:source_span_id => nil)].each do |unproved|
+      assert_equal [crop, unproved].flat_map { |face| face[:loops] },
+                   Subject.construction_ink_loops([crop, unproved])
+    end
+    vectors = [glyph, glyph.merge(:loops => [rect(2, 0, 5, 3)])]
+    assert_equal vectors.flat_map { |face| face[:loops] }, Subject.construction_ink_loops(vectors)
+  end
 end

@@ -412,15 +412,23 @@ module BlueCollarSystems
 
       def self.construction_ink_loops(ink)
         original = ink.flat_map { |record| record[:loops] }
-        return original unless ink.length > 1 && ink.all? { |record| record[:final_page_crop] == true }
-        identities = ink.map { |record| [record[:source_pdf_sha256], record[:raster_page_number]] }.uniq
+        return original unless ink.length > 1
+        crops = ink.select { |record| record[:final_page_crop] == true }
+        return original if crops.empty?
+        identities = crops.map { |record| [record[:source_pdf_sha256], record[:raster_page_number]] }.uniq
         return original unless identities.length == 1 &&
           /\A[0-9a-f]{64}\z/i =~ identities[0][0].to_s &&
           identities[0][1].is_a?(Integer) && identities[0][1] > 0
+        return original unless ink.all? do |record|
+          next true if record[:final_page_crop] == true
+          source = /\Atext_span:(\d+):\d+\z/.match(record[:source_span_id].to_s)
+          source && source[1].to_i == identities[0][1] && valid_order?(record[:paint_order])
+        end
         # Legacy native face discovery can leave the white boundary unsplit
-        # inside overlapping image rectangles. Construct their exact union
+        # inside overlapping image rectangles, including a rectangle over
+        # source-ordered glyph faces from its same page. Construct their union
         # boundary first; every classification, area and coverage gate below
-        # still uses the original physical crop records, without altering images.
+        # still uses the original physical records, without altering text/images.
         # Unsupported point-touch topology keeps the existing native route and
         # its unchanged verification; it never authorizes approximate contours.
         SvgRegionBoundary.normalize(ink, :native_union) || original
