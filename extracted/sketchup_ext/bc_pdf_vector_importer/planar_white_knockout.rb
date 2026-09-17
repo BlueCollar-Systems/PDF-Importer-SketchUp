@@ -350,13 +350,13 @@ module BlueCollarSystems
           page_transform = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
                            Geom::Transformation.scaling(1.0 / CONSTRUCTION_SCALE)
           stage.transformation = transform.inverse * page_transform
-          (white + ink).each do |record|
-            record[:loops].each do |loop|
-              points = loop.map { |point| construction_point(point, origin) }
-              # A previously inserted coincident boundary may return nil. The
-              # physical partition/coverage checks below decide success.
-              stage.entities.add_face(points)
-            end
+          construction_loops = white.flat_map { |record| record[:loops] } +
+                               construction_ink_loops(ink)
+          construction_loops.each do |loop|
+            points = loop.map { |point| construction_point(point, origin) }
+            # A previously inserted coincident boundary may return nil. The
+            # physical partition/coverage checks below decide success.
+            stage.entities.add_face(points)
           end
           subdivide_native_boundaries!(stage.entities)
           repair_native_hole_topology!(stage.entities)
@@ -408,6 +408,22 @@ module BlueCollarSystems
           end
           raise
         end
+      end
+
+      def self.construction_ink_loops(ink)
+        original = ink.flat_map { |record| record[:loops] }
+        return original unless ink.length > 1 && ink.all? { |record| record[:final_page_crop] == true }
+        identities = ink.map { |record| [record[:source_pdf_sha256], record[:raster_page_number]] }.uniq
+        return original unless identities.length == 1 &&
+          /\A[0-9a-f]{64}\z/i =~ identities[0][0].to_s &&
+          identities[0][1].is_a?(Integer) && identities[0][1] > 0
+        # Legacy native face discovery can leave the white boundary unsplit
+        # inside overlapping image rectangles. Construct their exact union
+        # boundary first; every classification, area and coverage gate below
+        # still uses the original physical crop records, without altering images.
+        # Unsupported point-touch topology keeps the existing native route and
+        # its unchanged verification; it never authorizes approximate contours.
+        SvgRegionBoundary.normalize(ink, :native_union) || original
       end
 
       def self.partition_faces(entities)

@@ -536,4 +536,66 @@ class PlanarWhiteKnockoutTest < Minitest::Test
       refute Subject.strict_loop_inside?([6.to_r, 2.to_r], loop, box)
     end
   end
+
+  def crop_record(loop)
+    record(loop).merge(:final_page_crop => true, :source_pdf_sha256 => 'a' * 64,
+                       :raster_page_number => 1)
+  end
+
+  def test_overlapping_final_page_crops_construct_union_without_changing_physical_records
+    crops = [crop_record(rect(0, 2, 8, 4)), crop_record(rect(0, 0, 7, 3))]
+    before = Marshal.dump(crops)
+    loops = Subject.construction_ink_loops(crops)
+    assert_equal 1, loops.length
+    assert_equal 8, loops.first.length
+    assert_in_delta 30.0, Subject.loop_area(loops.first), 1.0e-12
+    assert_equal before, Marshal.dump(crops)
+    # The intermediate seam is absent, while the exact external step remains.
+    assert_includes loops.first, [7.0, 0.0, 0.0]
+    refute loops.first.each_index.any? { |i| [loops.first[i], loops.first[(i + 1) % loops.first.length]].sort ==
+      [[0.0, 2.0, 0.0], [7.0, 2.0, 0.0]] }
+  end
+
+  def test_crop_union_keeps_nested_touching_disjoint_rotated_and_counter_regions_exact
+    cases = [
+      [rect(0, 0, 6, 6), rect(2, 2, 4, 4)],
+      [rect(0, 0, 3, 3), rect(3, 0, 5, 3)],
+      [rect(0, 0, 2, 2), rect(4, 0, 6, 2)],
+      [rect(0, 0, 2, 2), rect(2, 2, 4, 4)],
+      [[[0, 2, 0], [2, 0, 0], [4, 2, 0], [2, 4, 0]], rect(2, 1, 5, 3)],
+      [rect(0, 0, 6, 1), rect(0, 5, 6, 6), rect(0, 1, 1, 5), rect(5, 1, 6, 5)]
+    ]
+    cases.each do |raw|
+      crops = raw.map { |loop| crop_record(loop) }
+      before = Marshal.dump(crops)
+      loops = Subject.construction_ink_loops(crops)
+      # Offset samples avoid coincident fixture edges, including diagonals.
+      (-2..14).each do |x|
+        (-2..14).each do |y|
+          p = [Rational(x, 2) + Rational(1, 13), Rational(y, 2) + Rational(1, 17)]
+          expected = crops.any? { |face| Subject.contains?(face, p) }
+          actual = loops.inject(0) do |sum, loop|
+            sum + BlueCollarSystems::PDFVectorImporter::SvgRegionBoundary.winding(p,
+              loop.map { |v| v.first(2).map(&:to_r) })
+          end != 0
+          assert_equal expected, actual
+        end
+      end
+      assert_equal before, Marshal.dump(crops)
+    end
+  end
+
+  def test_unproved_mixed_or_different_page_inputs_preserve_original_construction
+    first, second = crop_record(rect(0, 0, 3, 3)), crop_record(rect(1, 1, 4, 4))
+    [:final_page_crop, :source_pdf_sha256, :raster_page_number].each do |key|
+      unproved = second.dup
+      unproved.delete(key)
+      assert_equal [first[:loops].first, unproved[:loops].first],
+                   Subject.construction_ink_loops([first, unproved])
+    end
+    other_page = second.merge(:raster_page_number => 2)
+    assert_equal [first[:loops].first, other_page[:loops].first],
+                 Subject.construction_ink_loops([first, other_page])
+    assert_equal first[:loops], Subject.construction_ink_loops([first])
+  end
 end
