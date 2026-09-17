@@ -106,6 +106,22 @@ module BlueCollarSystems
         { media_box: media_box, crop_box: crop_box, rotation: rotation, content_streams: streams }
       end
 
+      # Annotation appearances are outside /Contents. The native path parser
+      # cannot infer their paint from page streams; normalize them once first.
+      def page_has_annotations?(page_num)
+        raise ArgumentError, 'annotation page is out of range' unless (1..@page_count).include?(page_num)
+        dict = to_dict(resolve_object(@pages[page_num - 1]))
+        raise 'annotation page dictionary is unavailable' unless dict
+        value = dict['/Annots']
+        return false if value.nil? || value == 'null'
+        entries = resolve_object(value)
+        if entries.is_a?(String) && entries.strip.start_with?('[')
+          entries = parse_array_string(entries)
+        end
+        raise 'annotation array is unresolved or malformed' unless entries.is_a?(Array)
+        !entries.empty?
+      end
+
       # ---------------------------------------------------------------
       # Form XObject inline expansion (Round 18)
       # ---------------------------------------------------------------

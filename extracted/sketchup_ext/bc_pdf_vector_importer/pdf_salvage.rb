@@ -15,6 +15,7 @@
 
 require 'fileutils'
 require 'open3'
+require 'digest'
 require File.join(File.dirname(__FILE__), 'safe_temp')
 require File.join(File.dirname(__FILE__), 'poppler_result_validator')
 
@@ -62,6 +63,11 @@ module BlueCollarSystems
           reason = needs_salvage_reason(pdf_path)
           return [pdf_path, nil] unless reason
 
+          if reason == 'page annotations'
+            out = normalize_annotation_appearances(pdf_path)
+            return [out, 'visible annotation appearances normalized as vector page content']
+          end
+
           out = salvage_with_poppler(pdf_path, reason)
           if out
             note = "salvaged via poppler (#{reason})"
@@ -104,6 +110,11 @@ module BlueCollarSystems
             return "parse failed: #{e.class}"
           end
           return 'zero pages' if parser.page_count == 0
+          begin
+            return 'page annotations' if (1..parser.page_count).any? { |page| parser.page_has_annotations?(page) }
+          rescue StandardError => error
+            raise SalvageError, 'PDF annotation inventory could not be verified: ' + error.message
+          end
           data = begin
             parser.page_data(1)
           rescue StandardError
@@ -116,6 +127,61 @@ module BlueCollarSystems
           end
           return 'no readable content streams' unless usable
           nil
+        ensure
+          parser.release if parser
+        end
+
+        # pdfwrite preserves text/vectors and image resolution. Screen flags
+        # matter: pdftocairo -pdf uses print visibility and drops non-printing
+        # visible notes (or exposes print-only hidden notes). Never use it here.
+        def normalize_annotation_appearances(pdf_path)
+          exe = DependencyResolver.find_ghostscript
+          raise SalvageError, 'Visible PDF annotations require the bundled Ghostscript helper; repair the importer installation.' unless exe
+          before = Digest::SHA256.file(pdf_path).hexdigest
+          source = PDFParser.new(pdf_path)
+          source.parse
+          count = source.page_count
+          out = SafeTemp.join('bc_annotations_' + Process.pid.to_s + '_' + Time.now.to_i.to_s + '_' + rand(1_000_000).to_s + '.pdf')
+          accepted = false
+          args = [exe, '-q', '-dSAFER', '-dBATCH', '-dNOPAUSE', '-dPDFSTOPONERROR',
+                  '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.7',
+                  '-dPrinted=false', '-dPreserveAnnots=false', '-dShowAnnots=true',
+                  '-dAutoRotatePages=/None', '-dDownsampleColorImages=false',
+                  '-dDownsampleGrayImages=false', '-dDownsampleMonoImages=false',
+                  '-sOutputFile=' + out, '-f', pdf_path]
+          run = if defined?(CommandRunner) && CommandRunner.respond_to?(:run)
+                  CommandRunner.run(args, :timeout_s=>SALVAGE_TIMEOUT_S, :context=>'PdfAnnotationNormalization')
+                else
+                  fallback_run_pdftocairo(args)
+                end
+          validation = PopplerResultValidator.validate(run, :executable=>exe,
+            :argv=>args, :context=>'PdfAnnotationNormalization', :attempt=>1,
+            :representation=>:vector_pdf_annotation_normalization,
+            :artifacts=>[out], :artifact_policy=>:all_nonempty)
+          unless validation && validation[:ok]
+            raise SalvageError, 'Could not preserve visible PDF annotations: vector normalization failed. No incomplete import was created.'
+          end
+          unless run[:stderr].to_s.strip.empty? && run[:stdout].to_s.strip.empty?
+            raise SalvageError, 'Annotation normalization reported a PDF/font warning; repair the reported source or helper problem before importing. ' +
+              (run[:stderr].to_s + ' ' + run[:stdout].to_s).strip[0,600]
+          end
+          raise SalvageError, 'PDF changed during annotation normalization.' unless Digest::SHA256.file(pdf_path).hexdigest == before
+          check = PDFParser.new(out)
+          check.parse
+          unless check.page_count == count && (1..count).none? { |page| check.page_has_annotations?(page) }
+            raise SalvageError, 'Annotation normalization did not preserve every page as complete page content.'
+          end
+          temp_salvages << out
+          accepted = true
+          out
+        rescue SalvageError
+          raise
+        rescue StandardError => error
+          raise SalvageError, 'Could not preserve visible PDF annotations: ' + error.message
+        ensure
+          source.release if source
+          check.release if check
+          File.delete(out) if out && !accepted && File.file?(out)
         end
 
         # Track all temporary salvaged files so they can be removed at

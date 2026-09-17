@@ -11,6 +11,7 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 ### Recent fixes (v3.7.151)
 
+- Visible PDF annotations are preserved as page vectors and text before import, including markup lines outside the ordinary page content stream. Screen-visible notes remain visible and hidden notes stay hidden; the source PDF is unchanged. Missing helpers or incomplete normalization stop the import with an error.
 - Simultaneous imports keep their reports, parts data and source provenance in separate run folders, preventing one importer from replacing another importer's verification evidence.
 - Each import retains its own diagnostic log, and saved compatibility reports remain available for later review.
 - Default report names handle long and non-ASCII drawing names. Explicit CLI report destinations retain their chosen paths.
