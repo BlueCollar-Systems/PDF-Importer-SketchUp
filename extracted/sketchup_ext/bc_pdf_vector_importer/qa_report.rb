@@ -600,6 +600,9 @@ module BlueCollarSystems
           ),
           delivered_text_entity_counts: delivered_text_entity_counts(stats),
           text_delivery_accounting: text_delivery_accounting(stats),
+          text_delivery_failures: Array(
+            stats[:text_delivery_failures] || stats['text_delivery_failures']
+          ).map { |entry| normalize_json(entry) },
           execution_scope: (stats[:execution_scope] ||
                             stats['execution_scope'] || :host_import).to_s,
           extracted_text_items: (stats[:extracted_text_items] ||
@@ -2414,6 +2417,14 @@ module BlueCollarSystems
         if !Array(stats[:recognition_skipped_pages]).empty?
           signals << 'semantic_recognition_skipped_for_speed'
           actions << 'Geometry was imported, but heavy-page semantic recognition was skipped; use a smaller page range if you need semantic report details.'
+        end
+
+        uncertified = Array(
+          stats[:text_delivery_failures] || stats['text_delivery_failures']
+        )
+        unless uncertified.empty?
+          signals << 'uncertified_text_spans'
+          actions << "#{uncertified.length} source text span(s) were not certified; geometry and certified text were kept. See extra.text_delivery_failures and last_import.log."
         end
 
         {

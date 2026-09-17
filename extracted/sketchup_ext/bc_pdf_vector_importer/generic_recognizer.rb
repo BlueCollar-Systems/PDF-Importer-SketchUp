@@ -158,26 +158,45 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       def self.associate_dimensions(texts, prims, config)
         assocs = []
+        radius = config.dimension_assoc_radius
+        indexed = []
+        prims.each_with_index do |p, index|
+          next unless p.bbox
+          pcx = (p.bbox[0] + p.bbox[2]) / 2.0
+          pcy = (p.bbox[1] + p.bbox[3]) / 2.0
+          indexed << [index, pcx, pcy, p]
+        end
+        cell = radius > 0.0 ? radius.to_f : 3.0
+        grid = {}
+        indexed.each do |item|
+          key = [(item[1] / cell).floor, (item[2] / cell).floor]
+          (grid[key] ||= []) << item
+        end
+        span = (radius / cell).ceil
 
         dim_texts = texts.select { |t| t.classifications.include?(:dimension_like) }
         dim_texts.each do |txt|
-          # Parse the dimension value
           parsed = DimensionParser.parse(txt.text)
           next unless parsed.value && parsed.confidence > 0.3
 
-          # Find nearest primitive
           nearest = nil
-          nearest_dist = config.dimension_assoc_radius
-
-          prims.each do |p|
-            next unless p.bbox
-            # Distance from text insertion to primitive bbox center
-            pcx = (p.bbox[0] + p.bbox[2]) / 2.0
-            pcy = (p.bbox[1] + p.bbox[3]) / 2.0
-            d = Math.sqrt((txt.insertion[0] - pcx)**2 + (txt.insertion[1] - pcy)**2)
-            if d < nearest_dist
-              nearest = p
-              nearest_dist = d
+          nearest_index = nil
+          nearest_dist = radius
+          gx = (txt.insertion[0] / cell).floor
+          gy = (txt.insertion[1] / cell).floor
+          (-span..span).each do |dx|
+            (-span..span).each do |dy|
+              (grid[[gx + dx, gy + dy]] || []).each do |index, pcx, pcy, p|
+                d = Math.sqrt((txt.insertion[0] - pcx)**2 + (txt.insertion[1] - pcy)**2)
+                if d < nearest_dist
+                  nearest = p
+                  nearest_index = index
+                  nearest_dist = d
+                elsif nearest_index && d == nearest_dist && index < nearest_index
+                  nearest = p
+                  nearest_index = index
+                end
+              end
             end
           end
 

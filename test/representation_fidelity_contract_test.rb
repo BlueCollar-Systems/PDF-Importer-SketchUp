@@ -1940,9 +1940,49 @@ class RepresentationFidelityContractTest < Minitest::Test
                  context[:importer_id]
     assert_equal 3, context[:page_number]
     assert_equal :complete, context[:render_status]
-    assert_equal :failed, context[:font_inventory_status]
-    assert_equal :font_inventory_runtime_error,
-                 context[:page_failures][0][:reason_code]
+    assert_equal :complete, context[:font_inventory_status]
+    assert_equal ['MissingEmbeddedFont'], context[:missing_fonts]
+    assert_empty context[:page_failures]
+  end
+
+  def test_item_inventory_failures_are_recorded_without_aborting_the_page
+    stats = { text_delivery_failures: [] }
+    item_failures = [{
+      source_span_id: 'text_span:1:84',
+      reason_code: :source_page_inventory_failed,
+      detail: 'page renderer/font inventory failed; exact source absence is unproven'
+    }]
+    page_failures = [{
+      reason_code: :source_loop_binding_mismatch,
+      detail: 'independent SVG loop binding failed'
+    }]
+    mixed = item_failures + page_failures
+
+    mapped = IMP.map_text_renderer_failures(mixed)
+    assert_equal ['text_span:1:84'],
+                 IMP.item_level_text_delivery_failures(mapped).map { |row|
+                   row[:source_span_id]
+                 }
+    assert_equal [nil],
+                 IMP.page_level_text_delivery_failures(mapped).map { |row|
+                   row[:source_span_id]
+                 }
+
+    IMP.record_uncertified_text_spans!(stats, 1, item_failures)
+    assert_equal 1, stats[:text_delivery_failures].length
+    assert_equal 'text_span:1:84',
+                 stats[:text_delivery_failures][0][:source_span_id]
+    assert_equal 'source_page_inventory_failed',
+                 stats[:text_delivery_failures][0][:reason]
+    assert_equal false, stats[:text_delivery_failures][0][:certified]
+
+    main = File.read(
+      File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),
+      encoding: 'UTF-8'
+    )
+    assert_match(/record_uncertified_text_spans!/, main)
+    assert_match(/item_level_text_delivery_failures/, main)
+    refute_match(/promote_text_delivery_failures_to_raster!/, main)
   end
 
   def test_terminal_raster_must_be_a_new_owned_nonempty_image
