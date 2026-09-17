@@ -2,6 +2,7 @@
 # Binding tolerances account for Cairo's 1/256-point output grid only; no native
 # coordinates, text entities, styles, or representation certificates are edited.
 require File.join(File.dirname(__FILE__), 'planar_white_knockout')
+require File.join(File.dirname(__FILE__), 'svg_region_boundary')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -34,15 +35,31 @@ module BlueCollarSystems
           next if white.empty?
           box = Geometry.union_bounds(white)
           loops = white.flat_map { |face| face[:loops] }
-          candidates = source_masks.select do |candidate|
-            same_bounds?(box, candidate[:bounds], tolerance) &&
-              same_loops?(loops, candidate[:loops], tolerance)
+          near = source_masks.select { |candidate| same_bounds?(box, candidate[:bounds], tolerance) }
+          native_boundary = nil
+          native_boundary_checked = false
+          candidates = near.select do |candidate|
+            unless native_boundary_checked
+              native_boundary = SvgRegionBoundary.normalize(white, :native_union)
+              native_boundary_checked = true
+            end
+            unless candidate.key?(:binding_boundary)
+              candidate[:binding_boundary] = SvgRegionBoundary.normalize([candidate], :svg)
+            end
+            source_boundary = candidate[:binding_boundary]
+            native_boundary && source_boundary &&
+              same_region_boundaries?(native_boundary, source_boundary, tolerance)
           end
           copy = record.dup
           copy[:pdf_paint_order] = record[:paint_order]
           copy[:native_white_faces] = white
           copy[:bounds] = box
           copy[:svg_candidates] = candidates
+          copy[:native_loop_sizes] = loops.map(&:length)
+          copy[:nearby_svg_diagnostics] = near.first(3).map do |candidate|
+            { :offset => candidate[:svg_document_offset], :loop_sizes => candidate[:loops].map(&:length),
+              :fill_rule => candidate[:fill_rule], :normalized_loops => candidate[:binding_boundary] && candidate[:binding_boundary].length }
+          end
           bound_masks << copy
         end
         # Duplicate equal-shape paints remain distinct: associate their source
@@ -103,7 +120,9 @@ module BlueCollarSystems
           unless Geometry.valid_order?(mask[:paint_order])
             Geometry.fail_contract('source SVG paint order is unproven for an overlapping white mask: PDF order=' +
               mask[:pdf_paint_order].inspect + ', bounds=' + mask[:bounds].inspect +
-              ', source candidates=' + mask[:svg_candidates].length.to_s)
+              ', source candidates=' + mask[:svg_candidates].length.to_s +
+              ', native loop sizes=' + mask[:native_loop_sizes].first(12).inspect +
+              ', nearby SVG=' + mask[:nearby_svg_diagnostics].inspect)
           end
           unknown = overlapping.find { |face| !Geometry.valid_order?(face[:paint_order]) }
           if unknown
@@ -157,6 +176,70 @@ module BlueCollarSystems
           unused.delete_at(unused.index(candidates[0]))
         end
         unused.empty?
+      end
+
+      # Normalization cancels only proven internal seams. Compare every full
+      # remaining edge, in both directions, while retaining outer/hole signs
+      # and component count. Cairo tolerance binds identities only; neither
+      # source nor native geometry is moved or reconstructed here.
+      def self.same_region_boundaries?(native, source, tolerance)
+        return false unless native.length == source.length && !native.empty?
+        unused = source.dup
+        native.each do |loop|
+          candidates = unused.select do |other|
+            area = signed_loop_area(loop)
+            other_area = signed_loop_area(other)
+            area * other_area > 0.0 &&
+              loop_edges(loop).all? { |a,b| boundary_segment_covered?(a,b,other,tolerance) } &&
+              loop_edges(other).all? { |a,b| boundary_segment_covered?(a,b,loop,tolerance) }
+          end
+          return false unless candidates.length == 1
+          unused.delete_at(unused.index(candidates[0]))
+        end
+        unused.empty?
+      end
+
+      def self.signed_loop_area(loop)
+        origin = loop.first
+        return 0.0 unless origin
+        loop_edges(loop).inject(0.0) do |area,pair|
+          a,b = pair
+          area + (a[0]-origin[0])*(b[1]-origin[1]) - (b[0]-origin[0])*(a[1]-origin[1])
+        end * 0.5
+      end
+
+      def self.loop_edges(loop)
+        points = loop.dup
+        points.pop if points.length > 1 && points[-1] == points[0]
+        return [] if points.length < 3
+        points.each_with_index.map { |point,index| [point,points[(index+1)%points.length]] }
+      end
+
+      def self.boundary_segment_covered?(a, b, boundary, tolerance)
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        length = Math.sqrt(dx*dx+dy*dy)
+        return false unless length > 0.0
+        ux, uy = dx/length, dy/length
+        intervals = []
+        loop_edges(boundary).each do |c,d|
+          next unless (d[0]-c[0])*ux+(d[1]-c[1])*uy > 0.0
+          c_along = (c[0]-a[0])*ux+(c[1]-a[1])*uy
+          d_along = (d[0]-a[0])*ux+(d[1]-a[1])*uy
+          c_normal = (c[0]-a[0])*uy-(c[1]-a[1])*ux
+          d_normal = (d[0]-a[0])*uy-(d[1]-a[1])*ux
+          next unless c_normal.abs <= tolerance && d_normal.abs <= tolerance
+          c_slack = Math.sqrt([tolerance*tolerance-c_normal*c_normal,0.0].max)
+          d_slack = Math.sqrt([tolerance*tolerance-d_normal*d_normal,0.0].max)
+          intervals << [c_along-c_slack,d_along+d_slack]
+        end
+        covered = 0.0
+        intervals.sort_by { |interval| interval[0] }.each do |low,high|
+          next if high < covered
+          return false if low > covered
+          covered = high if high > covered
+          return true if covered >= length
+        end
+        false
       end
 
       def self.loop_samples(loop)

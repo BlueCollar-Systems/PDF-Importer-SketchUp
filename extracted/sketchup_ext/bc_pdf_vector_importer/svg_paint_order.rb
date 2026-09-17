@@ -103,7 +103,7 @@ module BlueCollarSystems
             # Keep its first index, but the final identical repaint determines
             # whether that ink covers an intervening white mask. Translucent
             # repaints cannot collapse to one effective opaque paint event.
-            key = [id, matrix, frame[:fill], frame[:alpha]]
+            key = [id, matrix, frame[:fill], frame[:alpha], frame[:fill_rule]]
             previous = frame[:alpha] == 1.0 ? by_physical[key] : nil
             if previous
               previous[:placement_indices] << event[:placement_index]
@@ -202,7 +202,9 @@ module BlueCollarSystems
           next unless path
           p = SvgTextRenderer.svg_tag_attribute_map(path[1])
           next unless (p.keys - ['d', 'clip-rule']).empty? && linear_path?(p['d'])
-          rule = p['clip-rule'] || 'nonzero'
+          # Inherited clip-rule is intentionally outside this bounded parser.
+          # Cairo declares it on each path; absence must remain unproven.
+          rule = p['clip-rule']
           next unless ['nonzero', 'evenodd'].include?(rule)
           begin
             loops = path_loops(p['d'])

@@ -92,6 +92,18 @@ class SvgPaintOrderTest < Minitest::Test
     assert_equal [0.5, 0.5], result[:glyphs].last(2).map { |g| g[:fill_opacity] }
   end
 
+  def test_differing_fill_rules_do_not_steal_the_order_of_an_identical_outline
+    compound = '<defs><g id="glyph-0-0"><path d="M 0 0 L 20 0 L 20 20 L 0 20 Z M 5 5 L 15 5 L 15 15 L 5 15 Z"/></g></defs>'
+    svg = document(use(10,20,'fill-rule="nonzero"') + mask +
+      use(10,20,'fill-rule="evenodd"'), compound)
+    result = Subject.build(svg, BOX)
+    assert_equal 2, result[:glyphs].length
+    assert_equal [:nonzero,:evenodd], result[:glyphs].map { |g| g[:fill_rule] }
+    assert_equal [[0],[1]], result[:glyphs].map { |g| g[:placement_indices] }
+    assert_equal(-1, result[:glyphs][0][:paint_order] <=> result[:white_paths][0][:paint_order])
+    assert_equal(-1, result[:white_paths][0][:paint_order] <=> result[:glyphs][1][:paint_order])
+  end
+
   def test_unsupported_glyph_definition_cannot_certify_an_untransformed_copy
     definitions = '<defs><path id="glyph-0-0" transform="scale(3)" d="M 0 0 L 4 0 L 4 6 Z"/></defs>'
     result = Subject.build(document(use, definitions), BOX)
@@ -222,5 +234,13 @@ class SvgPaintOrderTest < Minitest::Test
       assert_empty result[:white_paths]
       assert_equal 'unsupported_clip-path', result[:excluded].first[:reason]
     end
+  end
+
+  def test_missing_clip_rule_never_guesses_away_inherited_evenodd_holes
+    defs = '<defs clip-rule="evenodd"><clipPath id="c"><path d="M 0 0 L 20 0 L 20 20 L 0 20 Z M 5 5 L 15 5 L 15 15 L 5 15 Z"/></clipPath></defs>'
+    body = '<g clip-path="url(#c)"><rect width="50" height="50" fill="white"/></g>'
+    result = Subject.build(document(body, defs), BOX)
+    assert_empty result[:white_paths]
+    assert_equal 'unsupported_clip-path', result[:excluded].first[:reason]
   end
 end

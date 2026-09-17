@@ -132,4 +132,64 @@ class SvgPaintBindingTest < Minitest::Test
         { :white_paths => [source(white,10),source(white,30)], :glyphs => [source(glyph,20,1)] })
     end
   end
+
+  def test_adjacent_svg_rectangles_bind_one_merged_native_stepped_region
+    base=rectangle(0,0,10,6); top=rectangle(2,6,8,7)
+    merged=[[0,0,0],[10,0,0],[10,6,0],[8,6,0],[8,7,0],[2,7,0],[2,6,0],[0,6,0]]
+    glyph=rectangle(3,2,4,4)
+    white=source(base,20).merge(:loops=>[base,top])
+    native_white=native(merged,[]); before=Marshal.dump(native_white[:loops])
+    result=prepare([mask(100)], [native_white], [native(glyph,[1])],
+      {:white_paths=>[white], :glyphs=>[source(glyph,30,1)]})
+    assert_equal [0,20], result[:masks].first[:paint_order]
+    assert_equal before, Marshal.dump(native_white[:loops])
+    assert_equal 1, result[:binding][:matched_masks]
+  end
+
+  def test_triangulated_native_white_region_has_the_same_filled_boundary
+    white=rectangle(0,0,2,2); glyph=rectangle(0.2,0.2,1,1)
+    triangles=[native([[0,0,0],[2,0,0],[2,2,0]],[]),native([[0,0,0],[2,2,0],[0,2,0]],[])]
+    result=prepare([mask(100)], triangles, [native(glyph,[1])],
+      {:white_paths=>[source(white,20)], :glyphs=>[source(glyph,30,1)]})
+    assert_equal [0,20], result[:masks].first[:paint_order]
+  end
+
+  def test_native_hole_cannot_match_nonzero_source_with_redundant_inner_contour
+    outer=rectangle(0,0,4,4); hole=rectangle(1,1,3,3); glyph=rectangle(0.1,0.1,0.8,0.8)
+    native_white=Geometry.face_record([outer,hole])
+    white=source(outer,20).merge(:loops=>[outer,hole],:fill_rule=>:nonzero)
+    assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+      prepare([mask(100)], [native_white], [native(glyph,[1])],
+        {:white_paths=>[white], :glyphs=>[source(glyph,30,1)]})
+    end
+    white[:fill_rule]=:evenodd
+    result=prepare([mask(100)], [native_white], [native(glyph,[1])],
+      {:white_paths=>[white], :glyphs=>[source(glyph,30,1)]})
+    assert_equal [0,20], result[:masks].first[:paint_order]
+  end
+
+  def test_small_counter_is_not_erased_by_binding_tolerance
+    outer=rectangle(0,0,4,4); hole=rectangle(1,1,1.00001,1.00001); glyph=rectangle(2,2,3,3)
+    white=source(outer,20).merge(:loops=>[outer,hole],:fill_rule=>:evenodd)
+    assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+      prepare([mask(100)], [native(outer,[])], [native(glyph,[1])],
+        {:white_paths=>[white], :glyphs=>[source(glyph,30,1)]})
+    end
+  end
+
+  def test_oriented_boundary_comparison_rejects_hole_sign_changes
+    square=rectangle(0,0,2,2)
+    assert Binding.same_region_boundaries?([square],[square],0.0001)
+    refute Binding.same_region_boundaries?([square],[square.reverse],0.0001)
+  end
+
+  def test_single_retraced_evenodd_contour_does_not_certify_a_filled_face
+    square=rectangle(0,0,4,4); glyph=rectangle(1,1,2,2)
+    doubled=square + [square.first] + square.drop(1) + [square.first]
+    white=source(doubled,20).merge(:fill_rule=>:evenodd)
+    assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+      prepare([mask(100)], [native(square,[])], [native(glyph,[1])],
+        {:white_paths=>[white], :glyphs=>[source(glyph,30,1)]})
+    end
+  end
 end
