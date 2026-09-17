@@ -192,4 +192,39 @@ class SvgPaintBindingTest < Minitest::Test
         {:white_paths=>[white], :glyphs=>[source(glyph,30,1)]})
     end
   end
+
+  def test_short_clipped_corner_binds_to_adjacent_endpoint_disks_without_moving_loops
+    tolerance=Binding::SOURCE_GRID_INCHES
+    cut=tolerance*0.3
+    pointed=[[0,-1,0],[1,0,0],[0,1,0]]
+    clipped=[[0,-1,0],[1-cut,-cut,0],[1-cut,cut,0],[0,1,0]]
+    before=Marshal.dump([pointed,clipped])
+    assert Binding.boundary_segment_covered?(clipped[1],clipped[2],pointed,tolerance)
+    assert Binding.same_region_boundaries?([pointed],[clipped],tolerance)
+    assert_equal before,Marshal.dump([pointed,clipped])
+  end
+
+  def test_corner_cut_beyond_existing_tolerance_is_rejected
+    tolerance=Binding::SOURCE_GRID_INCHES
+    cut=tolerance*2.0
+    pointed=[[0,-1,0],[1,0,0],[0,1,0]]
+    clipped=[[0,-1,0],[1-cut,-cut,0],[1-cut,cut,0],[0,1,0]]
+    refute Binding.same_region_boundaries?([pointed],[clipped],tolerance)
+  end
+
+  def test_endpoint_intervals_do_not_bridge_a_missing_boundary_segment
+    tolerance=Binding::SOURCE_GRID_INCHES
+    square=rectangle(0,0,2,2)
+    notch=[[0,0,0],[0.9,0,0],[0.9,1,0],[1.1,1,0],
+           [1.1,0,0],[2,0,0],[2,2,0],[0,2,0]]
+    refute Binding.boundary_segment_covered?(square[0],square[1],notch,tolerance)
+    refute Binding.same_region_boundaries?([square],[notch],tolerance)
+  end
+
+  def test_endpoint_disks_preserve_directed_edge_coverage
+    square=rectangle(0,0,2,2)
+    tolerance=Binding::SOURCE_GRID_INCHES
+    assert Binding.boundary_segment_covered?(square[0],square[1],square,tolerance)
+    refute Binding.boundary_segment_covered?(square[1],square[0],square,tolerance)
+  end
 end

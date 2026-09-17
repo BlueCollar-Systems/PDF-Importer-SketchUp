@@ -111,6 +111,9 @@ jobs:
           ruby test/cairo_glyph_source_test.rb
           ruby test/svg_text_embed_test.rb
           ruby test/svg_text_3d_renderer_test.rb
+          ruby test/svg_item_representation_renderer_test.rb
+          ruby test/svg_item_filled_glyph_faces_test.rb
+          ruby test/page_representation_transform_test.rb
           ruby test/svg_3d_text_font_gap_attribution_test.rb
           ruby test/covered_clip_fill_test.rb
           ruby test/planar_white_knockout_test.rb

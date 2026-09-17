@@ -1089,9 +1089,10 @@ module BlueCollarSystems
           outer[2] >= inner[2] && outer[3] >= inner[3]
       end
 
-      # A fill rectangle covering a compound clipping contour paints exactly
-      # that contour. Preserve its curves and winding rule, including holes.
-      # This is a proved containment case, not a general Boolean approximation.
+      # A covering fill paints the exact clip. If only rectangular boundaries
+      # trim a linear clip, intersect its actual segments with those boundaries;
+      # do not expand a nearly covering paint rectangle and lose source detail.
+      # Curves retain the proved-containment route without approximation.
       def covered_clip_fill(paint_paths)
         paint_box = rectangle_bounds(paint_paths)
         return nil unless paint_box && @clip_regions && !@clip_regions.empty?
@@ -1099,11 +1100,77 @@ module BlueCollarSystems
         return nil unless complex.length == 1
         clip = complex[0]
         clip_box = contour_bounds(clip[:paths])
-        return nil unless box_covers?(paint_box, clip_box)
-        return nil unless @clip_regions.all? do |other|
+        covered = box_covers?(paint_box, clip_box) && @clip_regions.all? do |other|
           other.equal?(clip) || box_covers?(rectangle_bounds(other[:paths]), clip_box)
         end
-        [clip[:paths], clip[:rule]]
+        return [clip[:paths], clip[:rule]] if covered
+
+        loops = clip[:paths].map { |subpath| linear_clip_points(subpath) }
+        return nil if loops.any?(&:nil?)
+        boxes = [paint_box] + @clip_regions.reject { |other| other.equal?(clip) }.map do |other|
+          rectangle_bounds(other[:paths])
+        end
+        return nil if boxes.any?(&:nil?)
+        bounds = [boxes.map { |box| box[0] }.max, boxes.map { |box| box[1] }.max,
+                  boxes.map { |box| box[2] }.min, boxes.map { |box| box[3] }.min]
+        return [[], clip[:rule]] unless bounds[2] > bounds[0] && bounds[3] > bounds[1]
+
+        paths = loops.map do |points|
+          clipped = clip_linear_loop_to_rectangle(points, bounds)
+          next if clipped.empty?
+          segments = [Segment.new(:move, [clipped[0]])]
+          clipped.each_with_index do |point, index|
+            following = clipped[(index + 1) % clipped.length]
+            segments << Segment.new(:line, [point, following])
+          end
+          SubPath.new(segments, true)
+        end.compact
+        [paths, clip[:rule]]
+      end
+
+      def linear_clip_points(subpath)
+        segments = subpath.segments
+        return nil if segments.empty? || segments[0].type != :move
+        return nil unless segments.drop(1).all? { |segment| segment.type == :line }
+        points = [segments[0].points[0]]
+        segments.drop(1).each do |segment|
+          return nil unless segment.points.length == 2 && segment.points[0] == points[-1]
+          points << segment.points[1] unless segment.points[1] == points[-1]
+        end
+        points.pop if points.length > 1 && points[-1] == points[0]
+        return nil unless points.length >= 3 && points.all? do |point|
+          point.length == 2 && point.all? { |value| value.is_a?(Numeric) && value.finite? }
+        end
+        points
+      end
+
+      # Sutherland-Hodgman clipping retains the directed contour, so even-odd
+      # and nonzero compound fills keep their original winding semantics.
+      def clip_linear_loop_to_rectangle(loop, bounds)
+        points = loop.map(&:dup)
+        [[0, bounds[0], 1], [0, bounds[2], -1],
+         [1, bounds[1], 1], [1, bounds[3], -1]].each do |axis, limit, sign|
+          break if points.empty?
+          output = []
+          previous = points[-1]
+          previous_inside = sign * (previous[axis] - limit) >= 0.0
+          points.each do |point|
+            inside = sign * (point[axis] - limit) >= 0.0
+            if inside != previous_inside
+              fraction = (limit - previous[axis]).to_f / (point[axis] - previous[axis])
+              other_axis = 1 - axis
+              crossing = [0.0, 0.0]
+              crossing[axis] = limit
+              crossing[other_axis] = previous[other_axis] + fraction * (point[other_axis] - previous[other_axis])
+              output << crossing unless output[-1] == crossing
+            end
+            output << point if inside && output[-1] != point
+            previous, previous_inside = point, inside
+          end
+          points = output
+        end
+        points.pop if points.length > 1 && points[-1] == points[0]
+        points.uniq.length < 3 ? [] : points
       end
 
       def clear_path

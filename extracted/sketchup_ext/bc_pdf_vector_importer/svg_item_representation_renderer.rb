@@ -19,6 +19,8 @@ module BlueCollarSystems
     module SvgItemRepresentationRenderer
       SIZE_TOLERANCE_INCHES = 0.001
       COLLINEAR_DISTANCE_TOLERANCE_INCHES = 1.0e-9
+      GEOMETRY_CONSTRUCTION_SCALE = 1000.0
+      SOURCE_EDGE_TOLERANCE_INCHES = 1.0e-9
       SUPPORTED_MODES = [:glyphs, :geometry].freeze
       PEER_OWNER_GRID_SIZE_PT = 32.0
       PEER_OWNER_MAX_CELLS_PER_BOX = 4096
@@ -142,6 +144,8 @@ module BlueCollarSystems
 
         expected = CairoGlyphSource.loops_extent(entries)
         verify_bounds!(group, expected, source_id)
+        verify_source_edges!(group, build[:source_outline_segments], nil,
+                             source_id) if mode == :geometry
         emit_progress_callback(
           opts[:progress_callback], 'svg_item_bounds_verified',
           "source_id=#{source_id}; mode=#{mode}"
@@ -185,6 +189,9 @@ module BlueCollarSystems
           :association_strategy => selection[:strategy],
           :glyph_ids => entries.map { |entry| entry[:glyph_id].to_s },
           :source_extent => expected.map { |value| value.to_f },
+          :source_construction_transformation =>
+            build[:source_construction_transformation],
+          :source_outline_segments => build[:source_outline_segments],
           :edge_count => build[:edge_count],
           :delivered_edge_count => build[:delivered_edge_count].to_i,
           :face_count => build[:face_count].to_i,
@@ -240,6 +247,12 @@ module BlueCollarSystems
           result[:edge_count], result[:source_span_id]
         )
         verify_visible_tree!(group, result[:source_span_id])
+        if result[:mode] == :geometry && result[:source_outline_segments]
+          verify_source_edges!(
+            group, result[:source_outline_segments],
+            result[:source_page_transformation], result[:source_span_id]
+          )
+        end
         box = bounds_hash(group)
         unless box[:width] > SIZE_TOLERANCE_INCHES ||
                box[:height] > SIZE_TOLERANCE_INCHES
@@ -289,7 +302,14 @@ module BlueCollarSystems
             raise RepresentationFidelity::ContractError,
                   'item vector final bounds differ from source outlines and page transform'
           end
-          transform = result[:source_page_transformation]
+          # The page transform acts on source coordinates; the physical group
+          # also undoes its large construction coordinates. Source bounds use
+          # only the former, while the instance certificate records both.
+          transform = if result[:source_construction_transformation]
+                        RepresentationFidelity.entity_transformation_payload(group)
+                      else
+                        result[:source_page_transformation]
+                      end
         end
         expected_box ||= {
           :min => [box[:min_x], box[:min_y], box[:min_z]],
@@ -649,13 +669,42 @@ module BlueCollarSystems
               'owned Geometry group has no entities collection' unless child
         edges = []
         fill = new_fill_summary
-        Array(entries).each do |entry|
+        # Building adjacent letters at sheet size lets SketchUp weld distinct
+        # vertices less than 0.001in apart. Keep the raw Edge/Face representation
+        # in one owned group, but construct it large and place it inversely.
+        extent = CairoGlyphSource.loops_extent(entries)
+        origin = [extent[0].to_f, extent[1].to_f, 0.0]
+        factor = GEOMETRY_CONSTRUCTION_SCALE
+        construction = [
+          1.0 / factor, 0.0, 0.0, 0.0,
+          0.0, 1.0 / factor, 0.0, 0.0,
+          0.0, 0.0, 1.0 / factor, 0.0,
+          origin[0], origin[1], origin[2], 1.0
+        ]
+        unless group.respond_to?(:transformation=)
+          raise RepresentationFidelity::ContractError,
+                "#{source_id}: Geometry construction transform is unavailable"
+        end
+        source_segments = outline_segments(entries)
+        scaled_entries = Array(entries).map do |entry|
+          entry.merge(:loops => Array(entry[:loops]).map do |loop_points|
+            Array(loop_points).map do |point|
+              Geom::Point3d.new(
+                (point.x.to_f - origin[0]) * factor,
+                (point.y.to_f - origin[1]) * factor,
+                point.z.to_f * factor
+              )
+            end
+          end)
+        end
+        scaled_entries.each do |entry|
           edges.concat(add_entry_edges!(child, entry, source_id, :geometry,
                                         layer))
           faces = add_entry_faces!(child, entry, source_id, :geometry, layer)
           merge_fill_summary!(fill, faces)
           fill[:paint_targets] << [entry, faces[:faces]]
         end
+        group.transformation = Geom::Transformation.new(construction)
         raise RepresentationFidelity::ContractError,
               "#{source_id}: Geometry created no raw edges" if edges.empty?
         # The host may split or merge edges while it builds the glyph faces
@@ -675,7 +724,151 @@ module BlueCollarSystems
         # merge one (a self-referential post-build count alone would let a
         # host-dropped outline edge pass silently).
         { :edge_count => edge_count, :delivered_edge_count => edges.length,
+          :source_outline_segments => source_segments,
+          :source_construction_transformation => construction,
           :glyph_group_count => 0 }.merge(fill)
+      end
+
+      def self.outline_segments(entries)
+        Array(entries).inject([]) do |all, entry|
+          Array(entry[:loops]).each do |loop_points|
+            normalized_points(loop_points).each_cons(2) do |first, last|
+              all << [[first.x.to_f, first.y.to_f, first.z.to_f],
+                      [last.x.to_f, last.y.to_f, last.z.to_f]]
+            end
+          end
+          all
+        end
+      end
+
+      def self.transform_source_point(point, values)
+        return point.map(&:to_f) unless values
+        matrix = Array(values)
+        unless matrix.length == 16
+          raise RepresentationFidelity::ContractError,
+                'Geometry source transform is malformed'
+        end
+        (0..2).map do |axis|
+          point[0].to_f * matrix[axis].to_f +
+            point[1].to_f * matrix[axis + 4].to_f +
+            point[2].to_f * matrix[axis + 8].to_f + matrix[axis + 12].to_f
+        end
+      end
+
+      def self.verify_source_edges!(group, source_segments, page_matrix, source_id)
+        transform = group.respond_to?(:transformation) ? group.transformation : nil
+        matrix = transform && transform.respond_to?(:to_a) ? transform.to_a : nil
+        unless matrix && Array(source_segments).length > 0
+          raise RepresentationFidelity::ContractError,
+                "#{source_id}: exact Geometry source edges are unavailable"
+        end
+        actual = entity_members(group).select do |entity|
+          entity_type(entity) == 'Edge'
+        end.map do |edge|
+          points = if edge.respond_to?(:start) && edge.respond_to?(:end)
+                     [edge.start.position, edge.end.position]
+                   elsif edge.respond_to?(:points)
+                     edge.points
+                   end
+          unless Array(points).length == 2
+            raise RepresentationFidelity::ContractError,
+                  "#{source_id}: Geometry edge endpoints are unavailable"
+          end
+          points.map do |point|
+            transform_source_point([point.x, point.y, point.z], matrix)
+          end
+        end
+        expected = Array(source_segments).map do |segment|
+          segment.map { |point| transform_source_point(point, page_matrix) }
+        end
+        unless segment_sets_cover?(expected, actual) &&
+               segment_sets_cover?(actual, expected)
+          raise RepresentationFidelity::ContractError,
+                "#{source_id}: Geometry edges differ from exact source outlines"
+        end
+        true
+      end
+
+      # Check complete segment coverage in both directions. Host-created
+      # subdivisions are valid; moved corners, missing edges and extra ink are
+      # not. This comparison is independent of the much looser extent check.
+      def self.segment_sets_cover?(required, available)
+        tolerance = SOURCE_EDGE_TOLERANCE_INCHES
+        candidates = available.map do |segment|
+          [segment, (0..2).map { |axis| segment.map { |point| point[axis] }.minmax }]
+        end
+        cell_size = 0.125
+        grid = {}
+        broad = []
+        candidates.each_with_index do |entry, index|
+          cells = segment_grid_cells(entry[1], cell_size, tolerance)
+          if cells
+            cells.each { |key| (grid[key] ||= []) << index }
+          else
+            broad << index
+          end
+        end
+        required.all? do |segment|
+          first, last = segment
+          delta = (0..2).map { |axis| last[axis] - first[axis] }
+          length2 = delta.inject(0.0) { |sum, value| sum + value * value }
+          next false unless length2 > 0.0
+          length = Math.sqrt(length2)
+          epsilon = tolerance / length
+          intervals = []
+          limits = (0..2).map { |axis| [first[axis], last[axis]].minmax }
+          cells = segment_grid_cells(limits, cell_size, tolerance)
+          nearby = if cells
+                     ids = broad.dup
+                     cells.each { |key| ids.concat(grid[key] || []) }
+                     ids.uniq.map { |index| candidates[index] }
+                   else
+                     candidates
+                   end
+          nearby.each do |candidate, bounds|
+            next unless (0..2).all? do |axis|
+              bounds[axis][1] >= limits[axis][0] - tolerance &&
+                bounds[axis][0] <= limits[axis][1] + tolerance
+            end
+            projections = candidate.map do |point|
+              relative = (0..2).map { |axis| point[axis] - first[axis] }
+              t = (0..2).inject(0.0) do |sum, axis|
+                sum + relative[axis] * delta[axis]
+              end / length2
+              residual2 = (0..2).inject(0.0) do |sum, axis|
+                residual = relative[axis] - t * delta[axis]
+                sum + residual * residual
+              end
+              residual2 <= tolerance * tolerance ? t : nil
+            end
+            next if projections.any?(&:nil?)
+            low, high = projections.minmax
+            next if high < -epsilon || low > 1.0 + epsilon
+            intervals << [[low, 0.0].max, [high, 1.0].min]
+          end
+          reached = 0.0
+          covered = false
+          intervals.sort_by { |interval| interval[0] }.each do |low, high|
+            break if low > reached + epsilon
+            reached = [reached, high].max
+            if reached >= 1.0 - epsilon
+              covered = true
+              break
+            end
+          end
+          covered
+        end
+      end
+
+      def self.segment_grid_cells(bounds, cell_size, tolerance)
+        x0 = ((bounds[0][0] - tolerance) / cell_size).floor
+        x1 = ((bounds[0][1] + tolerance) / cell_size).floor
+        y0 = ((bounds[1][0] - tolerance) / cell_size).floor
+        y1 = ((bounds[1][1] + tolerance) / cell_size).floor
+        return nil if (x1 - x0 + 1) * (y1 - y0 + 1) > 4096
+        cells = []
+        (x0..x1).each { |x| (y0..y1).each { |y| cells << [x, y] } }
+        cells
       end
 
       def self.build_glyph_groups!(group, entries, source_id, layer,
@@ -1135,7 +1328,7 @@ module BlueCollarSystems
         Array(values).each do |point|
           next unless point && point.respond_to?(:x) && point.respond_to?(:y)
           if points.empty? || points[-1].distance(point).to_f >
-                              SIZE_TOLERANCE_INCHES
+                              SOURCE_EDGE_TOLERANCE_INCHES
             points << point
           end
         end
@@ -1152,7 +1345,7 @@ module BlueCollarSystems
         values = Array(points).dup
         return values if values.length < 3
         closed = values.length > 3 &&
-          values[0].distance(values[-1]).to_f <= SIZE_TOLERANCE_INCHES
+          values[0].distance(values[-1]).to_f <= SOURCE_EDGE_TOLERANCE_INCHES
         values = values[0...-1] if closed
         minimum = closed ? 3 : 2
         loop do

@@ -2210,23 +2210,60 @@ module BlueCollarSystems
                                                             scale, rotation,
                                                             y_offset,
                                                             evidence_record = nil)
-      expected = page_representation_transform(
+      page_transform = page_representation_transform(
         media_box, scale, rotation, y_offset
       )
-      return false unless group.respond_to?(:transform!)
-      group.transform!(expected)
-      return false unless group.respond_to?(:transformation)
+      return false unless group.respond_to?(:transform!) &&
+                          group.respond_to?(:transformation)
+      expected = page_transform
+      construction = evidence_record.is_a?(Hash) &&
+        evidence_record[:source_construction_transformation]
+      if construction
+        # Only the renderer's independently source-verified Geometry
+        # construction is allowed before page placement. Do not bless an
+        # arbitrary existing group transform as the expected position.
+        return false unless evidence_record[:mode] == :geometry
+        extent = evidence_record[:source_extent]
+        return false unless extent.is_a?(Array) && extent.length == 4 &&
+          extent.all? { |value| value.is_a?(Numeric) && value.to_f.finite? }
+        inverse_scale = 1.0 /
+          SvgItemRepresentationRenderer::GEOMETRY_CONSTRUCTION_SCALE
+        allowed = [
+          inverse_scale, 0.0, 0.0, 0.0,
+          0.0, inverse_scale, 0.0, 0.0,
+          0.0, 0.0, inverse_scale, 0.0,
+          extent[0].to_f, extent[1].to_f, 0.0, 1.0
+        ]
+        return false unless construction.is_a?(Array) &&
+          construction.length == 16 &&
+          construction.each_with_index.all? do |value, index|
+            value.is_a?(Numeric) && value.to_f.finite? &&
+              (value.to_f - allowed[index]).abs <= 1.0e-12
+          end
+        initial = group.transformation
+        return false unless initial.respond_to?(:to_a)
+        initial_values = initial.to_a
+        return false unless initial_values.length == 16 &&
+          initial_values.each_with_index.all? do |value, index|
+            value.is_a?(Numeric) && value.to_f.finite? &&
+              (value.to_f - allowed[index]).abs <= 1.0e-12
+          end
+        expected = page_transform * Geom::Transformation.new(allowed)
+      end
+      group.transform!(page_transform)
       actual = group.transformation
       return false unless actual.respond_to?(:to_a) && expected.respond_to?(:to_a)
       expected_values = expected.to_a
       actual_values = actual.to_a
-      return false unless expected_values.length == actual_values.length
+      return false unless expected_values.length == 16 && actual_values.length == 16
       verified = expected_values.each_with_index.all? do |value, index|
-        (value.to_f - actual_values[index].to_f).abs <= 1.0e-8
+        value.is_a?(Numeric) && value.to_f.finite? &&
+          actual_values[index].is_a?(Numeric) && actual_values[index].to_f.finite? &&
+          (value.to_f - actual_values[index].to_f).abs <= 1.0e-8
       end
       if verified && evidence_record.is_a?(Hash)
         evidence_record[:source_page_transformation] =
-          expected_values.map { |value| value.to_f }
+          page_transform.to_a.map { |value| value.to_f }
         evidence_record[:page_transform_verified] = true
       end
       verified

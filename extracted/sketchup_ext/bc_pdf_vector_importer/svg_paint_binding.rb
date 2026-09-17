@@ -227,9 +227,15 @@ module BlueCollarSystems
           d_along = (d[0]-a[0])*ux+(d[1]-a[1])*uy
           c_normal = (c[0]-a[0])*uy-(c[1]-a[1])*ux
           d_normal = (d[0]-a[0])*uy-(d[1]-a[1])*ux
-          next unless c_normal.abs <= tolerance && d_normal.abs <= tolerance
-          c_slack = Math.sqrt([tolerance*tolerance-c_normal*c_normal,0.0].max)
-          d_slack = Math.sqrt([tolerance*tolerance-d_normal*d_normal,0.0].max)
+          # A rounded/clipped corner may have a short edge near the endpoint
+          # of a longer opposing edge. Its other endpoint can be outside this
+          # strip; retain the exact endpoint-disk coverage before requiring
+          # both endpoints for the directed segment's interior coverage.
+          c_slack = c_normal.abs <= tolerance ? Math.sqrt([tolerance*tolerance-c_normal*c_normal,0.0].max) : nil
+          d_slack = d_normal.abs <= tolerance ? Math.sqrt([tolerance*tolerance-d_normal*d_normal,0.0].max) : nil
+          intervals << [c_along-c_slack,c_along+c_slack] if c_slack
+          intervals << [d_along-d_slack,d_along+d_slack] if d_slack
+          next unless c_slack && d_slack
           intervals << [c_along-c_slack,d_along+d_slack]
         end
         covered = 0.0

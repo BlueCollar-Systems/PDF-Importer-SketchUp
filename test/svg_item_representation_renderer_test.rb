@@ -30,6 +30,8 @@ module Geom
     def initialize(values)
       @matrix = Array(values).map(&:to_f)
     end
+
+    def to_a; @matrix.dup; end
   end unless const_defined?(:Transformation)
 end
 
@@ -77,6 +79,15 @@ class SvgItemRepresentationPointNormalizationTest < Minitest::Test
     normalized = Renderer.normalized_points(points)
 
     assert_equal 3, normalized.length
+  end
+
+  def test_small_real_foot_and_near_closing_vertex_are_preserved
+    points = [[0, 0], [1, 1], [2, 0], [0.00001, 0.00001], [0, 0]].map do |x, y|
+      Geom::Point3d.new(x, y, 0)
+    end
+    normalized = Renderer.normalized_points(points)
+    assert_equal points.map { |point| [point.x, point.y] },
+                 normalized.map { |point| [point.x, point.y] }
   end
 end
 
@@ -204,6 +215,16 @@ class ItemVectorEntities
         Geom::Point3d.new(point.x + dx.to_f, point.y + dy.to_f, point.z)
       end
     end
+    if @options[:host_vertex_tolerance]
+      @host_vertices ||= []
+      points = points.map do |point|
+        previous = @host_vertices.find do |vertex|
+          vertex.distance(point) < @options[:host_vertex_tolerance]
+        end
+        @host_vertices << point unless previous
+        previous || point
+      end
+    end
     created = []
     Array(points).each_cons(2) do |first, last|
       edge = ItemVectorEdge.new(next_id, first, last)
@@ -234,7 +255,7 @@ class ItemVectorEntities
 end
 
 class ItemVectorGroup
-  attr_accessor :name, :layer
+  attr_accessor :name, :layer, :transformation
   attr_reader :persistent_id, :entities, :attributes
 
   def initialize(owner, id, options, counter)
@@ -242,6 +263,9 @@ class ItemVectorGroup
     @persistent_id = id
     @entities = ItemVectorEntities.new(self, options, counter)
     @attributes = {}
+    @transformation = Geom::Transformation.new([
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
+    ])
   end
 
   def typename; 'Group'; end
@@ -259,6 +283,12 @@ class ItemVectorGroup
       points << box.min << box.max
     end
     raise 'empty group bounds' if points.empty?
+    values = transformation.to_a
+    points = points.map do |point|
+      xyz = BlueCollarSystems::PDFVectorImporter::SvgItemRepresentationRenderer.
+        transform_source_point([point.x, point.y, point.z], values)
+      Geom::Point3d.new(*xyz)
+    end
     ItemVectorBounds.new(points)
   end
 end
@@ -320,6 +350,68 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     assert_equal 'geometry', result[:group].attributes[
       ['BC_PDF_Importer', 'representation']
     ]
+  end
+
+  def test_geometry_constructs_close_letters_large_without_welding_source_vertices
+    entities = ItemVectorEntities.new(nil, :host_vertex_tolerance => 0.001)
+    group = entities.add_group
+    entries = [
+      [[0, 0], [1, 0], [0.5, 1], [0, 0]],
+      [[1.0005, 0], [1.5, 1], [2, 0], [1.0005, 0]]
+    ].each_with_index.map do |points, index|
+      { :glyph_id => "synthetic-#{index}", :placement_index => index,
+        :loops => [points.map { |x, y| Geom::Point3d.new(x, y, 0) }] }
+    end
+    build = RENDERER.build_flat_geometry!(group, entries, 'synthetic', nil)
+    assert RENDERER.verify_source_edges!(
+      group, build[:source_outline_segments], nil, 'synthetic'
+    )
+    assert_equal 0.001, group.transformation.to_a[0]
+    assert group.entities.to_a.all? { |entity| entity.typename == 'Edge' }
+    world_x = group.entities.to_a.map(&:points).flatten.map do |point|
+      RENDERER.transform_source_point(
+        [point.x, point.y, point.z], group.transformation.to_a
+      )[0]
+    end
+    assert_includes world_x, 1.0
+    assert_includes world_x, 1.0005
+    assert_equal 1.0005, entries[1][:loops][0][0].x
+  end
+
+  def test_source_edge_proof_accepts_subdivision_but_rejects_tiny_corner_drift
+    required = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
+    split = [
+      [[0.0, 0.0, 0.0], [0.4, 0.0, 0.0]],
+      [[0.4, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    ]
+    assert RENDERER.segment_sets_cover?(required, split)
+    assert RENDERER.segment_sets_cover?(split, required)
+    shifted = [[[0.0005, 0.0, 0.0], [1.0, 0.0, 0.0]]]
+    refute RENDERER.segment_sets_cover?(required, shifted)
+    extra = split + [[[0.0, 0.0, 0.0], [0.0, 0.0005, 0.0]]]
+    refute RENDERER.segment_sets_cover?(extra, required)
+  end
+
+  def test_final_geometry_proof_uses_page_transform_and_construction_transform
+    result = render(ItemVectorEntities.new, :geometry)
+    page = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 10, 20, 0, 1]
+    local = result[:source_construction_transformation]
+    combined = Array.new(16) do |index|
+      row = index % 4
+      column = index / 4
+      (0..3).inject(0.0) do |sum, k|
+        sum + page[k * 4 + row] * local[column * 4 + k]
+      end
+    end
+    result[:group].transformation = Geom::Transformation.new(combined)
+    result[:source_page_transformation] = page
+    assert RENDERER.verify_transformed_delivery!(result)
+    # Same overall extent can hide a shifted internal point. Source-segment
+    # coverage must reject it before a new physical hash can certify it.
+    result[:group].entities.to_a.first.points.first.x += 0.2
+    assert_raises(FIDELITY::ContractError) do
+      RENDERER.verify_transformed_delivery!(result)
+    end
   end
 
   def test_glyphs_are_physically_distinct_per_glyph_groups_not_flat_geometry
@@ -575,7 +667,7 @@ class SvgItemRepresentationRendererTest < Minitest::Test
       RENDERER.finalize_source_evidence!(result, item)
     end
 
-    assert_match(/final bounds differ from source outlines/i, error.message)
+    assert_match(/Geometry edges differ from exact source outlines/i, error.message)
   end
 
   def test_precomputed_page_inventory_avoids_reparsing_svg_per_item
