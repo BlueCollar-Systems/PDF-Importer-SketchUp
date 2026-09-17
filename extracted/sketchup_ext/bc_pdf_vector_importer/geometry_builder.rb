@@ -3180,10 +3180,10 @@ module BlueCollarSystems
           return false unless path.respond_to?(:source_stroke_style_proven) &&
                               path.source_stroke_style_proven == true
           width = path.line_width
-          return false unless width.is_a?(Numeric) && width.finite? && width > 0
+          return false unless width.is_a?(Numeric) && width.to_f.finite? && width > 0
           ctm = path.ctm
           return false unless ctm.is_a?(Array) && ctm.length == 6 &&
-                              ctm.all? { |value| value.is_a?(Numeric) && value.finite? }
+                              ctm.all? { |value| value.is_a?(Numeric) && value.to_f.finite? }
           return false unless [0, 1, 2].include?(path.line_cap) && [0, 1, 2].include?(path.line_join)
           factor = path.line_cap == 2 ? Math.sqrt(2.0) : 1.0
           # A lone open straight segment has caps but no joins. Otherwise the
@@ -3193,7 +3193,7 @@ module BlueCollarSystems
           end
           if path.line_join == 0 && !isolated_lines
             limit = path.source_miter_limit
-            return false unless limit.is_a?(Numeric) && limit.finite? && limit >= 1.0
+            return false unless limit.is_a?(Numeric) && limit.to_f.finite? && limit >= 1.0
             factor = [factor, limit].max
           end
           radius = 0.5 * width * factor
@@ -3209,7 +3209,7 @@ module BlueCollarSystems
 
       def finite_page_bounds?(bounds)
         bounds.is_a?(Array) && bounds.length == 4 &&
-          bounds.all? { |value| value.is_a?(Numeric) && value.finite? } &&
+          bounds.all? { |value| value.is_a?(Numeric) && value.to_f.finite? } &&
           bounds[0] <= bounds[2] && bounds[1] <= bounds[3]
       end
 
