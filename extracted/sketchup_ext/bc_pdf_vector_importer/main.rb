@@ -3277,12 +3277,12 @@ module BlueCollarSystems
 
     def self.finalize_import_diagnostics!(path, opts, stats)
       report = QAReport.build_from_stats(path, opts, stats)
+      report_target = stats[:import_report_path] || QAReport.default_output_path(path)
       parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
       if parts_payload && parts_payload[:row_count].to_i > 0
-        report_target = QAReport.default_output_path(path)
         sidecar_base = File.join(
           File.dirname(report_target),
-          File.basename(path.to_s, File.extname(path.to_s))
+          File.basename(report_target, '_import_report.json')
         )
         parts_path = PartsBootstrap.write_sidecar(parts_payload, sidecar_base)
         if parts_path
@@ -3301,9 +3301,9 @@ module BlueCollarSystems
         extra['representation_fidelity'] || { :ready => false }
       stats[:import_contract_ready] = extra[:import_contract_ready] ||
         extra['import_contract_ready'] || { :ready => false }
-      report_path = QAReport.write_json(report, QAReport.default_output_path(path))
+      report_path = QAReport.write_json(report, report_target)
       stats[:import_report_path] = report_path if report_path
-      sidecar_path = write_source_provenance_sidecar(path, opts, stats)
+      sidecar_path = write_source_provenance_sidecar(path, opts, stats, File.dirname(report_target))
       stats[:source_provenance_sidecar_path] = sidecar_path if sidecar_path
       ImportHealth.record!(stats, path)
       stats[:import_contract_ready]
@@ -6453,12 +6453,12 @@ module BlueCollarSystems
       { ok: false, reason: reason, message: message }
     end
 
-    def self.write_source_provenance_sidecar(pdf_path, opts, stats)
+    def self.write_source_provenance_sidecar(pdf_path, opts, stats, output_dir = nil)
       objects = Array(stats[:source_provenance_objects])
       return nil if objects.empty?
 
       session_id = (stats[:import_session_id] || SourceProvenance.new_import_session_id).to_s
-      sidecar_path = SourceProvenance.default_sidecar_path(pdf_path)
+      sidecar_path = SourceProvenance.default_sidecar_path(pdf_path, output_dir)
       SourceProvenance.write_sidecar(
         output_path: sidecar_path,
         import_session_id: session_id,

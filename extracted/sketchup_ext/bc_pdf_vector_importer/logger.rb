@@ -23,8 +23,9 @@ module BlueCollarSystems
         @writes_since_flush = 0
         close_log
 
-        # Open a log file for post-session diagnosis.
-        # Previous log is overwritten each import so it stays small.
+        # Keep each import's diagnostics at the path shown to its operator.
+        # A shared last_import.log lets another host truncate this process's
+        # buffered writes, and a later reset destroys earlier failure evidence.
         candidate_dirs = []
         begin
           candidate_dirs << SafeTemp.join('bc_pdf_importer')
@@ -46,7 +47,8 @@ module BlueCollarSystems
         candidate_dirs.uniq.each do |dir|
           begin
             FileUtils.mkdir_p(dir)
-            path = File.join(dir, 'last_import.log')
+            log_dir = Dir.mktmpdir('log-', dir)
+            path = File.join(log_dir, 'last_import.log')
             file = File.open(path, 'w')
             # Buffered writes — per-line fsync (sync=true) forces one synchronous
             # disk write per log line. Dense imports emit hundreds of WARNs,

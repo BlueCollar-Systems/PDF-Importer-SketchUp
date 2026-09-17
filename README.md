@@ -3,13 +3,19 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.150-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.151-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.150)
+### Recent fixes (v3.7.151)
+
+- Simultaneous imports keep their reports, parts data and source provenance in separate run folders, preventing one importer from replacing another importer's verification evidence.
+- Each import retains its own diagnostic log, and saved compatibility reports remain available for later review.
+- Default report names handle long and non-ASCII drawing names. Explicit CLI report destinations retain their chosen paths.
+
+### Earlier fixes (v3.7.150)
 
 - A temporary failed font inventory no longer disables font preparation for the rest of a session.
 - A Windows PDF renderer's Symbol startup warning is treated as unrelated only when a complete successful source-font inventory proves that the document has no Symbol font. Actual missing fonts, incomplete inventories and other renderer errors still require repair; text placement and geometry verification remain mandatory.
