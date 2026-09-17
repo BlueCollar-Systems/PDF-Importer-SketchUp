@@ -46,6 +46,7 @@ module BlueCollarSystems
           result[:skipped_unproven_order] += overlaps.length - candidates.length
           next if candidates.empty?
           result[:removed_area] += compose_group!(group, transform, white, candidates)
+          group.erase! if child_entities(group).to_a.empty?
           result[:composed_groups] += 1
         end
         result
@@ -388,7 +389,13 @@ module BlueCollarSystems
           end
           clean_partition_edges!(stage.entities)
           entities.erase_entities(originals)
-          stage.set_attribute(DICTIONARY, 'planar_white_knockout', true)
+          # The legacy host purges empty groups at commit. Remove our empty
+          # construction container now, before the retained-entity certificate.
+          if stage.entities.to_a.empty?
+            stage.erase!
+          else
+            stage.set_attribute(DICTIONARY, 'planar_white_knockout', true)
+          end
           removed.inject(0.0) { |sum, cell| sum + cell[:area] }
         rescue StandardError => error
           stage.erase! if stage && stage.valid?
@@ -422,6 +429,7 @@ module BlueCollarSystems
           next unless entity.valid?
           if entity.typename.to_s == 'Group'
             clean_partition_edges!(entity.entities)
+            entity.erase! if entity.entities.to_a.empty?
           elsif entity.typename.to_s == 'Edge'
             entity.faces.empty? ? entity.erase! : (entity.hidden = true)
           end

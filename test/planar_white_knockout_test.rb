@@ -236,6 +236,33 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     assert_in_delta 1.0, stage.entities.intersections[1].scale, 1.0e-12
   end
 
+  def test_fully_covered_white_removes_only_its_generated_containers
+    white, text, original, _ink = fixture
+    covering = Face.new([rect(0, 0, 4, 4)])
+    text.entities.items.replace([covering])
+    receipt = Subject.compose!([{ :group => white, :fill_rgb => [1, 1, 1], :before_text => true }], [text])
+    assert_in_delta 16.0, receipt[:removed_area], 1.0e-10
+    assert white.entities.stage.erased
+    assert white.erased
+    assert original.erased
+    refute text.erased
+    refute covering.erased
+  end
+
+  def test_private_stage_cleanup_removes_empty_repair_groups_but_keeps_physical_faces
+    face = Face.new([rect(0, 0, 1, 1)])
+    retained = Group.new(Entities.new([face]))
+    inner = Group.new(Entities.new([CascadingEdge.new]))
+    empty = Group.new(Entities.new([inner]))
+    stage = Entities.new([retained, empty])
+    Subject.clean_partition_edges!(stage)
+    assert inner.erased
+    assert empty.erased
+    refute retained.erased
+    refute face.erased
+    assert_equal [retained], stage.to_a
+  end
+
   def test_generic_host_failure_leaves_original_white_and_text_and_raises_contract_error
     white, text, original, ink = fixture
     white.entities.fail_add = true

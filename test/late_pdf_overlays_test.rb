@@ -42,14 +42,15 @@ class LatePdfOverlaysTest < Minitest::Test
     def initialize(points); @outer_loop = Loop.new(points.map { |p| Vertex.new(p) }); end
     def loops; [outer_loop]; end
     def typename; 'Face'; end
-    def valid?; true; end
+    def valid?; !@erased; end
+    def erase!; @erased = true; end
     def normal; Struct.new(:z).new(1.0); end
     def reverse!; end
     def get_attribute(_dictionary, _key, default); default; end
   end
   class Entities
     def initialize; @items = []; end
-    def to_a; @items.dup; end
+    def to_a; @items.select(&:valid?); end
     def add_group; group = Group.new; @items << group; group; end
     def add_face(points); face = Face.new(points); @items << face; face; end
   end
@@ -58,10 +59,10 @@ class LatePdfOverlaysTest < Minitest::Test
     attr_reader :entities
     def initialize; @entities = Entities.new; @transformation = Geom::Transformation.new; end
     def typename; 'Group'; end
-    def valid?; true; end
+    def valid?; !@erased; end
     def get_attribute(_dictionary, _key, default); default; end
     def set_attribute(_dictionary, _key, _value); end
-    def erase!; end
+    def erase!; @erased = true; end
   end
 
   def parse(stream = RECTANGLE)
@@ -146,6 +147,39 @@ class LatePdfOverlaysTest < Minitest::Test
     assert_equal [1.0, 0.2, 0.7], record[:fill_rgb]
     assert_equal [0.1, 0.2, 0.3], record[:stroke_rgb]
     assert_equal 0.81, record[:fill_opacity]
+  end
+
+  def test_fully_cropped_paints_leave_no_empty_groups_before_certification
+    [2, 5].each do |cropped_count|
+      record = Subject.rectangle_record(parse.first)
+      crop = Compositor.face_record([[[0, 0, 0], [100, 0, 0], [100, 100, 0], [0, 100, 0]]])
+      crop.merge!(:final_page_crop => true, :raster_page_number => 1, :source_pdf_sha256 => 'a' * 64)
+      entities, calls, removed = Entities.new, [], 0.0
+      subtract = lambda do |group, _transform, faces, _crops|
+        calls << group
+        next 0.0 if calls.length > cropped_count
+        group.entities.to_a.each(&:erase!)
+        area = Compositor.source_area(faces)
+        removed += area
+        area
+      end
+      output = nil
+      Compositor.stub(:compose_group!, subtract) do
+        output = Subject.build!(entities, [record], :point_mapper => lambda { |x, y| [x, y, 0] },
+          :materials => Materials.new, :highest_text_z => 0.0, :page_number => 1,
+          :source_pdf_sha256 => 'a' * 64, :final_page_crops => [crop])
+      end
+      assert_in_delta removed, output[0][:cropped_area], 1.0e-10
+      assert calls.first(cropped_count).none?(&:valid?)
+      if cropped_count == 5
+        assert_empty entities.to_a
+        assert_nil output[0][:group]
+      else
+        surface = output[0][:group].entities.to_a.first
+        assert_equal 3, surface.entities.to_a.length
+        assert surface.entities.to_a.all? { |group| group.entities.to_a.length == 1 }
+      end
+    end
   end
 
   def test_crop_subtraction_keeps_each_source_paint_and_its_material_in_a_separate_group

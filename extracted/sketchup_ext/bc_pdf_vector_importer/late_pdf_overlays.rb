@@ -186,10 +186,19 @@ module BlueCollarSystems
               paint_faces = PlanarWhiteKnockout.snapshots(paint_group, surface.transformation, false)
               box = PlanarWhiteKnockout.union_bounds(paint_faces)
               intersections = crops.select { |crop| PlanarWhiteKnockout.boxes_overlap?(box, crop[:bounds]) }
-              sum + (intersections.empty? ? 0.0 : PlanarWhiteKnockout.compose_group!(
-                paint_group, surface.transformation, paint_faces, intersections))
+              cropped = intersections.empty? ? 0.0 : PlanarWhiteKnockout.compose_group!(
+                paint_group, surface.transformation, paint_faces, intersections)
+              paint_group.erase! if paint_group.entities.to_a.empty?
+              sum + cropped
             end
+            # Fully cropped source paints must not leave containers that the
+            # host silently removes after the page certificate is recorded.
+            surface.erase! if surface.entities.to_a.empty?
             depth = [top.to_f, 0.0].max + DISPLAY_GAP * (index + 1)
+            if group.entities.to_a.empty?
+              group.erase!
+              next record.merge(:group => nil, :display_depth => depth, :cropped_area => removed)
+            end
             group.transformation = Geom::Transformation.translation(Geom::Point3d.new(0, 0, depth))
             { 'late_pdf_overlay' => true, 'source_paint_order' => record[:paint_order],
               'source_fill_opacity' => record[:fill_opacity], 'source_stroke_opacity' => 1.0,
