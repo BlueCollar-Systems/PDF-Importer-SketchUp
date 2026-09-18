@@ -3146,10 +3146,44 @@ module BlueCollarSystems
       end
     end
 
+    def self.apply_pdf_color_display(model)
+      return false unless model && model.respond_to?(:rendering_options)
+      options = model.rendering_options
+      return false unless options
+      desired = {
+        'EdgeColorMode' => 0, 'DisplayColorByLayer' => false,
+        'RenderMode' => 2, 'Texture' => true
+      }
+      previous = {}
+      desired.each_key { |key| previous[key] = options[key] }
+      desired.each { |key, value| options[key] = value }
+      unless desired.all? { |key, value| options[key] == value }
+        raise 'native PDF color display settings were not retained'
+      end
+      true
+    rescue StandardError => error
+      # Display preference failure does not invalidate stored source geometry.
+      # Restore the prior style and report how to reveal the retained colors.
+      (previous || {}).each do |key, value|
+        begin
+          options[key] = value
+          unless options[key] == value
+            Logger.warn('Pipeline', "Could not restore display option #{key}: native setting was not retained")
+          end
+        rescue StandardError => restore_error
+          Logger.warn('Pipeline', "Could not restore display option #{key}: #{restore_error.message}")
+        end
+      end
+      Logger.warn('Pipeline', "PDF colors are stored, but native display setup failed: #{error.message}. " \
+        'Use Shaded with Textures and edge color By Material to display PDF colors.')
+      false
+    end
+
     def self.apply_top_view_fit(model, preferred_bb = nil, imported_entities = nil)
       return unless model
       view = model.active_view
       return unless view
+      apply_pdf_color_display(model)
 
       preferred_valid = fit_usable_bounds?(preferred_bb)
       bb = Geom::BoundingBox.new

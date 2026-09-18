@@ -15,6 +15,8 @@ module BlueCollarSystems
   module PDFVectorImporter
     class GeometryBuilder
 
+      class StrokeStyleFailure < StandardError; end
+
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
       # Heavy pages construct inside isolated 250-path groups so SketchUp is
@@ -216,6 +218,8 @@ module BlueCollarSystems
             dest = fill_group.entities
           end
 
+          # Keep the source style local to this path, including retained batches.
+          stroke_style = should_stroke ? source_stroke_style(path.stroke_color) : nil
           stroke_bounds = effective_stroke_bounds(path) if should_stroke
           path.subpaths.each do |subpath|
             points_list = subpath_to_points(subpath)
@@ -244,6 +248,7 @@ module BlueCollarSystems
                 edge = draw_dest.add_line(p1, p2)
                 raise StrokeClipping::Unsupported, 'native host rejected clipped source stroke' unless edge
                 set_layer(edge, path_layer)
+                style_stroke_edge(edge, stroke_style)
                 @edge_count += 1
               end
               draw_face(draw_dest, su_points, path_layer, path.fill_color, false) if should_fill && subpath.closed && su_points.length >= 3
@@ -260,9 +265,9 @@ module BlueCollarSystems
             if @detect_arcs && !should_fill && dash_spec.nil? &&
                su_points.length >= 5 &&
                !self.class.overlaps_clip_fill?(path_bbox, clipped_fill_boxes)
-              draw_with_arc_detection(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color)
+              draw_with_arc_detection(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color, stroke_style)
             else
-              draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed) if should_stroke
+              draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, stroke_style) if should_stroke
               if should_fill && subpath.closed && su_points.length >= 3
                 draw_face(draw_dest, su_points, path_layer, path.fill_color, !should_stroke)
               end
@@ -625,7 +630,7 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Draw edges with arc detection
       # ---------------------------------------------------------------
-      def draw_with_arc_detection(entities, points, layer, dash_layer, dash_spec, closed, should_fill, fill_rgb = nil)
+      def draw_with_arc_detection(entities, points, layer, dash_layer, dash_spec, closed, should_fill, fill_rgb = nil, stroke_style = nil)
         # Convert Point3d to [x,y] for the arc fitter
         pts_2d = points.map { |p| [p.x, p.y] }
 
@@ -643,7 +648,7 @@ module BlueCollarSystems
         )
 
         if segments.empty?
-          draw_edges(entities, points, layer, dash_layer, dash_spec, closed)
+          draw_edges(entities, points, layer, dash_layer, dash_spec, closed, stroke_style)
           if should_fill && closed && points.length >= 3
             draw_face(entities, points, layer, fill_rgb)
           end
@@ -678,7 +683,7 @@ module BlueCollarSystems
                 seg[:points].each_cons(2) do |pa, pb|
                   p1 = Geom::Point3d.new(pa[0], pa[1], 0)
                   p2 = Geom::Point3d.new(pb[0], pb[1], 0)
-                  e = safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec)
+                  e = safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec, stroke_style)
                   all_edges << e if e
                 end
                 next
@@ -693,7 +698,7 @@ module BlueCollarSystems
                 seg[:points].each_cons(2) do |pa, pb|
                   p1 = Geom::Point3d.new(pa[0], pa[1], 0)
                   p2 = Geom::Point3d.new(pb[0], pb[1], 0)
-                  e = safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec)
+                  e = safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec, stroke_style)
                   all_edges << e if e
                 end
                 next
@@ -708,22 +713,25 @@ module BlueCollarSystems
                 edges.each do |e|
                   set_layer(e, layer)
                   set_layer(e, get_or_create_layer(dash_layer)) if dash_layer
+                  style_stroke_edge(e, stroke_style)
                   all_edges << e
                 end
                 @arc_count += 1
                 @edge_count += edges.length
               else
                 # Fallback to line
-                e = safe_add_line(entities, sp, ep, layer, dash_layer, dash_spec)
+                e = safe_add_line(entities, sp, ep, layer, dash_layer, dash_spec, stroke_style)
                 all_edges << e if e
               end
+            rescue StrokeStyleFailure
+              raise
             rescue StandardError => ex
               Logger.warn("GeometryBuilder", "arc creation failed: #{ex.message}")
               # Arc creation failed — fall back to lines through the points
               seg[:points].each_cons(2) do |pa, pb|
                 p1 = Geom::Point3d.new(pa[0], pa[1], 0)
                 p2 = Geom::Point3d.new(pb[0], pb[1], 0)
-                e = safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec)
+                e = safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec, stroke_style)
                 all_edges << e if e
               end
             end
@@ -731,7 +739,7 @@ module BlueCollarSystems
           elsif seg[:type] == :line
             p1 = Geom::Point3d.new(seg[:from][0], seg[:from][1], 0)
             p2 = Geom::Point3d.new(seg[:to][0], seg[:to][1], 0)
-            e = safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec)
+            e = safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec, stroke_style)
             all_edges << e if e
           end
         end
@@ -741,7 +749,7 @@ module BlueCollarSystems
           first_pt = points.first
           last_pt = points.last
           if first_pt.distance(last_pt) > @merge_tol
-            e = safe_add_line(entities, last_pt, first_pt, layer, dash_layer, dash_spec)
+            e = safe_add_line(entities, last_pt, first_pt, layer, dash_layer, dash_spec, stroke_style)
             all_edges << e if e
           end
         end
@@ -755,7 +763,7 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Draw simple edges (no arc detection)
       # ---------------------------------------------------------------
-      def draw_edges(entities, points, layer, dash_layer, dash_spec, closed)
+      def draw_edges(entities, points, layer, dash_layer, dash_spec, closed, stroke_style = nil)
         # Filter out zero-length segments, then batch-add for performance.
         valid_pts = [points.first]
         (1...points.length).each do |i|
@@ -777,7 +785,7 @@ module BlueCollarSystems
 
         if needs_physical_dashes
           (0...valid_pts.length - 1).each do |i|
-            safe_add_line(entities, valid_pts[i], valid_pts[i + 1], layer, dash_layer, dash_spec)
+            safe_add_line(entities, valid_pts[i], valid_pts[i + 1], layer, dash_layer, dash_spec, stroke_style)
           end
           return
         end
@@ -787,25 +795,30 @@ module BlueCollarSystems
         begin
           edges = entities.add_edges(valid_pts)
           if edges && !edges.empty?
-            edges.each { |e| set_layer(e, target) }
+            edges.each do |edge|
+              set_layer(edge, target)
+              style_stroke_edge(edge, stroke_style)
+            end
             @edge_count += edges.length
           end
+        rescue StrokeStyleFailure
+          raise
         rescue StandardError => e
           # Fallback to individual lines if batch fails
           Logger.warn("GeometryBuilder", "add_edges batch failed, falling back: #{e.message}")
           (0...valid_pts.length - 1).each do |i|
-            safe_add_line(entities, valid_pts[i], valid_pts[i + 1], layer, dash_layer, dash_spec)
+            safe_add_line(entities, valid_pts[i], valid_pts[i + 1], layer, dash_layer, dash_spec, stroke_style)
           end
         end
       end
 
-      def safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec = nil)
+      def safe_add_line(entities, p1, p2, layer, dash_layer, dash_spec = nil, stroke_style = nil)
         return nil if p1.distance(p2) < @merge_tol
         begin
           target = dash_layer ? get_or_create_layer(dash_layer) : layer
 
           if dash_spec && dash_spec[:pattern].is_a?(Array) && !dash_spec[:pattern].empty?
-            edges = add_dashed_line(entities, p1, p2, dash_spec, target)
+            edges = add_dashed_line(entities, p1, p2, dash_spec, target, stroke_style)
             return edges.first if edges && !edges.empty?
             return nil
           end
@@ -813,9 +826,12 @@ module BlueCollarSystems
           edge = entities.add_line(p1, p2)
           if edge
             set_layer(edge, target)
+            style_stroke_edge(edge, stroke_style)
             @edge_count += 1
           end
           edge
+        rescue StrokeStyleFailure
+          raise
         rescue StandardError => e
           Logger.error("GeometryBuilder", "add_line failed", e)
           nil
@@ -3183,6 +3199,55 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Dash pattern → layer/tag classification
       # ---------------------------------------------------------------
+      # Stroke colors belong to the real edges, independent of optional grouping,
+      # face materials, or the active viewport's edge-color display setting.
+      def source_stroke_style(rgb)
+        values = rgb.nil? ? [0.0, 0.0, 0.0] : rgb
+        unless values.is_a?(Array) && values.length >= 3 &&
+               values.first(3).all? { |v| v.is_a?(Numeric) && v.to_f.finite? && v >= 0 && v <= 1 }
+          raise StrokeStyleFailure, 'source stroke RGB is invalid'
+        end
+        expected = values.first(3).map { |v| (v.to_f * 255).round }.freeze
+        @stroke_material_cache ||= {}
+        material = @stroke_material_cache[expected]
+        unless material
+          name = 'PDF_Stroke_' + expected.join('_')
+          # Never reuse a user material by name: matching RGB can still carry
+          # transparency or a texture. SketchUp adds a unique suffix on collision.
+          material = @model.materials.add(name)
+          material.color = Sketchup::Color.new(*expected)
+          unless material && stroke_material_rgb(material) == expected &&
+                 material.alpha == 1.0 && material.texture.nil?
+            raise StrokeStyleFailure, 'native stroke material did not retain source RGB'
+          end
+          @stroke_material_cache[expected] = material
+        end
+        { :material => material, :rgb => expected }.freeze
+      rescue StrokeStyleFailure
+        raise
+      rescue StandardError => error
+        raise StrokeStyleFailure, "cannot retain source stroke color: #{error.message}"
+      end
+
+      def stroke_material_rgb(material)
+        color = material.color
+        [color.red, color.green, color.blue]
+      end
+
+      def style_stroke_edge(edge, style)
+        return edge unless style
+        edge.material = style[:material]
+        unless edge.material == style[:material] &&
+               stroke_material_rgb(edge.material) == style[:rgb]
+          raise StrokeStyleFailure, 'native edge did not retain source stroke RGB'
+        end
+        edge
+      rescue StrokeStyleFailure
+        raise
+      rescue StandardError => error
+        raise StrokeStyleFailure, "cannot apply source stroke color: #{error.message}"
+      end
+
       # Get or create a SketchUp material from an [r, g, b] 0.0–1.0 array.
       # Caches materials to avoid duplicates.
       def get_or_create_material(rgb)
@@ -3412,7 +3477,7 @@ module BlueCollarSystems
       end
 
       # Draw line as explicit dash segments to preserve hidden-line semantics.
-      def add_dashed_line(entities, p1, p2, dash_spec, layer)
+      def add_dashed_line(entities, p1, p2, dash_spec, layer, stroke_style = nil)
         pattern = dash_spec[:pattern]
         phase = dash_spec[:phase].to_f
         return [] unless pattern.is_a?(Array) && !pattern.empty?
@@ -3460,9 +3525,12 @@ module BlueCollarSystems
               e = entities.add_line(a, b)
               if e
                 set_layer(e, layer)
+                style_stroke_edge(e, stroke_style)
                 edges << e
                 @edge_count += 1
               end
+            rescue StrokeStyleFailure
+              raise
             rescue StandardError => e
               Logger.warn("GeometryBuilder", "add_dashed_line segment failed: #{e.message}")
             end

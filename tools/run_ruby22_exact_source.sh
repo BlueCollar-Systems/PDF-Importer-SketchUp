@@ -174,6 +174,8 @@ readonly SMOKE_TESTS=(
   test/item_raster_display_test.rb
   test/page_paint_bounds_test.rb
   test/stroke_clipping_test.rb
+  test/stroke_color_preservation_test.rb
+  test/pdf_color_display_test.rb
   test/geometry_cleanup_collinear_coverage_test.rb
   test/cleanup_selected_operation_test.rb
   test/embedded_image_affine_test.rb

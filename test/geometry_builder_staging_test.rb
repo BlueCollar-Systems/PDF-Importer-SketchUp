@@ -53,6 +53,12 @@ module Geom
 end
 
 module Sketchup
+  class Color
+    attr_reader :red, :green, :blue
+    def initialize(red, green, blue)
+      @red, @green, @blue = red, green, blue
+    end
+  end
   def self.status_text=(_value); end
 end
 
@@ -89,7 +95,7 @@ class GeometryBuilderStagingTest < Minitest::Test
   end
 
   class Edge
-    attr_accessor :layer, :hidden
+    attr_accessor :layer, :hidden, :material
     attr_reader :start_point, :end_point
 
     def initialize(start_point, end_point)
@@ -240,13 +246,37 @@ class GeometryBuilderStagingTest < Minitest::Test
     end
   end
 
+  class Material
+    attr_accessor :color, :alpha, :texture
+    def initialize
+      @alpha = 1.0
+      @texture = nil
+    end
+  end
+
+  class Materials
+    attr_reader :items
+    def initialize
+      @items = {}
+    end
+    def [](name)
+      @items[name]
+    end
+    def add(name)
+      key = name
+      key += '_1' while @items.key?(key)
+      @items[key] = Material.new
+    end
+  end
+
   class Model
-    attr_reader :active_entities, :layers, :definitions
+    attr_reader :active_entities, :layers, :definitions, :materials
 
     def initialize(reject_small_faces = false)
       @active_entities = Entities.new(reject_small_faces)
       @layers = Layers.new
       @definitions = Definitions.new
+      @materials = Materials.new
     end
 
     def line_styles
