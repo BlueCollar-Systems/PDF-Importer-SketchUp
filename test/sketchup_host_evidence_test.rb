@@ -831,6 +831,24 @@ class SketchupHostEvidenceTest < Minitest::Test
                  'nested host children must be enumerated once per snapshot'
   end
 
+  def test_snapshot_preserves_native_matrix_precision_without_changing_geometry_digest
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    matrix = [1.0, 0, 0, 0, 0, 1.0, 0, 0,
+              0, 0, 1.0, 0, 10.216722276475694, 4.2384694417317705, 0.021, 1.0]
+    group = FakeGroup.new(29, [], :transformation => matrix)
+    expected_geometry = fidelity.physical_evidence([group])[:physical_geometry_sha256]
+
+    [false, true].each do |compact|
+      row = SketchupHostEvidence.snapshot_entities([group], :compact => compact).first
+      assert_equal matrix, row['transformation'], 'native placement evidence must not round coordinates'
+      assert_equal expected_geometry, row['geometry_evidence']['sha256']
+      rounded = fidelity.entity_transformation_payload(group)
+      refute_equal matrix, rounded
+      assert BlueCollarSystems::PDFVectorImporter::EmbeddedImagePlacement.same_matrix?(row['transformation'], matrix)
+      refute BlueCollarSystems::PDFVectorImporter::EmbeddedImagePlacement.same_matrix?(rounded, matrix)
+    end
+  end
+
   def test_compact_snapshot_reuses_shared_component_definition_tree
     dictionary = 'BC_PDF_Importer'
     definition_entities = CountingCollection.new([

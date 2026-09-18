@@ -1344,7 +1344,10 @@ module SketchupHostEvidence
       'valid' => boolean_state(entity, :valid?),
       'deleted' => boolean_state(entity, :deleted?),
       'bounds' => physical_tree_bounds(physical_tree),
-      'transformation' => physical_tree_transformation(physical_tree),
+      # Placement comparisons need the full native precision. The physical
+      # tree intentionally quantizes coordinates for stable geometry hashes;
+      # using its matrix here can falsely report movement of a source image.
+      'transformation' => transformation_payload(entity),
       'representation_evidence' => representation,
       'content_evidence' => host_content_evidence(entity, typename, context),
       'geometry_evidence' => physical['geometry_evidence'],
