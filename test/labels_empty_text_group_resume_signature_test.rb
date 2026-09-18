@@ -78,6 +78,12 @@ ORIGIN = Geom::Point3d.new(0, 0, 0) unless defined?(ORIGIN)
 Z_AXIS = Geom::Vector3d.new(0, 0, 1) unless defined?(Z_AXIS)
 
 module Sketchup
+  class Color
+    attr_reader :red, :green, :blue
+    def initialize(red, green, blue)
+      @red, @green, @blue = red, green, blue
+    end
+  end
   def self.status_text=(_value); end
 end
 
@@ -227,13 +233,34 @@ module FakeHost
     end
   end
 
+  class Material
+    attr_reader :name
+    attr_accessor :color, :alpha, :texture
+    def initialize(name)
+      @name = name
+      @alpha = 1.0
+      @texture = nil
+    end
+  end
+
+  class Materials
+    def initialize; @items = {}; end
+    def [](name); @items[name]; end
+    def add(name)
+      key = name
+      key += '_1' while @items.key?(key)
+      @items[key] = Material.new(key)
+    end
+  end
+
   class Model
     include Attributes
-    attr_reader :active_entities, :layers, :definitions, :purged_groups
+    attr_reader :active_entities, :layers, :definitions, :purged_groups, :materials
 
     def initialize
       @active_entities = Entities.new
       @layers = Layers.new
+      @materials = Materials.new
       @definitions = Struct.new(:items).new([])
       @operation_open = false
       @purged_groups = 0
