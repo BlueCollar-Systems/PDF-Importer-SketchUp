@@ -243,7 +243,7 @@ module BlueCollarSystems
         # source-only mask format separately, with complete CRC/row checks.
         def gray_mask_proof(bytes)
           raise Unproven, 'invalid gray PNG signature' unless bytes[0,8] == PngCropper::SIGNATURE
-          position, width, height, compressed, ended = 8, nil, nil, ''.b, false
+          position, width, height, compressed, ended = 8, nil, nil, String.new.force_encoding(Encoding::BINARY), false
           while position < bytes.bytesize
             raise Unproven, 'truncated gray PNG chunk' unless position + 12 <= bytes.bytesize
             length = bytes[position,4].unpack('N')[0]
@@ -269,7 +269,7 @@ module BlueCollarSystems
             end
           end
           raise Unproven, 'incomplete gray PNG' unless ended && width && position == bytes.bytesize
-          inflater, rows = Zlib::Inflate.new, ''.b
+          inflater, rows = Zlib::Inflate.new, String.new.force_encoding(Encoding::BINARY)
           begin
             offset = 0
             while offset < compressed.bytesize
