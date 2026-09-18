@@ -189,7 +189,7 @@ module BlueCollarSystems
 
       def original_quad_covered?(polygon, quad)
         return false unless polygon.length == 4 && quad.length == 4 &&
-          (polygon + quad).all? { |p| p.is_a?(Array) && p.length == 2 && p.all? { |v| v.is_a?(Numeric) && v.finite? } }
+          (polygon + quad).all? { |p| p.is_a?(Array) && p.length == 2 && p.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } }
         edges = polygon.each_with_index.map { |a,i| b=polygon[(i+1)%4]; [b[0]-a[0],b[1]-a[1]] }
         turns = edges.each_with_index.map { |a,i| b=edges[(i+1)%4]; a[0]*b[1]-a[1]*b[0] }
         return false unless turns.all? { |v| v > 0 } || turns.all? { |v| v < 0 }
@@ -212,7 +212,7 @@ module BlueCollarSystems
       def original_image_clip_proof(page_num, obj_num, ctm, corners, state)
         reasons = state[:unknown].dup
         reasons << 'image affine is degenerate or nonfinite' unless ctm.length == 6 &&
-          ctm.all? { |v| v.finite? } && (ctm[0]*ctm[3]-ctm[1]*ctm[2]) != 0
+          ctm.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } && (ctm[0]*ctm[3]-ctm[1]*ctm[2]) != 0
         state[:clips].each do |clip|
           reasons << "original #{clip[:kind]} does not contain full image" unless original_quad_covered?(clip[:corners_pts],corners)
         end

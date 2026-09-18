@@ -676,7 +676,7 @@ module BlueCollarSystems
             end
             source_box, bounds = crop.values_at(:source_box, :bounds_svg)
             page_box, viewbox = image.values_at(:svg_page_box, :svg_viewbox)
-            unless [source_box, bounds, page_box, viewbox].all? { |b| b.is_a?(Array) && b.length == 4 && b.all? { |v| v.is_a?(Numeric) && v.finite? } } &&
+            unless [source_box, bounds, page_box, viewbox].all? { |b| b.is_a?(Array) && b.length == 4 && b.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } } &&
               source_box[0] < source_box[2] && source_box[1] < source_box[3]
               raise Unproven, 'final-page crop source bounds are invalid'
             end

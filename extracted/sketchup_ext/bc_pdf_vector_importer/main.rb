@@ -5513,7 +5513,7 @@ module BlueCollarSystems
           entity.get_attribute(dictionary, 'raster_page_number', nil) == context[:page] &&
           entity.get_attribute(dictionary, 'raster_source_box', nil) == box &&
           entity.get_attribute(dictionary, 'raster_visual_pixel_sha256', '') == artifact[:visual_pixel_sha256] &&
-          box.is_a?(Array) && box.length == 4 && box.all? { |v| v.is_a?(Numeric) && v.finite? } &&
+          box.is_a?(Array) && box.length == 4 && box.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } &&
           box[0] < box[2] && box[1] < box[3] &&
           box[0] >= media_box[0] && box[1] >= media_box[1] && box[2] <= media_box[2] && box[3] <= media_box[3]
           raise RepresentationFidelity::ContractError, 'final-page crop native/source binding differs'
@@ -5569,7 +5569,7 @@ module BlueCollarSystems
         # impossibility nor permission to invent paint order.
         pixels = PngCropper.inspect_pixels!(asset.file_path, false)
         corners = Array(asset.corners_pts)
-        unless corners.length == 4 && corners.all? { |p| p.is_a?(Array) && p.length == 2 && p.all? { |v| v.is_a?(Numeric) && v.finite? } }
+        unless corners.length == 4 && corners.all? { |p| p.is_a?(Array) && p.length == 2 && p.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } }
           raise RepresentationFidelity::ContractError, 'embedded source image corner inventory is invalid'
         end
         # PNG rows start at image top-left; PDF image unit-square corners start
