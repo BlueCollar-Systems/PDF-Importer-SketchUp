@@ -883,7 +883,7 @@ module BlueCollarSystems
       end
 
       def draw_compound_clip_fill(entities, source_loops, rule, layer, fill_rgb)
-        loops = source_loops.map { |points| remove_consecutive_duplicates(points) }
+        loops = source_loops.map { |points| compound_fill_loop(points) }
         loops = loops.select { |points| points.length >= 3 }
         raise 'clipped fill has no usable source contours' if loops.empty?
         origin = loops[0][0]
@@ -943,6 +943,21 @@ module BlueCollarSystems
       rescue StandardError
         group.erase! if group && group.valid?
         raise
+      end
+
+      # PDF contours may explicitly repeat their first vertex before `h`.
+      # SketchUp closes a face itself and rejects that duplicate array entry.
+      # Remove only an exact closing vertex: near vertices and repeated interior
+      # vertices can describe real ink, so neither global uniq nor snapping is safe.
+      def compound_fill_loop(points)
+        loop = remove_consecutive_duplicates(points).dup
+        while loop.length > 1 &&
+              loop.first.x.to_f == loop.last.x.to_f &&
+              loop.first.y.to_f == loop.last.y.to_f &&
+              loop.first.z.to_f == loop.last.z.to_f
+          loop.pop
+        end
+        loop
       end
 
       def draw_face(entities, points, layer, fill_rgb = nil, hide_edges = false)

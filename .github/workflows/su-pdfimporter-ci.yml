@@ -134,6 +134,7 @@ jobs:
           ruby test/page_representation_transform_test.rb
           ruby test/svg_3d_text_font_gap_attribution_test.rb
           ruby test/covered_clip_fill_test.rb
+          ruby test/compound_fill_closed_contour_test.rb
           ruby test/planar_white_knockout_test.rb
           ruby test/late_pdf_overlays_test.rb
           ruby test/svg_paint_binding_test.rb
