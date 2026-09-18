@@ -125,6 +125,7 @@ jobs:
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_display_test.rb
           ruby test/page_paint_bounds_test.rb
+          ruby test/stroke_clipping_test.rb
           ruby test/embedded_image_affine_test.rb
           ruby test/embedded_image_placement_test.rb
           ruby test/poppler_active_boundary_validation_test.rb
@@ -191,5 +192,6 @@ jobs:
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_display_test.rb
           ruby test/pdf_navigation_link_appearance_test.rb
+          ruby test/stroke_clipping_test.rb
       - name: Validate release publication state
         run: python tools/check_release_publication.py

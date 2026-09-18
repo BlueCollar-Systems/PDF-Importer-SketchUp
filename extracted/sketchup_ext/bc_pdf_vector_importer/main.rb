@@ -4526,6 +4526,7 @@ module BlueCollarSystems
           import_session_id: stats[:import_session_id]
         }
         builder = GeometryBuilder.new(model, paths, builder_text_items, media_box,
+          page_clip_box: svg_page_box,
           scale_factor: opts[:scale], bezier_segments: opts[:bezier_segments],
           import_as: opts[:import_as], layer_name: opts[:layer_name],
           group_per_page: group_policy[:effective_group_per_page], page_number: page_num,
@@ -4908,6 +4909,7 @@ module BlueCollarSystems
         if hatch_mode == :group && !hatch_paths.empty? && builder.page_group
           hatch_layer_name = "#{opts[:layer_name] || 'PDF Import'}:Hatching"
           hatch_builder = GeometryBuilder.new(model, hatch_paths, [], media_box,
+            page_clip_box: svg_page_box,
             scale_factor: opts[:scale], bezier_segments: opts[:bezier_segments],
             import_as: :edges, layer_name: hatch_layer_name,
             group_per_page: false, page_number: page_num,

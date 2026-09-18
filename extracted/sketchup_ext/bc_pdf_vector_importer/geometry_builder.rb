@@ -8,6 +8,7 @@
 require File.join(File.dirname(__FILE__), 'page_transform')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'import_run_control')
+require File.join(File.dirname(__FILE__), 'stroke_clipping')
 require 'digest'
 
 module BlueCollarSystems
@@ -36,6 +37,7 @@ module BlueCollarSystems
         @paths = paths
         @text_items = text_items || []
         @media_box = media_box
+        @page_clip_box = opts[:page_clip_box] || media_box
 
         # BCS-ARCH-001 consolidated defaults (tightest correct value):
         # bezier_segments=32 (SU curve quality ceiling),
@@ -87,6 +89,7 @@ module BlueCollarSystems
         @text_attempts = []
         @geometry_staging = disabled_geometry_staging
         @deferred_small_face_batches = {}
+        @stroke_clipping = { :clipped_subpaths => 0, :unresolved_subpaths => 0, :unresolved_reasons => {} }
       end
 
       def build
@@ -213,6 +216,7 @@ module BlueCollarSystems
             dest = fill_group.entities
           end
 
+          stroke_bounds = effective_stroke_bounds(path) if should_stroke
           path.subpaths.each do |subpath|
             points_list = subpath_to_points(subpath)
             next if points_list.empty?
@@ -226,6 +230,25 @@ module BlueCollarSystems
             su_points = remove_consecutive_duplicates(su_points)
             next if su_points.length < 2
             draw_dest = staged_geometry_target(dest, path_idx)
+
+            # Clip source-space centerlines before any native batch/arc/dash path.
+            # Fill contours remain independent; clipped stroke pieces never close
+            # along the clipping boundary or connect across an invisible interval.
+            fragments = should_stroke ? clipped_stroke_segments(path, points_list, subpath.closed, stroke_bounds) : nil
+            if fragments
+              record_unresolved_stroke_clip('filled path boundary paint remains outside the centerline clipping contract') if should_fill
+              fragments.each do |a, b|
+                p1 = pdf_to_su(a[0], a[1], page_origin_x, page_origin_y)
+                p2 = pdf_to_su(b[0], b[1], page_origin_x, page_origin_y)
+                next if p1.distance(p2) == 0
+                edge = draw_dest.add_line(p1, p2)
+                raise StrokeClipping::Unsupported, 'native host rejected clipped source stroke' unless edge
+                set_layer(edge, path_layer)
+                @edge_count += 1
+              end
+              draw_face(draw_dest, su_points, path_layer, path.fill_color, false) if should_fill && subpath.closed && su_points.length >= 3
+              next
+            end
 
             # Arc reconstruction on the polyline
             # A filled PDF contour is authoritative as one exact sampled
@@ -350,7 +373,7 @@ module BlueCollarSystems
           text_delivery_failures: Array(@text_delivery_failures),
           text_attempts: Array(@text_attempts),
           source_provenance_objects: Array(@provenance_bucket),
-          geometry_staging: geometry_staging_metrics
+          geometry_staging: geometry_staging_metrics.merge(:stroke_clipping => @stroke_clipping)
         }
       end
 
@@ -3195,12 +3218,68 @@ module BlueCollarSystems
         [xs.min, ys.min, xs.max, ys.max]
       end
 
+      def record_unresolved_stroke_clip(reason)
+        @stroke_clipping ||= { :clipped_subpaths => 0, :unresolved_subpaths => 0, :unresolved_reasons => {} }
+        reasons = @stroke_clipping[:unresolved_reasons]
+        Logger.warn('GeometryBuilder', "Stroke clipping retained source centerline: #{reason}; painted-stroke appearance is not certified") unless reasons[reason]
+        reasons[reason] = reasons.fetch(reason, 0) + 1
+        @stroke_clipping[:unresolved_subpaths] += 1
+        nil
+      end
+
+      def effective_stroke_bounds(path)
+        snapshot = path.respond_to?(:source_stroke_clip) ? path.source_stroke_clip : nil
+        if snapshot.nil? && path.respond_to?(:source_clip_clear) && path.source_clip_clear == false
+          return { :unsupported => 'source stroke clip inventory unavailable' }
+        end
+        StrokeClipping.effective_bounds(snapshot, @media_box, @page_clip_box)
+      rescue StrokeClipping::Unsupported => error
+        { :unsupported => error.message }
+      end
+
+      def clipped_stroke_segments(path, points, closed, bounds)
+        if bounds.is_a?(Hash)
+          return record_unresolved_stroke_clip(bounds[:unsupported])
+        end
+        return nil if points.all? { |point| StrokeClipping.inside?(point, bounds) }
+        return [] if bounds == :empty # Empty source clip intersection, not absent clip evidence.
+        centerlines = StrokeClipping.visible_segments(points, closed, bounds)
+        contour = points.dup
+        contour << contour.first if closed && contour.last != contour.first
+        unsupported_paint = contour.each_cons(2).any? do |a,b|
+          next false if a == b || StrokeClipping.line(a,b,bounds)
+          bbox = [[a[0],b[0]].min, [a[1],b[1]].min, [a[0],b[0]].max, [a[1],b[1]].max]
+          !paint_entirely_outside_bounds?(path, bbox, bounds)
+        end
+        if unsupported_paint
+          return record_unresolved_stroke_clip('stroke width/caps may paint inside clip although centerline is outside')
+        end
+        fragments = if @map_dashes && path.dash_pattern
+                      StrokeClipping.visible_segments(points, closed, bounds, path.dash_pattern, path.ctm)
+                    else
+                      centerlines
+                    end
+        @stroke_clipping ||= { :clipped_subpaths => 0, :unresolved_subpaths => 0, :unresolved_reasons => {} }
+        @stroke_clipping[:clipped_subpaths] += 1
+        fragments
+      rescue StrokeClipping::Unsupported => error
+        record_unresolved_stroke_clip(error.message)
+      end
+
       # PDF viewers clip paint to the page. Cull only paint whose conservative
-      # bounds are wholly outside it; never trim a partially visible path.
+      # bounds are wholly outside it. Crossing centerlines are clipped separately.
       # The path bbox includes every Bezier control point, not just endpoints.
       def paint_entirely_outside_page?(path, bbox)
-        return false unless finite_page_bounds?(bbox) && finite_page_bounds?(@media_box)
-        return false unless @media_box[2] > @media_box[0] && @media_box[3] > @media_box[1]
+        page_bounds = StrokeClipping.effective_bounds(nil, @media_box, @page_clip_box)
+        return true if page_bounds == :empty
+        paint_entirely_outside_bounds?(path, bbox, page_bounds)
+      rescue StrokeClipping::Unsupported
+        false
+      end
+
+      def paint_entirely_outside_bounds?(path, bbox, bounds)
+        return false unless finite_page_bounds?(bbox) && finite_page_bounds?(bounds)
+        return false unless bounds[2] > bounds[0] && bounds[3] > bounds[1]
         pad_x = pad_y = 0.0
         if path.stroke
           return false unless path.respond_to?(:source_stroke_style_proven) &&
@@ -3227,8 +3306,8 @@ module BlueCollarSystems
           pad_y = radius * Math.sqrt(ctm[1] * ctm[1] + ctm[3] * ctm[3])
           return false unless pad_x.finite? && pad_y.finite?
         end
-        bbox[2] + pad_x < @media_box[0] || bbox[0] - pad_x > @media_box[2] ||
-          bbox[3] + pad_y < @media_box[1] || bbox[1] - pad_y > @media_box[3]
+        bbox[2] + pad_x < bounds[0] || bbox[0] - pad_x > bounds[2] ||
+          bbox[3] + pad_y < bounds[1] || bbox[1] - pad_y > bounds[3]
       rescue StandardError
         false
       end

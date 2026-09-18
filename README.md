@@ -474,3 +474,24 @@ These AI tools were used as collaborative development partners throughout the pr
 ## Author
 
 **BlueCollar-Systems** -- BUILT. NOT BOUGHT.
+
+### Source stroke clipping
+
+Crossing vector strokes are clipped to verified rectangular PDF clips and the
+visible page box without moving the remaining source vertices or adding boundary
+connectors. Trimmed dashed strokes keep the source phase across the original
+subpath and measure dash lengths before its transform. Contained paths retain the
+existing native arc/style behavior. Fill contours and compound holes are separate.
+
+SketchUp centerline edges do not model physical PDF stroke width, joins, or caps.
+A nonrectangular/text clip or a cap-only painted intersection retains the existing
+source centerline and records an unresolved warning, rather than silently deleting
+possible paint. Per-page counts and reasons are retained under
+`extra.geometry_staging[].stroke_clipping`; those warnings are not paint-fidelity
+acceptance. Text mode and text representation are unchanged.
+
+Large annotated PDF sets use a finite preparation budget based on verified page
+count (at least two minutes, five seconds per page, up to thirty minutes), so a
+valid large set is not rejected solely by the former fixed two-minute timeout.
+Source identity, complete page count, and annotation-flattening checks still apply;
+timeouts and partial output remain explicit failures with diagnostic causes.

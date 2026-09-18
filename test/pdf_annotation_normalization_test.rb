@@ -94,6 +94,43 @@ class PdfAnnotationNormalizationTest < Minitest::Test
     end
   end
 
+  def test_annotation_timeout_scales_with_verified_pages_and_remains_bounded
+    assert_equal 120, PS.send(:annotation_timeout_s, 1)
+    assert_equal 120, PS.send(:annotation_timeout_s, 24)
+    assert_equal 1295, PS.send(:annotation_timeout_s, 259)
+    assert_equal 1800, PS.send(:annotation_timeout_s, 10_000)
+    [nil, 0, -1, 2.5, '259'].each do |invalid|
+      assert_raises(ArgumentError) { PS.send(:annotation_timeout_s, invalid) }
+    end
+  end
+
+  def test_verified_count_controls_helper_budget_and_timeout_is_diagnosable
+    Dir.mktmpdir('annotation_budget') do |dir|
+      source = fixture(File.join(dir, 'source.pdf'))
+      observed = []
+      timed_out = lambda do |args, options = {}|
+        observed << options
+        output = args.find { |a| a.start_with?('-sOutputFile=') }.split('=', 2).last
+        File.binwrite(output, '%PDF-incomplete fixture')
+        {:ok=>false, :timed_out=>true, :exitstatus=>1, :stdout=>'', :stderr=>''}
+      end
+      # Use the production runner boundary so this also proves the computed
+      # budget reaches the actual subprocess, not just a utility method.
+      require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/command_runner'
+      IMP::DependencyResolver.stub(:find_ghostscript, 'fake-gs') do
+        IMP::CommandRunner.stub(:run, timed_out) do
+          error = assert_raises(PS::SalvageError) do
+            PS.send(:normalize_annotation_appearances, source, 259)
+          end
+          assert_match(/1295s reached for 259 pages/, error.message)
+          assert_equal 1295, observed.fetch(0).fetch(:timeout_s)
+          assert_equal 'PdfAnnotationNormalization', observed.fetch(0).fetch(:context)
+          assert_empty PS.temp_salvages, 'A timed-out partial PDF cannot become accepted output'
+        end
+      end
+    end
+  end
+
   def test_real_vector_writer_preserves_screen_visibility_and_every_page
     skip 'Bundled/system Ghostscript unavailable' unless IMP::DependencyResolver.find_ghostscript
     Dir.mktmpdir('annotation_fixture') do |dir|

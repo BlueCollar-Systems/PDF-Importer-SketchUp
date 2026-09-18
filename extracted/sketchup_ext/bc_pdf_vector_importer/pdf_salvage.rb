@@ -27,6 +27,8 @@ module BlueCollarSystems
       class SalvageError < StandardError; end
 
       SALVAGE_TIMEOUT_S = 120
+      ANNOTATION_SECONDS_PER_PAGE = 5
+      ANNOTATION_MAX_TIMEOUT_S = 1800
 
       class << self
         # Returns [path_to_import, note_or_nil]. Never raises for the
@@ -175,6 +177,9 @@ module BlueCollarSystems
             count = source.page_count
           end
           raise SalvageError, 'Source page count was not verified.' unless count.is_a?(Integer) && count > 0
+          timeout_s = annotation_timeout_s(count)
+          log_info('Preserving annotation appearances for ' + count.to_s +
+            ' pages; helper time limit ' + timeout_s.to_s + 's.')
           out = SafeTemp.join('bc_annotations_' + Process.pid.to_s + '_' + Time.now.to_i.to_s + '_' + rand(1_000_000).to_s + '.pdf')
           input = pdf_path
           if source
@@ -193,7 +198,7 @@ module BlueCollarSystems
                   '-dDownsampleGrayImages=false', '-dDownsampleMonoImages=false',
                   '-sOutputFile=' + out, '-f', input]
           run = if defined?(CommandRunner) && CommandRunner.respond_to?(:run)
-                  CommandRunner.run(args, :timeout_s=>SALVAGE_TIMEOUT_S, :context=>'PdfAnnotationNormalization')
+                  CommandRunner.run(args, :timeout_s=>timeout_s, :context=>'PdfAnnotationNormalization')
                 else
                   fallback_run_pdftocairo(args)
                 end
@@ -202,7 +207,14 @@ module BlueCollarSystems
             :representation=>:vector_pdf_annotation_normalization,
             :artifacts=>[out], :artifact_policy=>:all_nonempty)
           unless validation && validation[:ok]
-            raise SalvageError, 'Could not preserve visible PDF annotations: vector normalization failed. No incomplete import was created.'
+            PopplerResultValidator.log_rejection(validation, 'PdfAnnotationNormalization')
+            detail = if run && run[:timed_out]
+                       'time limit of ' + timeout_s.to_s + 's reached for ' + count.to_s + ' pages'
+                     else
+                       'helper failed; see the import log for the exact process evidence'
+                     end
+            raise SalvageError, 'Could not preserve visible PDF annotations: vector normalization failed (' +
+              detail + '). No incomplete import was created.'
           end
           unless run[:stderr].to_s.strip.empty? && run[:stdout].to_s.strip.empty?
             raise SalvageError, 'Annotation normalization reported a PDF/font warning; repair the reported source or helper problem before importing. ' +
@@ -236,6 +248,18 @@ module BlueCollarSystems
           rescue StandardError => cleanup_error
             log_warn('Rejected annotation artifact cleanup failed: ' + cleanup_error.message)
           end
+        end
+
+        # A full-document screen normalization must preserve every page, even
+        # when the operator will import only one. A fixed two-minute helper
+        # budget rejected valid large drawing sets. Retain a finite upper bound
+        # and the existing floor for complex single pages; no quality setting or
+        # annotation/page completeness check is relaxed.
+        def annotation_timeout_s(page_count)
+          raise ArgumentError, 'positive verified page count required' unless
+            page_count.is_a?(Integer) && page_count > 0
+          [SALVAGE_TIMEOUT_S,
+           [page_count * ANNOTATION_SECONDS_PER_PAGE, ANNOTATION_MAX_TIMEOUT_S].min].max
         end
 
         # Track all temporary salvaged files so they can be removed at
