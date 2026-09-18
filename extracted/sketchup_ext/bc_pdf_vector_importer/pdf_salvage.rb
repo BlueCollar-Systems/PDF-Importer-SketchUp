@@ -15,6 +15,7 @@
 
 require 'fileutils'
 require 'open3'
+require 'digest'
 require File.join(File.dirname(__FILE__), 'safe_temp')
 require File.join(File.dirname(__FILE__), 'poppler_result_validator')
 
@@ -26,6 +27,8 @@ module BlueCollarSystems
       class SalvageError < StandardError; end
 
       SALVAGE_TIMEOUT_S = 120
+      ANNOTATION_SECONDS_PER_PAGE = 5
+      ANNOTATION_MAX_TIMEOUT_S = 1800
 
       class << self
         # Returns [path_to_import, note_or_nil]. Never raises for the
@@ -37,18 +40,37 @@ module BlueCollarSystems
           key = memo_key(pdf_path)
           @memo ||= {}
           cached = key ? @memo[key] : nil
-          if cached
-            raise SalvageError, cached[:error] if cached[:error]
+          source_sha256 = Digest::SHA256.file(pdf_path).hexdigest
+          if valid_cached_result?(cached, source_sha256)
             return [cached[:path], cached[:note]]
           end
+          @memo.delete(key) if key
           begin
             result = prepare_uncached(pdf_path)
-            @memo[key] = { :path => result[0], :note => result[1] } if key
+            unless Digest::SHA256.file(pdf_path).hexdigest == source_sha256
+              raise SalvageError, 'PDF changed during import preparation.'
+            end
+            @memo[key] = { :path => result[0], :note => result[1],
+              :source_sha256 => source_sha256,
+              :normalized_sha256 => Digest::SHA256.file(result[0]).hexdigest } if key
             result
           rescue SalvageError => e
-            @memo[key] = { :error => e.message } if key
+            # A repaired helper or source must be retryable in the same session.
+            @memo.delete(key) if key
             raise
           end
+        rescue SalvageError
+          raise
+        rescue StandardError => error
+          raise SalvageError, 'PDF preparation could not be verified: ' + error.message
+        end
+
+        def valid_cached_result?(cached, source_sha256)
+          cached && cached[:source_sha256] == source_sha256 &&
+            File.file?(cached[:path].to_s) &&
+            Digest::SHA256.file(cached[:path]).hexdigest == cached[:normalized_sha256]
+        rescue StandardError
+          false
         end
 
         def memo_key(pdf_path)
@@ -62,11 +84,27 @@ module BlueCollarSystems
           reason = needs_salvage_reason(pdf_path)
           return [pdf_path, nil] unless reason
 
+          if reason == 'page annotations'
+            out = normalize_annotation_appearances(pdf_path)
+            return [out, 'visible annotation appearances normalized as vector page content']
+          end
+
           out = salvage_with_poppler(pdf_path, reason)
           if out
-            note = "salvaged via poppler (#{reason})"
-            log_info("#{File.basename(pdf_path)}: #{note}")
-            return [out, note]
+            # Cairo is a page-count recovery oracle only: its PDF output uses
+            # print flags, so importing it could lose visible non-print notes.
+            # Normalize the ORIGINAL source with screen visibility instead.
+            begin
+              inventory = PDFParser.new(out)
+              inventory.parse
+              normalized = normalize_annotation_appearances(pdf_path, inventory.page_count)
+              note = "recovered PDF with screen-visible annotation appearances (#{reason})"
+              log_info("#{File.basename(pdf_path)}: #{note}")
+              return [normalized, note]
+            ensure
+              inventory.release if inventory
+              cleanup(out)
+            end
           end
 
           if reason == 'encrypted'
@@ -104,6 +142,11 @@ module BlueCollarSystems
             return "parse failed: #{e.class}"
           end
           return 'zero pages' if parser.page_count == 0
+          begin
+            return 'page annotations' if (1..parser.page_count).any? { |page| parser.page_has_annotation_appearances?(page) }
+          rescue StandardError => error
+            raise SalvageError, 'PDF annotation inventory could not be verified: ' + error.message
+          end
           data = begin
             parser.page_data(1)
           rescue StandardError
@@ -116,6 +159,107 @@ module BlueCollarSystems
           end
           return 'no readable content streams' unless usable
           nil
+        ensure
+          parser.release if parser
+        end
+
+        # pdfwrite preserves text/vectors and image resolution. Screen flags
+        # matter: pdftocairo -pdf uses print visibility and drops non-printing
+        # visible notes (or exposes print-only hidden notes). Never use it here.
+        def normalize_annotation_appearances(pdf_path, recovered_page_count = nil)
+          exe = DependencyResolver.find_ghostscript
+          raise SalvageError, 'Visible PDF annotations require the bundled Ghostscript helper; repair the importer installation.' unless exe
+          before = Digest::SHA256.file(pdf_path).hexdigest
+          count = recovered_page_count
+          unless count
+            source = PDFParser.new(pdf_path)
+            source.parse
+            count = source.page_count
+          end
+          raise SalvageError, 'Source page count was not verified.' unless count.is_a?(Integer) && count > 0
+          timeout_s = annotation_timeout_s(count)
+          log_info('Preserving annotation appearances for ' + count.to_s +
+            ' pages; helper time limit ' + timeout_s.to_s + 's.')
+          out = SafeTemp.join('bc_annotations_' + Process.pid.to_s + '_' + Time.now.to_i.to_s + '_' + rand(1_000_000).to_s + '.pdf')
+          input = pdf_path
+          if source
+            navigation_copy = out.sub(/\.pdf\z/, '_appearance_input.pdf')
+            navigation_copy_created = source.write_annotation_appearance_copy(navigation_copy)
+            if navigation_copy_created
+              input = navigation_copy
+              navigation_copy_sha = Digest::SHA256.file(navigation_copy).hexdigest
+            end
+          end
+          accepted = false
+          args = [exe, '-q', '-dSAFER', '-dBATCH', '-dNOPAUSE', '-dPDFSTOPONERROR',
+                  '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.7',
+                  '-dPrinted=false', '-dPreserveAnnots=false', '-dShowAnnots=true',
+                  '-dAutoRotatePages=/None', '-dDownsampleColorImages=false',
+                  '-dDownsampleGrayImages=false', '-dDownsampleMonoImages=false',
+                  '-sOutputFile=' + out, '-f', input]
+          run = if defined?(CommandRunner) && CommandRunner.respond_to?(:run)
+                  CommandRunner.run(args, :timeout_s=>timeout_s, :context=>'PdfAnnotationNormalization')
+                else
+                  fallback_run_pdftocairo(args)
+                end
+          validation = PopplerResultValidator.validate(run, :executable=>exe,
+            :argv=>args, :context=>'PdfAnnotationNormalization', :attempt=>1,
+            :representation=>:vector_pdf_annotation_normalization,
+            :artifacts=>[out], :artifact_policy=>:all_nonempty)
+          unless validation && validation[:ok]
+            PopplerResultValidator.log_rejection(validation, 'PdfAnnotationNormalization')
+            detail = if run && run[:timed_out]
+                       'time limit of ' + timeout_s.to_s + 's reached for ' + count.to_s + ' pages'
+                     else
+                       'helper failed; see the import log for the exact process evidence'
+                     end
+            raise SalvageError, 'Could not preserve visible PDF annotations: vector normalization failed (' +
+              detail + '). No incomplete import was created.'
+          end
+          unless run[:stderr].to_s.strip.empty? && run[:stdout].to_s.strip.empty?
+            raise SalvageError, 'Annotation normalization reported a PDF/font warning; repair the reported source or helper problem before importing. ' +
+              (run[:stderr].to_s + ' ' + run[:stdout].to_s).strip[0,600]
+          end
+          raise SalvageError, 'PDF changed during annotation normalization.' unless Digest::SHA256.file(pdf_path).hexdigest == before
+          if navigation_copy_sha && Digest::SHA256.file(navigation_copy).hexdigest != navigation_copy_sha
+            raise SalvageError, 'Annotation appearance preparation copy changed during normalization.'
+          end
+          check = PDFParser.new(out)
+          check.parse
+          remaining = (1..check.page_count).select { |page| check.page_has_annotations?(page) }
+          unless check.page_count == count && remaining.empty?
+            raise SalvageError, 'Annotation normalization did not preserve every page as complete page content ' +
+              '(expected ' + count.to_s + ' pages, found ' + check.page_count.to_s +
+              '; remaining annotation pages: ' + remaining.join(',') + ').'
+          end
+          temp_salvages << out
+          accepted = true
+          out
+        rescue SalvageError
+          raise
+        rescue StandardError => error
+          raise SalvageError, 'Could not preserve visible PDF annotations: ' + error.message
+        ensure
+          source.release if source
+          check.release if check
+          begin
+            File.delete(out) if out && !accepted && File.file?(out)
+            File.delete(navigation_copy) if navigation_copy_created && File.file?(navigation_copy)
+          rescue StandardError => cleanup_error
+            log_warn('Rejected annotation artifact cleanup failed: ' + cleanup_error.message)
+          end
+        end
+
+        # A full-document screen normalization must preserve every page, even
+        # when the operator will import only one. A fixed two-minute helper
+        # budget rejected valid large drawing sets. Retain a finite upper bound
+        # and the existing floor for complex single pages; no quality setting or
+        # annotation/page completeness check is relaxed.
+        def annotation_timeout_s(page_count)
+          raise ArgumentError, 'positive verified page count required' unless
+            page_count.is_a?(Integer) && page_count > 0
+          [SALVAGE_TIMEOUT_S,
+           [page_count * ANNOTATION_SECONDS_PER_PAGE, ANNOTATION_MAX_TIMEOUT_S].min].max
         end
 
         # Track all temporary salvaged files so they can be removed at
@@ -186,6 +330,7 @@ module BlueCollarSystems
         def cleanup(path)
           return nil unless path.is_a?(String)
           return nil unless temp_salvages.delete(path)
+          @memo.delete_if { |_key, value| value[:path] == path } if @memo
           File.delete(path) if File.file?(path)
           nil
         rescue StandardError
@@ -196,6 +341,7 @@ module BlueCollarSystems
         def cleanup_all
           paths = temp_salvages.dup
           temp_salvages.clear
+          @memo.delete_if { |_key, value| paths.include?(value[:path]) } if @memo
           paths.each do |p|
             File.delete(p) if File.file?(p)
           end

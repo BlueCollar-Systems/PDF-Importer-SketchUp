@@ -151,6 +151,14 @@ readonly SMOKE_TESTS=(
   test/ruby22_compat_test.rb
   test/import_health_test.rb
   test/compatibility_report_test.rb
+  test/compatibility_report_isolation_test.rb
+  test/qa_report_isolation_test.rb
+  test/finalize_diagnostics_isolation_test.rb
+  test/batch_geometry_sidecar_isolation_test.rb
+  test/pdf_navigation_link_appearance_test.rb
+  test/logger_isolation_test.rb
+  test/logger_buffer_test.rb
+  test/poppler_output_path_alphabet_test.rb
   test/corpus_harness_test.rb
   test/arc_fitter_test.rb
   test/unit_parser_test.rb
@@ -164,8 +172,18 @@ readonly SMOKE_TESTS=(
   test/command_runner_environment_test.rb
   test/item_raster_page_renderer_test.rb
   test/item_raster_display_test.rb
+  test/source_image_paint_order_test.rb
+  test/original_image_clip_test.rb
+  test/decorative_display_test.rb
+  test/text_display_container_test.rb
   test/page_paint_bounds_test.rb
+  test/stroke_clipping_test.rb
+  test/stroke_color_preservation_test.rb
+  test/pdf_color_display_test.rb
+  test/geometry_cleanup_collinear_coverage_test.rb
+  test/cleanup_selected_operation_test.rb
   test/embedded_image_affine_test.rb
+  test/embedded_image_extractor_test.rb
   test/embedded_image_placement_test.rb
   test/poppler_active_boundary_validation_test.rb
 )

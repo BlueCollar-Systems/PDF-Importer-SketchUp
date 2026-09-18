@@ -12,6 +12,9 @@
 module BlueCollarSystems
   module PDFVectorImporter
     module GeometryCleanup
+      # Callers own the model operation and must abort on this error. A failed
+      # destructive join cannot be downgraded to a warning and committed.
+      class CleanupFailure < StandardError; end
 
       # ---------------------------------------------------------------
       # Run the full cleanup pipeline on a group's entities.
@@ -43,6 +46,8 @@ module BlueCollarSystems
             nested.each do |key, value|
               stats[key] = (stats[key] || 0) + value.to_i
             end
+          rescue CleanupFailure
+            raise
           rescue StandardError => e
             Logger.warn("GeometryCleanup", "nested group cleanup failed: #{e.message}")
           end
@@ -216,8 +221,9 @@ module BlueCollarSystems
 
       # ---------------------------------------------------------------
       # Phase 4: Join collinear edges that share a vertex
-      # If two edges share a vertex and are collinear (same direction),
-      # replace them with a single edge.
+      # Only replace a true between-endpoints junction. Two collinear edges
+      # can instead overlap on the same side of their shared vertex; joining
+      # their other endpoints would erase part of the source stroke union.
       # ---------------------------------------------------------------
       def self.join_collinear_edges(entities, tolerance)
         count = 0
@@ -244,6 +250,8 @@ module BlueCollarSystems
             e1, e2 = vedges
             # Both must be simple edges (no faces)
             next unless e1.faces.empty? && e2.faces.empty?
+            style = joinable_edge_style(e1)
+            next unless style && style == joinable_edge_style(e2)
 
             # Check collinearity
             v1 = e1.line[1]  # direction vector
@@ -266,27 +274,59 @@ module BlueCollarSystems
               outer1 = (e1.start == shared_vert) ? e1.end.position : e1.start.position
               outer2 = (e2.start == shared_vert) ? e2.end.position : e2.start.position
 
+              # Directions must point away from the shared vertex on opposite
+              # rays. Parallel line vectors alone cannot distinguish a junction
+              # from a nested overlap, and edge start/end order is arbitrary.
+              ray1 = outer1 - shared_vert.position
+              ray2 = outer2 - shared_vert.position
+              next unless ray1.dot(ray2) < 0.0
               next if outer1.distance(outer2) < 0.001
-
-              # Get layer from first edge
-              layer = e1.layer
 
               # Remove old edges and create new one
               begin
                 e1.erase!
                 e2.erase!
                 new_edge = entities.add_line(outer1, outer2)
-                new_edge.layer = layer if new_edge && layer
+                unless new_edge && new_edge.respond_to?(:valid?) && new_edge.valid?
+                  raise CleanupFailure, 'native host did not create the joined source edge'
+                end
+                style.each do |property, value|
+                  new_edge.public_send("#{property}=", value)
+                end
+                unless joinable_edge_style(new_edge) == style
+                  raise CleanupFailure, 'native joined edge did not retain the source style'
+                end
                 count += 1
                 changed = true
               rescue StandardError => e
-                Logger.warn("GeometryCleanup", "merge_collinear_edges failed: #{e.message}")
+                raise CleanupFailure,
+                  "collinear source-edge cleanup failed (#{e.class}): #{e.message}"
               end
             end
           end
         end
 
         count
+      end
+
+      # Cleanup must not collapse source ownership, native curves, or distinct
+      # edge appearance. Attributed edges stay intact because a new single edge
+      # cannot honestly inherit two independent source/extension identities.
+      def self.joinable_edge_style(edge)
+        if edge.respond_to?(:attribute_dictionaries)
+          dictionaries = edge.attribute_dictionaries
+          return nil if dictionaries && !dictionaries.to_a.empty?
+        end
+        return nil if edge.respond_to?(:curve) && edge.curve
+        style = {}
+        { :layer => :layer, :material => :material, :hidden => :hidden?,
+          :soft => :soft?, :smooth => :smooth?,
+          :casts_shadows => :casts_shadows? }.each do |property, reader|
+          next unless edge.respond_to?(reader)
+          return nil unless edge.respond_to?("#{property}=")
+          style[property] = edge.public_send(reader)
+        end
+        style
       end
 
       # ---------------------------------------------------------------

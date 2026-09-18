@@ -287,7 +287,8 @@ class SketchupHostEvidenceTest < Minitest::Test
     Dir.mktmpdir('su-evidence-source') do |dir|
       plugin_dir = File.join(dir, 'bc_pdf_vector_importer')
       FileUtils.mkdir_p(plugin_dir)
-      %w[representation_fidelity.rb png_cropper.rb item_raster_display.rb page_transform.rb].each do |name|
+      %w[representation_fidelity.rb png_cropper.rb item_raster_display.rb page_transform.rb
+         decorative_display.rb embedded_image_placement.rb].each do |name|
         FileUtils.cp(
           File.join(
             REPO_ROOT, 'extracted', 'sketchup_ext',
@@ -329,7 +330,8 @@ class SketchupHostEvidenceTest < Minitest::Test
       [Zlib.crc32(type + payload)].pack('N')
   end
 
-  def write_rgba_png(path, width, height, pixels)
+  def write_rgba_png(path, width, height, pixels,
+                     compression = Zlib::DEFAULT_COMPRESSION)
     rows = ''.dup
     rows.force_encoding(Encoding::BINARY) if rows.respond_to?(:force_encoding)
     height.times do |row|
@@ -343,7 +345,7 @@ class SketchupHostEvidenceTest < Minitest::Test
     File.open(path, 'wb') do |file|
       file.write(signature)
       file.write(png_chunk('IHDR', ihdr))
-      file.write(png_chunk('IDAT', Zlib::Deflate.deflate(rows)))
+      file.write(png_chunk('IDAT', Zlib::Deflate.deflate(rows, compression)))
       file.write(png_chunk('IEND', ''.dup))
     end
   end
@@ -493,6 +495,184 @@ class SketchupHostEvidenceTest < Minitest::Test
     changed[0]['content_evidence']['host_pixel_width'] = 3
     assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.verify_host_heal_preservation!(source, changed)
+    end
+  end
+
+  def test_texture_continuity_accepts_same_decoded_pixels_with_different_png_sizes
+    Dir.mktmpdir('bc_texture_encoding_') do |directory|
+      first = File.join(directory, 'compressed.png')
+      second = File.join(directory, 'uncompressed.png')
+      pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+      write_rgba_png(first, 2, 1, pixels)
+      write_rgba_png(second, 2, 1, pixels, Zlib::NO_COMPRESSION)
+      refute_equal File.size(first), File.size(second)
+      visual_sha = Digest::SHA256.hexdigest(pixels.flatten.pack('C*'))
+      image = raster_image_with_visual_sha(visual_sha)
+      snapshots = [first, second].map do |path|
+        with_texture_writer(FakeTextureWriter.new(path)) do
+          SketchupHostEvidence.snapshot_entities([image])
+        end
+      end
+      snapshots.each do |snapshot|
+        content = snapshot.first['content_evidence']
+        assert_equal true, content['host_texture_export_verified']
+        assert_equal visual_sha, content['host_visual_pixel_sha256']
+        assert_equal [2, 1], content.values_at('host_pixel_width', 'host_pixel_height')
+        assert_operator content['host_texture_export_byte_size'], :>, 0
+      end
+      assert SketchupHostEvidence.verify_host_heal_preservation!(*snapshots)
+      assert SketchupHostEvidence.verify_reopen_continuity!(*snapshots)
+    end
+  end
+
+  def test_texture_encoding_normalization_does_not_hide_invalid_exports
+    [nil, 0, -1, 100.0, '100'].each do |invalid|
+      [:verify_host_heal_preservation!, :verify_reopen_continuity!].each do |method|
+        source = timed_texture_manifest(0, 0, 0)
+        changed = Marshal.load(Marshal.dump(source))
+        changed.first['content_evidence']['host_texture_export_byte_size'] = invalid
+        assert_raises(SketchupHostEvidence::EvidenceError) do
+          SketchupHostEvidence.send(method, source, changed)
+        end
+        source.first['content_evidence']['host_texture_export_byte_size'] = invalid
+        assert_raises(SketchupHostEvidence::EvidenceError) do
+          SketchupHostEvidence.send(method, source, changed)
+        end
+      end
+    end
+    source = timed_texture_manifest(0, 0, 0)
+    source.first['content_evidence'].delete('host_texture_export_byte_size')
+    assert_raises(SketchupHostEvidence::EvidenceError) do
+      SketchupHostEvidence.verify_host_heal_preservation!(source, source)
+    end
+  end
+
+  def test_texture_encoding_normalization_keeps_all_physical_and_source_fields
+    original = {
+      'host_visual_pixel_sha256' => 'a' * 64,
+      'host_pixel_width' => 2, 'host_pixel_height' => 1,
+      'display_width' => 8.5, 'display_height' => 11.0,
+      'raster_content_sha256' => 'b' * 64,
+      'raster_visual_pixel_sha256' => 'a' * 64,
+      'raster_content_bytes' => 100,
+      'raster_source_pdf_sha256' => 'c' * 64,
+      'source_span_id' => 'text_span:1:219', 'raster_page_number' => 1,
+      'host_texture_export_verified' => true,
+      'host_texture_proof_temp_bytes' => 0,
+      'host_texture_pixel_proof_decoder_backend' => 'native_zlib_stream'
+    }
+    changes = {
+      'host_visual_pixel_sha256' => 'd' * 64,
+      'host_pixel_width' => 3, 'host_pixel_height' => 2,
+      'display_width' => 8.6, 'display_height' => 11.1,
+      'raster_content_sha256' => 'd' * 64,
+      'raster_visual_pixel_sha256' => 'd' * 64,
+      'raster_content_bytes' => 101,
+      'raster_source_pdf_sha256' => 'd' * 64,
+      'source_span_id' => 'text_span:1:220', 'raster_page_number' => 2,
+      'host_texture_export_verified' => false,
+      'host_texture_proof_temp_bytes' => 42,
+      'host_texture_pixel_proof_decoder_backend' => 'different_decoder'
+    }
+    changes.each do |key, value|
+      [:verify_host_heal_preservation!, :verify_reopen_continuity!].each do |method|
+        source = timed_texture_manifest(0, 0, 0)
+        source.first['content_evidence'].merge!(original)
+        changed = Marshal.load(Marshal.dump(source))
+        changed.first['content_evidence']['host_texture_export_byte_size'] = 200
+        changed.first['content_evidence'][key] = value
+        assert_raises(SketchupHostEvidence::EvidenceError, key) do
+          SketchupHostEvidence.send(method, source, changed)
+        end
+      end
+    end
+  end
+
+  def test_texture_encoding_normalization_preserves_transform_bounds_and_style
+    source = timed_texture_manifest(0, 0, 0)
+    source.first['transformation'] = [1.0] * 16
+    source.first['bounds'] = { 'min' => [0, 0, 0], 'max' => [2, 1, 0] }
+    source.first['style_evidence'] = { 'hidden' => false }
+    {
+      'transformation' => [2.0] * 16,
+      'bounds' => { 'min' => [0, 0, 0], 'max' => [3, 1, 0] },
+      'style_evidence' => { 'hidden' => true }
+    }.each do |field, value|
+      [:verify_host_heal_preservation!, :verify_reopen_continuity!].each do |method|
+        changed = Marshal.load(Marshal.dump(source))
+        changed.first['content_evidence']['host_texture_export_byte_size'] = 200
+        changed.first[field] = value
+        assert_raises(SketchupHostEvidence::EvidenceError, field) do
+          SketchupHostEvidence.send(method, source, changed)
+        end
+      end
+    end
+  end
+
+  def test_preservation_diagnostics_success_has_no_io_or_result_changes
+    Dir.mktmpdir('bc_preservation_success_') do |directory|
+      result = Object.new
+      actual = SketchupHostEvidence.with_preservation_diagnostics!(
+        directory, 'host_heal', [], [], {}
+      ) { result }
+      assert_same result, actual
+      assert_equal [], Dir.entries(directory) - ['.', '..']
+    end
+  end
+
+  def test_preservation_failure_retains_raw_manifests_with_file_and_run_hashes
+    Dir.mktmpdir('bc_preservation_failure_') do |directory|
+      source = timed_texture_manifest(0, 0, 0)
+      changed = Marshal.load(Marshal.dump(source))
+      changed.first['content_evidence']['host_visual_pixel_sha256'] = 'b' * 64
+      source_json, changed_json = JSON.generate(source), JSON.generate(changed)
+      model = File.join(directory, 'fixture.skp')
+      pdf = File.join(directory, 'fixture.pdf')
+      File.binwrite(model, 'fixture model bytes')
+      File.binwrite(pdf, 'fixture source bytes')
+      context = { 'job_id' => 'job-1', 'job_sha256' => 'c' * 64,
+                  'source_tree_sha256_after_import' => 'd' * 64,
+                  'model_path' => model, 'source_pdf_path' => pdf }
+      error = assert_raises(SketchupHostEvidence::EvidenceError) do
+        SketchupHostEvidence.with_preservation_diagnostics!(
+          directory, 'host_heal', source, changed, context
+        ) { SketchupHostEvidence.verify_host_heal_preservation!(source, changed) }
+      end
+      paths = Dir.glob(File.join(directory, 'host_heal_preservation_failure_*', 'receipt.json'))
+      assert_equal 1, paths.length
+      receipt = JSON.parse(File.read(paths.first))
+      assert_equal context['job_sha256'], receipt['job_sha256']
+      assert_equal context['source_tree_sha256_after_import'], receipt['source_tree_sha256_after_import']
+      assert_equal Digest::SHA256.file(model).hexdigest, receipt['model_sha256']
+      assert_equal Digest::SHA256.file(pdf).hexdigest, receipt['source_pdf_sha256']
+      assert_equal error.message, receipt['error']
+      assert_equal error.backtrace, receipt['backtrace']
+      { 'before' => source, 'after' => changed }.each do |key, manifest|
+        record = receipt['manifests'][key]
+        assert_equal manifest, JSON.parse(File.read(record['path']))
+        assert_equal Digest::SHA256.file(record['path']).hexdigest, record['sha256']
+        assert_equal File.size(record['path']), record['byte_size']
+      end
+      assert_equal source_json, JSON.generate(source)
+      assert_equal changed_json, JSON.generate(changed)
+    end
+  end
+
+  def test_preservation_diagnostic_io_failure_keeps_original_verifier_error
+    Dir.mktmpdir('bc_preservation_io_') do |directory|
+      original = SketchupHostEvidence::EvidenceError.new('original pixel mismatch')
+      _stdout, stderr = capture_io do
+        error = assert_raises(SketchupHostEvidence::EvidenceError) do
+          SketchupHostEvidence.stub(:atomic_write_json, lambda { |*_args| raise IOError, 'disk full' }) do
+            SketchupHostEvidence.with_preservation_diagnostics!(
+              directory, 'host_heal', [], [], {}
+            ) { raise original }
+          end
+        end
+        assert_same original, error
+      end
+      assert_match(/disk full/, stderr)
+      assert_match(/original pixel mismatch/, stderr)
     end
   end
 
@@ -649,6 +829,24 @@ class SketchupHostEvidenceTest < Minitest::Test
                  'root host children must be enumerated once per snapshot'
     assert_equal 1, nested_entities.to_a_calls,
                  'nested host children must be enumerated once per snapshot'
+  end
+
+  def test_snapshot_preserves_native_matrix_precision_without_changing_geometry_digest
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    matrix = [1.0, 0, 0, 0, 0, 1.0, 0, 0,
+              0, 0, 1.0, 0, 10.216722276475694, 4.2384694417317705, 0.021, 1.0]
+    group = FakeGroup.new(29, [], :transformation => matrix)
+    expected_geometry = fidelity.physical_evidence([group])[:physical_geometry_sha256]
+
+    [false, true].each do |compact|
+      row = SketchupHostEvidence.snapshot_entities([group], :compact => compact).first
+      assert_equal matrix, row['transformation'], 'native placement evidence must not round coordinates'
+      assert_equal expected_geometry, row['geometry_evidence']['sha256']
+      rounded = fidelity.entity_transformation_payload(group)
+      refute_equal matrix, rounded
+      assert BlueCollarSystems::PDFVectorImporter::EmbeddedImagePlacement.same_matrix?(row['transformation'], matrix)
+      refute BlueCollarSystems::PDFVectorImporter::EmbeddedImagePlacement.same_matrix?(rounded, matrix)
+    end
   end
 
   def test_compact_snapshot_reuses_shared_component_definition_tree

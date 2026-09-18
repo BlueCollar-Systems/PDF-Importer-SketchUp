@@ -99,6 +99,17 @@ jobs:
           ruby test/ruby22_compat_test.rb
           ruby test/import_health_test.rb
           ruby test/compatibility_report_test.rb
+          ruby test/compatibility_report_isolation_test.rb
+          ruby test/qa_report_isolation_test.rb
+          ruby test/finalize_diagnostics_isolation_test.rb
+          ruby test/batch_geometry_sidecar_isolation_test.rb
+          ruby test/pdf_annotation_normalization_test.rb
+          ruby test/pdf_navigation_link_appearance_test.rb
+          ruby test/pdf_salvage_memo_integrity_test.rb
+          ruby test/pdf_salvage_screen_recovery_test.rb
+          ruby test/logger_isolation_test.rb
+          ruby test/logger_buffer_test.rb
+          ruby test/poppler_output_path_alphabet_test.rb
           ruby test/corpus_harness_test.rb
           ruby test/arc_fitter_test.rb
           ruby test/unit_parser_test.rb
@@ -113,8 +124,18 @@ jobs:
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_display_test.rb
+          ruby test/source_image_paint_order_test.rb
+          ruby test/original_image_clip_test.rb
+          ruby test/decorative_display_test.rb
+          ruby test/text_display_container_test.rb
           ruby test/page_paint_bounds_test.rb
+          ruby test/stroke_clipping_test.rb
+          ruby test/stroke_color_preservation_test.rb
+          ruby test/pdf_color_display_test.rb
+          ruby test/geometry_cleanup_collinear_coverage_test.rb
+          ruby test/cleanup_selected_operation_test.rb
           ruby test/embedded_image_affine_test.rb
+          ruby test/embedded_image_extractor_test.rb
           ruby test/embedded_image_placement_test.rb
           ruby test/poppler_active_boundary_validation_test.rb
           ruby test/svg_text_embed_test.rb
@@ -124,6 +145,7 @@ jobs:
           ruby test/page_representation_transform_test.rb
           ruby test/svg_3d_text_font_gap_attribution_test.rb
           ruby test/covered_clip_fill_test.rb
+          ruby test/compound_fill_closed_contour_test.rb
           ruby test/planar_white_knockout_test.rb
           ruby test/late_pdf_overlays_test.rb
           ruby test/svg_paint_binding_test.rb
@@ -178,5 +200,9 @@ jobs:
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_display_test.rb
+          ruby test/pdf_navigation_link_appearance_test.rb
+          ruby test/stroke_clipping_test.rb
+          ruby test/stroke_color_preservation_test.rb
+          ruby test/pdf_color_display_test.rb
       - name: Validate release publication state
         run: python tools/check_release_publication.py

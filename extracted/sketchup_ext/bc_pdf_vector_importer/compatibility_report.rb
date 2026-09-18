@@ -207,13 +207,9 @@ module BlueCollarSystems
         end
 
         def save_report(report)
-          dir = SafeTemp.join('bc_pdf_importer')
-          begin
-            Dir.mkdir(dir) unless File.directory?(dir)
-          rescue StandardError
-            # directory might already exist or be non-creatable
-          end
-
+          # Preserve the host details behind each returned support artifact.
+          # Another SketchUp process must not replace this report in place.
+          dir = SafeTemp.mktmpdir('bc_compat_')
           path = File.join(dir, 'compatibility_report.txt')
           File.open(path, 'w') { |f| f.write(report) }
           path

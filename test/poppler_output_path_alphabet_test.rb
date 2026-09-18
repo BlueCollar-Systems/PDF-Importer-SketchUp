@@ -130,6 +130,23 @@ class PopplerOutputPathAlphabetTest < Minitest::Test
                  'ordinary ASCII names must pass through unchanged'
   end
 
+  def test_explicit_diagnostic_parent_is_unique_and_ascii
+    Dir.mktmpdir('bc_log_parent_') do |parent|
+      first = SafeTemp.mktmpdir('log-', parent)
+      second = SafeTemp.mktmpdir('log-', parent)
+      refute_equal first, second
+      [first, second].each do |path|
+        assert_equal parent, File.dirname(path)
+        assert path.ascii_only?
+        assert File.directory?(path)
+      end
+      hostile = File.join(parent, 'профиль')
+      Dir.mkdir(hostile)
+      assert_raises(ArgumentError) { SafeTemp.mktmpdir('log-', hostile) }
+      assert_equal [], Dir.entries(hostile) - ['.', '..']
+    end
+  end
+
   def test_ascii_component_never_returns_an_empty_or_dot_only_name
     ['', '...', '寸法図'].each do |bad|
       token = SafeTemp.ascii_component(bad)

@@ -6,6 +6,7 @@ require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'logger')
 require File.join(File.dirname(__FILE__), 'svg_3d_text_solid_cache')
 require File.join(File.dirname(__FILE__), 'import_run_control')
+require File.join(File.dirname(__FILE__), 'text_display_container')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -241,31 +242,42 @@ module BlueCollarSystems
           end
 
           group = nil
+          owned_group = nil
           begin
             raise 'parent entities cannot create an owned group' unless
               entities.respond_to?(:add_group)
-            group = entities.add_group
+            claim_parent = entities
+            if opts[:decorative_text_containers] == true
+              owned_group = TextDisplayContainer.create!(entities, source_id, opts[:layer])
+              owned_groups << owned_group
+              claim_parent = owned_group.entities
+            end
+            group = claim_parent.add_group
             raise 'owned source-span group was not created' unless group
-            owned_groups << group
+            unless owned_group
+              owned_group = group
+              owned_groups << owned_group
+            end
             assign_group_identity(
               group, source_id, :text_span, opts[:layer], indices
             )
             span_result = build_span_group(
               group, entries, source_id, depth, :text_span, solid_cache
             )
+            TextDisplayContainer.verify_claim!(owned_group, group) if owned_group != group
             span_result[:source_ink_coverage] = ink_evidence if ink_evidence
             result[:span_results] << span_result
           rescue ImportRunControl::ImportCancelled
-            cleanup_owned_group(entities, group)
-            owned_groups.delete(group)
+            cleanup_owned_group(entities, owned_group)
+            owned_groups.delete(owned_group)
             raise
           rescue StandardError => e
             Logger.warn(
               'Svg3DTextRenderer',
               "#{source_id}: #{e.class}: #{e.message}"
             )
-            cleanup = cleanup_owned_group(entities, group)
-            owned_groups.delete(group)
+            cleanup = cleanup_owned_group(entities, owned_group)
+            owned_groups.delete(owned_group)
             if e.is_a?(UnrepresentableSourceContour)
               result[:transition_proofs] << unrepresentable_as_3d_text_proof(
                 source_id, item, depth, opts[:source_context], e.message
@@ -1527,24 +1539,35 @@ module BlueCollarSystems
         page_number = opts.key?(:page_number) ? opts[:page_number].to_i : 0
         source_id = "svg_glyph_placements:page:#{page_number}"
         group = nil
+        owned_group = nil
         begin
           raise 'parent entities cannot create an owned group' unless
             entities.respond_to?(:add_group)
-          group = entities.add_group
+          claim_parent = entities
+          if opts[:decorative_text_containers] == true
+            owned_group = TextDisplayContainer.create!(entities, source_id, opts[:layer], :svg_glyph_placement)
+            owned_groups << owned_group
+            claim_parent = owned_group.entities
+          end
+          group = claim_parent.add_group
           raise 'owned source-glyph group was not created' unless group
-          owned_groups << group
+          unless owned_group
+            owned_group = group
+            owned_groups << owned_group
+          end
           assign_group_identity(
             group, source_id, :svg_glyph_placement, opts[:layer], indices
           )
           row = build_span_group(
             group, entries, source_id, depth, :svg_glyph_placement, solid_cache
           )
+          TextDisplayContainer.verify_claim!(owned_group, group) if owned_group != group
           row[:semantic_identity_available] = false
           row[:physical_source_identity_verified] = true
           result[:unmatched_source_results] << row
         rescue StandardError => e
-          cleanup = cleanup_owned_group(entities, group)
-          owned_groups.delete(group)
+          cleanup = cleanup_owned_group(entities, owned_group)
+          owned_groups.delete(owned_group)
           result[:failures] << hard_failure(
             nil, classify_host_failure(e), e.message,
             cleanup[:created_entity_ids], cleanup[:cleaned_entity_ids],

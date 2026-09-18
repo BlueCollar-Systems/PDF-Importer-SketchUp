@@ -161,11 +161,17 @@ module BlueCollarSystems
           bounds_top({ :min => [bounds.min.x.to_f, bounds.min.y.to_f, bounds.min.z.to_f],
                        :max => [bounds.max.x.to_f, bounds.max.y.to_f, bounds.max.z.to_f] }, root[:parent].to_a)
         end.push(0.0).max
-        depth = top + GAP
+        source_image_top = page_group.entities.to_a.select do |entity|
+          entity.typename.to_s == 'Image' && entity.get_attribute(DICTIONARY, 'decorative_source_image', false) == true
+        end.map do |entity|
+          bounds_top(RepresentationFidelity.entity_bounds_payload(entity), IDENTITY)
+        end.push(0.0).max
+        depth = [top, source_image_top].max + GAP
         proof = opts.reject { |key, _value| key == :final_page_crops }.merge(
           :schema => 'bcs.item_raster_display/1.0', :policy => POLICY,
           :page_group_id => RepresentationFidelity.stable_entity_id(page_group),
           :highest_nonimage_text_z => top, :display_gap_inches => GAP,
+          :highest_source_image_z => source_image_top,
           :expected_display_z => depth, :placements => [])
         if Array(value(stats, :item_raster_display_placements)).any? { |p| value(p, :page_group_id) == proof[:page_group_id] }
           fail_contract('display placement has already been applied to this page')
@@ -246,7 +252,14 @@ module BlueCollarSystems
           fail_contract('physical page group is absent or duplicated') unless pages.length == 1
           roots = manifest_roots(value(pages.first, :children))
           top = roots.reject { |root| value(root[:row], :typename) == 'Image' }.map { |root| bounds_top(value(root[:row], :bounds), root[:parent]) }.push(0.0).max
-          depth = top + GAP
+          source_images = Array(value(pages.first, :children)).select do |row|
+            value(row, :typename) == 'Image' && value(row, :decorative_source_image) == true
+          end
+          source_image_top = source_images.map { |row| bounds_top(value(row, :bounds), IDENTITY) }.push(0.0).max
+          if !source_images.empty? || !value(proof, :highest_source_image_z).nil?
+            close_points!([[0,0,value(proof, :highest_source_image_z)]], [[0,0,source_image_top]], 'physical embedded-image top policy')
+          end
+          depth = [top, source_image_top].max + GAP
           close_points!([[0, 0, value(proof, :highest_nonimage_text_z)], [0, 0, value(proof, :expected_display_z)]], [[0, 0, top], [0, 0, depth]], 'physical text-top policy')
           placements = value(proof, :placements)
           fail_contract('display placements are missing') unless placements.is_a?(Array) && !placements.empty?

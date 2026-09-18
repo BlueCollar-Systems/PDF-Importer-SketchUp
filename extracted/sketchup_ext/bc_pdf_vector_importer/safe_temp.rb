@@ -57,9 +57,13 @@ module BlueCollarSystems
           @root = nil
         end
 
-        # Dir.mktmpdir with the same prefix semantics, under the safe root.
-        def mktmpdir(prefix)
-          Dir.mktmpdir(prefix, root)
+        # An explicit diagnostic parent must satisfy the same alphabet rule.
+        # The logger uses this to retain writable LOCALAPPDATA/home fallbacks.
+        def mktmpdir(prefix, parent = nil)
+          if parent && !parent.ascii_only?
+            raise ArgumentError, 'Temporary directory parent must be ASCII'
+          end
+          Dir.mktmpdir(prefix, parent || root)
         end
 
         def join(*parts)

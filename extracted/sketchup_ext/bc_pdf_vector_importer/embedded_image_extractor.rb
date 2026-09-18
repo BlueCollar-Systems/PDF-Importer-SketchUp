@@ -10,6 +10,7 @@
 require 'fileutils'
 require 'json'
 require 'zlib'
+require 'digest'
 require_relative 'content_stream_parser'
 require_relative 'png_cropper'
 
@@ -19,7 +20,10 @@ module BlueCollarSystems
       # Operators the image walk needs from a content stream (BI only to
       # count inline images).
       PLACEMENT_OPERATORS = {
-        'q' => true, 'Q' => true, 'cm' => true, 'Do' => true, 'BI' => true
+        'q' => true, 'Q' => true, 'cm' => true, 'Do' => true, 'BI' => true,
+        'W' => true, 'W*' => true, 'Tr' => true, 'ET' => true,
+        'n' => true, 'S' => true, 's' => true, 'f' => true, 'F' => true,
+        'f*' => true, 'B' => true, 'B*' => true, 'b' => true, 'b*' => true
       }.freeze
       MAX_FORM_DEPTH = 12
       MAX_IMAGE_PIXELS = 25_000_000
@@ -44,7 +48,8 @@ module BlueCollarSystems
         :encoded,
         :soft_mask_obj_num,
         :fully_transparent,
-        :placement_error
+        :placement_error,
+        :original_clip_proof
       )
 
       attr_reader :assets, :inline_image_count
@@ -69,7 +74,7 @@ module BlueCollarSystems
         return [] unless raw
 
         resources = page_resources(page_num)
-        streams = raw[:content_streams] || []
+        streams = raw[:source_content_streams] || raw[:content_streams] || []
         walk_streams(
           page_num,
           streams,
@@ -78,7 +83,8 @@ module BlueCollarSystems
           output_dir,
           write_files,
           {},
-          0
+          0,
+          original_page_clip_state(page_num, raw, streams)
         )
         @assets
       end
@@ -128,16 +134,111 @@ module BlueCollarSystems
         find_inherited(parent_dict, key, depth + 1)
       end
 
-      def walk_streams(page_num, streams, resources, initial_ctm, output_dir, write_files, seen_forms, depth)
+      # This independent original-PDF proof never assumes Cairo's generated
+      # integer image clip is the PDF's actual clipping path. Unknown clipping
+      # stays unproved; it does not affect ordinary image extraction.
+      def original_source_numbers(value, count)
+        resolved = @pdf.resolve_object(value)
+        values = resolved.is_a?(Array) ? resolved : @pdf.send(:parse_array_string, resolved.to_s)
+        return nil unless values.is_a?(Array) && values.length == count
+        numbers = values.map { |v| Float(v) }
+        numbers.all? { |v| v.finite? } ? numbers : nil
+      rescue StandardError
+        nil
+      end
+
+      def original_box_polygon(value, matrix)
+        box = original_source_numbers(value, 4)
+        return nil unless box && box[2] > box[0] && box[3] > box[1]
+        [[box[0],box[1]],[box[2],box[1]],[box[2],box[3]],[box[0],box[3]]].map { |p| transform_point(p,matrix) }
+      end
+
+      def original_page_clip_state(page_num, raw, streams)
+        state = { :clips=>[], :unknown=>[], :source_streams=>[], :form_chain=>[] }
+        data = @pdf.instance_variable_get(:@data)
+        if data.is_a?(String) && data.start_with?('%PDF-')
+          @parsed_pdf_sha256 ||= Digest::SHA256.hexdigest(data)
+          state[:parsed_pdf_sha256] = @parsed_pdf_sha256
+        else
+          state[:unknown] << 'parsed PDF bytes unavailable'
+        end
+        pages = @pdf.respond_to?(:pages) ? @pdf.pages : @pdf.instance_variable_get(:@pages)
+        page = pages && to_dict(@pdf.resolve_object(pages[page_num - 1]))
+        media = page && find_inherited(page, '/MediaBox')
+        crop = page && find_inherited(page, '/CropBox')
+        [[:media_box, media], [:crop_box, crop || media]].each do |kind,value|
+          polygon = original_box_polygon(value, identity_matrix)
+          if polygon
+            state[:clips] << { :kind=>kind.to_s, :corners_pts=>polygon }
+          else
+            state[:unknown] << "missing or invalid original #{kind}"
+          end
+        end
+        state[:unknown] << 'unexpanded original page streams unavailable' unless raw.key?(:source_content_streams)
+        Array(streams).each_with_index do |stream,index|
+          if stream.is_a?(String)
+            state[:source_streams] << { :kind=>'page', :index=>index, :sha256=>Digest::SHA256.hexdigest(stream) }
+          else
+            state[:unknown] << 'original page stream unavailable'
+          end
+        end
+        state
+      rescue StandardError => error
+        { :clips=>[], :unknown=>['original page clip inventory failed: ' + error.message], :source_streams=>[], :form_chain=>[] }
+      end
+
+      def original_quad_covered?(polygon, quad)
+        return false unless polygon.length == 4 && quad.length == 4 &&
+          (polygon + quad).all? { |p| p.is_a?(Array) && p.length == 2 && p.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } }
+        edges = polygon.each_with_index.map { |a,i| b=polygon[(i+1)%4]; [b[0]-a[0],b[1]-a[1]] }
+        turns = edges.each_with_index.map { |a,i| b=edges[(i+1)%4]; a[0]*b[1]-a[1]*b[0] }
+        return false unless turns.all? { |v| v > 0 } || turns.all? { |v| v < 0 }
+        # Only arithmetic roundoff is allowed. This is not the Cairo identity
+        # grid and cannot enlarge a genuinely narrower original PDF clip.
+        scale = (polygon + quad).flatten.map { |v| v.abs }.max
+        points = polygon + quad
+        span = [points.map { |p| p[0] }.max-points.map { |p| p[0] }.min,
+                points.map { |p| p[1] }.max-points.map { |p| p[1] }.min].max
+        epsilon = 64.0 * Float::EPSILON * [scale * span, 1.0].max
+        quad.all? do |point|
+          cross = polygon.each_with_index.map do |a,index|
+            b = polygon[(index+1)%4]
+            (b[0]-a[0])*(point[1]-a[1])-(b[1]-a[1])*(point[0]-a[0])
+          end
+          cross.all? { |v| v >= -epsilon } || cross.all? { |v| v <= epsilon }
+        end
+      end
+
+      def original_image_clip_proof(page_num, obj_num, ctm, corners, state)
+        reasons = state[:unknown].dup
+        reasons << 'image affine is degenerate or nonfinite' unless ctm.length == 6 &&
+          ctm.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } && (ctm[0]*ctm[3]-ctm[1]*ctm[2]) != 0
+        state[:clips].each do |clip|
+          reasons << "original #{clip[:kind]} does not contain full image" unless original_quad_covered?(clip[:corners_pts],corners)
+        end
+        { :schema=>'bcs.original_image_clip/1', :status=>reasons.empty? ? 'FULL_FOOTPRINT' : 'UNPROVEN',
+          :parsed_pdf_sha256=>state[:parsed_pdf_sha256], :page_number=>page_num,
+          :image_object_number=>obj_num, :placement_index=>@sequence,
+          :ctm=>ctm.dup, :corners_pts=>corners.map { |p| p.dup },
+          :clip_polygons_pts=>state[:clips], :source_streams=>state[:source_streams],
+          :form_chain=>state[:form_chain], :unproven_reasons=>reasons }
+      end
+
+      def walk_streams(page_num, streams, resources, initial_ctm, output_dir, write_files, seen_forms, depth, initial_clip_state)
         return if depth > MAX_FORM_DEPTH
 
         # Streaming q/Q/cm/Do walk (ContentStreamParser.scan_operators): no
         # token array and no token cap, so an image placed late in a dense
         # sheet is found just like one at the top.
+        # /Contents arrays are one logical graphics program. q/cm in one
+        # stream can affect an image in the next; Form recursion starts its
+        # own walk and therefore still has an isolated graphics state.
+        ctm_stack = [initial_ctm.dup]
+        current_ctm = initial_ctm.dup
+        clip_stack, clip_state = [], initial_clip_state
+        pending_path_clip, pending_text_clip = false, false
         Array(streams).each do |stream|
           next unless stream
-          ctm_stack = [initial_ctm.dup]
-          current_ctm = initial_ctm.dup
 
           ContentStreamParser.scan_operators(stream, PLACEMENT_OPERATORS) do |op, operands|
             case op
@@ -145,18 +246,47 @@ module BlueCollarSystems
               @inline_image_count += 1
             when 'q'
               ctm_stack << current_ctm.dup
+              clip_stack << clip_state
             when 'Q'
               current_ctm = ctm_stack.pop || initial_ctm.dup
+              clip_state = clip_stack.pop || initial_clip_state.merge(:unknown=>initial_clip_state[:unknown] + ['unbalanced original Q'])
             when 'cm'
               nums = operands.select { |value| value.is_a?(Float) }
+              unless nums.length == 6 && nums.all? { |value| value.finite? }
+                clip_state = clip_state.merge(:unknown=>clip_state[:unknown] + ['invalid original image CTM'])
+              end
               if nums.length >= 6
                 current_ctm = multiply_matrices(
                   [nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]],
                   current_ctm
                 )
               end
+            when 'W', 'W*'
+              # The current path is not part of q/Q graphics state. W takes
+              # effect only at the following path-ending operator.
+              pending_path_clip = true
+            when 'n', 'S', 's', 'f', 'F', 'f*', 'B', 'B*', 'b', 'b*'
+              if pending_path_clip
+                clip_state = clip_state.merge(:unknown=>clip_state[:unknown] + ['active original path clipping is unproved'])
+                pending_path_clip = false
+              end
+            when 'Tr'
+              mode = operands.last
+              unless mode.is_a?(Float) && mode.finite? && mode == mode.to_i && mode >= 0 && mode <= 3
+                clip_state = clip_state.merge(:unknown=>clip_state[:unknown] + ['original text clipping is unproved'])
+                pending_text_clip = true
+              end
+            when 'ET'
+              if pending_text_clip
+                clip_state = clip_state.merge(:unknown=>clip_state[:unknown] + ['original text clipping is unproved'])
+                pending_text_clip = false
+              end
             when 'Do'
               name_value = operands.reverse.find { |value| value.is_a?(String) }
+              occurrence_clip = clip_state
+              if pending_path_clip || pending_text_clip
+                occurrence_clip = clip_state.merge(:unknown=>clip_state[:unknown] + ['unfinished original clipping program'])
+              end
               handle_xobject_do(
                 page_num,
                 name_value,
@@ -165,14 +295,15 @@ module BlueCollarSystems
                 output_dir,
                 write_files,
                 seen_forms,
-                depth
+                depth,
+                occurrence_clip
               )
             end
           end
         end
       end
 
-      def handle_xobject_do(page_num, raw_name, resources, current_ctm, output_dir, write_files, seen_forms, depth)
+      def handle_xobject_do(page_num, raw_name, resources, current_ctm, output_dir, write_files, seen_forms, depth, clip_state)
         clean_name = raw_name.to_s.sub(/\A\//, '')
         return if clean_name.empty?
 
@@ -186,7 +317,7 @@ module BlueCollarSystems
 
         subtype = dict['/Subtype'].to_s
         if subtype == '/Image'
-          record_image(page_num, clean_name, obj_num, dict, current_ctm, output_dir, write_files)
+          record_image(page_num, clean_name, obj_num, dict, current_ctm, output_dir, write_files, clip_state)
         elsif subtype == '/Form'
           return unless obj_num
           key = "#{obj_num}:#{depth}"
@@ -200,6 +331,17 @@ module BlueCollarSystems
           form_matrix = parse_array_nums(dict['/Matrix'])
           form_matrix = identity_matrix unless form_matrix && form_matrix.length >= 6
           combined = multiply_matrices(form_matrix, current_ctm)
+          strict_matrix = dict.key?('/Matrix') ? original_source_numbers(dict['/Matrix'],6) : identity_matrix
+          polygon = original_box_polygon(dict['/BBox'], combined)
+          reasons = clip_state[:unknown].dup
+          reasons << 'missing or invalid original Form BBox' unless polygon
+          reasons << 'invalid original Form matrix' unless strict_matrix && strict_matrix == form_matrix
+          form_clip = polygon ? [{ :kind=>'form_bbox', :obj_num=>obj_num, :corners_pts=>polygon }] : []
+          child_clip_state = clip_state.merge(
+            :clips=>clip_state[:clips] + form_clip, :unknown=>reasons,
+            :source_streams=>clip_state[:source_streams] + [{ :kind=>'form', :obj_num=>obj_num, :sha256=>Digest::SHA256.hexdigest(form_stream) }],
+            :form_chain=>clip_state[:form_chain] + [{ :obj_num=>obj_num, :bbox=>original_source_numbers(dict['/BBox'],4),
+              :matrix=>strict_matrix, :parent_ctm=>current_ctm.dup, :combined_ctm=>combined.dup }])
           walk_streams(
             page_num,
             [form_stream],
@@ -208,7 +350,8 @@ module BlueCollarSystems
             output_dir,
             write_files,
             seen_forms,
-            depth + 1
+            depth + 1,
+            child_clip_state
           )
           seen_forms.delete(key)
         end
@@ -216,7 +359,7 @@ module BlueCollarSystems
         Logger.warn('EmbeddedImages', "XObject #{raw_name} scan failed: #{e.message}")
       end
 
-      def record_image(page_num, name, obj_num, dict, ctm, output_dir, write_files)
+      def record_image(page_num, name, obj_num, dict, ctm, output_dir, write_files, clip_state)
         return unless obj_num
 
         @sequence += 1
@@ -247,7 +390,8 @@ module BlueCollarSystems
           data_info[:encoded],
           ref_obj_num(dict['/SMask']),
           false,
-          nil
+          nil,
+          original_image_clip_proof(page_num, obj_num, ctm, corners, clip_state)
         )
 
         if write_files && output_dir
@@ -437,7 +581,8 @@ module BlueCollarSystems
           encoded: asset.encoded,
           soft_mask_object: asset.soft_mask_obj_num,
           fully_transparent: asset.fully_transparent,
-          placement_error: asset.placement_error
+          placement_error: asset.placement_error,
+          original_clip_proof: asset.original_clip_proof
         }
       end
 

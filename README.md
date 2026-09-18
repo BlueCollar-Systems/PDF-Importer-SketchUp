@@ -3,13 +3,24 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.150-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.151-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.150)
+### Recent fixes (v3.7.151)
+
+- Embedded image callouts cover earlier drawing marks while later source text remains visible. Display order is checked against the renderer's actual source references and original PDF clipping instructions; source image pixels, XY placement and requested text representations remain unchanged. Unproved image order is reported explicitly.
+- Text that needs a display offset retains its original geometry, source identity and local transform inside a dedicated parent created before the text. Saved/reopened verification checks that parent's exact Z offset, ownership, visibility and neutral material, alongside the original text certificates.
+
+- Visible PDF annotations are preserved as page vectors and text before import, including markup lines outside the ordinary page content stream. Screen-visible notes remain visible and hidden notes stay hidden; the source PDF is unchanged. Missing helpers or incomplete normalization stop the import with an error.
+- Encrypted PDFs that open without a password and repaired PDFs use the same screen-visible annotation handling. Temporary normalized files are checked against both source and output bytes; repeating an import after cleanup or repairing a missing helper works within the same session.
+- Simultaneous imports keep their reports, parts data and source provenance in separate run folders, preventing one importer from replacing another importer's verification evidence.
+- Each import retains its own diagnostic log, and saved compatibility reports remain available for later review.
+- Default report names handle long and non-ASCII drawing names. Explicit CLI report destinations retain their chosen paths.
+
+### Earlier fixes (v3.7.150)
 
 - A temporary failed font inventory no longer disables font preparation for the rest of a session.
 - A Windows PDF renderer's Symbol startup warning is treated as unrelated only when a complete successful source-font inventory proves that the document has no Symbol font. Actual missing fonts, incomplete inventories and other renderer errors still require repair; text placement and geometry verification remain mandatory.
@@ -466,3 +477,24 @@ These AI tools were used as collaborative development partners throughout the pr
 ## Author
 
 **BlueCollar-Systems** -- BUILT. NOT BOUGHT.
+
+### Source stroke clipping
+
+Crossing vector strokes are clipped to verified rectangular PDF clips and the
+visible page box without moving the remaining source vertices or adding boundary
+connectors. Trimmed dashed strokes keep the source phase across the original
+subpath and measure dash lengths before its transform. Contained paths retain the
+existing native arc/style behavior. Fill contours and compound holes are separate.
+
+SketchUp centerline edges do not model physical PDF stroke width, joins, or caps.
+A nonrectangular/text clip or a cap-only painted intersection retains the existing
+source centerline and records an unresolved warning, rather than silently deleting
+possible paint. Per-page counts and reasons are retained under
+`extra.geometry_staging[].stroke_clipping`; those warnings are not paint-fidelity
+acceptance. Text mode and text representation are unchanged.
+
+Large annotated PDF sets use a finite preparation budget based on verified page
+count (at least two minutes, five seconds per page, up to thirty minutes), so a
+valid large set is not rejected solely by the former fixed two-minute timeout.
+Source identity, complete page count, and annotation-flattening checks still apply;
+timeouts and partial output remain explicit failures with diagnostic causes.

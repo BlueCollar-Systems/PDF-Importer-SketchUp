@@ -188,6 +188,10 @@ jobs:
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_display_test.rb
+          ruby test/source_image_paint_order_test.rb
+          ruby test/original_image_clip_test.rb
+          ruby test/decorative_display_test.rb
+          ruby test/text_display_container_test.rb
       - name: Evaluate release publication gate
         id: publication
         run: python tools/check_release_publication.py
@@ -281,8 +285,15 @@ jobs:
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_display_test.rb
+          ruby test/source_image_paint_order_test.rb
+          ruby test/original_image_clip_test.rb
+          ruby test/decorative_display_test.rb
+          ruby test/text_display_container_test.rb
           ruby test/page_paint_bounds_test.rb
+          ruby test/stroke_color_preservation_test.rb
+          ruby test/pdf_color_display_test.rb
           ruby test/embedded_image_affine_test.rb
+          ruby test/embedded_image_extractor_test.rb
           ruby test/embedded_image_placement_test.rb
           ruby test/poppler_active_boundary_validation_test.rb
           ruby test/qa_report_test.rb
