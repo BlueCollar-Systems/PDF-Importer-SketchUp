@@ -747,6 +747,48 @@ module SketchupHostEvidence
     verify_persistent_rows!(saved, reopened)
   end
 
+  # Preserve raw physical evidence only on failure. A later retry may not
+  # reproduce a host normalization, so retain both snapshots before closing
+  # SketchUp. Diagnostic I/O must never replace the original verifier error.
+  def self.with_preservation_diagnostics!(output_dir, phase, before, after,
+                                          context = {})
+    yield
+  rescue StandardError => original_error
+    begin
+      directory = Dir.mktmpdir(
+        "#{phase.to_s.gsub(/[^a-zA-Z0-9_-]/, '_')}_preservation_failure_",
+        File.expand_path(output_dir)
+      )
+      files = {}
+      { 'before' => before, 'after' => after }.each do |name, manifest|
+        path = atomic_write_json(File.join(directory, "#{name}.json"), manifest)
+        files[name] = {
+          'path' => path, 'sha256' => Digest::SHA256.file(path).hexdigest,
+          'byte_size' => File.size(path)
+        }
+      end
+      payload = context.merge(
+        'schema' => 'bcs.host_preservation_failure/1.0',
+        'phase' => phase.to_s,
+        'error_class' => original_error.class.to_s,
+        'error' => original_error.message.to_s,
+        'backtrace' => Array(original_error.backtrace),
+        'manifests' => files
+      )
+      ['model_path', 'source_pdf_path'].each do |key|
+        path = hash_value(context, key)
+        next unless path && File.file?(path)
+        payload[key.sub(/_path\z/, '_sha256')] = Digest::SHA256.file(path).hexdigest
+      end
+      atomic_write_json(File.join(directory, 'receipt.json'), payload)
+    rescue StandardError => diagnostic_error
+      warn "Host preservation diagnostics could not be retained: " \
+           "#{diagnostic_error.class}: #{diagnostic_error.message}; " \
+           "original failure: #{original_error.class}: #{original_error.message}"
+    end
+    raise
+  end
+
   def self.verify_lightweight_reopen_continuity!(saved_manifest,
                                                   reopened_manifest)
     normalized = normalize_texture_proof_for_lightweight(reopened_manifest)
@@ -1924,9 +1966,20 @@ module SketchupHostEvidence
     end
     return value unless value.is_a?(Hash)
 
+    physical_texture = hash_value(value, :host_texture_export_verified) == true
+    if physical_texture
+      exact_positive_integer!(
+        hash_value(value, :host_texture_export_byte_size),
+        'host texture export byte size'
+      )
+    end
     stable = {}
     value.each do |key, entry|
       next if VOLATILE_CONTENT_EVIDENCE_KEYS.include?(key.to_s)
+      # TextureWriter may encode identical pixels with a different PNG size.
+      # Successful export/decoding, pixel digest, dimensions, source claims,
+      # original crop bytes and placement remain mandatory comparison keys.
+      next if physical_texture && key.to_s == 'host_texture_export_byte_size'
       stable[key] = stable_content_evidence(entry)
     end
     stable

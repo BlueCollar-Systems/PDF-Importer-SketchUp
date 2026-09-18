@@ -66,6 +66,17 @@ class SketchupBatchHostContractTest < Minitest::Test
     refute_match(/ARGV\[1\]/, source)
   end
 
+  def test_preservation_failures_retain_bound_before_and_after_snapshots
+    assert_equal 2, source.scan('SketchupHostEvidence.with_preservation_diagnostics!').length
+    assert_includes source, "job[:output_dir], 'host_heal', source_delivery_manifest"
+    assert_includes source, 'stabilized_owned_manifest, preservation_context'
+    assert_includes source, "job[:output_dir], 'reopen', after_manifest, reopened_manifest"
+    assert_includes source, "'source_tree_sha256_after_import' => source_tree_sha256_after_import"
+    assert_includes source, "'import_session_id' => import_session_id"
+    assert_includes source, "'model_path' => job[:model_path]"
+    assert_includes source, "'source_pdf_path' => job[:pdf_path]"
+  end
+
   def test_callable_orchestration_writes_bound_started_then_ok_and_quits
     load_runner_library
     with_job do |job_path, result_path, environment|
