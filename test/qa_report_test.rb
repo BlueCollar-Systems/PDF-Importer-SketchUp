@@ -7,6 +7,23 @@ require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/qa_report'
 QAReportTextItem = Struct.new(:text, :page_number, :bbox_x0, :bbox_y0, :id)
 
 class QAReportTest < Minitest::Test
+  def test_ordinary_report_retains_source_qualified_display_policy_and_unqualified_scope
+    qualification = [{ page: 1, source_svg_sha256: 'a' * 64,
+      qualified_count: 1, unqualified: [{ image_id: 'persistent_id:9', reason: 'unproven source mask' }] }]
+    ledger = [{ schema: 'bcs.decorative_display/1.0',
+      policy: 'source_image_then_later_text_z_only/1.0', page: 1,
+      source_pdf_sha256: 'b' * 64, image_display_z: 0.02,
+      placements: [{ image_id: 'persistent_id:8', later_text: [{ root_id: 'persistent_id:7', wrapper_id: 'persistent_id:6' }] }] }]
+    [{ embedded_image_paint_order: qualification, decorative_display_placements: ledger },
+     { 'embedded_image_paint_order' => qualification, 'decorative_display_placements' => ledger }].each do |stats|
+      report = BlueCollarSystems::PDFVectorImporter::QAReport.build_from_stats(
+        'fictional-source.pdf', { import_mode: 'auto' }, stats)
+      persisted = JSON.parse(JSON.generate(report))['extra']
+      assert_equal JSON.parse(JSON.generate(qualification)), persisted['embedded_image_paint_order']
+      assert_equal JSON.parse(JSON.generate(ledger)), persisted['decorative_display_placements']
+    end
+  end
+
   def test_report_preserves_immutable_normalized_and_salvage_lineage
     lineage = {
       original_pdf_path: 'C:/owner/original.pdf',

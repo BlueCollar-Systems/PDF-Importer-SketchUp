@@ -124,6 +124,10 @@ jobs:
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_display_test.rb
+          ruby test/source_image_paint_order_test.rb
+          ruby test/original_image_clip_test.rb
+          ruby test/decorative_display_test.rb
+          ruby test/text_display_container_test.rb
           ruby test/page_paint_bounds_test.rb
           ruby test/stroke_clipping_test.rb
           ruby test/stroke_color_preservation_test.rb

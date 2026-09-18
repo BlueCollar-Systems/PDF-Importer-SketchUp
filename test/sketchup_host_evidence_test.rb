@@ -287,7 +287,8 @@ class SketchupHostEvidenceTest < Minitest::Test
     Dir.mktmpdir('su-evidence-source') do |dir|
       plugin_dir = File.join(dir, 'bc_pdf_vector_importer')
       FileUtils.mkdir_p(plugin_dir)
-      %w[representation_fidelity.rb png_cropper.rb item_raster_display.rb page_transform.rb].each do |name|
+      %w[representation_fidelity.rb png_cropper.rb item_raster_display.rb page_transform.rb
+         decorative_display.rb embedded_image_placement.rb].each do |name|
         FileUtils.cp(
           File.join(
             REPO_ROOT, 'extracted', 'sketchup_ext',

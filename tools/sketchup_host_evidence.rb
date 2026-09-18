@@ -27,6 +27,10 @@ require File.join(
   SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
   'bc_pdf_vector_importer', 'item_raster_display'
 )
+require File.join(
+  SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
+  'bc_pdf_vector_importer', 'decorative_display'
+)
 
 module SketchupHostEvidence
   class EvidenceError < StandardError; end
@@ -1064,6 +1068,7 @@ module SketchupHostEvidence
         stats, manifest, requested_mode, selected_pages
       )
       verify_item_raster_display!(stats, manifest, require_item_raster_display)
+      verify_decorative_display!(stats, manifest)
       verify_page_representation_fallbacks!(
         stats, requested_mode, selected_pages
       )
@@ -1080,6 +1085,19 @@ module SketchupHostEvidence
     return true unless hash_key?(stats, :item_raster_display_placements) ||
       (required && !helper.item_records(stats).empty?)
     helper.verify_manifest!(stats, manifest)
+  rescue BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError => error
+    raise EvidenceError, error.message
+  end
+
+  def self.verify_decorative_display!(stats, manifest)
+    observed = false
+    BlueCollarSystems::PDFVectorImporter::ItemRasterDisplay.walk_rows(manifest) do |row|
+      observed ||= hash_value(row, :decorative_source_image) == true ||
+        hash_value(row, :decorative_text_wrapper) == true
+    end
+    qualified = Array(hash_value(stats,:embedded_image_paint_order)).any? { |row| hash_value(row,:qualified_count).to_i > 0 }
+    return true unless observed || qualified || hash_key?(stats, :decorative_display_placements)
+    BlueCollarSystems::PDFVectorImporter::DecorativeDisplay.verify_manifest!(stats, manifest)
   rescue BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError => error
     raise EvidenceError, error.message
   end
@@ -1305,7 +1323,11 @@ module SketchupHostEvidence
     physical_tree = fidelity.physical_entity_tree(
       entity, child_trees, shared_payloads
     )
-    include_row = !compact || top_level || source_claim_root?(representation) ||
+    decorative_image = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'decorative_source_image', false) == true
+    decorative_wrapper = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'decorative_text_wrapper', false) == true
+    include_row = !compact || top_level || decorative_image || decorative_wrapper || source_claim_root?(representation) ||
       !child_rows.empty?
     return [nil, physical_tree] unless include_row
 
@@ -1329,6 +1351,11 @@ module SketchupHostEvidence
       'style_evidence' => physical['style_evidence'],
       'children' => child_rows
     }
+    row['decorative_source_image'] = true if decorative_image
+    if decorative_wrapper
+      row['decorative_text_wrapper'] = true
+      row['native_child_count'] = child_results.length
+    end
     [row, physical_tree]
   end
   private_class_method :snapshot_entity_with_physical_tree
@@ -1708,7 +1735,9 @@ module SketchupHostEvidence
       'source_span_id' => attributes['source_span_id']
     }
     claimed_visual_sha = attributes['raster_visual_pixel_sha256'].to_s.strip
-    unless claimed_visual_sha.empty?
+    decorative_image = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'decorative_source_image', false) == true
+    unless claimed_visual_sha.empty? && !decorative_image
       if texture_proof
         evidence.merge!(
           texture_pixel_evidence(entity, performance_telemetry)
@@ -1788,7 +1817,7 @@ module SketchupHostEvidence
     claim_root = entity.get_attribute(dictionary, 'source_claim_root', nil)
     values['source_claim_root'] = claim_root unless claim_root.nil?
     [
-      'source_evidence_sha256', 'source_text_sha256',
+      'source_evidence_sha256', 'source_text_sha256', 'source_placement_indices',
       'physical_geometry_sha256', 'physical_style_sha256',
       'source_ink_material_owned', 'source_ink_material_name',
       'source_ink_rgb', 'source_ink_alpha',

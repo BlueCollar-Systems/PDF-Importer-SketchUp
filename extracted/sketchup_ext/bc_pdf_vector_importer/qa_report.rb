@@ -610,6 +610,12 @@ module BlueCollarSystems
           item_raster_display_placements: normalize_json(
             stats[:item_raster_display_placements] || stats['item_raster_display_placements'] || []
           ),
+          embedded_image_paint_order: normalize_json(
+            stats[:embedded_image_paint_order] || stats['embedded_image_paint_order'] || []
+          ),
+          decorative_display_placements: normalize_json(
+            stats[:decorative_display_placements] || stats['decorative_display_placements'] || []
+          ),
           pipeline_performance: normalize_json(
             stats[:pipeline_performance] || stats['pipeline_performance'] || {}
           ),

@@ -11,6 +11,9 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 ### Recent fixes (v3.7.151)
 
+- Embedded image callouts cover earlier drawing marks while later source text remains visible. Display order is checked against the renderer's actual source references and original PDF clipping instructions; source image pixels, XY placement and requested text representations remain unchanged. Unproved image order is reported explicitly.
+- Text that needs a display offset retains its original geometry, source identity and local transform inside a dedicated parent created before the text. Saved/reopened verification checks that parent's exact Z offset, ownership, visibility and neutral material, alongside the original text certificates.
+
 - Visible PDF annotations are preserved as page vectors and text before import, including markup lines outside the ordinary page content stream. Screen-visible notes remain visible and hidden notes stay hidden; the source PDF is unchanged. Missing helpers or incomplete normalization stop the import with an error.
 - Encrypted PDFs that open without a password and repaired PDFs use the same screen-visible annotation handling. Temporary normalized files are checked against both source and output bytes; repeating an import after cleanup or repairing a missing helper works within the same session.
 - Simultaneous imports keep their reports, parts data and source provenance in separate run folders, preventing one importer from replacing another importer's verification evidence.

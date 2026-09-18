@@ -63,6 +63,8 @@ module BlueCollarSystems
     require File.join(dir, 'svg_paint_binding')
     require File.join(dir, 'late_pdf_overlays')
     require File.join(dir, 'item_raster_display')
+    require File.join(dir, 'source_image_paint_order')
+    require File.join(dir, 'decorative_display')
     require File.join(dir, 'model_3d_extruder')
     require File.join(dir, 'geometry_cleanup')
     require File.join(dir, 'hatch_detector')
@@ -901,6 +903,24 @@ module BlueCollarSystems
       glyph_component_cache = nil, precomputed_peer_owners = nil
     )
       source_id = RepresentationFidelity.source_span_id(item)
+      if opts[:decorative_text_containers] == true &&
+         [:glyphs, :geometry].include?(controller.current_mode)
+        container = TextDisplayContainer.create!(target_entities, source_id, text_layer)
+        begin
+          delivery = complete_item_representation_ladder!(
+            stats, model, container.entities, pdf_path, page_num, item,
+            requested_mode, controller, history, media_box, render_box,
+            page_rotation, opts.merge(:decorative_text_containers => false),
+            import_start, y_offset, svg_document, text_layer, peer_items,
+            precomputed_match, precomputed_peer_boxes, precomputed_placed,
+            precomputed_pens, glyph_component_cache, precomputed_peer_owners)
+          TextDisplayContainer.verify_claim!(container)
+          return delivery
+        rescue StandardError
+          RepresentationFidelity.erase_owned!(target_entities, [container])
+          raise
+        end
+      end
       context = svg_source_context(svg_document, page_num, {})
       while [:glyphs, :geometry].include?(controller.current_mode)
         mode = controller.current_mode
@@ -1196,6 +1216,7 @@ module BlueCollarSystems
         :page_number => page_num,
         :match_text_items => Array(all_page_text_items || text_items),
         :preserve_unmatched_source_placements => false,
+        :decorative_text_containers => opts[:decorative_text_containers] == true,
         :source_context => svg_source_context(svg_document, page_num, {}),
         :run_controller => opts[:run_controller]
       )
@@ -4503,6 +4524,10 @@ module BlueCollarSystems
           end
         end
 
+        # Only pages with supported embedded assets need a reserved display
+        # parent. The source claim is born inside it; it is never regrouped.
+        page_text_opts = opts.merge(:decorative_text_containers => !embedded_assets.empty?)
+
         # Geometry text uses raw transformed path edges in one owned group;
         # Glyphs uses reusable component instances in a different owned group.
         # The ordinary PDF vectors remain on GeometryBuilder's established
@@ -4694,7 +4719,7 @@ module BlueCollarSystems
             builder.page_group.entities : model.active_entities
           complete_label_item_fallbacks!(
             stats, model, fallback_parent, path, page_num, fallback_items,
-            media_box, svg_page_box, page_rotation, opts, import_start,
+            media_box, svg_page_box, page_rotation, page_text_opts, import_start,
             page_y_offset, label_svg_document, label_fallback_failures,
             result[:text_attempts], layer_mgr.text_fallback_layer, text_items,
             requested_text_mode, flat_text_fallbacks
@@ -4817,6 +4842,7 @@ module BlueCollarSystems
             :page_number => page_num,
             :run_controller => opts[:run_controller],
             :preserve_unmatched_source_placements => Array(text_items).empty?,
+            :decorative_text_containers => page_text_opts[:decorative_text_containers],
             :source_context => svg_source_context(
               svg_document, page_num, svg_failure
             )
@@ -4921,7 +4947,7 @@ module BlueCollarSystems
             unless transition_proofs.empty?
               complete_text3d_item_fallbacks!(
                 stats, model, representation_parent, path, page_num,
-                text_items, media_box, svg_page_box, page_rotation, opts,
+                text_items, media_box, svg_page_box, page_rotation, page_text_opts,
                 import_start, page_y_offset, svg_document,
                 transition_proofs, exact_3d_requested_mode,
                 (exact_3d_requested_mode == :text ?
@@ -5050,7 +5076,7 @@ module BlueCollarSystems
             complete_item_representation_ladder!(
               stats, model, representation_parent, path, page_num,
               source_item, requested_text_mode, controller, [], media_box,
-              svg_page_box, page_rotation, opts, import_start, page_y_offset,
+              svg_page_box, page_rotation, page_text_opts, import_start, page_y_offset,
               svg_document, text_layer, text_items,
               precomputed_match, precomputed_peer_boxes,
               precomputed_placed, precomputed_pens, glyph_component_cache,
@@ -5103,6 +5129,7 @@ module BlueCollarSystems
           cl.each { |k, v| stats[:cleanup][k] = (stats[:cleanup][k] || 0) + v }
         end
 
+        embedded_image_records = []
         if !embedded_assets.empty? && builder.page_group
           placed = place_embedded_images(
             model,
@@ -5111,7 +5138,8 @@ module BlueCollarSystems
             opts,
             page_y_offset,
             page_rotation,
-            builder.page_group.entities
+            builder.page_group.entities,
+            embedded_image_records
           )
           stats[:embedded_images_placed] += placed
           Logger.info(
@@ -5157,6 +5185,34 @@ module BlueCollarSystems
             :display_depth_inches => built_overlays.map { |record| record[:display_depth] },
             :final_crop_overlap_area => built_overlays.inject(0.0) { |sum, record| sum + record[:cropped_area] }
           }
+        end
+
+        unless embedded_image_records.empty?
+          display_plan = prepare_embedded_image_display_plans(
+            builder.page_group, embedded_image_records, paint_svg_provider.call,
+            media_box, :scale => opts[:scale], :svg_page_box => svg_page_box,
+            :parsed_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
+            :page_number => page_num,
+            :raster_delivery_records => stats[:raster_delivery_records])
+          stats[:embedded_image_paint_order] ||= []
+          stats[:embedded_image_paint_order] << {
+            :page => page_num, :source_svg_sha256 => display_plan[:source_svg_sha256],
+            :qualified_count => display_plan[:qualified_plans].length,
+            :unqualified => display_plan[:unqualified]
+          }
+          display_plan[:unqualified].each do |item|
+            Logger.warn('EmbeddedImages', "Page #{page_num}: source paint-order display remains unqualified for #{item[:image_id]}: #{item[:reason]}")
+          end
+          unless display_plan[:qualified_plans].empty?
+            DecorativeDisplay.apply!(builder.page_group, stats,
+              display_plan[:qualified_plans],
+              :page => page_num, :source_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
+              :source_svg_sha256 => display_plan[:source_svg_sha256],
+              :svg_page_box => display_plan[:svg_page_box],
+              :svg_viewbox => display_plan[:svg_viewbox],
+              :media_box => media_box, :scale => opts[:scale],
+              :page_y_offset => page_y_offset, :page_rotation => page_rotation)
+          end
         end
 
         if composition && builder.page_group
@@ -5367,7 +5423,7 @@ module BlueCollarSystems
       end
     end
 
-    def self.place_embedded_images(model, assets, media_box, opts, y_offset, page_rotation, target_entities = nil)
+    def self.place_embedded_images(model, assets, media_box, opts, y_offset, page_rotation, target_entities = nil, placed_records = nil)
       return 0 unless model && assets && !assets.empty?
       entities = target_entities || model.active_entities
       return 0 unless entities && entities.respond_to?(:add_image)
@@ -5424,6 +5480,7 @@ module BlueCollarSystems
               Logger.warn('EmbeddedImages', "Image layer assignment failed: #{e.message}")
             end
             placed += 1
+            placed_records << { :asset => asset, :image_entity => image } if placed_records
           else
             raise RepresentationFidelity::ContractError,
                   'native embedded image creation returned no Image'
@@ -5435,6 +5492,113 @@ module BlueCollarSystems
         end
       end
       placed
+    end
+
+    # Join final-page crop proof to the actual existing native Image. These
+    # records never give Raster Images invented Cairo placement indices.
+    def self.embedded_image_final_page_crops(roots, media_box, page_box, viewbox, opts)
+      context = { :page => opts[:page_number], :source_pdf_sha256 => opts[:parsed_pdf_sha256] }
+      ItemRasterDisplay.item_records(opts, opts[:page_number]).map do |record|
+        artifact, sid, id = ItemRasterDisplay.validate_binding!(record, context)
+        matches = roots.select { |root| root[:source_span_id] == sid && root[:id] == id }
+        unless matches.length == 1
+          raise RepresentationFidelity::ContractError, 'final-page crop lacks one actual native Image'
+        end
+        entity = matches.first[:entity]
+        box = artifact[:source_box]
+        dictionary = ItemRasterDisplay::DICTIONARY
+        unless entity.typename.to_s == 'Image' &&
+          ['ghostscript_transparent_page_crop', 'pdftocairo_transparent_page_crop'].include?(entity.get_attribute(dictionary, 'renderer', '')) &&
+          entity.get_attribute(dictionary, 'raster_source_pdf_sha256', '') == context[:source_pdf_sha256] &&
+          entity.get_attribute(dictionary, 'raster_page_number', nil) == context[:page] &&
+          entity.get_attribute(dictionary, 'raster_source_box', nil) == box &&
+          entity.get_attribute(dictionary, 'raster_visual_pixel_sha256', '') == artifact[:visual_pixel_sha256] &&
+          box.is_a?(Array) && box.length == 4 && box.all? { |v| v.is_a?(Numeric) && v.finite? } &&
+          box[0] < box[2] && box[1] < box[3] &&
+          box[0] >= media_box[0] && box[1] >= media_box[1] && box[2] <= media_box[2] && box[3] <= media_box[3]
+          raise RepresentationFidelity::ContractError, 'final-page crop native/source binding differs'
+        end
+        { :source_span_id => sid, :resulting_entity_id => id, :source_box => box.dup,
+          :page_number => context[:page], :source_pdf_sha256 => context[:source_pdf_sha256],
+          :bounds_svg => [box[0]-page_box[0]+viewbox[0], viewbox[3]+viewbox[1]+page_box[1]-box[3],
+            box[2]-page_box[0]+viewbox[0], viewbox[3]+viewbox[1]+page_box[1]-box[1]] }
+      end
+    end
+
+    # Qualify display changes against the exact source renderer paint program.
+    # All actual geometry changes remain in DecorativeDisplay's independently
+    # verified wrapper/image-placement boundary.
+    def self.prepare_embedded_image_display_plans(page_group, records, document, media_box, opts)
+      return { :qualified_plans => [], :unqualified => [] } if records.empty?
+      unless document && document[:svg].is_a?(String) && !document[:svg].empty?
+        raise RepresentationFidelity::ContractError,
+          'embedded image source paint-order SVG is unavailable'
+      end
+      svg = document[:svg]
+      page_box = opts[:svg_page_box] || media_box
+      mapping = SvgPaintOrder.coordinate_mapping(svg, media_box,
+        :svg_page_box => page_box, :scale => opts[:scale])
+      viewbox = mapping[:viewbox]
+      roots = ItemRasterDisplay.live_roots(page_group.entities).map do |root|
+        entity = root[:entity]
+        root.merge(:id => RepresentationFidelity.stable_entity_id(entity),
+          :placement_indices => PlanarWhiteKnockout.source_indices_for(entity))
+      end
+      source_roots = roots.map do |root|
+        { :id => root[:id], :source_span_id => root[:source_span_id],
+          :placement_indices => root[:placement_indices] }
+      end
+      final_page_crops = embedded_image_final_page_crops(roots, media_box, page_box, viewbox, opts)
+      plans, unqualified = [], []
+      begin
+        inventory = SourceImagePaintOrder::Inventory.new(svg)
+      rescue SourceImagePaintOrder::Unproven => error
+        return { :qualified_plans => [], :unqualified => records.map do |record|
+          { :image_id => RepresentationFidelity.stable_entity_id(record[:image_entity]),
+            :reason => error.message }
+        end }
+      end
+      records.each do |record|
+        asset, image = record[:asset], record[:image_entity]
+        image_id = RepresentationFidelity.stable_entity_id(image)
+        if File.extname(asset.file_path).downcase != '.png'
+          unqualified << { :image_id => image_id, :reason => 'original image RGBA decoder is unavailable for this source encoding' }
+          next
+        end
+        # A decoder/file/runtime failure propagates. It is neither source
+        # impossibility nor permission to invent paint order.
+        pixels = PngCropper.inspect_pixels!(asset.file_path, false)
+        corners = Array(asset.corners_pts)
+        unless corners.length == 4 && corners.all? { |p| p.is_a?(Array) && p.length == 2 && p.all? { |v| v.is_a?(Numeric) && v.finite? } }
+          raise RepresentationFidelity::ContractError, 'embedded source image corner inventory is invalid'
+        end
+        # PNG rows start at image top-left; PDF image unit-square corners start
+        # bottom-left. Reverse the vertical ordering without changing pixels.
+        svg_corners = [3,2,1,0].map do |index|
+          x,y = corners[index]
+          [x - page_box[0] + viewbox[0], viewbox[3] + viewbox[1] + page_box[1] - y]
+        end
+        binding = pixels.merge(:id => image_id, :corners_svg => svg_corners,
+          :parsed_pdf_sha256 => opts[:parsed_pdf_sha256], :page_number => opts[:page_number],
+          :image_object_number => asset.obj_num, :placement_index => asset.placement_index,
+          :ctm => asset.ctm, :corners_pts => corners,
+          :svg_page_box => page_box, :svg_viewbox => viewbox,
+          :original_clip_proof => (asset.respond_to?(:original_clip_proof) ? asset.original_clip_proof : nil))
+        begin
+          proof = inventory.qualify(binding, source_roots, final_page_crops)
+          later = proof[:later_roots].map do |source_root|
+            root = roots.find { |candidate| candidate[:id] == source_root[:id] }
+            raise RepresentationFidelity::ContractError, 'qualified source text root disappeared' unless root
+            root.merge(:source_paint_ranks => source_root[:source_paint_ranks])
+          end
+          plans << record.merge(:source_proof => proof, :later_roots => later)
+        rescue SourceImagePaintOrder::Unproven => error
+          unqualified << { :image_id => image_id, :reason => error.message }
+        end
+      end
+      { :qualified_plans => plans, :unqualified => unqualified,
+        :source_svg_sha256 => inventory.svg_sha256,
+        :svg_page_box => page_box.dup, :svg_viewbox => viewbox.dup }
     end
 
     def self.embedded_image_su_bbox(asset, media_box, scale, y_offset, page_rotation)
