@@ -155,6 +155,7 @@ readonly SMOKE_TESTS=(
   test/qa_report_isolation_test.rb
   test/finalize_diagnostics_isolation_test.rb
   test/batch_geometry_sidecar_isolation_test.rb
+  test/pdf_navigation_link_appearance_test.rb
   test/logger_isolation_test.rb
   test/logger_buffer_test.rb
   test/poppler_output_path_alphabet_test.rb

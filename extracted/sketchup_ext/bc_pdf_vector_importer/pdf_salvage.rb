@@ -141,7 +141,7 @@ module BlueCollarSystems
           end
           return 'zero pages' if parser.page_count == 0
           begin
-            return 'page annotations' if (1..parser.page_count).any? { |page| parser.page_has_annotations?(page) }
+            return 'page annotations' if (1..parser.page_count).any? { |page| parser.page_has_annotation_appearances?(page) }
           rescue StandardError => error
             raise SalvageError, 'PDF annotation inventory could not be verified: ' + error.message
           end
@@ -176,13 +176,22 @@ module BlueCollarSystems
           end
           raise SalvageError, 'Source page count was not verified.' unless count.is_a?(Integer) && count > 0
           out = SafeTemp.join('bc_annotations_' + Process.pid.to_s + '_' + Time.now.to_i.to_s + '_' + rand(1_000_000).to_s + '.pdf')
+          input = pdf_path
+          if source
+            navigation_copy = out.sub(/\.pdf\z/, '_appearance_input.pdf')
+            navigation_copy_created = source.write_annotation_appearance_copy(navigation_copy)
+            if navigation_copy_created
+              input = navigation_copy
+              navigation_copy_sha = Digest::SHA256.file(navigation_copy).hexdigest
+            end
+          end
           accepted = false
           args = [exe, '-q', '-dSAFER', '-dBATCH', '-dNOPAUSE', '-dPDFSTOPONERROR',
                   '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.7',
                   '-dPrinted=false', '-dPreserveAnnots=false', '-dShowAnnots=true',
                   '-dAutoRotatePages=/None', '-dDownsampleColorImages=false',
                   '-dDownsampleGrayImages=false', '-dDownsampleMonoImages=false',
-                  '-sOutputFile=' + out, '-f', pdf_path]
+                  '-sOutputFile=' + out, '-f', input]
           run = if defined?(CommandRunner) && CommandRunner.respond_to?(:run)
                   CommandRunner.run(args, :timeout_s=>SALVAGE_TIMEOUT_S, :context=>'PdfAnnotationNormalization')
                 else
@@ -200,6 +209,9 @@ module BlueCollarSystems
               (run[:stderr].to_s + ' ' + run[:stdout].to_s).strip[0,600]
           end
           raise SalvageError, 'PDF changed during annotation normalization.' unless Digest::SHA256.file(pdf_path).hexdigest == before
+          if navigation_copy_sha && Digest::SHA256.file(navigation_copy).hexdigest != navigation_copy_sha
+            raise SalvageError, 'Annotation appearance preparation copy changed during normalization.'
+          end
           check = PDFParser.new(out)
           check.parse
           remaining = (1..check.page_count).select { |page| check.page_has_annotations?(page) }
@@ -220,6 +232,7 @@ module BlueCollarSystems
           check.release if check
           begin
             File.delete(out) if out && !accepted && File.file?(out)
+            File.delete(navigation_copy) if navigation_copy_created && File.file?(navigation_copy)
           rescue StandardError => cleanup_error
             log_warn('Rejected annotation artifact cleanup failed: ' + cleanup_error.message)
           end
