@@ -6581,14 +6581,22 @@ module BlueCollarSystems
     def self.quick_scale; ScaleTool.quick_scale; end
 
     def self.cleanup_selected
+      operation_open = false
       model = Sketchup.active_model; return unless model
       groups = model.selection.grep(Sketchup::Group)
       return UI.messagebox("Select groups to clean.") if groups.empty?
       model.start_operation("Cleanup", true)
+      operation_open = true
       total = {}
       groups.each { |g| GeometryCleanup.cleanup(g.entities).each { |k,v| total[k]=(total[k]||0)+v } }
       model.commit_operation
+      operation_open = false
       UI.messagebox("Cleanup:\n"+total.select{|_,v|v>0}.map{|k,v|"  #{v} #{k}"}.join("\n"))
+    rescue StandardError => error
+      operation_open = abort_open_operation!(model, operation_open, 'Cleanup')
+      Logger.error('Cleanup', error.message, error)
+      UI.messagebox("Cleanup failed: #{error.message}")
+      nil
     end
 
     def self.feature_inventory
