@@ -947,17 +947,28 @@ module BlueCollarSystems
 
       # PDF contours may explicitly repeat their first vertex before `h`.
       # SketchUp closes a face itself and rejects that duplicate array entry.
-      # Remove only an exact closing vertex: near vertices and repeated interior
-      # vertices can describe real ink, so neither global uniq nor snapping is safe.
+      # Clipping arithmetic can also leave consecutive copies a few floating-
+      # point roundoff units apart. The numerical bound below is independent of
+      # SketchUp's much larger modeling tolerance and scales with each coordinate.
+      # Real near vertices and repeated interior vertices remain source geometry.
       def compound_fill_loop(points)
-        loop = remove_consecutive_duplicates(points).dup
-        while loop.length > 1 &&
-              loop.first.x.to_f == loop.last.x.to_f &&
-              loop.first.y.to_f == loop.last.y.to_f &&
-              loop.first.z.to_f == loop.last.z.to_f
+        loop = []
+        remove_consecutive_duplicates(points).each do |point|
+          loop << point unless !loop.empty? && same_roundoff_point?(loop.last, point)
+        end
+        while loop.length > 1 && same_roundoff_point?(loop.first, loop.last)
           loop.pop
         end
         loop
+      end
+
+      def same_roundoff_point?(left, right)
+        [:x, :y, :z].all? do |axis|
+          a = left.public_send(axis).to_f
+          b = right.public_send(axis).to_f
+          a.finite? && b.finite? &&
+            (a == b || (a - b).abs <= 8.0 * Float::EPSILON * [a.abs, b.abs].max)
+        end
       end
 
       def draw_face(entities, points, layer, fill_rgb = nil, hide_edges = false)

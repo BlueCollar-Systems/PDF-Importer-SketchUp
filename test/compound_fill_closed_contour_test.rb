@@ -50,4 +50,43 @@ class CompoundFillClosedContourTest < Minitest::Test
     assert_equal loop,clean(loop)
     refute_same loop,clean(loop)
   end
+
+  def test_clipping_roundoff_is_coalesced_even_with_zero_merge_tolerance
+    @builder.instance_variable_set(:@merge_tol,0.0)
+    [0.000001,1.0,1000000.0].each do |scale|
+      values=[[37.686666666666675,31.374998888888882],
+        [37.686666666666675,31.281666666666666],
+        [38.66,31.28333333333333],[38.66,31.28333333333334],
+        [38.568334444444446,31.374998888888882]]
+      original=points(values.map { |x,y| [x*scale,y*scale] })
+      before=original.map(&:dup)
+      assert_equal original.values_at(0,1,2,4),clean(original)
+      assert_equal before,original
+    end
+  end
+
+  def test_roundoff_bound_does_not_become_a_host_geometry_tolerance
+    @builder.instance_variable_set(:@merge_tol,0.0)
+    [0.000001,1.0,1000000.0].each do |scale|
+      original=points([[0,0],[38.66*scale,31.28333333333333*scale],
+        [38.66*scale,(31.28333333333333+0.000000000001)*scale],[0,40*scale]])
+      assert_equal original,clean(original)
+    end
+    near_origin=points([[0,0],[0.000000000000000001,0],[1,1]])
+    assert_equal near_origin,clean(near_origin)
+  end
+
+  def test_nonfinite_coordinates_are_not_certified_as_numerical_duplicates
+    [Float::INFINITY,-Float::INFINITY,Float::NAN].each do |value|
+      refute @builder.send(:same_roundoff_point?,Point.new(value,0,0),Point.new(value,0,0))
+    end
+  end
+
+  def test_clipped_apex_with_six_ulp_roundoff_is_coalesced
+    @builder.instance_variable_set(:@merge_tol,0.0)
+    loop=points([[0,0],[8,3.0],[8,3.000000000000003],[10,10]])
+    assert_equal loop.values_at(0,1,3),clean(loop)
+    real_edge=points([[0,0],[8,3.0],[8,3.00000000000002],[10,10]])
+    assert_equal real_edge,clean(real_edge)
+  end
 end
