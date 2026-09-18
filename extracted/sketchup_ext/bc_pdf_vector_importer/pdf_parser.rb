@@ -101,9 +101,15 @@ module BlueCollarSystems
         # Expand each `/Name Do` inline as `q <Matrix> cm <form> Q` so the
         # vector parser, text parser, and nominal scanner all see it in the
         # graphics state active at the invocation point.
+        # Resource-aware consumers must walk the original Form invocations.
+        # Expanded streams retain inner /Image names but not their Form-local
+        # resource dictionaries, so looking those names up at page scope can
+        # silently omit an image or substitute an unrelated page image.
+        source_content_streams = streams
         streams = expand_form_xobjects(streams, dict) unless streams.empty?
 
-        { media_box: media_box, crop_box: crop_box, rotation: rotation, content_streams: streams }
+        { media_box: media_box, crop_box: crop_box, rotation: rotation,
+          content_streams: streams, source_content_streams: source_content_streams }
       end
 
       # Annotation appearances are outside /Contents. The native path parser

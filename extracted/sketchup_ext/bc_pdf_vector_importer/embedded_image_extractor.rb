@@ -69,7 +69,7 @@ module BlueCollarSystems
         return [] unless raw
 
         resources = page_resources(page_num)
-        streams = raw[:content_streams] || []
+        streams = raw[:source_content_streams] || raw[:content_streams] || []
         walk_streams(
           page_num,
           streams,
@@ -134,10 +134,13 @@ module BlueCollarSystems
         # Streaming q/Q/cm/Do walk (ContentStreamParser.scan_operators): no
         # token array and no token cap, so an image placed late in a dense
         # sheet is found just like one at the top.
+        # /Contents arrays are one logical graphics program. q/cm in one
+        # stream can affect an image in the next; Form recursion starts its
+        # own walk and therefore still has an isolated graphics state.
+        ctm_stack = [initial_ctm.dup]
+        current_ctm = initial_ctm.dup
         Array(streams).each do |stream|
           next unless stream
-          ctm_stack = [initial_ctm.dup]
-          current_ctm = initial_ctm.dup
 
           ContentStreamParser.scan_operators(stream, PLACEMENT_OPERATORS) do |op, operands|
             case op

@@ -177,6 +177,7 @@ readonly SMOKE_TESTS=(
   test/geometry_cleanup_collinear_coverage_test.rb
   test/cleanup_selected_operation_test.rb
   test/embedded_image_affine_test.rb
+  test/embedded_image_extractor_test.rb
   test/embedded_image_placement_test.rb
   test/poppler_active_boundary_validation_test.rb
 )
