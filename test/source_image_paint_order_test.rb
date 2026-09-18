@@ -222,6 +222,30 @@ class SourceImagePaintOrderTest < Minitest::Test
     end
   end
 
+  def test_source_image_decode_uses_safe_temp_and_cleans_success_and_failure
+    Dir.mktmpdir('image-order-cleanup-test-') do |parent|
+      raw, png = File.join(parent,'source.rgba'), File.join(parent,'source.png')
+      File.binwrite(raw,[20,40,60,255].pack('C*')*4)
+      Importer::PngCropper.raw_to_png!(raw,2,2,4,png)
+      payload = 'data:image/png;base64,' + Base64.strict_encode64(File.binread(png))
+      subject = Subject::Inventory.new(document(IMAGE_USE))
+      allocated = nil
+      allocator = lambda do |prefix|
+        assert_equal 'bc-image-order-', prefix
+        allocated = Dir.mktmpdir(prefix,parent)
+      end
+      Importer::SafeTemp.stub(:mktmpdir,allocator) do
+        assert_equal true, subject.read_png(payload)[:all_opaque]
+        refute File.exist?(allocated)
+        Importer::PngCropper.stub(:prepare_rgba!,lambda { |*_args| raise IOError, 'decode failed' }) do
+          assert_raises(IOError) { subject.read_png(payload) }
+        end
+        refute File.exist?(allocated)
+      end
+      assert File.file?(png), 'cleanup must keep the original input'
+    end
+  end
+
   def test_reflection_and_shear_bind_ordered_affine_corners_without_bbox_fitting
     svg = document('<use xlink:href="#pic" transform="matrix(-5,1,2,5,20,10)"/>')
     corners = [[20,10],[10,12],[14,22],[24,20]]

@@ -3,7 +3,7 @@
 # through their actual references; XML definition order is not paint order.
 require 'base64'
 require 'digest'
-require 'tmpdir'
+require_relative 'safe_temp'
 require_relative 'svg_paint_order'
 require_relative 'png_cropper'
 
@@ -222,7 +222,8 @@ module BlueCollarSystems
           raise Unproven, 'source image is not an inline PNG' unless match
           bytes = Base64.strict_decode64(match[1].gsub(/\s/, ''))
           return gray_mask_proof(bytes) if bytes.bytesize >= 33 && bytes.getbyte(25) == 0
-          Dir.mktmpdir('bc-image-order-') do |dir|
+          dir = SafeTemp.mktmpdir('bc-image-order-')
+          begin
             path, raw = File.join(dir, 'image.png'), File.join(dir, 'image.rgba')
             File.open(path, 'wb') { |file| file.write(bytes) }
             proof = PngCropper.prepare_rgba!(path, raw, false)
@@ -235,6 +236,8 @@ module BlueCollarSystems
             end
             proof.merge(:all_white_opaque=>rgba.each_byte.all? { |byte| byte == 255 },
               :all_opaque=>all_opaque)
+          ensure
+            FileUtils.remove_entry(dir) if File.directory?(dir)
           end
         end
 
