@@ -6,8 +6,9 @@ module BlueCollarSystems
   module PDFVectorImporter
     module AnnotationMicrostrokeDisplay
       DICTIONARY = 'BC_PDF_Importer'.freeze
-      SCHEMA = 'bcs.original_annotation_native/1'.freeze
-      POLICY = 'original_annotation_rgb_crop_no_source_glyph_ink/1'.freeze
+      SCHEMA = 'bcs.original_annotation_native/2'.freeze
+      POLICY = 'original_annotation_rgb_crop_replaces_owned_capsule_display/2'.freeze
+      REPLACEMENT_POLICY = 'editable_source_capsule_hidden_by_verified_original_composite/1'.freeze
       DISPLAY_GAP = 0.01
 
       def self.fail_contract(message)
@@ -88,12 +89,51 @@ module BlueCollarSystems
             row[:display] = composite.reject { |key,_| [:png_path].include?(key) }.merge(
               :image_entity_id=>RepresentationFidelity.stable_entity_id(image),
               :image_matrix=>image.transformation.to_a, :expected_corners=>placement[:corners])
+            # The source crop already contains this capsule's final paint. Keep
+            # its exact editable native geometry, but do not paint the opaque
+            # source face again beneath a raised composite (visible in oblique).
+            row[:display_replacement] = suppress_replaced_capsule!(page_group,group,image,composite,context)
+            row[:native_geometry] = AnnotationMicrostrokeGeometry.snapshot(group)
+            AnnotationMicrostrokeGeometry.verify_snapshot!(row[:native_geometry],built[:geometry_plan],true)
           end
           proof[:placements] << row
         end
         stats[:original_annotation_placements] ||= []
         stats[:original_annotation_placements] << proof
         proof
+      end
+
+      def self.replacement_binding(capsule_id,image_id)
+        { :policy=>REPLACEMENT_POLICY, :capsule_entity_id=>capsule_id,
+          :image_entity_id=>image_id, :source_geometry_retained=>true, :source_group_hidden=>true }
+      end
+
+      def self.suppress_replaced_capsule!(page,group,image,composite,context)
+        validate_composite_proof!(composite,context)
+        source = composite[:source]
+        owned = page.entities.to_a
+        unless group && group.valid? && group.typename.to_s == 'Group' && owned.include?(group) &&
+               image && image.valid? && image.typename.to_s == 'Image' && owned.include?(image) &&
+               group.get_attribute(DICTIONARY,'original_annotation_capsule',false) == true &&
+               symbols(JSON.parse(group.get_attribute(DICTIONARY,'original_annotation_source','null'))) == source &&
+               image.get_attribute(DICTIONARY,'annotation_composite_image',false) == true &&
+               image.get_attribute(DICTIONARY,'annotation_source_pdf_sha256') == context[:source_pdf_sha256] &&
+               image.get_attribute(DICTIONARY,'annotation_page_number') == context[:page] &&
+               image.get_attribute(DICTIONARY,'annotation_ref') == source[:annotation_ref] &&
+               !image.hidden? && !group.hidden?
+          fail_contract('display replacement is not the exact live owned annotation pair')
+        end
+        replacement = replacement_binding(RepresentationFidelity.stable_entity_id(group),
+          RepresentationFidelity.stable_entity_id(image))
+        group.hidden = true
+        fail_contract('source capsule display suppression setter was ignored') unless group.hidden?
+        # The layer stays unchanged. Outliner/Show Hidden Geometry can expose
+        # this named source group for editing without recreating its ArcCurves.
+        group.name = 'Original annotation ' + source[:annotation_ref].to_s + ' (editable source; composite display)'
+        group.set_attribute(DICTIONARY,'original_annotation_display_replacement',JSON.generate(replacement))
+        replacement
+      rescue JSON::ParserError
+        fail_contract('display replacement source identity is malformed')
       end
 
       def self.highest_other_z(entities)
@@ -187,14 +227,26 @@ module BlueCollarSystems
             unless capsule && capsule[:original_annotation_capsule] == true && parents[capsule_id].equal?(page)
               fail_contract('original annotation capsule ownership changed')
             end
-            visible!(capsule,'annotation capsule')
-            AnnotationMicrostrokeGeometry.verify_snapshot!(capsule[:annotation_native_geometry],expected)
+            display = placement[:display]
+            replacement = placement[:display_replacement]
+            if display
+              unless replacement == replacement_binding(capsule_id,display[:image_entity_id]) &&
+                     capsule[:valid] == true && capsule[:deleted] == false &&
+                     capsule[:style_evidence].is_a?(Hash) &&
+                     capsule[:style_evidence][:entity_visible] == false &&
+                     capsule[:style_evidence][:layer_visible] == true
+                fail_contract('owned source capsule is not suppressed by its exact composite display')
+              end
+            else
+              fail_contract('source capsule hidden without a composite replacement') unless replacement.nil?
+              visible!(capsule,'annotation capsule')
+            end
+            AnnotationMicrostrokeGeometry.verify_snapshot!(capsule[:annotation_native_geometry],expected,!display.nil?)
             saved = placement[:native_geometry]
             if native_ids(capsule[:annotation_native_geometry]) != native_ids(saved)
               fail_contract('original annotation native entities were replaced')
             end
             expected_capsules << capsule_id
-            display = placement[:display]
             next unless display
             validate_composite_proof!(display,proof)
             image_id = display[:image_entity_id]

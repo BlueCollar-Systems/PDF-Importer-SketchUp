@@ -14,6 +14,20 @@ class AnnotationMicrostrokeGeometryTest < Minitest::Test
   Edge = Struct.new(:start,:end,:curve) do
     def valid?; true; end
   end
+  Display = Importer::AnnotationMicrostrokeDisplay
+
+  class DisplayEntity
+    attr_reader :persistent_id, :typename, :attributes
+    attr_accessor :name, :ignore_hidden, :source_geometry
+    def initialize(id,kind)
+      @persistent_id,@typename,@attributes,@hidden = id,kind,{},false
+    end
+    def valid?; true; end
+    def hidden?; @hidden; end
+    def hidden=(value); @hidden = value unless @ignore_hidden; end
+    def get_attribute(_dictionary,key,default = nil); @attributes.fetch(key,default); end
+    def set_attribute(_dictionary,key,value); @attributes[key] = value; end
+  end
 
   def source
     { :start_pdf=>[30.0,40.0], :end_pdf=>[30.014,40.0], :radius_pdf=>2.0,
@@ -171,6 +185,7 @@ class AnnotationMicrostrokeGeometryTest < Minitest::Test
 
   def display_manifest
     snapshot,plan = native_snapshot
+    snapshot[:hidden] = true
     source_record = source.merge(:source_pdf_sha256=>'a'*64,:page_number=>1,:annotation_ref=>'7 0 R')
     plan[:source] = source_record
     counter = 20
@@ -196,7 +211,8 @@ class AnnotationMicrostrokeGeometryTest < Minitest::Test
     display[:image_matrix] = corners[:matrix]
     display[:expected_corners] = corners[:corners]
     proof[:placements] = [{:source=>source_record,:geometry_plan=>plan,:capsule_entity_id=>'persistent_id:20',
-      :native_geometry=>snapshot,:display=>display}]
+      :native_geometry=>snapshot,:display=>display,
+      :display_replacement=>Display.replacement_binding('persistent_id:20','persistent_id:11')}]
     neutral = { :valid=>true,:deleted=>false,:style_evidence=>{:entity_visible=>true,:layer_visible=>true},:children=>[] }
     image = neutral.merge(:typename=>'Image',:persistent_id=>11,:entity_id=>11,:annotation_composite_image=>true,
       :transformation=>display[:image_matrix].dup,
@@ -205,6 +221,7 @@ class AnnotationMicrostrokeGeometryTest < Minitest::Test
         :host_visual_pixel_sha256=>'b'*64,:host_pixel_width=>crop[:pixel_width],:host_pixel_height=>crop[:pixel_height],
         :display_width=>corners[:matrix][0],:display_height=>corners[:matrix][5]})
     capsule = neutral.merge(:typename=>'Group',:persistent_id=>20,:entity_id=>20,:original_annotation_capsule=>true,
+      :style_evidence=>{:entity_visible=>false,:layer_visible=>true},
       :annotation_native_geometry=>Marshal.load(Marshal.dump(snapshot)))
     page = neutral.merge(:typename=>'Group',:persistent_id=>10,:entity_id=>10,
       :transformation=>Importer::ItemRasterDisplay::IDENTITY,:children=>[capsule,image],:annotation_highest_other_z=>0.0)
@@ -229,12 +246,86 @@ class AnnotationMicrostrokeGeometryTest < Minitest::Test
       lambda { |s,m| s[:original_annotation_placements][0][:placements][0][:display][:background_proof][:source_crop_boxes_svg] = [] },
       lambda { |s,m| s[:original_annotation_placements][0][:placements][0][:display][:crop][:pixel_box][0] += 1 },
       lambda { |s,m| s[:original_annotation_ink][0][:composite_count] = 0 },
-      lambda { |s,m| m[0][:annotation_highest_other_z] = 0.02 }
+      lambda { |s,m| m[0][:annotation_highest_other_z] = 0.02 },
+      lambda { |s,m| s[:original_annotation_placements][0][:placements][0].delete(:display_replacement) },
+      lambda { |s,m| s[:original_annotation_placements][0][:placements][0][:display_replacement][:image_entity_id] = 'persistent_id:99' },
+      lambda { |s,m| m[0][:children][0][:style_evidence][:entity_visible] = true },
+      lambda { |s,m| m[0][:children][0][:annotation_native_geometry][:hidden] = false },
+      lambda { |s,m| m[0][:children][0][:annotation_native_geometry][:children][0][:entities][-1][:area] *= 0.9 }
     ]
     mutations.each_with_index do |mutation,index|
       s,m = display_manifest
       mutation.call(s,m)
       assert_raises(Error,"display mutation #{index}") { Importer::AnnotationMicrostrokeDisplay.verify_manifest!(s,m) }
+    end
+  end
+
+  def test_source_geometry_without_composite_remains_visible_and_editable
+    stats,manifest = display_manifest
+    placement = stats[:original_annotation_placements][0][:placements][0]
+    placement.delete(:display)
+    placement.delete(:display_replacement)
+    placement[:native_geometry][:hidden] = false
+    stats[:original_annotation_ink][0][:composite_count] = 0
+    manifest[0][:children].pop
+    capsule = manifest[0][:children][0]
+    capsule[:style_evidence][:entity_visible] = true
+    capsule[:annotation_native_geometry][:hidden] = false
+    assert Display.verify_manifest!(stats,manifest)
+    capsule[:annotation_native_geometry][:hidden] = true
+    assert_raises(Error) { Display.verify_manifest!(stats,manifest) }
+  end
+
+  def suppression_fixture
+    stats,_manifest = display_manifest
+    proof = stats[:original_annotation_placements][0]
+    composite = proof[:placements][0][:display]
+    capsule,image,unrelated = DisplayEntity.new(20,'Group'),DisplayEntity.new(11,'Image'),DisplayEntity.new(99,'Group')
+    capsule.source_geometry = native_snapshot.first
+    capsule.set_attribute(Display::DICTIONARY,'original_annotation_capsule',true)
+    capsule.set_attribute(Display::DICTIONARY,'original_annotation_source',JSON.generate(composite[:source]))
+    image.set_attribute(Display::DICTIONARY,'annotation_composite_image',true)
+    image.set_attribute(Display::DICTIONARY,'annotation_source_pdf_sha256',proof[:source_pdf_sha256])
+    image.set_attribute(Display::DICTIONARY,'annotation_page_number',proof[:page])
+    image.set_attribute(Display::DICTIONARY,'annotation_ref',composite[:source][:annotation_ref])
+    [Struct.new(:entities).new([capsule,image,unrelated]),capsule,image,unrelated,composite,proof]
+  end
+
+  def test_verified_composite_suppresses_only_its_exact_owned_editable_source_group
+    page,capsule,image,unrelated,composite,proof = suppression_fixture
+    before = Marshal.dump(capsule.source_geometry)
+    binding = Display.suppress_replaced_capsule!(page,capsule,image,composite,proof)
+    assert_equal Display.replacement_binding('persistent_id:20','persistent_id:11'),binding
+    assert capsule.hidden?
+    refute image.hidden?
+    refute unrelated.hidden?
+    assert_equal before,Marshal.dump(capsule.source_geometry)
+    assert_match(/Original annotation 7 0 R.*editable source/,capsule.name)
+    assert_equal binding,Subject.symbols(JSON.parse(capsule.get_attribute(Display::DICTIONARY,'original_annotation_display_replacement')))
+  end
+
+  def test_ignored_hide_setter_rejects_duplicate_visible_paint
+    page,capsule,image,_unrelated,composite,proof = suppression_fixture
+    capsule.ignore_hidden = true
+    error = assert_raises(Error) { Display.suppress_replaced_capsule!(page,capsule,image,composite,proof) }
+    assert_match(/suppression setter was ignored/,error.message)
+    refute capsule.hidden?
+  end
+
+  def test_unproven_missing_hidden_or_wrong_source_image_cannot_suppress_source_geometry
+    mutations = [
+      lambda { |page,_capsule,image,_composite| page.entities.delete(image) },
+      lambda { |_page,_capsule,image,_composite| image.hidden = true },
+      lambda { |_page,_capsule,image,_composite| image.set_attribute(Display::DICTIONARY,'annotation_ref','8 0 R') },
+      lambda { |_page,_capsule,_image,composite| composite[:pixels][:transparent_pixel_present] = true },
+      lambda { |_page,capsule,_image,_composite| capsule.set_attribute(Display::DICTIONARY,'original_annotation_source','{}') }
+    ]
+    mutations.each do |mutation|
+      page,capsule,image,unrelated,composite,proof = suppression_fixture
+      mutation.call(page,capsule,image,composite)
+      assert_raises(Error) { Display.suppress_replaced_capsule!(page,capsule,image,composite,proof) }
+      refute capsule.hidden?
+      refute unrelated.hidden?
     end
   end
 end

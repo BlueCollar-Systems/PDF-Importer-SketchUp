@@ -245,11 +245,12 @@ module BlueCollarSystems
         end
       end
 
-      def self.verify_snapshot!(raw,expected)
+      def self.verify_snapshot!(raw,expected,expected_hidden = false)
         actual = symbols(raw)
         expected = symbols(expected)
         matrix = ItemRasterDisplay.matrix!(actual[:transformation])
-        unless actual[:typename] == 'Group' && actual[:valid] == true && actual[:hidden] == false &&
+        unless [true,false].include?(expected_hidden) &&
+               actual[:typename] == 'Group' && actual[:valid] == true && actual[:hidden] == expected_hidden &&
                actual[:material].nil? && matrix.zip(expected[:transform]).all? { |a,b| close?(a,b,1.0e-12) }
           fail_contract('original annotation group placement/style changed')
         end
