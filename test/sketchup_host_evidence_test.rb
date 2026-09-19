@@ -287,8 +287,10 @@ class SketchupHostEvidenceTest < Minitest::Test
     Dir.mktmpdir('su-evidence-source') do |dir|
       plugin_dir = File.join(dir, 'bc_pdf_vector_importer')
       FileUtils.mkdir_p(plugin_dir)
-      %w[representation_fidelity.rb png_cropper.rb item_raster_display.rb page_transform.rb
-         decorative_display.rb embedded_image_placement.rb].each do |name|
+      # Use the selected runtime's complete Ruby dependency set. The host
+      # verifier now also loads original-annotation source/geometry validators.
+      source_plugin = File.join(REPO_ROOT,'extracted','sketchup_ext','bc_pdf_vector_importer')
+      Dir.entries(source_plugin).select { |name| name.end_with?('.rb') }.each do |name|
         FileUtils.cp(
           File.join(
             REPO_ROOT, 'extracted', 'sketchup_ext',
@@ -422,6 +424,32 @@ class SketchupHostEvidenceTest < Minitest::Test
         SketchupHostEvidence.verify_reopen_continuity!(saved, reopened)
       end
       assert_match(/content/i, error.message)
+    end
+  end
+
+  def test_original_annotation_image_is_retained_and_physically_decoded_without_text_raster_claim
+    Dir.mktmpdir('bc_annotation_texture_') do |directory|
+      png_path = File.join(directory,'original.png')
+      pixels = [[255,128,64,255],[40,20,10,255]]
+      write_rgba_png(png_path,2,1,pixels)
+      dictionary = 'BC_PDF_Importer'
+      image = FakeImage.new(72,:attributes=>{
+        [dictionary,'annotation_composite_image']=>true,
+        [dictionary,'annotation_source_pdf_sha256']=>'a'*64,
+        [dictionary,'annotation_page_number']=>1,
+        [dictionary,'annotation_ref']=>'7 0 R' })
+      parent = FakeStyledGroup.new(71,[image])
+      rows = with_texture_writer(FakeTextureWriter.new(png_path)) do
+        SketchupHostEvidence.snapshot_entities([parent],:compact=>true)
+      end
+      row = rows.first['children'].first
+      assert_equal true,row['annotation_composite_image']
+      assert_equal({'source_pdf_sha256'=>'a'*64,'page'=>1,'annotation_ref'=>'7 0 R'},row['annotation_source_binding'])
+      content = row['content_evidence']
+      assert_equal true,content['host_texture_export_verified']
+      assert_equal Digest::SHA256.hexdigest(pixels.flatten.pack('C*')),content['host_visual_pixel_sha256']
+      assert_nil content['source_span_id']
+      assert_nil content['raster_visual_pixel_sha256']
     end
   end
 

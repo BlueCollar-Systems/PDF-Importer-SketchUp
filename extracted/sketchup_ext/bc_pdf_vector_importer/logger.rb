@@ -27,8 +27,13 @@ module BlueCollarSystems
         # A shared last_import.log lets another host truncate this process's
         # buffered writes, and a later reset destroys earlier failure evidence.
         candidate_dirs = []
+        temp_warning = nil
         begin
           candidate_dirs << SafeTemp.join('bc_pdf_importer')
+        rescue SafeTemp::Unavailable => error
+          # Logging remains available through its independent local/home
+          # fallbacks, while the operator retains the helper-path diagnosis.
+          temp_warning = error.message
         rescue StandardError
           # continue with env/home fallbacks below
         end
@@ -65,6 +70,7 @@ module BlueCollarSystems
             @log_path = nil
           end
         end
+        warn('SafeTemp', temp_warning) if temp_warning
       end
 
       def self.warn(context, msg)

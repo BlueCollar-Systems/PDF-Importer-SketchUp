@@ -31,6 +31,10 @@ require File.join(
   SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
   'bc_pdf_vector_importer', 'decorative_display'
 )
+require File.join(
+  SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
+  'bc_pdf_vector_importer', 'annotation_microstroke_display'
+)
 
 module SketchupHostEvidence
   class EvidenceError < StandardError; end
@@ -1069,6 +1073,7 @@ module SketchupHostEvidence
       )
       verify_item_raster_display!(stats, manifest, require_item_raster_display)
       verify_decorative_display!(stats, manifest)
+      verify_original_annotation_ink!(stats, manifest)
       verify_page_representation_fallbacks!(
         stats, requested_mode, selected_pages
       )
@@ -1100,6 +1105,12 @@ module SketchupHostEvidence
     BlueCollarSystems::PDFVectorImporter::DecorativeDisplay.verify_manifest!(stats, manifest)
   rescue BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError => error
     raise EvidenceError, error.message
+  end
+
+  def self.verify_original_annotation_ink!(stats, manifest)
+    BlueCollarSystems::PDFVectorImporter::AnnotationMicrostrokeDisplay.verify_manifest!(stats,manifest)
+  rescue BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError => error
+    raise EvidenceError,error.message
   end
 
   def self.verify_attempt_claim_ownership!(attempts, rows_by_claim)
@@ -1327,7 +1338,11 @@ module SketchupHostEvidence
       entity.get_attribute('BC_PDF_Importer', 'decorative_source_image', false) == true
     decorative_wrapper = entity.respond_to?(:get_attribute) &&
       entity.get_attribute('BC_PDF_Importer', 'decorative_text_wrapper', false) == true
-    include_row = !compact || top_level || decorative_image || decorative_wrapper || source_claim_root?(representation) ||
+    annotation_capsule = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'original_annotation_capsule', false) == true
+    annotation_image = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'annotation_composite_image', false) == true
+    include_row = !compact || top_level || decorative_image || decorative_wrapper || annotation_capsule || annotation_image || source_claim_root?(representation) ||
       !child_rows.empty?
     return [nil, physical_tree] unless include_row
 
@@ -1355,6 +1370,21 @@ module SketchupHostEvidence
       'children' => child_rows
     }
     row['decorative_source_image'] = true if decorative_image
+    if child_rows.any? { |child| child['original_annotation_capsule'] == true }
+      row['annotation_highest_other_z'] = BlueCollarSystems::PDFVectorImporter::AnnotationMicrostrokeDisplay.highest_other_z(entity.entities)
+    end
+    if annotation_capsule
+      row['original_annotation_capsule'] = true
+      row['annotation_native_geometry'] = BlueCollarSystems::PDFVectorImporter::AnnotationMicrostrokeGeometry.snapshot(entity)
+    end
+    if annotation_image
+      row['annotation_composite_image'] = true
+      row['annotation_source_binding'] = {
+        'source_pdf_sha256'=>entity.get_attribute('BC_PDF_Importer','annotation_source_pdf_sha256',nil),
+        'page'=>entity.get_attribute('BC_PDF_Importer','annotation_page_number',nil),
+        'annotation_ref'=>entity.get_attribute('BC_PDF_Importer','annotation_ref',nil)
+      }
+    end
     if decorative_wrapper
       row['decorative_text_wrapper'] = true
       row['native_child_count'] = child_results.length
@@ -1740,7 +1770,9 @@ module SketchupHostEvidence
     claimed_visual_sha = attributes['raster_visual_pixel_sha256'].to_s.strip
     decorative_image = entity.respond_to?(:get_attribute) &&
       entity.get_attribute('BC_PDF_Importer', 'decorative_source_image', false) == true
-    unless claimed_visual_sha.empty? && !decorative_image
+    annotation_image = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'annotation_composite_image', false) == true
+    unless claimed_visual_sha.empty? && !decorative_image && !annotation_image
       if texture_proof
         evidence.merge!(
           texture_pixel_evidence(entity, performance_telemetry)

@@ -380,7 +380,9 @@ module SketchupBatchImport
         'raster_delivery_records' => Array(stats[:raster_delivery_records]),
         'item_raster_display_placements' => Array(stats[:item_raster_display_placements]),
         'decorative_display_placements' => Array(stats[:decorative_display_placements]),
-        'embedded_image_paint_order' => Array(stats[:embedded_image_paint_order]),
+          'embedded_image_paint_order' => Array(stats[:embedded_image_paint_order]),
+          'original_annotation_ink' => Array(stats[:original_annotation_ink]),
+          'original_annotation_placements' => Array(stats[:original_annotation_placements]),
         'item_raster_display_verified' => true,
         'inline_image_page_raster_fallbacks' =>
           Array(stats[:inline_image_page_raster_fallbacks]),

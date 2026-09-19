@@ -616,6 +616,12 @@ module BlueCollarSystems
           decorative_display_placements: normalize_json(
             stats[:decorative_display_placements] || stats['decorative_display_placements'] || []
           ),
+          original_annotation_ink: normalize_json(
+            stats[:original_annotation_ink] || stats['original_annotation_ink'] || []
+          ),
+          original_annotation_placements: normalize_json(
+            stats[:original_annotation_placements] || stats['original_annotation_placements'] || []
+          ),
           pipeline_performance: normalize_json(
             stats[:pipeline_performance] || stats['pipeline_performance'] || {}
           ),

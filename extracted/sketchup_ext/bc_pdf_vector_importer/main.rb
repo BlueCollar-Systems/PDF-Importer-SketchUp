@@ -65,6 +65,7 @@ module BlueCollarSystems
     require File.join(dir, 'item_raster_display')
     require File.join(dir, 'source_image_paint_order')
     require File.join(dir, 'decorative_display')
+    require File.join(dir, 'annotation_microstroke_display')
     require File.join(dir, 'model_3d_extruder')
     require File.join(dir, 'geometry_cleanup')
     require File.join(dir, 'hatch_detector')
@@ -3649,6 +3650,7 @@ module BlueCollarSystems
       Logger.reset
       prepared_path = source_path
       parser = nil
+      original_annotation_cache = {}
       begin
         prepared_path, salvage_note = PdfSalvage.prepare_if_needed(source_path)
         Logger.info('Pipeline', salvage_note) if salvage_note
@@ -3701,6 +3703,7 @@ module BlueCollarSystems
           page_opts[:prepared_pdf_path] = prepared_path
           page_opts[:prepared_salvage_note] = salvage_note
           page_opts[:preserve_prepared_parser] = true
+          page_opts[:original_annotation_cache] = original_annotation_cache
           page_opts[:preserve_logger] = true
           page_opts[:defer_final_diagnostics] = true
           page_stats = run_pipeline(model, source_path, page_opts)
@@ -3734,6 +3737,7 @@ module BlueCollarSystems
         report_pipeline_progress(opts, 'finalize_diagnostics_completed')
         stats
       ensure
+        release_original_annotation_cache!(original_annotation_cache)
         begin
           parser.release if parser
         rescue StandardError => e
@@ -3741,6 +3745,70 @@ module BlueCollarSystems
         end
         Logger.flush_log
         PdfSalvage.cleanup(prepared_path) if defined?(PdfSalvage)
+      end
+    end
+
+    def self.release_original_annotation_cache!(cache)
+      return unless cache.is_a?(Hash)
+      cache[:parser].release if cache[:owned] && cache[:parser]
+      cache.clear
+    end
+
+    # The prepared PDF remains the normal import input. This optional, bounded
+    # repair reads original annotation appearances and never infers their
+    # geometry or blend state from a normalized stream.
+    def self.apply_original_annotation_microstrokes!(builder, model, stats, opts,
+                                                    source_path, prepared_path,
+                                                    prepared_parser, page_number,
+                                                    y_offset, layer)
+      return unless builder.page_group
+      cache = opts[:original_annotation_cache] ||= {}
+      digest = cached_source_pdf_sha256!(opts,source_path)
+      unless cache[:source_path] == source_path && cache[:source_sha256] == digest
+        release_original_annotation_cache!(cache)
+        cache[:source_path],cache[:source_sha256] = source_path,digest
+        if File.expand_path(source_path) == File.expand_path(prepared_path)
+          cache[:parser],cache[:owned] = prepared_parser,false
+        else
+          original = PDFParser.new(source_path)
+          begin
+            original.parse
+            cache[:parser],cache[:owned] = original,true
+          rescue StandardError => error
+            original.release
+            cache[:source_unavailable] = error.message
+          end
+        end
+      end
+      original = cache[:parser]
+      unless original && original.respond_to?(:page_annotation_entries)
+        stats[:original_annotation_ink] ||= []
+        stats[:original_annotation_ink] << {
+          :schema=>'bcs.original_annotation_delivery/1', :page=>page_number,
+          :source_pdf_sha256=>digest, :eligible_geometry_count=>0, :composite_count=>0,
+          :composite_status=>'ORIGINAL_SOURCE_UNPROVEN_EXISTING_IMPORT_UNCHANGED',
+          :composite_reason=>cache[:source_unavailable] || 'original annotation dictionaries unavailable' }
+        return
+      end
+      return if original.page_annotation_entries(page_number).empty?
+      provider = AnnotationCompositeProvider::Page.new(original,page_number,digest,safe_find_pdftocairo)
+      stats[:original_annotation_ink] ||= []
+      stats[:original_annotation_ink] << provider.report
+      begin
+        provider.prepare!
+        page = original.page_data(page_number)
+        dict = SourceRoundAnnotationInk.dictionary(original,original.pages.fetch(page_number-1))
+        rotation = SourceRoundAnnotationInk.number(original.send(:find_inherited,dict,'/Rotate') || 0)
+        AnnotationMicrostrokeDisplay.apply!(builder.page_group,provider,stats,
+          :model=>model, :layer=>layer, :page=>page_number, :source_pdf_sha256=>digest,
+          :media_box=>page[:media_box], :page_rotation=>rotation,
+          :scale=>opts[:scale], :page_y_offset=>y_offset)
+        if provider.report[:composite_status] == 'SOURCE_UNSUPPORTED_GEOMETRY_RETAINED'
+          Logger.warn('OriginalAnnotations',provider.report[:composite_reason])
+        end
+        provider.verify_original_file!
+      ensure
+        provider.cleanup
       end
     end
 
@@ -5225,6 +5293,9 @@ module BlueCollarSystems
             :final_page_crops => composition[:final_page_crops])
         end
 
+        apply_original_annotation_microstrokes!(builder,model,stats,opts,
+          source_input_path,path,parser,page_num,page_y_offset,layer_mgr.base_layer)
+
         if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0 && builder.page_group &&
            opts[:import_mode].to_s != 'raster'
           begin
@@ -5416,6 +5487,9 @@ module BlueCollarSystems
       end
       cleanup_item_raster_page_cache!(opts) if
         defined?(opts) && opts.is_a?(Hash)
+      if defined?(opts) && opts.is_a?(Hash) && !opts[:preserve_prepared_parser]
+        release_original_annotation_cache!(opts[:original_annotation_cache])
+      end
       Logger.flush_log
       if defined?(PdfSalvage) &&
          !(defined?(opts) && opts.is_a?(Hash) &&

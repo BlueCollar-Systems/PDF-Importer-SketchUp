@@ -289,6 +289,11 @@ jobs:
           ruby test/original_image_clip_test.rb
           ruby test/decorative_display_test.rb
           ruby test/text_display_container_test.rb
+          ruby test/source_round_annotation_ink_test.rb
+          ruby test/annotation_composite_source_test.rb
+          ruby test/annotation_composite_provider_test.rb
+          ruby test/annotation_microstroke_geometry_test.rb
+          ruby test/original_annotation_pipeline_test.rb
           ruby test/page_paint_bounds_test.rb
           ruby test/stroke_color_preservation_test.rb
           ruby test/labels_empty_text_group_resume_signature_test.rb

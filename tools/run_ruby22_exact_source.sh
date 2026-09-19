@@ -176,6 +176,11 @@ readonly SMOKE_TESTS=(
   test/original_image_clip_test.rb
   test/decorative_display_test.rb
   test/text_display_container_test.rb
+  test/source_round_annotation_ink_test.rb
+  test/annotation_composite_source_test.rb
+  test/annotation_composite_provider_test.rb
+  test/annotation_microstroke_geometry_test.rb
+  test/original_annotation_pipeline_test.rb
   test/page_paint_bounds_test.rb
   test/stroke_clipping_test.rb
   test/stroke_color_preservation_test.rb

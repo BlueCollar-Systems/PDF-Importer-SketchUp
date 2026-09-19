@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
 require 'minitest/autorun'
+require 'minitest/mock'
 require 'tmpdir'
 require 'fileutils'
 require 'json'
@@ -96,6 +97,27 @@ class LoggerIsolationTest < Minitest::Test
       assert_includes content, "[INFO] #{marker}: after peer reset"
       peer = marker == 'process-A' ? 'process-B' : 'process-A'
       refute_includes content, peer
+    end
+  end
+
+  def test_unavailable_helper_temp_keeps_logger_fallback_and_actionable_warning
+    prior_local = ENV['LOCALAPPDATA']
+    ENV['LOCALAPPDATA'] = @root
+    message = 'No writable ASCII temporary folder is available. Set BC_PDF_TEMP_DIR to a writable ASCII-only path.'
+    failure = proc { |*_args| raise TEMP::Unavailable, message }
+    begin
+      TEMP.stub(:join, failure) { LOG.reset }
+      assert File.file?(LOG.log_path), 'independent logging must survive helper temp failure'
+      assert LOG.log_path.start_with?(@root), 'test must use its writable local fixture'
+      assert_equal 1, LOG.warning_count
+      assert_includes LOG.warnings.first, message
+      LOG.info('after-failure', 'logging still works')
+      LOG.flush_log
+      content = File.read(LOG.log_path)
+      assert_includes content, '[WARN] SafeTemp: ' + message
+      assert_includes content, 'logging still works'
+    ensure
+      ENV['LOCALAPPDATA'] = prior_local
     end
   end
 

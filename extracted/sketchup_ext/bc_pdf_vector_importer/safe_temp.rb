@@ -25,10 +25,10 @@
 #      ASCII and nothing changes for them
 #   3. %ProgramData%\BlueCollarSystems\tmp -- ASCII on every Windows locale
 #      (the localized names in Explorer are display aliases; the physical path
-#      is C:\ProgramData), creatable by a standard non-admin user, no network,
-#      no PATH
-#   4. Dir.tmpdir regardless             -- last resort: a mojibake-risk
-#      attempt still beats having no temp directory at all
+#      is C:\ProgramData). Its writability is checked; no administrator
+#      permissions, network access, or PATH changes are requested.
+# If none is writable and ASCII, raise an actionable Unavailable error. A
+# known non-ASCII path cannot serve as a fallback for these helper writers.
 #
 # Customer-derived filename components (a PDF basename folded into a temp file
 # name) go through ascii_component, because an ASCII root does not help if the
@@ -46,6 +46,7 @@ module BlueCollarSystems
   module PDFVectorImporter
     module SafeTemp
       ENV_OVERRIDE = 'BC_PDF_TEMP_DIR'.freeze
+      class Unavailable < StandardError; end
 
       class << self
         def root
@@ -92,10 +93,10 @@ module BlueCollarSystems
           fallback = program_data_root
           return fallback if fallback
 
-          # Nothing ASCII was available. Continue with the profile temp so the
-          # import can still try; helpers may fail on it, but Ruby-side writes
-          # (logs, reports) generally survive.
-          tmp || Dir.tmpdir
+          raise Unavailable,
+                'No writable ASCII temporary folder is available. Set ' \
+                'BC_PDF_TEMP_DIR to a writable folder with an ASCII-only path ' \
+                'and restart SketchUp.'
         end
 
         def system_tmpdir
