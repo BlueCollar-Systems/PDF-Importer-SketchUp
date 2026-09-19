@@ -20,14 +20,14 @@ class DecorativeDisplayTest < Minitest::Test
     @late[:geometry_evidence] = { :sha256=>'c'*64 }
     @late[:style_evidence] = { :sha256=>'d'*64 }
     @wrapper = row(4,'Group',@bounds.dup,[@late])
-    @wrapper[:transformation] = Subject.translation(0.022)
+    @wrapper[:transformation] = Subject.translation(0.031)
     @wrapper[:decorative_text_wrapper] = true
     @wrapper[:native_child_count] = 1
     @wrapper[:style_evidence] = { :entity_visible=>true,:layer_visible=>true,:material=>nil,:back_material=>nil }
     @earlier = row(5,'Group',@bounds.dup)
     @earlier[:representation_evidence] = { :source_span_id=>'text_span:1:1' }
-    @image = row(2,'Image',{:min=>[0,0,0.021],:max=>[1,1,0.021]})
-    @image[:transformation] = Subject.translation(0.021)
+    @image = row(2,'Image',{:min=>[0,0,0.030],:max=>[1,1,0.030]})
+    @image[:transformation] = Subject.translation(0.030)
     @image[:decorative_source_image] = true
     @image[:style_evidence] = { :entity_visible=>true,:layer_visible=>true }
     @image[:content_evidence] = { :display_width=>1.0,:display_height=>1.0,
@@ -46,16 +46,16 @@ class DecorativeDisplayTest < Minitest::Test
     @text = { :root_id=>'persistent_id:3', :wrapper_id=>'persistent_id:4',
       :source_span_id=>'text_span:1:2',:placement_indices=>[2,3],
       :canonical_parent=>Math3::IDENTITY.dup,:canonical_transformation=>Math3::IDENTITY.dup,
-      :canonical_bounds=>@bounds.dup,:expected_wrapper_transformation=>Subject.translation(0.022),
+      :canonical_bounds=>@bounds.dup,:expected_wrapper_transformation=>Subject.translation(0.031),
       :canonical_physical=>{ :physical_geometry_sha256=>'c'*64,:physical_style_sha256=>'d'*64 } }
     @placement = { :image_id=>'persistent_id:2',:corners_pdf=>[[0,0],[72,0],[72,72],[0,72]],
-      :canonical_transformation=>Math3::IDENTITY.dup,:expected_display_transformation=>Subject.translation(0.021),
+      :canonical_transformation=>Math3::IDENTITY.dup,:expected_display_transformation=>Subject.translation(0.030),
       :source_proof=>@source,:later_text=>[@text] }
-    @proof = { :schema=>Subject::SCHEMA,:policy=>Subject::POLICY,:display_gap_inches=>0.001,
+    @proof = { :schema=>Subject::SCHEMA,:policy=>Subject::POLICY,:display_gap_inches=>0.001,:image_display_gap_inches=>0.01,
       :page_group_id=>'persistent_id:1',:page=>1,:source_pdf_sha256=>'a'*64,:source_svg_sha256=>'e'*64,
       :media_box=>[0,0,72,72],:scale=>1.0,:page_y_offset=>0.0,:page_rotation=>0,
       :svg_page_box=>[0,0,72,72],:svg_viewbox=>[0,0,72,72],
-      :canonical_text_top=>0.02,:image_display_z=>0.021,:placements=>[@placement] }
+      :canonical_text_top=>0.02,:image_display_z=>0.030,:placements=>[@placement] }
     @stats = { :normalized_input_sha256=>'a'*64,:decorative_display_placements=>[@proof] }
   end
 
@@ -77,8 +77,8 @@ class DecorativeDisplayTest < Minitest::Test
       :source_box=>[0,0,72,72],:bounds_svg=>[0,0,72,72],:page_number=>1,
       :source_pdf_sha256=>'a'*64,:placement_index=>9,:paint_rank=>15,:glyph_bounds_svg=>[10,10,20,20] }
     @source[:later_final_page_crops] = [@crop]
-    @crop_image = row(9,'Image',{:min=>[0,0,0.043],:max=>[1,1,0.043]})
-    @crop_image[:transformation] = Subject.translation(0.043)
+    @crop_image = row(9,'Image',{:min=>[0,0,0.052],:max=>[1,1,0.052]})
+    @crop_image[:transformation] = Subject.translation(0.052)
     @crop_image[:representation_evidence] = { :source_span_id=>sid }
     @crop_image[:style_evidence] = { :entity_visible=>true,:layer_visible=>true }
     @crop_image[:content_evidence] = { :raster_source_pdf_sha256=>'a'*64,:raster_page_number=>1,
@@ -96,7 +96,7 @@ class DecorativeDisplayTest < Minitest::Test
 
   def test_rejects_final_crop_coplanar_with_embedded_image
     add_final_crop
-    @crop_image[:transformation][14] = 0.021
+    @crop_image[:transformation][14] = 0.030
     rejects
   end
 
@@ -135,6 +135,24 @@ class DecorativeDisplayTest < Minitest::Test
   def test_accepts_source_bound_image_and_later_original_text_after_json_roundtrip
     assert verify
     assert Subject.verify_manifest!(JSON.parse(JSON.generate(@stats)),JSON.parse(JSON.generate([@page])))
+  end
+  def test_rejects_old_image_clearance_even_when_the_native_and_ledger_agree
+    @image[:transformation][14] = @placement[:expected_display_transformation][14] = 0.021
+    @proof[:image_display_z] = 0.021
+    rejects
+  end
+  def test_later_text_keeps_its_small_clearance_above_the_raised_image
+    assert_in_delta 0.001, @wrapper[:transformation][14] - @image[:transformation][14], 1e-12
+    assert verify
+    @wrapper[:transformation][14] = @text[:expected_wrapper_transformation][14] = 0.040
+    rejects
+  end
+  def test_rejects_unbound_image_gap_and_legacy_display_policy
+    @proof.delete(:image_display_gap_inches)
+    rejects
+    @proof[:image_display_gap_inches] = 0.01
+    @proof[:policy] = 'source_image_then_later_text_z_only/1.0'
+    rejects
   end
   def test_rejects_native_image_xy_shift
     @image[:transformation][12] = 0.02
@@ -266,7 +284,7 @@ class DecorativeDisplayTest < Minitest::Test
     @source[:source_image_event][:corners] = [3,2,1,0].map { |i| [corners[i][0],72-corners[i][1]] }
     canonical = BlueCollarSystems::PDFVectorImporter::EmbeddedImagePlacement.affine(corners,[0,0,72,72],1.0,0.0,0)[:matrix]
     @placement[:canonical_transformation] = canonical
-    @placement[:expected_display_transformation] = Math3.multiply(Subject.translation(0.021),canonical)
+    @placement[:expected_display_transformation] = Math3.multiply(Subject.translation(0.030),canonical)
     @image[:transformation] = @placement[:expected_display_transformation].dup
     @image[:content_evidence][:display_height] = Math.sqrt(1+0.25**2)
     assert verify

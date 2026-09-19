@@ -10,8 +10,12 @@ module BlueCollarSystems
       Math3 = ItemRasterDisplay
       Fidelity = RepresentationFidelity
       DICTIONARY = 'BC_PDF_Importer'.freeze
-      POLICY = 'source_image_then_later_text_z_only/1.0'.freeze
-      SCHEMA = 'bcs.decorative_display/1.0'.freeze
+      POLICY = 'source_image_then_later_text_z_only/1.1'.freeze
+      SCHEMA = 'bcs.decorative_display/1.1'.freeze
+      # A .001-inch image clearance leaked covered filled text in native
+      # oblique views. Separate the tested image depth guard from the smaller
+      # later-text clearance; neither changes source XY or text geometry.
+      IMAGE_GAP = 0.01
       GAP = 0.001
 
       def value(hash, key); Math3.value(hash, key); end
@@ -222,7 +226,8 @@ module BlueCollarSystems
         end.push(0.0).max
         proof = context.merge(:schema=>SCHEMA, :policy=>POLICY,
           :page_group_id=>Fidelity.stable_entity_id(page_group), :display_gap_inches=>GAP,
-          :canonical_text_top=>top, :image_display_z=>top+GAP, :placements=>[])
+          :image_display_gap_inches=>IMAGE_GAP,
+          :canonical_text_top=>top, :image_display_z=>top+IMAGE_GAP, :placements=>[])
         ledger = (stats[:decorative_display_placements] ||= [])
         fail_contract('display order already applied to page') if ledger.any? { |p| value(p,:page_group_id) == proof[:page_group_id] }
         owners = {}
@@ -239,11 +244,11 @@ module BlueCollarSystems
           Math3.close_points!(Math3.image_corners(image.transformation.to_a, Math3::IDENTITY,
             image.width.to_f,image.height.to_f), corners, 'original embedded image corners')
           record[:canonical_transformation] = image.transformation.to_a
-          expected_image = Geom::Transformation.new(translation(top+GAP)) * image.transformation
+          expected_image = Geom::Transformation.new(translation(top+IMAGE_GAP)) * image.transformation
           image.transformation = expected_image
           same_matrix!(image.transformation.to_a,expected_image.to_a,'host ignored image display transformation')
           Math3.close_points!(Math3.image_corners(image.transformation.to_a,Math3::IDENTITY,
-            image.width.to_f,image.height.to_f),corners.map { |p| [p[0],p[1],top+GAP] },'displayed embedded image corners')
+            image.width.to_f,image.height.to_f),corners.map { |p| [p[0],p[1],top+IMAGE_GAP] },'displayed embedded image corners')
           image.set_attribute(DICTIONARY, 'decorative_source_image', true)
           record[:expected_display_transformation] = image.transformation.to_a
           later = plan.fetch(:later_roots)
@@ -264,7 +269,7 @@ module BlueCollarSystems
             bounds = Fidelity.entity_bounds_payload(root)
             before = Fidelity.physical_evidence([root])
             low = minimum_z(bounds, matrix)
-            dz = top + 2*GAP - low
+            dz = top + IMAGE_GAP + GAP - low
             candidates = []
             visit = lambda do |entities|
               entities.to_a.each do |entity|
@@ -326,6 +331,7 @@ module BlueCollarSystems
         ledgers.each do |proof|
           unless value(proof,:schema) == SCHEMA && value(proof,:policy) == POLICY &&
                  value(proof,:display_gap_inches) == GAP &&
+                 value(proof,:image_display_gap_inches) == IMAGE_GAP &&
                  value(proof,:source_pdf_sha256) == (value(stats,:normalized_input_sha256) || value(stats,:normalized_pdf_sha256))
             fail_contract('display policy/source mismatch')
           end
@@ -346,7 +352,7 @@ module BlueCollarSystems
             Math3.bounds_top(value(root[:row],:bounds),parent)
           end.push(0.0).max
           Math3.close_points!([[0,0,value(proof,:canonical_text_top)],[0,0,value(proof,:image_display_z)]],
-            [[0,0,top],[0,0,top+GAP]],'canonical source text top')
+            [[0,0,top],[0,0,top+IMAGE_GAP]],'canonical source text top')
           placements.each do |placement|
             canonical = validate_source!(placement,proof)
             verify_final_page_crops!(placement,proof,stats,rows)
@@ -356,7 +362,7 @@ module BlueCollarSystems
               value(image,:typename) == 'Image' && value(image,:decorative_source_image) == true
             seen_images << id
             visible_neutral_style!(image,false)
-            expected = Math3.multiply(translation(top+GAP),value(placement,:canonical_transformation))
+            expected = Math3.multiply(translation(top+IMAGE_GAP),value(placement,:canonical_transformation))
             same_matrix!(value(placement,:expected_display_transformation),expected,'recorded image matrix changed')
             same_matrix!(value(image,:transformation),expected,'native image matrix changed')
             content = value(image,:content_evidence)
@@ -369,7 +375,7 @@ module BlueCollarSystems
             end
             actual = Math3.image_corners(value(image,:transformation),Math3::IDENTITY,
               value(content,:display_width),value(content,:display_height))
-            Math3.close_points!(actual,canonical.map { |p| [p[0],p[1],top+GAP] },'native source-image footprint')
+            Math3.close_points!(actual,canonical.map { |p| [p[0],p[1],top+IMAGE_GAP] },'native source-image footprint')
             expected_roots = value(value(placement,:source_proof),:later_roots)
             text = value(placement,:later_text)
             fail_contract('later text coverage differs') unless text.is_a?(Array) &&
@@ -397,7 +403,7 @@ module BlueCollarSystems
               Math3.close_points!([value(value(root,:bounds),:min),value(value(root,:bounds),:max)],
                 [value(value(item,:canonical_bounds),:min),value(value(item,:canonical_bounds),:max)],'canonical text bounds')
               low = minimum_z(value(root,:bounds),parent)
-              expected_wrapper = translation((top+2*GAP-low)/parent[10])
+              expected_wrapper = translation((top+IMAGE_GAP+GAP-low)/parent[10])
               same_matrix!(value(wrapper,:transformation),expected_wrapper,'native wrapper is not exact source Z display offset')
               same_matrix!(value(item,:expected_wrapper_transformation),expected_wrapper,'wrapper ledger changed')
               source = expected_roots.find { |r| value(r,:id) == value(item,:root_id) }
