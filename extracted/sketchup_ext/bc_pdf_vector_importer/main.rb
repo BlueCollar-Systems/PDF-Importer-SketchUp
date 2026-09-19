@@ -3699,6 +3699,7 @@ module BlueCollarSystems
           page_opts[:page_certifier] = certifier
           page_opts[:prepared_parser] = parser
           page_opts[:prepared_pdf_path] = prepared_path
+          page_opts[:prepared_salvage_note] = salvage_note
           page_opts[:preserve_prepared_parser] = true
           page_opts[:preserve_logger] = true
           page_opts[:defer_final_diagnostics] = true
@@ -3796,6 +3797,7 @@ module BlueCollarSystems
       if opts[:prepared_parser]
         parser = opts[:prepared_parser]
         path = opts[:prepared_pdf_path] || path
+        salvage_note = opts[:prepared_salvage_note]
       else
         begin
           path, salvage_note = PdfSalvage.prepare_if_needed(path)

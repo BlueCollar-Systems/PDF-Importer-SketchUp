@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
 
 require 'minitest/autorun'
+require 'tmpdir'
+require 'digest'
 
 class ImportRunControlIntegrationTest < Minitest::Test
   MAIN = File.read(File.expand_path(
@@ -98,5 +100,102 @@ class ImportRunControlIntegrationTest < Minitest::Test
     assert_operator assessment, :<, build
     assert_includes pipeline, 'run_control_checkpoint!('
     assert_includes pipeline, ':page_parse'
+  end
+
+  def test_resumable_pages_retain_real_normalization_lineage
+    with_lineage_pipeline(true) do |rows, source, prepared, note|
+      assert_equal 2, rows.length
+      rows.each do |stats|
+        lineage = stats[:source_lineage]
+        assert_equal Digest::SHA256.file(source).hexdigest, lineage[:immutable_pdf_sha256]
+        assert_equal Digest::SHA256.file(prepared).hexdigest, lineage[:normalized_pdf_sha256]
+        refute_equal lineage[:immutable_pdf_sha256], lineage[:normalized_pdf_sha256]
+        assert_equal note, lineage[:salvage_note]
+        assert_equal note, stats[:salvage_note]
+      end
+    end
+  end
+
+  def test_resumable_unchanged_source_does_not_invent_a_salvage_note
+    with_lineage_pipeline(false) do |rows, source, _prepared, _note|
+      assert_equal 2, rows.length
+      rows.each do |stats|
+        lineage = stats[:source_lineage]
+        assert_equal source, lineage[:normalized_pdf_path]
+        assert_equal lineage[:immutable_pdf_sha256], lineage[:normalized_pdf_sha256]
+        assert_nil lineage[:salvage_note]
+        assert_nil stats[:salvage_note]
+      end
+    end
+  end
+
+  # Execute the real resumable handoff, normalization branch and lineage writer.
+  # Geometry/host orchestration is replaced at its boundary; no CAD work is
+  # necessary to reproduce the lost note between these production methods.
+  def with_lineage_pipeline(normalized)
+    Dir.mktmpdir('resumable-lineage') do |dir|
+      source = File.join(dir, 'source.pdf')
+      prepared = normalized ? File.join(dir, 'prepared.pdf') : source
+      File.binwrite(source, '%PDF-fictional-original')
+      File.binwrite(prepared, '%PDF-fictional-normalized') if normalized
+      note = normalized ? 'visible annotation appearances normalized as vector page content' : nil
+      scope = Module.new
+      scope.module_eval(<<-'RUBY')
+        module Logger
+          def self.reset; end
+          def self.info(*); end
+          def self.flush_log; end
+          def self.log_path; nil; end
+        end
+        class PDFParser
+          def initialize(*); end
+          def parse; end
+          def page_count; 2; end
+          def release; end
+        end
+        module PdfSalvage
+          class << self
+            attr_accessor :result
+            def prepare_if_needed(*); result; end
+            def cleanup(*); end
+          end
+        end
+        module ImportRunControl
+          JOURNAL_SCHEMA = 'test'
+          def self.identity_for(*); {}; end
+          class Controller
+            def initialize(*); end
+          end
+          class PageOrchestrator
+            def initialize(options); @options = options; end
+            def run
+              rows = @options[:pages].map do |page|
+                @options[:runner].call(page, 0, nil)[:stats]
+              end
+              {:stats => rows.last.merge(:observed_pages => rows)}
+            end
+          end
+        end
+        def self.resumable_import?(*); true; end
+        def self.report_pipeline_progress(*); end
+        def self.finalize_import_diagnostics!(*); end
+      RUBY
+      scope.const_get(:PdfSalvage).result = [prepared, note]
+      outer = MAIN[/    def self\.run_resumable_pipeline.*?(?=    def self\.create_resumable_page_group!)/m]
+      lineage = MAIN[/    def self\.record_source_lineage!.*?(?=    def self\.finalize_import_diagnostics!)/m]
+      preparation = MAIN[/      salvage_note = nil\n      if opts\[:prepared_parser\].*?(?=      if parser\.page_count == 0)/m]
+      refute_nil outer
+      refute_nil lineage
+      refute_nil preparation
+      scope.module_eval(outer + lineage, __FILE__, __LINE__)
+      scope.module_eval("def self.run_pipeline(model, path, opts)\n" \
+        "source_path = path\n" + preparation +
+        "stats = {}\nrecord_source_lineage!(stats, source_path, path, salvage_note, opts)\n" \
+        "stats[:next_y_offset] = 0\nstats\nend", __FILE__, __LINE__)
+      result = scope.run_resumable_pipeline(nil, source,
+        :pages => [1, 2], :text_mode => :text3d, :group_per_page => true,
+        :cancel_probe => lambda { false }, :status_sink => lambda { |_| })
+      yield result[:observed_pages], source, prepared, note
+    end
   end
 end
