@@ -5237,6 +5237,10 @@ module BlueCollarSystems
           end
         end
 
+        # Host commit purges empty groups. Keep that automatic housekeeping out
+        # of the strict retained-tree signature by finalizing only this
+        # builder's source color containers before page certification.
+        builder.prune_empty_color_groups!
         add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
 
         # Advance the running page stack only after a successful import.

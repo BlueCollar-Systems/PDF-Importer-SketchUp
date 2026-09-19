@@ -291,6 +291,7 @@ jobs:
           ruby test/text_display_container_test.rb
           ruby test/page_paint_bounds_test.rb
           ruby test/stroke_color_preservation_test.rb
+          ruby test/labels_empty_text_group_resume_signature_test.rb
           ruby test/pdf_color_display_test.rb
           ruby test/embedded_image_affine_test.rb
           ruby test/embedded_image_extractor_test.rb

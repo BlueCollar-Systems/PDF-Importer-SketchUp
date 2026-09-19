@@ -115,6 +115,7 @@ module BlueCollarSystems
 
         # Color group cache
         @color_groups = {}
+        @color_group_parents = {}
         fill_targets = {}
         @fill_only_groups = []
 
@@ -282,6 +283,7 @@ module BlueCollarSystems
         )
         finalize_geometry_staging!
         flush_deferred_small_faces!
+        prune_empty_color_groups!
         emit_progress(
           :geometry_completed,
           :path_count => @paths.length,
@@ -380,6 +382,30 @@ module BlueCollarSystems
           source_provenance_objects: Array(@provenance_bucket),
           geometry_staging: geometry_staging_metrics.merge(:stroke_clipping => @stroke_clipping)
         }
+      end
+
+      # Empty color containers are temporary construction details. SketchUp
+      # deletes them at commit, so remove only our own empty containers before
+      # the retained page tree is certified. Call again after page cleanup,
+      # which can empty a previously populated source color group.
+      def prune_empty_color_groups!
+        removed = 0
+        (@color_groups || {}).keys.each do |key|
+          group = @color_groups[key]
+          next unless group.entities.length == 0
+          parent = @color_group_parents[key]
+          unless parent && parent.to_a.include?(group)
+            raise 'empty color group lost its source-owned parent'
+          end
+          group.erase!
+          if parent.to_a.include?(group)
+            raise 'host did not remove an empty color group before certification'
+          end
+          @color_groups.delete(key)
+          @color_group_parents.delete(key)
+          removed += 1
+        end
+        removed
       end
 
       private
@@ -3191,6 +3217,7 @@ module BlueCollarSystems
           grp = parent_entities.add_group
           grp.name = "Color_%02X%02X%02X" % [r, g, b]
           @color_groups[key] = grp
+          @color_group_parents[key] = parent_entities
         end
 
         @color_groups[key].entities

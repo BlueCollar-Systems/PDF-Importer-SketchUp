@@ -428,4 +428,78 @@ class LabelsEmptyTextGroupResumeSignatureTest < Minitest::Test
       c.is_a?(FakeHost::Group) && c.entities.length.zero?
     }
   end
+
+  def build_color_page(model, empty, heavy = false)
+    kept = heavy ? 500.times.map { |i| line_path(10.0 + i) } : [line_path(10.0)]
+    colored = line_path(30.0)
+    colored.subpaths.first.segments.last.points[1] = [0.001, 30.0] if empty
+    colored.stroke_color = [0.25, 0.5, 0.75]
+    builder = Builder.new(model, kept + [colored], [], MEDIA_BOX,
+      :group_per_page => true, :group_by_color => true,
+      :detect_arcs => false, :import_fills => false, :import_text => false,
+      :requested_text_mode => :text3d)
+    [builder, builder.build]
+  end
+
+  def color_group(builder)
+    builder.page_group.entities.to_a.find { |child| child.name == 'Color_3F7FBF' }
+  end
+
+  def test_empty_source_color_group_does_not_change_signature_at_commit
+    [false, true].each do |heavy|
+      model = FakeHost::Model.new
+      model.start_operation('PDF Import', true)
+      builder, result = build_color_page(model, true, heavy)
+      assert_nil color_group(builder), 'an undelivered short source path must not leave an empty color group'
+      assert_equal heavy ? 500 : 1, result[:edges]
+      controller = IRC::Controller.new(:model => model, :pages => [1],
+        :requested_mode => :text3d, :identity => identity, :clock => lambda { 0.0 })
+      controller.certify_page!(builder.page_group, 1)
+      model.commit_operation
+      assert_equal [1], controller.resumable_pages
+      assert_equal 0, model.purged_groups
+    end
+  end
+
+  def test_color_cleanup_after_page_finalization_preserves_unowned_groups
+    model = FakeHost::Model.new
+    builder, = build_color_page(model, false)
+    colored = color_group(builder)
+    refute_nil colored
+    colored.entities.erase_entities(colored.entities.to_a)
+    unrelated = builder.page_group.entities.add_group
+    unrelated.name = 'Color_USER'
+    assert_equal 1, builder.prune_empty_color_groups!
+    refute colored.valid?
+    assert unrelated.valid?, 'cleanup owns only groups created by this builder'
+    assert_includes builder.page_group.entities.to_a, unrelated
+    assert_equal 0, builder.prune_empty_color_groups!, 'cleanup is idempotent'
+  end
+
+  def test_empty_color_group_ignored_erase_fails_instead_of_certifying
+    model = FakeHost::Model.new
+    builder, = build_color_page(model, false)
+    colored = color_group(builder)
+    colored.entities.erase_entities(colored.entities.to_a)
+    def colored.erase!; true; end
+    error = assert_raises(RuntimeError) { builder.prune_empty_color_groups! }
+    assert_match(/empty color group/, error.message)
+    assert colored.valid?
+  end
+
+  def test_nonempty_color_group_and_strict_signature_remain_unchanged
+    model = FakeHost::Model.new
+    builder, = build_color_page(model, false)
+    colored = color_group(builder)
+    before = colored.entities.to_a
+    assert_equal 0, builder.prune_empty_color_groups!
+    assert_equal before, colored.entities.to_a
+    controller = IRC::Controller.new(:model => model, :pages => [1],
+      :requested_mode => :text3d, :identity => identity, :clock => lambda { 0.0 })
+    controller.certify_page!(builder.page_group, 1)
+    model.commit_operation
+    assert_equal [1], controller.resumable_pages
+    colored.entities.erase_entities(before.first)
+    assert_raises(IRC::ResumeMismatch) { controller.resumable_pages }
+  end
 end
