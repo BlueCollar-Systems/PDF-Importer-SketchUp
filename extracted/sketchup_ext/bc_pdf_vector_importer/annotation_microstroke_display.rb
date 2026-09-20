@@ -112,10 +112,12 @@ module BlueCollarSystems
         validate_composite_proof!(composite,context)
         source = composite[:source]
         owned = page.entities.to_a
+        # Original PDF dictionaries retain String keys inside the live
+        # Symbol-keyed record. Compare both at the persisted JSON boundary.
         unless group && group.valid? && group.typename.to_s == 'Group' && owned.include?(group) &&
                image && image.valid? && image.typename.to_s == 'Image' && owned.include?(image) &&
                group.get_attribute(DICTIONARY,'original_annotation_capsule',false) == true &&
-               symbols(JSON.parse(group.get_attribute(DICTIONARY,'original_annotation_source','null'))) == source &&
+               JSON.parse(group.get_attribute(DICTIONARY,'original_annotation_source','null')) == JSON.parse(JSON.generate(source)) &&
                image.get_attribute(DICTIONARY,'annotation_composite_image',false) == true &&
                image.get_attribute(DICTIONARY,'annotation_source_pdf_sha256') == context[:source_pdf_sha256] &&
                image.get_attribute(DICTIONARY,'annotation_page_number') == context[:page] &&

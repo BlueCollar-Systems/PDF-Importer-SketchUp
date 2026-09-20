@@ -304,6 +304,60 @@ class AnnotationMicrostrokeGeometryTest < Minitest::Test
     assert_equal binding,Subject.symbols(JSON.parse(capsule.get_attribute(Display::DICTIONARY,'original_annotation_display_replacement')))
   end
 
+  def mixed_pdf_dictionary_suppression_fixture
+    page,capsule,image,unrelated,composite,proof = suppression_fixture
+    # The real qualifier retains original PDF dictionary keys as Strings inside
+    # its Symbol-keyed record. Do not pre-normalize this provider boundary.
+    parser_class = Class.new do
+      def initialize
+        @objects = {
+          '8 0 R'=>{'/Subtype'=>'/Form','/BBox'=>[10,20,50,60],
+            '/Group'=>{'/S'=>'/Transparency'},
+            '/Resources'=>{'/ExtGState'=>{'/GS'=>'9 0 R'}}},
+          '9 0 R'=>{'/CA'=>'1','/ca'=>'1','/BM'=>'/Multiply'}
+        }
+      end
+      def resolve_object(value); @objects.fetch(value,value); end
+      def to_dict(value); value if value.is_a?(Hash); end
+      def get_stream_data(_number)
+        '/GS gs 1 0.5 0.25 RG 4 w 1 J 1 j 30 40 m 30.014 40 l S'
+      end
+    end
+    record = Importer::SourceRoundAnnotationInk.qualify(parser_class.new,'7 0 R',
+      {'/Subtype'=>'/Ink','/F'=>'4','/Rect'=>[10,20,50,60],'/AP'=>{'/N'=>'8 0 R'}},
+      source[:page_clip_polygons_pdf])
+    record.merge!(:source_pdf_sha256=>proof[:source_pdf_sha256],:page_number=>proof[:page],
+      :page_clip_polygons_pdf=>source[:page_clip_polygons_pdf])
+    composite[:source].replace(record)
+    capsule.set_attribute(Display::DICTIONARY,'original_annotation_source',JSON.generate(record))
+    [page,capsule,image,unrelated,composite,proof]
+  end
+
+  def test_live_qualified_original_pdf_dictionary_survives_stored_json_boundary
+    page,capsule,image,unrelated,composite,proof = mixed_pdf_dictionary_suppression_fixture
+    assert_equal '/Transparency',composite[:source][:forms][0][:group]['/S']
+    assert_equal '/Multiply',composite[:source][:graphics_states][0][:dictionary]['/BM']
+    source_before = Marshal.dump(composite[:source])
+    geometry_before = Marshal.dump(capsule.source_geometry)
+    Display.suppress_replaced_capsule!(page,capsule,image,composite,proof)
+    assert capsule.hidden?
+    refute image.hidden?
+    refute unrelated.hidden?
+    assert_equal source_before,Marshal.dump(composite[:source])
+    assert_equal geometry_before,Marshal.dump(capsule.source_geometry)
+  end
+
+  def test_changed_nested_original_pdf_value_cannot_suppress_editable_source
+    page,capsule,image,_unrelated,composite,proof = mixed_pdf_dictionary_suppression_fixture
+    stored = JSON.parse(capsule.get_attribute(Display::DICTIONARY,'original_annotation_source'))
+    stored['graphics_states'][0]['dictionary']['/BM'] = '/Normal'
+    capsule.set_attribute(Display::DICTIONARY,'original_annotation_source',JSON.generate(stored))
+    error = assert_raises(Error) { Display.suppress_replaced_capsule!(page,capsule,image,composite,proof) }
+    assert_match(/display replacement is not the exact live owned annotation pair/,error.message)
+    refute capsule.hidden?
+    refute image.hidden?
+  end
+
   def test_ignored_hide_setter_rejects_duplicate_visible_paint
     page,capsule,image,_unrelated,composite,proof = suppression_fixture
     capsule.ignore_hidden = true
