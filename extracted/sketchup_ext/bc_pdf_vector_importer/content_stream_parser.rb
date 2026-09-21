@@ -5,6 +5,8 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
+require File.join(File.dirname(__FILE__), 'stroke_clipping')
+
 module BlueCollarSystems
   module PDFVectorImporter
     class ContentStreamParser
@@ -39,7 +41,7 @@ module BlueCollarSystems
       VectorPath.class_eval do
         attr_accessor :source_paint_order, :source_fill_opacity,
                       :source_stroke_opacity, :source_clip_clear,
-                      :source_miter_limit, :source_stroke_style_proven
+                      :source_miter_limit, :source_stroke_style_proven, :source_stroke_clip
       end
 
       SubPath = Struct.new(
@@ -1039,6 +1041,7 @@ module BlueCollarSystems
         path.source_clip_clear = @clip_regions.empty? && !@text_clip_active && !@text_clip_pending
         path.source_miter_limit = @miter_limit
         path.source_stroke_style_proven = @stroke_style_proven
+        path.source_stroke_clip = StrokeClipping.snapshot(@clip_regions, @text_clip_active || @text_clip_pending) if stroke
         apply_pending_clip!
         clear_path
       end

@@ -27,6 +27,14 @@ require File.join(
   SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
   'bc_pdf_vector_importer', 'item_raster_display'
 )
+require File.join(
+  SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
+  'bc_pdf_vector_importer', 'decorative_display'
+)
+require File.join(
+  SketchupHostEvidence::IMPORTER_SOURCE_ROOT,
+  'bc_pdf_vector_importer', 'annotation_microstroke_display'
+)
 
 module SketchupHostEvidence
   class EvidenceError < StandardError; end
@@ -747,6 +755,48 @@ module SketchupHostEvidence
     verify_persistent_rows!(saved, reopened)
   end
 
+  # Preserve raw physical evidence only on failure. A later retry may not
+  # reproduce a host normalization, so retain both snapshots before closing
+  # SketchUp. Diagnostic I/O must never replace the original verifier error.
+  def self.with_preservation_diagnostics!(output_dir, phase, before, after,
+                                          context = {})
+    yield
+  rescue StandardError => original_error
+    begin
+      directory = Dir.mktmpdir(
+        "#{phase.to_s.gsub(/[^a-zA-Z0-9_-]/, '_')}_preservation_failure_",
+        File.expand_path(output_dir)
+      )
+      files = {}
+      { 'before' => before, 'after' => after }.each do |name, manifest|
+        path = atomic_write_json(File.join(directory, "#{name}.json"), manifest)
+        files[name] = {
+          'path' => path, 'sha256' => Digest::SHA256.file(path).hexdigest,
+          'byte_size' => File.size(path)
+        }
+      end
+      payload = context.merge(
+        'schema' => 'bcs.host_preservation_failure/1.0',
+        'phase' => phase.to_s,
+        'error_class' => original_error.class.to_s,
+        'error' => original_error.message.to_s,
+        'backtrace' => Array(original_error.backtrace),
+        'manifests' => files
+      )
+      ['model_path', 'source_pdf_path'].each do |key|
+        path = hash_value(context, key)
+        next unless path && File.file?(path)
+        payload[key.sub(/_path\z/, '_sha256')] = Digest::SHA256.file(path).hexdigest
+      end
+      atomic_write_json(File.join(directory, 'receipt.json'), payload)
+    rescue StandardError => diagnostic_error
+      warn "Host preservation diagnostics could not be retained: " \
+           "#{diagnostic_error.class}: #{diagnostic_error.message}; " \
+           "original failure: #{original_error.class}: #{original_error.message}"
+    end
+    raise
+  end
+
   def self.verify_lightweight_reopen_continuity!(saved_manifest,
                                                   reopened_manifest)
     normalized = normalize_texture_proof_for_lightweight(reopened_manifest)
@@ -1022,6 +1072,8 @@ module SketchupHostEvidence
         stats, manifest, requested_mode, selected_pages
       )
       verify_item_raster_display!(stats, manifest, require_item_raster_display)
+      verify_decorative_display!(stats, manifest)
+      verify_original_annotation_ink!(stats, manifest)
       verify_page_representation_fallbacks!(
         stats, requested_mode, selected_pages
       )
@@ -1040,6 +1092,25 @@ module SketchupHostEvidence
     helper.verify_manifest!(stats, manifest)
   rescue BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError => error
     raise EvidenceError, error.message
+  end
+
+  def self.verify_decorative_display!(stats, manifest)
+    observed = false
+    BlueCollarSystems::PDFVectorImporter::ItemRasterDisplay.walk_rows(manifest) do |row|
+      observed ||= hash_value(row, :decorative_source_image) == true ||
+        hash_value(row, :decorative_text_wrapper) == true
+    end
+    qualified = Array(hash_value(stats,:embedded_image_paint_order)).any? { |row| hash_value(row,:qualified_count).to_i > 0 }
+    return true unless observed || qualified || hash_key?(stats, :decorative_display_placements)
+    BlueCollarSystems::PDFVectorImporter::DecorativeDisplay.verify_manifest!(stats, manifest)
+  rescue BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError => error
+    raise EvidenceError, error.message
+  end
+
+  def self.verify_original_annotation_ink!(stats, manifest)
+    BlueCollarSystems::PDFVectorImporter::AnnotationMicrostrokeDisplay.verify_manifest!(stats,manifest)
+  rescue BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError => error
+    raise EvidenceError,error.message
   end
 
   def self.verify_attempt_claim_ownership!(attempts, rows_by_claim)
@@ -1263,7 +1334,15 @@ module SketchupHostEvidence
     physical_tree = fidelity.physical_entity_tree(
       entity, child_trees, shared_payloads
     )
-    include_row = !compact || top_level || source_claim_root?(representation) ||
+    decorative_image = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'decorative_source_image', false) == true
+    decorative_wrapper = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'decorative_text_wrapper', false) == true
+    annotation_capsule = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'original_annotation_capsule', false) == true
+    annotation_image = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'annotation_composite_image', false) == true
+    include_row = !compact || top_level || decorative_image || decorative_wrapper || annotation_capsule || annotation_image || source_claim_root?(representation) ||
       !child_rows.empty?
     return [nil, physical_tree] unless include_row
 
@@ -1280,13 +1359,36 @@ module SketchupHostEvidence
       'valid' => boolean_state(entity, :valid?),
       'deleted' => boolean_state(entity, :deleted?),
       'bounds' => physical_tree_bounds(physical_tree),
-      'transformation' => physical_tree_transformation(physical_tree),
+      # Placement comparisons need the full native precision. The physical
+      # tree intentionally quantizes coordinates for stable geometry hashes;
+      # using its matrix here can falsely report movement of a source image.
+      'transformation' => transformation_payload(entity),
       'representation_evidence' => representation,
       'content_evidence' => host_content_evidence(entity, typename, context),
       'geometry_evidence' => physical['geometry_evidence'],
       'style_evidence' => physical['style_evidence'],
       'children' => child_rows
     }
+    row['decorative_source_image'] = true if decorative_image
+    if child_rows.any? { |child| child['original_annotation_capsule'] == true }
+      row['annotation_highest_other_z'] = BlueCollarSystems::PDFVectorImporter::AnnotationMicrostrokeDisplay.highest_other_z(entity.entities)
+    end
+    if annotation_capsule
+      row['original_annotation_capsule'] = true
+      row['annotation_native_geometry'] = BlueCollarSystems::PDFVectorImporter::AnnotationMicrostrokeGeometry.snapshot(entity)
+    end
+    if annotation_image
+      row['annotation_composite_image'] = true
+      row['annotation_source_binding'] = {
+        'source_pdf_sha256'=>entity.get_attribute('BC_PDF_Importer','annotation_source_pdf_sha256',nil),
+        'page'=>entity.get_attribute('BC_PDF_Importer','annotation_page_number',nil),
+        'annotation_ref'=>entity.get_attribute('BC_PDF_Importer','annotation_ref',nil)
+      }
+    end
+    if decorative_wrapper
+      row['decorative_text_wrapper'] = true
+      row['native_child_count'] = child_results.length
+    end
     [row, physical_tree]
   end
   private_class_method :snapshot_entity_with_physical_tree
@@ -1666,7 +1768,11 @@ module SketchupHostEvidence
       'source_span_id' => attributes['source_span_id']
     }
     claimed_visual_sha = attributes['raster_visual_pixel_sha256'].to_s.strip
-    unless claimed_visual_sha.empty?
+    decorative_image = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'decorative_source_image', false) == true
+    annotation_image = entity.respond_to?(:get_attribute) &&
+      entity.get_attribute('BC_PDF_Importer', 'annotation_composite_image', false) == true
+    unless claimed_visual_sha.empty? && !decorative_image && !annotation_image
       if texture_proof
         evidence.merge!(
           texture_pixel_evidence(entity, performance_telemetry)
@@ -1746,7 +1852,7 @@ module SketchupHostEvidence
     claim_root = entity.get_attribute(dictionary, 'source_claim_root', nil)
     values['source_claim_root'] = claim_root unless claim_root.nil?
     [
-      'source_evidence_sha256', 'source_text_sha256',
+      'source_evidence_sha256', 'source_text_sha256', 'source_placement_indices',
       'physical_geometry_sha256', 'physical_style_sha256',
       'source_ink_material_owned', 'source_ink_material_name',
       'source_ink_rgb', 'source_ink_alpha',
@@ -1924,9 +2030,20 @@ module SketchupHostEvidence
     end
     return value unless value.is_a?(Hash)
 
+    physical_texture = hash_value(value, :host_texture_export_verified) == true
+    if physical_texture
+      exact_positive_integer!(
+        hash_value(value, :host_texture_export_byte_size),
+        'host texture export byte size'
+      )
+    end
     stable = {}
     value.each do |key, entry|
       next if VOLATILE_CONTENT_EVIDENCE_KEYS.include?(key.to_s)
+      # TextureWriter may encode identical pixels with a different PNG size.
+      # Successful export/decoding, pixel digest, dimensions, source claims,
+      # original crop bytes and placement remain mandatory comparison keys.
+      next if physical_texture && key.to_s == 'host_texture_export_byte_size'
       stable[key] = stable_content_evidence(entry)
     end
     stable

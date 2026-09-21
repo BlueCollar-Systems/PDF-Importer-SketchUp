@@ -9,6 +9,8 @@ $LOAD_PATH.unshift(SRC_ROOT)
 
 require 'bc_pdf_vector_importer/logger'
 require 'bc_pdf_vector_importer/embedded_image_extractor'
+require 'bc_pdf_vector_importer/pdf_parser'
+require_relative 'support/synthetic_pdf_builder'
 
 BlueCollarSystems::PDFVectorImporter::Logger.debug = false
 
@@ -227,6 +229,38 @@ class EmbeddedImageExtractorTest < Minitest::Test
       assert_equal 1, assets.length
       assert_equal 'Im2', assets.first.name
       assert File.file?(assets.first.file_path)
+    end
+  end
+
+  def test_real_parser_keeps_each_forms_private_image_resource_and_soft_mask
+    [false, true].each do |root_image|
+      Dir.mktmpdir('su_form_image_scope_') do |dir|
+        pdf = real_form_image_pdf(dir, root_image)
+        expanded = pdf.page_data(1)[:content_streams].join
+        refute_includes expanded, '/FmA Do'
+        assert_includes expanded, '/Im0 Do'
+        assets = BlueCollarSystems::PDFVectorImporter::EmbeddedImageExtractor
+          .new(pdf, dir).extract_page(1)
+        assert_equal(root_image ? [7, 8, 9] : [7, 8], assets.map(&:obj_num))
+        assert_equal [33.0, 52.0, 43.0, 70.0], assets[0].bbox_pts
+        assert_equal [110.0, 20.0, 112.0, 23.0], assets[1].bbox_pts
+        assert_equal [255, 0, 0, 128], decoded_rgba_bytes(assets[0], dir)
+        assert_equal [0, 0, 255, 255], decoded_rgba_bytes(assets[1], dir)
+        if root_image
+          assert_equal [0, 255, 0, 255], decoded_rgba_bytes(assets[2], dir)
+        end
+      end
+    end
+  end
+
+  def test_image_graphics_state_continues_between_page_content_streams
+    Dir.mktmpdir('su_form_image_streams_') do |dir|
+      pdf = real_form_image_pdf(dir, false, true)
+      assets = BlueCollarSystems::PDFVectorImporter::EmbeddedImageExtractor
+        .new(pdf, dir).extract_page(1)
+      assert_equal [7, 8], assets.map(&:obj_num)
+      assert_equal [33.0, 52.0, 43.0, 70.0], assets[0].bbox_pts
+      assert_equal [110.0, 20.0, 112.0, 23.0], assets[1].bbox_pts
     end
   end
 
@@ -787,6 +821,41 @@ class EmbeddedImageExtractorTest < Minitest::Test
   end
 
   private
+
+  def real_form_image_pdf(dir, root_image, split_streams = false)
+    builder = SyntheticPdfBuilder
+    prefix = 'q 2 0 0 3 11 13 cm '
+    body = '/FmA Do Q q 1 0 0 1 100 0 cm /FmB Do Q'.dup
+    body += ' q 1 0 0 1 160 80 cm /Im0 Do Q' if root_image
+    resources = '/FmA 5 0 R /FmB 6 0 R'
+    resources += ' /Im0 9 0 R' if root_image
+    image_dict = '/Type /XObject /Subtype /Image /Width 1 /Height 1 ' \
+      '/BitsPerComponent 8 /ColorSpace /DeviceRGB'
+    contents = split_streams ? '[4 0 R 11 0 R]' : '4 0 R'
+    objects = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] ' \
+        '/Resources << /XObject << ' + resources + ' >> >> /Contents ' + contents + ' >>',
+      builder.stream_object('', split_streams ? prefix : prefix + body),
+      builder.stream_object('/Type /XObject /Subtype /Form /BBox [0 0 30 30] ' \
+        '/Matrix [1 0 0 1 4 5] /Resources << /XObject << /Im0 7 0 R >> >>',
+        'q 5 0 0 6 7 8 cm /Im0 Do Q'),
+      builder.stream_object('/Type /XObject /Subtype /Form /BBox [0 0 30 30] ' \
+        '/Resources << /XObject << /Im0 8 0 R >> >>',
+        'q 2 0 0 3 10 20 cm /Im0 Do Q'),
+      builder.stream_object(image_dict + ' /SMask 10 0 R', [255, 0, 0].pack('C*')),
+      builder.stream_object(image_dict, [0, 0, 255].pack('C*')),
+      builder.stream_object(image_dict, [0, 255, 0].pack('C*')),
+      builder.stream_object('/Type /XObject /Subtype /Image /Width 1 /Height 1 ' \
+        '/BitsPerComponent 8 /ColorSpace /DeviceGray', [128].pack('C*'))
+    ]
+    objects << builder.stream_object('', body) if split_streams
+    path = builder.write(File.join(dir, 'fictional-image-scopes.pdf'), objects)
+    parser = BlueCollarSystems::PDFVectorImporter::PDFParser.new(path)
+    parser.parse
+    parser
+  end
 
   def decoded_rgba_bytes(asset, dir)
     decoded = File.join(dir, 'decoded.rgba')

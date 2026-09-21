@@ -103,9 +103,195 @@ module BlueCollarSystems
         # Expand each `/Name Do` inline as `q <Matrix> cm <form> Q` so the
         # vector parser, text parser, and nominal scanner all see it in the
         # graphics state active at the invocation point.
+        # Resource-aware consumers must walk the original Form invocations.
+        # Expanded streams retain inner /Image names but not their Form-local
+        # resource dictionaries, so looking those names up at page scope can
+        # silently omit an image or substitute an unrelated page image.
+        source_content_streams = streams
         streams = expand_form_xobjects(streams, dict) unless streams.empty?
 
-        { media_box: media_box, crop_box: crop_box, rotation: rotation, content_streams: streams }
+        { media_box: media_box, crop_box: crop_box, rotation: rotation,
+          content_streams: streams, source_content_streams: source_content_streams }
+      end
+
+      # Annotation appearances are outside /Contents. The native path parser
+      # cannot infer their paint from page streams; normalize them once first.
+      def page_has_annotations?(page_num)
+        !page_annotation_entries(page_num).empty?
+      end
+
+      # Navigation rectangles without a source appearance are not drawing ink.
+      # Ghostscript fabricates a default black Link border when /Border and
+      # /BS are absent. Keep genuine authored appearances and explicit style.
+      def page_has_annotation_appearances?(page_num)
+        page_annotation_entries(page_num).any? do |entry|
+          !navigation_only_link?(entry)
+        end
+      end
+
+      def page_annotation_entries(page_num)
+        raise ArgumentError, 'annotation page is out of range' unless (1..@page_count).include?(page_num)
+        dict = to_dict(resolve_object(@pages[page_num - 1]))
+        raise 'annotation page dictionary is unavailable' unless dict
+        value = dict['/Annots']
+        return [] if value.nil? || value == 'null'
+        entries = resolve_object(value)
+        return [] if entries == 'null'
+        if entries.is_a?(String) && entries.strip.start_with?('[')
+          entries = parse_array_string(entries)
+        end
+        raise 'annotation array is unresolved or malformed' unless entries.is_a?(Array)
+        entries
+      end
+
+      def navigation_only_link?(entry)
+        dict = to_dict(resolve_object(entry))
+        raise 'annotation dictionary is unresolved or malformed' unless dict
+        return false unless dict['/Subtype'] == '/Link'
+        # Any authored appearance/appearance characteristics require rendering;
+        # an unknown or broken appearance is never evidence of source absence.
+        return false if ['/AP', '/MK', '/C'].any? do |key|
+          dict.key?(key) && !dict[key].nil? && dict[key] != 'null'
+        end
+        if dict.key?('/BS') && !dict['/BS'].nil? && dict['/BS'] != 'null'
+          style = to_dict(resolve_object(dict['/BS']))
+          raise 'Link border style is unresolved or malformed' unless style
+          return annotation_border_width(style.fetch('/W', '1')) == 0.0
+        end
+        if dict.key?('/Border') && !dict['/Border'].nil? && dict['/Border'] != 'null'
+          border = resolve_object(dict['/Border'])
+          border = parse_array_string(border) if border.is_a?(String) && border.strip.start_with?('[')
+          raise 'Link border array is unresolved or malformed' unless border.is_a?(Array) && [3, 4].include?(border.length)
+          return annotation_border_width(border[2]) == 0.0
+        end
+        true
+      end
+
+      def annotation_border_width(value)
+        number = Float(resolve_object(value))
+        raise 'Link border width is invalid' unless number.finite? && number >= 0.0
+        number
+      rescue ArgumentError, TypeError
+        raise 'Link border width is unresolved or malformed'
+      end
+
+      # With an authored normal appearance, Ghostscript still adds a black
+      # default Link border unless the preparation input explicitly suppresses
+      # it. Do not change any authored border/style/color or the AP itself.
+      def link_appearance_needs_zero_border?(dict)
+        return false unless dict['/Subtype'] == '/Link'
+        return false unless dict.key?('/AP') && !dict['/AP'].nil? && dict['/AP'] != 'null'
+        return false if ['/Border', '/BS', '/C'].any? do |key|
+          dict.key?(key) && !dict[key].nil? && dict[key] != 'null'
+        end
+        appearance = to_dict(resolve_object(dict['/AP']))
+        raise 'Link normal appearance is unresolved or malformed' unless
+          appearance && appearance['/N'] && appearance['/N'] != 'null'
+        normal = to_dict(resolve_object(appearance['/N']))
+        raise 'Link normal appearance is unresolved or malformed' unless normal
+        unless normal['/Subtype'] == '/Form'
+          state = dict['/AS']
+          normal = state && normal[state] && to_dict(resolve_object(normal[state]))
+          raise 'Link normal appearance state is unresolved or malformed' unless
+            normal && normal['/Subtype'] == '/Form'
+        end
+        true
+      end
+
+      # Only a private preparation copy is written. Original objects/streams
+      # remain byte-for-byte intact; an incremental update replaces /Annots on
+      # affected page dictionaries. This also handles a mixture of invisible
+      # navigation Links and visible Link/custom markup appearances.
+      def write_annotation_appearance_copy(destination)
+        raise 'annotation copy cannot replace the source' if File.expand_path(destination) == File.expand_path(@filepath)
+        raise 'annotation copy destination already exists' if File.exist?(destination)
+        raise 'annotation copy requires an unencrypted parsed source' unless @data && @trailer && !@trailer.key?('/Encrypt')
+        updates = []
+        next_object = [@trailer['/Size'].to_i, (@objects.keys.max || 0) + 1].max
+        (1..@page_count).each do |page|
+          entries = page_annotation_entries(page)
+          kept = []
+          changed = false
+          entries.each do |entry|
+            if navigation_only_link?(entry)
+              changed = true
+              next
+            end
+            annotation = to_dict(resolve_object(entry))
+            if link_appearance_needs_zero_border?(annotation)
+              annotation = annotation.dup
+              annotation['/Border'] = ['0', '0', '0']
+              updates << [next_object, 0, annotation]
+              kept << next_object.to_s + ' 0 R'
+              next_object += 1
+              changed = true
+            else
+              kept << entry
+            end
+          end
+          next unless changed
+          ref = @pages[page - 1]
+          match = /\A(\d+)\s+(\d+)\s+R\z/.match(ref.to_s)
+          raise 'annotation copy page reference is invalid' unless match
+          dict = to_dict(resolve_object(ref)).dup
+          dict['/Annots'] = kept
+          updates << [match[1].to_i, match[2].to_i, dict]
+        end
+        return false if updates.empty?
+        root = @trailer['/Root']
+        previous = @xref_offsets.first
+        raise 'annotation copy root or cross-reference is invalid' unless
+          root.is_a?(String) && root =~ /\A\d+\s+\d+\s+R\z/ &&
+          previous.is_a?(Integer) && previous > 0
+        trailer = { '/Root' => root, '/Size' => next_object.to_s, '/Prev' => previous.to_s }
+        ['/Info', '/ID'].each { |key| trailer[key] = @trailer[key] if @trailer.key?(key) }
+        created = false
+        complete = false
+        begin
+          File.open(destination, File::WRONLY | File::CREAT | File::EXCL) do |file|
+            created = true
+            file.binmode
+            file.write(@data)
+            file.write("\n")
+            offsets = []
+            updates.sort_by { |row| row[0] }.each do |number, generation, dict|
+              raise 'annotation copy generation is invalid' unless generation >= 0 && generation < 65535
+              offsets << [number, generation, file.pos]
+              file.write(number.to_s + ' ' + generation.to_s + " obj\n")
+              file.write(annotation_pdf_value(dict))
+              file.write("\nendobj\n")
+            end
+            xref = file.pos
+            file.write("xref\n")
+            offsets.each do |number, generation, position|
+              file.write(number.to_s + " 1\n" + format('%010d %05d n ', position, generation) + "\n")
+            end
+            file.write("trailer\n" + annotation_pdf_value(trailer) + "\nstartxref\n" + xref.to_s + "\n%%EOF\n")
+          end
+          complete = true
+          true
+        ensure
+          File.delete(destination) if created && !complete && File.file?(destination)
+        end
+      end
+
+      def annotation_pdf_value(value)
+        case value
+        when Hash
+          '<< ' + value.map { |key, item| key + ' ' + annotation_pdf_value(item) }.join(' ') + ' >>'
+        when Array
+          '[ ' + value.map { |item| annotation_pdf_value(item) }.join(' ') + ' ]'
+        when String
+          value
+        when TrueClass
+          'true'
+        when FalseClass
+          'false'
+        when NilClass
+          'null'
+        else
+          raise 'unsupported annotation copy dictionary token'
+        end
       end
 
       # ---------------------------------------------------------------
@@ -818,8 +1004,9 @@ module BlueCollarSystems
       def find_xref
         # Search from end of file for startxref
         tail = @data[-1024..-1] || @data
-        if tail =~ /startxref\s+(\d+)/
-          @xref_offsets << $1.to_i
+        latest = tail.scan(/startxref\s+(\d+)/).last
+        if latest
+          @xref_offsets << latest[0].to_i
         else
           raise "Cannot find startxref in PDF"
         end
@@ -880,10 +1067,11 @@ module BlueCollarSystems
         trailer_idx = chunk.index('trailer')
         trailer_text = trailer_idx ? chunk[trailer_idx..-1] : nil
         if trailer_text
-          @trailer ||= parse_trailer_dict(trailer_text)
+          current_trailer = parse_trailer_dict(trailer_text)
+          @trailer ||= current_trailer
           # Follow /Prev for incremental updates
-          if @trailer['/Prev']
-            prev_offset = @trailer['/Prev'].to_i
+          if current_trailer['/Prev']
+            prev_offset = current_trailer['/Prev'].to_i
             unless @xref_offsets.include?(prev_offset)
               @xref_offsets << prev_offset
             end

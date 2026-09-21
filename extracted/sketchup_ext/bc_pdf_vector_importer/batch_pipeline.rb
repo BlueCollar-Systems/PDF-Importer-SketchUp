@@ -194,7 +194,7 @@ TEXT
         out[:import_report_path] = report_path
 
         if opts[:geometry_sidecar]
-          sidecar_path = geometry_sidecar_path_for(pdf_path, opts)
+          sidecar_path = geometry_sidecar_path_for(pdf_path, opts, report_path)
           FileUtils.mkdir_p(File.dirname(sidecar_path))
           File.write(
             sidecar_path,
@@ -217,12 +217,17 @@ TEXT
         QAReport.write_json(report, path)
       end
 
-      def geometry_sidecar_path_for(pdf_path, opts)
-        base = File.basename(pdf_path.to_s, '.pdf')
+      def geometry_sidecar_path_for(pdf_path, opts, report_path = nil)
         if opts[:report_dir]
+          base = File.basename(pdf_path.to_s, '.pdf')
           File.join(opts[:report_dir].to_s, "#{base}_geometry_sidecar.json")
         else
-          File.join(File.dirname(pdf_path.to_s), "#{base}_geometry_sidecar.json")
+          # Page selections and modes produce different summaries for one PDF.
+          # Keep the implicit sidecar beside this run's isolated report rather
+          # than replacing another run's evidence beside the source drawing.
+          report_path = QAReport.default_output_path(pdf_path) if report_path.to_s.empty?
+          base = File.basename(report_path, '_import_report.json')
+          File.join(File.dirname(report_path), "#{base}_geometry_sidecar.json")
         end
       end
 

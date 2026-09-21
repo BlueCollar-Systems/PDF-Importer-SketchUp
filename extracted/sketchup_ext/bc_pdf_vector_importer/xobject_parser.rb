@@ -303,7 +303,7 @@ module BlueCollarSystems
             ContentStreamParser::SubPath.new(new_segments, sp.closed)
           end
 
-          ContentStreamParser::VectorPath.new(
+          transformed = ContentStreamParser::VectorPath.new(
             new_subpaths,
             path.stroke,
             path.fill,
@@ -313,10 +313,16 @@ module BlueCollarSystems
             path.line_cap,
             path.line_join,
             path.dash_pattern ? path.dash_pattern.dup : nil,
-            matrix.dup,
+            multiply_matrices(path.ctm, matrix),
             path.layer_name,
             path.clip_fill_rule
           )
+          [:source_stroke_opacity, :source_clip_clear,
+           :source_miter_limit, :source_stroke_style_proven].each do |field|
+            transformed.send("#{field}=", path.send(field)) if path.respond_to?(field)
+          end
+          transformed.source_stroke_clip = StrokeClipping.transform(path.source_stroke_clip, matrix)
+          transformed
         end
       end
 

@@ -139,6 +139,15 @@ module SketchupBatchImport
       # defer its only TextureWriter proof to the authoritative final reopen.
       host_heal_required = !pure_terminal_page_raster
       host_heal_evidence_performance = nil
+      preservation_context = binding.merge(
+        'requested_text_mode' => requested_mode.to_s,
+        'model_path' => job[:model_path],
+        'source_pdf_path' => job[:pdf_path],
+        'source_lineage' => source_lineage,
+        'source_tree_sha256_before_load' => source_tree_sha256_before_load,
+        'source_tree_sha256_after_import' => source_tree_sha256_after_import,
+        'import_session_id' => import_session_id
+      )
       if host_heal_required
         SketchupBatchImport.write_progress!(
           job, binding, 'host_heal_stabilize_started'
@@ -156,11 +165,16 @@ module SketchupBatchImport
         stabilized_owned_manifest = SketchupHostEvidence.owned_manifest(
           before_manifest, after_manifest
         )
-        raise 'no recursively owned imported host entities found after heal' if
-          stabilized_owned_manifest.empty?
-        SketchupHostEvidence.verify_host_heal_preservation!(
-          source_delivery_manifest, stabilized_owned_manifest
-        )
+        SketchupHostEvidence.with_preservation_diagnostics!(
+          job[:output_dir], 'host_heal', source_delivery_manifest,
+          stabilized_owned_manifest, preservation_context
+        ) do
+          raise 'no recursively owned imported host entities found after heal' if
+            stabilized_owned_manifest.empty?
+          SketchupHostEvidence.verify_host_heal_preservation!(
+            source_delivery_manifest, stabilized_owned_manifest
+          )
+        end
         raise 'stabilized model save failed' unless
           stabilize_model.save(job[:model_path])
         SketchupBatchImport.write_progress!(
@@ -248,19 +262,24 @@ module SketchupBatchImport
         reopened_owned_manifest = SketchupHostEvidence.owned_manifest(
           before_manifest, reopened_manifest
         )
-        raise 'no recursively owned imported host entities found after reopen' if
-          reopened_owned_manifest.empty?
-        if pure_terminal_page_raster
-          SketchupHostEvidence.verify_lightweight_reopen_continuity!(
-            after_manifest, reopened_manifest
-          )
-          SketchupHostEvidence.verify_delivery_evidence!(
-            stats, reopened_owned_manifest, requested_mode, job[:pages], true
-          )
-        else
-          SketchupHostEvidence.verify_reopen_continuity!(
-            after_manifest, reopened_manifest
-          )
+        SketchupHostEvidence.with_preservation_diagnostics!(
+          job[:output_dir], 'reopen', after_manifest, reopened_manifest,
+          preservation_context
+        ) do
+          raise 'no recursively owned imported host entities found after reopen' if
+            reopened_owned_manifest.empty?
+          if pure_terminal_page_raster
+            SketchupHostEvidence.verify_lightweight_reopen_continuity!(
+              after_manifest, reopened_manifest
+            )
+            SketchupHostEvidence.verify_delivery_evidence!(
+              stats, reopened_owned_manifest, requested_mode, job[:pages], true
+            )
+          else
+            SketchupHostEvidence.verify_reopen_continuity!(
+              after_manifest, reopened_manifest
+            )
+          end
         end
         SketchupHostEvidence.verify_item_raster_display!(
           stats, reopened_owned_manifest, true
@@ -275,7 +294,11 @@ module SketchupBatchImport
         manifest_payload['reopened_entities'] = reopened_manifest
         manifest_payload['reopen_persistent_id_verified'] = false
         manifest_payload['reopen_continuity_error'] = error.message.to_s
-        SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
+        begin
+          SketchupHostEvidence.atomic_write_json(manifest_path, manifest_payload)
+        rescue StandardError => diagnostic_error
+          warn "Reopen failure manifest could not be retained: #{diagnostic_error.message}"
+        end
         raise
       end
       manifest_payload['reopened_entities'] = reopened_manifest
@@ -356,6 +379,10 @@ module SketchupBatchImport
           Array(stats[:page_representation_fallbacks]),
         'raster_delivery_records' => Array(stats[:raster_delivery_records]),
         'item_raster_display_placements' => Array(stats[:item_raster_display_placements]),
+        'decorative_display_placements' => Array(stats[:decorative_display_placements]),
+          'embedded_image_paint_order' => Array(stats[:embedded_image_paint_order]),
+          'original_annotation_ink' => Array(stats[:original_annotation_ink]),
+          'original_annotation_placements' => Array(stats[:original_annotation_placements]),
         'item_raster_display_verified' => true,
         'inline_image_page_raster_fallbacks' =>
           Array(stats[:inline_image_page_raster_fallbacks]),

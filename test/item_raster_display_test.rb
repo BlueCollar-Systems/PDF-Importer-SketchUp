@@ -93,6 +93,7 @@ class ItemRasterDisplayTest < Minitest::Test
       'bounds' => { 'min' => entity.bounds.min.to_a, 'max' => entity.bounds.max.to_a },
       'representation_evidence' => { 'source_span_id' => entity.attrs['source_span_id'] },
       'content_evidence' => { 'display_width' => entity.width, 'display_height' => entity.height },
+      'decorative_source_image' => entity.attrs['decorative_source_image'],
       'children' => entity.entities.to_a.map { |child| row(child) } }
   end
 
@@ -114,6 +115,21 @@ class ItemRasterDisplayTest < Minitest::Test
     apply
     assert_equal [0.001, 0.001], [@image, other].map { |image| image.transformation.to_a[14] }
     assert Subject.verify_manifest!(@stats, [row(@page)])
+  end
+
+  def test_final_page_crop_stays_above_source_ordered_image_without_native_text
+    source = Entity.new(8, 'Image', [], 'decorative_source_image' => true)
+    source.bounds = Bounds.new(Geom::Point3d.new(0,0,0.001), Geom::Point3d.new(2,2,0.001))
+    source.transformation = Geom::Transformation.translation(Geom::Point3d.new(0,0,0.001))
+    source.width = source.height = 2.0
+    @page = Entity.new(1, 'Group', [source,@image])
+    proof = apply
+    assert_equal 0.0, proof[:highest_nonimage_text_z]
+    assert_equal 0.001, proof[:highest_source_image_z]
+    assert_equal 0.002, proof[:expected_display_z]
+    assert Subject.verify_manifest!(@stats,[row(@page)])
+    @image.transformation = Geom::Transformation.translation(Geom::Point3d.new(1,5,0.001))
+    assert_raises(Error) { Subject.verify_manifest!(@stats,[row(@page)]) }
   end
 
   def test_nested_parent_transform_does_not_change_source_xy

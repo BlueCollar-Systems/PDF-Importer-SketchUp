@@ -450,8 +450,14 @@ module BlueCollarSystems
       end
 
       def default_output_path(pdf_path)
-        base = File.basename(pdf_path.to_s, '.pdf')
-        SafeTemp.join("#{base}_import_report.json")
+        base = File.basename(pdf_path.to_s, File.extname(pdf_path.to_s))
+        base = SafeTemp.ascii_component(base, 'drawing')[0, 64]
+        # Reports stay bound to one import. Other hosts and repeated imports
+        # of the same drawing can otherwise overwrite the report before native
+        # save/reopen verification reads it. mktmpdir reserves the directory
+        # atomically across threads and processes; explicit output paths are
+        # still handled unchanged by write_json.
+        File.join(SafeTemp.mktmpdir('bc_sketchup_report_'), "#{base}_import_report.json")
       end
 
       def input_block(pdf_path, stats)
@@ -605,6 +611,18 @@ module BlueCollarSystems
           ),
           item_raster_display_placements: normalize_json(
             stats[:item_raster_display_placements] || stats['item_raster_display_placements'] || []
+          ),
+          embedded_image_paint_order: normalize_json(
+            stats[:embedded_image_paint_order] || stats['embedded_image_paint_order'] || []
+          ),
+          decorative_display_placements: normalize_json(
+            stats[:decorative_display_placements] || stats['decorative_display_placements'] || []
+          ),
+          original_annotation_ink: normalize_json(
+            stats[:original_annotation_ink] || stats['original_annotation_ink'] || []
+          ),
+          original_annotation_placements: normalize_json(
+            stats[:original_annotation_placements] || stats['original_annotation_placements'] || []
           ),
           pipeline_performance: normalize_json(
             stats[:pipeline_performance] || stats['pipeline_performance'] || {}

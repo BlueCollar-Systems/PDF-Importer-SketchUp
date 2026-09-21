@@ -24,6 +24,7 @@
 # Ruby 2.2 compatible (SketchUp 2017 ships 2.2.4).
 
 require 'minitest/autorun'
+require 'minitest/mock'
 require 'tmpdir'
 
 EXT_DIR = File.expand_path(
@@ -38,7 +39,12 @@ class PopplerOutputPathAlphabetTest < Minitest::Test
   def setup
     SafeTemp.reset!
     @saved_override = ENV['BC_PDF_TEMP_DIR']
+    @saved_program_data = ENV['ProgramData']
+    @program_data_fixture = Dir.mktmpdir('bc_program_data_')
     ENV.delete('BC_PDF_TEMP_DIR')
+    # The positive fallback test must not assume a writable machine-wide
+    # ProgramData directory or require elevated test permissions.
+    ENV['ProgramData'] = @program_data_fixture
   end
 
   def teardown
@@ -47,7 +53,9 @@ class PopplerOutputPathAlphabetTest < Minitest::Test
     else
       ENV.delete('BC_PDF_TEMP_DIR')
     end
+    ENV['ProgramData'] = @saved_program_data
     SafeTemp.reset!
+    FileUtils.remove_entry(@program_data_fixture) if @program_data_fixture && File.directory?(@program_data_fixture)
   end
 
   # --- (a) the fence: no shipped file may reach Dir.tmpdir on its own --------
@@ -82,8 +90,41 @@ class PopplerOutputPathAlphabetTest < Minitest::Test
       assert root.ascii_only?,
              "SafeTemp.root must not inherit a non-ASCII profile temp; got #{root.inspect}"
       assert File.directory?(root), 'the resolved root must actually exist'
+      assert_equal File.join(@program_data_fixture, 'BlueCollarSystems', 'tmp'), root
     ensure
       Dir.define_singleton_method(:tmpdir, original)
+      SafeTemp.reset!
+    end
+  end
+
+  def test_unwritable_ascii_roots_raise_instead_of_returning_known_bad_path
+    hostile = File.join(Dir.tmpdir, "bc_профиль_#{Process.pid}")
+    original_tmpdir = Dir.method(:tmpdir)
+    original_open = File.method(:open)
+    ENV['BC_PDF_TEMP_DIR'] = File.join(@program_data_fixture, 'override')
+    attempted = []
+    Dir.define_singleton_method(:tmpdir) { hostile }
+    denied_probe = proc do |path, *args, &block|
+      if File.basename(path).start_with?('.bc_probe_')
+        attempted << path
+        raise Errno::EACCES, path
+      end
+      original_open.call(path, *args, &block)
+    end
+    begin
+      failure = File.stub(:open, denied_probe) do
+        assert_raises(SafeTemp::Unavailable) { SafeTemp.root }
+      end
+      assert_equal 2, attempted.length, 'both ASCII override and ProgramData fallback must be tried'
+      assert attempted.all?(&:ascii_only?), 'never try a helper output probe through the known non-ASCII profile'
+      assert_match(/BC_PDF_TEMP_DIR/, failure.message)
+      assert_match(/writable.*ASCII-only/, failure.message)
+      assert_match(/restart SketchUp/, failure.message)
+      assert_nil SafeTemp.instance_variable_get(:@root), 'an unavailable root must not be cached'
+      assert_equal ENV['BC_PDF_TEMP_DIR'], SafeTemp.root,
+                   'a later writable resolution must recover without a cached invalid path'
+    ensure
+      Dir.define_singleton_method(:tmpdir, original_tmpdir)
       SafeTemp.reset!
     end
   end
@@ -128,6 +169,23 @@ class PopplerOutputPathAlphabetTest < Minitest::Test
     assert SafeTemp.ascii_component('чертёж.pdf').ascii_only?
     assert_equal 'plan-01.pdf', SafeTemp.ascii_component('plan-01.pdf'),
                  'ordinary ASCII names must pass through unchanged'
+  end
+
+  def test_explicit_diagnostic_parent_is_unique_and_ascii
+    Dir.mktmpdir('bc_log_parent_') do |parent|
+      first = SafeTemp.mktmpdir('log-', parent)
+      second = SafeTemp.mktmpdir('log-', parent)
+      refute_equal first, second
+      [first, second].each do |path|
+        assert_equal parent, File.dirname(path)
+        assert path.ascii_only?
+        assert File.directory?(path)
+      end
+      hostile = File.join(parent, 'профиль')
+      Dir.mkdir(hostile)
+      assert_raises(ArgumentError) { SafeTemp.mktmpdir('log-', hostile) }
+      assert_equal [], Dir.entries(hostile) - ['.', '..']
+    end
   end
 
   def test_ascii_component_never_returns_an_empty_or_dot_only_name
