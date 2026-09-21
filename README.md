@@ -3,13 +3,17 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.152-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.153-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.152)
+### Recent fixes (v3.7.153)
+
+- Bring external text on a /Rotate page back into the displayed page frame by flipping against displayed height and mapping through PageTransform.inverse_transform_point (measured 18/24 outside -> 0/24; unrotated control unchanged). A documented ~33.6 pt residual remains on some rotated sheets.
+
+### Earlier notes (v3.7.152)
 
 - Deliver recovered characters for text a PDF stores as raw glyph codes, using only this host's own positioned span evidence (or an exact unique positional bind). Ambiguous Poppler-only binds are refused so readable wrong numbers never replace obvious garbage.
 - Report text a PDF delivers as raw glyph codes instead of characters. Detection is from the font dictionaries; drawing is unchanged.
