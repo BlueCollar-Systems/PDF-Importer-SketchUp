@@ -34,6 +34,10 @@ module BlueCollarSystems
       # was resolved by the selected source font map; nil/false fails closed.
       TextItem.class_eval do
         attr_accessor :source_decode_complete, :source_paint_order
+        # Hex glyph codes when this item was drawn from a font whose codes
+        # carry no meaning; nil otherwise. Set only when the caller passed
+        # :unmapped_font_resources, so an ordinary parse is unaffected.
+        attr_accessor :glyph_code_raw
       end
 
       # Common structural drawing fraction denominators
@@ -363,6 +367,10 @@ module BlueCollarSystems
         # none. The position here is the show operation's own.
         unless @pending_raw_codes.empty?
           codes = @pending_raw_codes.join
+          # The codes travel ON the item as well as in the record. A consumer
+          # that had to re-pair records with items by index or position would
+          # be re-inventing exactly the binding that must not be guessed at.
+          item.glyph_code_raw = codes
           @glyph_code_spans << {
             :font => font_name.to_s,
             :x => x,

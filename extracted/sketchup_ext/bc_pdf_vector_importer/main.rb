@@ -33,6 +33,7 @@ module BlueCollarSystems
     require File.join(dir, 'text_parser')
     require File.join(dir, 'text_source_identity')
     require File.join(dir, 'glyph_code_report')
+    require File.join(dir, 'glyph_code_join')
     require File.join(dir, 'external_text_extractor')
     require File.join(dir, 'nominal_text_scanner')
     require File.join(dir, 'bezier')
@@ -3339,6 +3340,52 @@ module BlueCollarSystems
       end.map { |row| row[:resource].to_s }
     end
 
+    # Recover a page's glyph-code text, or leave every item exactly as it was.
+    #
+    # The evidence is the content-stream parse: it knows which spans came from
+    # a font whose codes carry no meaning, what those codes were, and where
+    # they were drawn. An item delivered by that same parse carries its codes
+    # and needs no binding at all; an item from the external extractor is bound
+    # positionally, and only when exactly one span proves it.
+    def self.recover_page_glyph_code_text(text_items, angle_items, parser,
+                                          page_num, font_rows, stats)
+      return text_items if text_items.nil? || Array(text_items).empty?
+      return text_items if unmapped_font_resources(font_rows).empty?
+
+      inputs = parser.page_font_recovery_inputs(page_num)
+      return text_items if inputs.empty?
+
+      proofs = {}
+      inputs.each do |resource, info|
+        proof = GlyphCodeRecovery::FontProof.new(
+          info[:program], info[:base_font], info[:widths], info[:default_width]
+        )
+        next unless proof.usable?
+        proofs[resource.to_s] = proof
+        proofs[resource.to_s.sub(/\A\//, '')] = proof
+      end
+      return text_items if proofs.empty?
+
+      evidence = Array(angle_items).empty? ? text_items : angle_items
+      recovered, records = GlyphCodeJoin.apply(text_items, evidence, proofs)
+      return text_items if records.empty?
+
+      stats[:glyph_code_recoveries] ||= []
+      records.each do |record|
+        stats[:glyph_code_recoveries] << record.merge(:page_number => page_num)
+      end
+      proven = records.count { |r| r[:status] == 'recovered' }
+      Logger.info(
+        'Pipeline',
+        "Page #{page_num}: recovered #{proven} of #{records.length} text "         'items the PDF delivered as raw glyph codes'
+      )
+      recovered
+    rescue StandardError => e
+      Logger.warn('Pipeline',
+                  "Page #{page_num}: glyph-code recovery unavailable: #{e.message}")
+      text_items
+    end
+
     # One line per import, never one per span. A sheet whose text decodes says
     # nothing at all; a sheet with raw glyph codes on it warns, because the
     # strings a fabricator would read off that sheet are wrong.
@@ -4326,7 +4373,9 @@ module BlueCollarSystems
                 angle_items = TextParser.new(
                   streams,
                   angle_font_maps,
-                  { strict_text_fidelity: true, merge_text_runs: false },
+                  { strict_text_fidelity: true, merge_text_runs: false,
+                    unmapped_font_resources:
+                      unmapped_font_resources(glyph_code_font_rows) },
                   ocg_map
                 ).parse
               end
@@ -4335,6 +4384,13 @@ module BlueCollarSystems
               Logger.warn("Pipeline", "Page #{page_num}: internal text angle hints unavailable: #{e.message}")
             end
           end
+          # Recover text the PDF delivered as raw glyph codes, where this
+          # document proves the characters. Runs after the extractor has been
+          # chosen and angle hints applied, and BEFORE source-span identity is
+          # assigned, so every downstream consumer sees one set of items.
+          text_items = recover_page_glyph_code_text(
+            text_items, angle_items, parser, page_num, glyph_code_font_rows, stats
+          )
           # Corrective 2026-07-12 §1 (RB-01): assign deterministic source-span
           # identity ONCE per page — after final extractor selection, merging,
           # and angle-hint replacement above, and BEFORE stats[:page_text_map]
