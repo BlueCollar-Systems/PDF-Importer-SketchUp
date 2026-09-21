@@ -9,6 +9,7 @@ require File.join(File.dirname(__FILE__), 'safe_temp')
 require File.join(File.dirname(__FILE__), 'command_runner')
 require File.join(File.dirname(__FILE__), 'dependency_resolver')
 require File.join(File.dirname(__FILE__), 'poppler_result_validator')
+require File.join(File.dirname(__FILE__), 'page_transform')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -140,6 +141,24 @@ module BlueCollarSystems
           offset_x = opts[:offset_x_pts].to_f
           offset_y = opts[:offset_y_pts].to_f
 
+          # On a /Rotate page pdftotext DECLARES the page in unrotated
+          # dimensions but emits word boxes in DISPLAYED ones. Measured on a
+          # 792x1224 /Rotate 90 sheet: <page width="792" height="1224"> while
+          # the word boxes span x 0..1170.8, y 0..773.0 - which fit 1224x792,
+          # the displayed box, and do not fit the declared one at all. On an
+          # unrotated sheet the two agree, which is why this stayed hidden.
+          #
+          # So the flip below has to use the DISPLAYED height, and the result
+          # then has to come back to unrotated PDF space, because that is what
+          # the rest of this importer works in and what pdf_to_su rotates
+          # exactly once, later. Left alone, such a point is flipped against
+          # the wrong constant and then rotated a second time, and the text
+          # lands where the geometry is not.
+          rotation = PageTransform.normalize_rotation(opts[:page_rotation])
+          media_box = opts[:media_box]
+          rotated = rotation != 0 && PageTransform.valid_box?(media_box)
+          page_h = PageTransform.effective_height(media_box, rotation) if rotated
+
           items = []
 
           html.scan(/<line\s+([^>]+)>(.*?)<\/line>/mi) do |line_attrs, inner|
@@ -219,6 +238,22 @@ module BlueCollarSystems
             bbox_x1 = x_max + offset_x
             bbox_y0 = (page_h - y_max) + offset_y
             bbox_y1 = (page_h - y_min) + offset_y
+
+            if rotated
+              # Displayed space -> unrotated PDF space. Both bbox corners are
+              # mapped and the extents recomputed, because a rotation swaps
+              # which corner is the minimum.
+              x_pdf, y_pdf =
+                PageTransform.inverse_transform_point(x_pdf, y_pdf, media_box, rotation)
+              cx0, cy0 =
+                PageTransform.inverse_transform_point(bbox_x0, bbox_y0, media_box, rotation)
+              cx1, cy1 =
+                PageTransform.inverse_transform_point(bbox_x1, bbox_y1, media_box, rotation)
+              bbox_x0 = [cx0, cx1].min
+              bbox_x1 = [cx0, cx1].max
+              bbox_y0 = [cy0, cy1].min
+              bbox_y1 = [cy0, cy1].max
+            end
 
             items << TextParser::TextItem.new(
               line_text,

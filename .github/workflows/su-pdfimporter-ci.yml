@@ -113,6 +113,7 @@ jobs:
           ruby test/glyph_code_report_test.rb
           ruby test/glyph_code_recovery_test.rb
           ruby test/glyph_code_join_test.rb
+          ruby test/rotated_page_text_frame_test.rb
           ruby test/ghostscript_runtime_resolver_test.rb
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb

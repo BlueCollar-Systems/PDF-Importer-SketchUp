@@ -65,6 +65,39 @@ module BlueCollarSystems
         [x.to_f, y.to_f]
       end
 
+      # The inverse of transform_point: displayed page space back to raw,
+      # unrotated PDF space.
+      #
+      # Needed because an external text extractor reports a rotated page in
+      # DISPLAYED coordinates, while everything else in this importer works in
+      # unrotated PDF coordinates and is rotated once, later, by
+      # transform_point. Without this, such coordinates get rotated a second
+      # time and the text lands somewhere the geometry is not.
+      def inverse_transform_point(x, y, box, rotation)
+        return [x.to_f, y.to_f] unless valid_box?(box)
+
+        min_x = box[0].to_f
+        min_y = box[1].to_f
+        w = box_width(box)
+        h = box_height(box)
+        dx = x.to_f
+        dy = y.to_f
+
+        lx, ly = case normalize_rotation(rotation)
+                 when 90
+                   [w - dy, dx]
+                 when 180
+                   [w - dx, h - dy]
+                 when 270
+                   [dy, h - dx]
+                 else
+                   [dx, dy]
+                 end
+        [lx + min_x, ly + min_y]
+      rescue StandardError
+        [x.to_f, y.to_f]
+      end
+
       def transform_bbox(x0, y0, x1, y1, box, rotation)
         pts = [
           transform_point(x0, y0, box, rotation),
