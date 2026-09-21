@@ -2491,12 +2491,17 @@ module BlueCollarSystems
     end
 
     def self.extract_external_page_text(path, page_num, streams, offset_x,
-                                        offset_y, strict, angle_items)
+                                        offset_y, strict, angle_items,
+                                        media_box = nil, page_rotation = 0)
       opts = {
         :offset_x_pts => offset_x,
         :offset_y_pts => offset_y,
         :strict_text_fidelity => strict,
-        :content_streams => streams
+        :content_streams => streams,
+        # A /Rotate page needs both: pdftotext reports it in displayed space
+        # while the rest of this importer works in unrotated PDF space.
+        :media_box => media_box,
+        :page_rotation => page_rotation
       }
       anchors = nominal_anchors_from_text_items(angle_items)
       opts[:nominal_anchors] = anchors unless anchors.empty?
@@ -4201,7 +4206,7 @@ module BlueCollarSystems
             if text_items.nil? || text_items.empty?
               text_items = extract_external_page_text(
                 path, page_num, streams, text_offset_x, text_offset_y,
-                strict_text_processing, nil
+                strict_text_processing, nil, media_box, page_rotation
               )
               text_source = :external
             end
@@ -4225,7 +4230,7 @@ module BlueCollarSystems
             end
             text_items = extract_external_page_text(
               path, page_num, streams, text_offset_x, text_offset_y,
-              strict_text_processing, angle_items
+              strict_text_processing, angle_items, media_box, page_rotation
             )
             text_source = :external
             if text_items.nil? || text_items.empty?
