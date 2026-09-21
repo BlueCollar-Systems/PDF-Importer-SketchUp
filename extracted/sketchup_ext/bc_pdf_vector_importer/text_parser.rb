@@ -39,6 +39,10 @@ module BlueCollarSystems
       # Common structural drawing fraction denominators
       VALID_DENOMS = [2, 4, 8, 16, 32, 64].freeze
 
+      # One record per text-show operand drawn from a font whose codes carry
+      # no meaning. Read after #parse.
+      attr_reader :glyph_code_spans
+
       def initialize(streams, font_maps = nil, opts = {}, ocg_map = {})
         @streams = streams
         @text_items = []
@@ -54,6 +58,18 @@ module BlueCollarSystems
         @ocg_map = ocg_map.is_a?(Hash) ? ocg_map : {}
         @mc_layer_stack = []
         @current_ocg_layer = nil
+        # Font resources whose codes are glyph indices the PDF never explains
+        # (PDFParser#page_font_glyph_code_status). Text drawn from one of these
+        # is raw glyph codes, not characters; this parser records that fact and
+        # changes nothing about what it delivers.
+        @unmapped_font_resources = {}
+        Array(opts[:unmapped_font_resources]).each do |name|
+          key = name.to_s
+          @unmapped_font_resources[key] = true
+          @unmapped_font_resources[key.sub(/\A\//, '')] = true
+        end
+        @glyph_code_spans = []
+        @pending_raw_codes = []
 
         (font_maps || {}).each do |k, v|
           key = k.to_s
@@ -240,6 +256,7 @@ module BlueCollarSystems
             when 'Tj'
               # Show text string
               if in_text
+                begin_show_operation
                 raw = strs.last || hexs.last
                 text = decode_text_operand(raw, font_name)
                 emit_text(
@@ -250,6 +267,7 @@ module BlueCollarSystems
             when 'TJ'
               # Show text with individual glyph positioning (array)
               if in_text
+                begin_show_operation
                 arr_token = operand_stack.find { |t| t[:type] == :array }
                 if arr_token
                   text = extract_tj_text(arr_token[:value], font_name)
@@ -265,6 +283,7 @@ module BlueCollarSystems
                 tlm = multiply_matrix([1, 0, 0, 1, 0, -font_size * 1.2], tlm)
                 tm = tlm.dup
                 if !strs.empty?
+                  begin_show_operation
                   text = decode_text_operand(strs.first, font_name)
                   emit_text(
                     text, tm, font_size, font_name, @last_decode_complete
@@ -278,6 +297,7 @@ module BlueCollarSystems
                 tlm = multiply_matrix([1, 0, 0, 1, 0, -font_size * 1.2], tlm)
                 tm = tlm.dup
                 if !strs.empty?
+                  begin_show_operation
                   text = decode_text_operand(strs.first, font_name)
                   emit_text(
                     text, tm, font_size, font_name, @last_decode_complete
@@ -335,6 +355,53 @@ module BlueCollarSystems
         item.source_decode_complete = source_decode_complete == true
         item.source_paint_order = @source_paint_order && @source_paint_order.dup
         @text_items << item
+        # One record per drawn item whose codes carry no meaning. The item
+        # itself is untouched: this change reports the defect, it does not
+        # alter what is drawn. No index into @text_items is recorded - the
+        # run merger rewrites that array after this point, and an index that
+        # silently stopped pointing at the right item would be worse than
+        # none. The position here is the show operation's own.
+        unless @pending_raw_codes.empty?
+          codes = @pending_raw_codes.join
+          @glyph_code_spans << {
+            :font => font_name.to_s,
+            :x => x,
+            :y => y,
+            :raw_codes => codes,
+            # An Identity CMap is two bytes per code by definition, which is
+            # four hex digits; that is the only encoding this fires on.
+            :glyphs => codes.length / 4,
+            :delivered_characters => text.to_s.length
+          }
+        end
+        @pending_raw_codes = []
+      end
+
+      # A show operation that decodes but never emits - readable_text? refuses
+      # it - must not leave its codes for the next item to claim.
+      def begin_show_operation
+        @pending_raw_codes = []
+      end
+
+      # True when this font resource's codes are glyph indices the PDF never
+      # explains. Set by the caller from PDFParser#page_font_glyph_code_status.
+      def unmapped_font_resource?(font_name)
+        return false if @unmapped_font_resources.empty?
+        return false unless font_name
+        key = font_name.to_s
+        @unmapped_font_resources[key] == true ||
+          @unmapped_font_resources[key.sub(/\A\//, '')] == true
+      end
+
+      # The codes exactly as the content stream carried them. Hex, because the
+      # bytes are frequently printable ASCII and a log that printed them as
+      # text would read as if the drawing said that.
+      def bytes_to_hex(bytes)
+        return '' unless bytes
+        s = bytes.to_s
+        s = s.dup
+        s.force_encoding(Encoding::BINARY) if s.respond_to?(:force_encoding)
+        s.unpack('H*')[0].to_s
       end
 
       def decode_text_operand(raw, font_name = nil)
@@ -350,6 +417,12 @@ module BlueCollarSystems
         mapped = decode_bytes_with_font_map(bytes, font_name)
         @last_decode_complete = !mapped.nil? &&
           font_map_covers_all_bytes?(bytes, font_name)
+        # Accumulated across one show operation - a TJ array decodes many
+        # strings into a single drawn item - and consumed by emit_text, which
+        # is where the position is known. Nothing downstream reads it.
+        if unmapped_font_resource?(font_name)
+          @pending_raw_codes << bytes_to_hex(bytes)
+        end
         text = if !mapped.nil?
                  mapped
                else

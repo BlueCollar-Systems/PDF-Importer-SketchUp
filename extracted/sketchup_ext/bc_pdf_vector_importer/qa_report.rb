@@ -14,6 +14,8 @@ require File.join(File.dirname(__FILE__), 'model_3d_intent')
 require File.join(File.dirname(__FILE__), 'parts_bootstrap')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 
+require File.join(File.dirname(__FILE__), 'glyph_code_report')
+
 module BlueCollarSystems
   module PDFVectorImporter
     module QAReport
@@ -681,8 +683,22 @@ module BlueCollarSystems
           parts_bootstrap: parts_bootstrap_block(stats),
           text_height_crosscheck: text_height_crosscheck_block(stats),
           text_width_crosscheck: text_width_crosscheck_block(stats),
-          glyph_source: glyph_source_block(stats)
+          glyph_source: glyph_source_block(stats),
+          text_glyph_codes: text_glyph_codes_block(stats)
         }
+      end
+
+      # Text the PDF delivered as raw glyph codes rather than characters.
+      # Always published, so a caller reading the report never has to infer
+      # from silence that the text on a sheet is trustworthy.
+      def text_glyph_codes_block(stats)
+        records = Array(stats[:glyph_code_pages] || stats['glyph_code_pages'])
+        normalize_json(GlyphCodeReport.delivery_block(records))
+      rescue StandardError => e
+        Logger.warn('QAReport', "text_glyph_codes block failed: #{e.message}")
+        # Deliberately does not name GlyphCodeReport::SCHEMA: if the module
+        # failed to load, reading a constant from it raises inside the handler.
+        { :schema => 'bcs.text_glyph_codes/1.0', :unavailable => e.message.to_s }
       end
 
       def text_delivery_accounting(stats)

@@ -13,16 +13,13 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 - Embedded image callouts cover earlier drawing marks while later source text remains visible. Display order is checked against the renderer's actual source references and original PDF clipping instructions; source image pixels, XY placement and requested text representations remain unchanged. Unproved image order is reported explicitly.
 - Text that needs a display offset retains its original geometry, source identity and local transform inside a dedicated parent created before the text. Saved/reopened verification checks that parent's exact Z offset, ownership, visibility and neutral material, alongside the original text certificates.
-
 - Visible PDF annotations are preserved as page vectors and text before import, including markup lines outside the ordinary page content stream. Screen-visible notes remain visible and hidden notes stay hidden; the source PDF is unchanged. Missing helpers or incomplete normalization stop the import with an error.
 - Very short, source-proven round-cap Ink annotations retain their original centerline and editable semicircular arcs even below SketchUp's normal edge tolerance. Their native fill uses 48 segments per semicircle, with its polygon area reported separately from the analytic source area. Where an unrotated original-page crop proves no glyph ink or unrelated annotation overlap, a bounded 600-DPI RGB display patch preserves the original blend appearance above that geometry. The report binds the original source, pixel lattice, saved image pixels and native arcs; unsupported composite scope is reported while retaining the qualified geometry. Text modes are unchanged.
 - Encrypted PDFs that open without a password and repaired PDFs use the same screen-visible annotation handling. Temporary normalized files are checked against both source and output bytes; repeating an import after cleanup or repairing a missing helper works within the same session.
 - Simultaneous imports keep their reports, parts data and source provenance in separate run folders, preventing one importer from replacing another importer's verification evidence.
 - Each import retains its own diagnostic log, and saved compatibility reports remain available for later review.
 - Default report names handle long and non-ASCII drawing names. Explicit CLI report destinations retain their chosen paths.
-
-### Earlier fixes (v3.7.150)
-
+- Report text a PDF delivers as raw glyph codes instead of characters. Detection is from the font dictionaries; drawing is unchanged.
 - A temporary failed font inventory no longer disables font preparation for the rest of a session.
 - A Windows PDF renderer's Symbol startup warning is treated as unrelated only when a complete successful source-font inventory proves that the document has no Symbol font. Actual missing fonts, incomplete inventories and other renderer errors still require repair; text placement and geometry verification remain mandatory.
 - Failed text imports now identify the font, language pack or renderer inventory check that failed.
