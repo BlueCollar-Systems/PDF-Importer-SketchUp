@@ -384,6 +384,112 @@ module BlueCollarSystems
       end
 
       # ---------------------------------------------------------------
+      # Everything the glyph-code recovery needs about one page's fonts that
+      # cannot turn their codes into characters: the embedded font program,
+      # the /W advances the PDF itself declares, and /DW.
+      #
+      # The advances matter as much as the program. They are the document's own
+      # statement of how wide each glyph is, and requiring them to agree with a
+      # reference face's advance is what stops a shape match answering the
+      # wrong character.
+      #
+      # Returns { resource_name => { :base_font, :program, :widths,
+      #                              :default_width } }.
+      # ---------------------------------------------------------------
+      def page_font_recovery_inputs(page_num)
+        out = {}
+        font_dict = page_font_resource_dict(page_num)
+        return out unless font_dict.is_a?(Hash)
+
+        page_font_glyph_code_status(page_num).each do |row|
+          next unless row[:status] == UNMAPPED_GLYPH_CODES
+          resource = row[:resource].to_s
+          dict = to_dict(resolve_object(font_dict[resource]))
+          next unless dict.is_a?(Hash)
+          descendant = first_descendant_font(dict)
+          out[resource] = {
+            :base_font => row[:base_font].to_s,
+            :program => embedded_font_program(descendant || dict),
+            :widths => parse_w_array(descendant ? descendant['/W'] : nil),
+            :default_width => descendant ? number_or_nil(descendant['/DW']) : nil
+          }
+        end
+        out
+      rescue StandardError => e
+        Logger.warn("PdfParser", "page_font_recovery_inputs failed: #{e.message}")
+        {}
+      end
+
+      def first_descendant_font(font_dict)
+        list = font_dict['/DescendantFonts']
+        list = resolve_object(list) unless list.is_a?(Array)
+        return nil unless list.is_a?(Array) && !list.empty?
+        to_dict(resolve_object(list[0]))
+      end
+
+      # /FontFile2 is a TrueType program. /FontFile3 is CFF and /FontFile is
+      # Type1; neither is read here, and returning nil for them is how the
+      # recovery comes to say it proved nothing rather than guessing.
+      def embedded_font_program(font_dict)
+        return nil unless font_dict.is_a?(Hash)
+        descriptor = to_dict(resolve_object(font_dict['/FontDescriptor']))
+        return nil unless descriptor.is_a?(Hash)
+        ref = descriptor['/FontFile2']
+        return nil unless ref
+        stream_from_ref(ref)
+      rescue StandardError
+        nil
+      end
+
+      def number_or_nil(value)
+        return nil if value.nil?
+        text = value.to_s.strip
+        return nil if text.empty?
+        return nil unless text =~ /\A-?\d+(?:\.\d+)?\z/
+        text.to_f
+      end
+
+      # A PDF /W array is either "c [w1 w2 ...]" or "cFirst cLast w", mixed
+      # freely. Returns { glyph id => advance in 1000-em units }.
+      def parse_w_array(value)
+        out = {}
+        raw = value.is_a?(String) ? value : value.to_s
+        raw = resolve_object(raw).to_s if raw =~ /\A\d+\s+\d+\s+R\z/
+        return out if raw.empty?
+        tokens = raw.scan(/\[|\]|-?\d+(?:\.\d+)?/)
+        i = 0
+        while i < tokens.length
+          token = tokens[i]
+          if token == '[' || token == ']'
+            i += 1
+            next
+          end
+          first = token.to_i
+          if tokens[i + 1] == '['
+            gid = first
+            j = i + 2
+            while j < tokens.length && tokens[j] != ']'
+              out[gid] = tokens[j].to_f
+              gid += 1
+              j += 1
+            end
+            i = j + 1
+          else
+            last = tokens[i + 1].to_i
+            width = tokens[i + 2].to_f
+            # A malformed range must not be expanded into millions of entries.
+            if last >= first && (last - first) <= 65535
+              (first..last).each { |g| out[g] = width }
+            end
+            i += 3
+          end
+        end
+        out
+      rescue StandardError
+        {}
+      end
+
+      # ---------------------------------------------------------------
       # Resolve an indirect reference "X Y R" to its parsed value
       # ---------------------------------------------------------------
       def resolve_object(ref)
