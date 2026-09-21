@@ -87,6 +87,33 @@ inline-image bytes and `Tr 3` non-painting OCR text; otherwise stop explicitly.
 - Older peer-swapping ladders such as Geometry/Glyphs → 3D Text → Labels → page raster are **superseded**. Use only the finite closest ladders above, one proven item transition at a time.
 - “Labels can remain native and editable while matching the PDF” is wrong for finite-bbox source spans in SketchUp 2017. The item-bound Labels capability proof advances only to verified source-outline 3D Text; it never jumps directly to Geometry or Raster.
 
+## Text this PDF cannot turn into characters
+
+A `/Type0` font with an Identity CMap and **no** `/ToUnicode` leaves the content stream holding glyph indices
+into an embedded subset, and nothing in the PDF says what they mean. This importer draws them anyway, because
+that is all the document gives it. The bytes are frequently printable ASCII, so what lands on the sheet is
+legible and **wrong** - a member mark reads `06-3` where the drawing says `MS-3`.
+
+`PDFParser#page_font_glyph_code_status` classifies every font on a page from the PDF's own font dictionaries,
+and `GlyphCodeReport` publishes `extra.text_glyph_codes` (`bcs.text_glyph_codes/1.0`) plus one warning line per
+import. Nothing about what is drawn changes: this reports the defect, it does not fix it.
+
+Three rules if you touch this:
+
+- **The trigger is that exact structure, not "no `/ToUnicode`".** Measured on 120 corpus sheets: 297 fonts on
+  page 1, 4 affected, and **155 with no `/ToUnicode` that decode perfectly**, because WinAnsi and MacRoman are
+  real encodings. Widening the trigger condemns all of them.
+- **Never detect by scanning the delivered text for control characters.** That check misses exactly the spans
+  that read as plausible, which are the dangerous ones. The verdict comes from the font dictionaries.
+- **Per-item records exist only where this host parsed the content stream itself.** Poppler's `-bbox-layout`
+  output carries no font identity, so on that path the fonts are named and the items are not, and the block
+  says `attribution: fonts_only`. That is a limit of the run, never something the document failed to say, and
+  the two are not reported in the same sentence.
+
+Recovery is a separate change and is deliberately not attempted here. On the measured sheet the embedded subset
+carries neither a `cmap` nor a `post` table, so the only route that can succeed is comparing the subset's own
+outlines against a reference face - a TrueType parser in Ruby 2.2.4, not a small addition.
+
 ## Other pointers
 
 - Host / text-mode matrix: [`HOST_COMPATIBILITY.md`](HOST_COMPATIBILITY.md), [`COMPATIBILITY.md`](COMPATIBILITY.md), [`README.md`](README.md)
