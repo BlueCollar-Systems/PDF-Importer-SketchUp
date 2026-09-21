@@ -32,6 +32,7 @@ module BlueCollarSystems
     require File.join(dir, 'content_stream_parser')
     require File.join(dir, 'text_parser')
     require File.join(dir, 'text_source_identity')
+    require File.join(dir, 'glyph_code_report')
     require File.join(dir, 'external_text_extractor')
     require File.join(dir, 'nominal_text_scanner')
     require File.join(dir, 'bezier')
@@ -3275,6 +3276,32 @@ module BlueCollarSystems
       lineage
     end
 
+    # Resource names ("/TT1") of the fonts whose codes carry no meaning.
+    def self.unmapped_font_resources(font_rows)
+      Array(font_rows).select do |row|
+        row[:status].to_s == 'unmapped_glyph_codes'
+      end.map { |row| row[:resource].to_s }
+    end
+
+    # One line per import, never one per span. A sheet whose text decodes says
+    # nothing at all; a sheet with raw glyph codes on it warns, because the
+    # strings a fabricator would read off that sheet are wrong.
+    def self.emit_glyph_code_warning(stats, report_path)
+      records = Array(stats[:glyph_code_pages])
+      return if records.empty?
+      block = GlyphCodeReport.delivery_block(records)
+      stats[:text_glyph_codes] = block
+      see = report_path && !report_path.to_s.empty? ?
+        "See text_glyph_codes in #{report_path}." :
+        'See text_glyph_codes in the import report.'
+      line = GlyphCodeReport.summary_line(block, see)
+      return if line.empty?
+      Logger.warn('Pipeline', line)
+      stats[:text_glyph_code_warning] = line
+    rescue StandardError => e
+      Logger.warn('Pipeline', "glyph-code warning unavailable: #{e.message}")
+    end
+
     def self.finalize_import_diagnostics!(path, opts, stats)
       report = QAReport.build_from_stats(path, opts, stats)
       parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
@@ -3303,6 +3330,7 @@ module BlueCollarSystems
         extra['import_contract_ready'] || { :ready => false }
       report_path = QAReport.write_json(report, QAReport.default_output_path(path))
       stats[:import_report_path] = report_path if report_path
+      emit_glyph_code_warning(stats, report_path)
       sidecar_path = write_source_provenance_sidecar(path, opts, stats)
       stats[:source_provenance_sidecar_path] = sidecar_path if sidecar_path
       ImportHealth.record!(stats, path)
@@ -4105,13 +4133,23 @@ module BlueCollarSystems
             prefer_internal_text = false
           end
           angle_items = nil
+          # Which fonts on this page cannot turn their codes into characters.
+          # Read from the PDF's own font dictionaries, never from the shape of
+          # the delivered text: the dangerous spans are the ones that read as
+          # ordinary text.
+          glyph_code_font_rows = parser.page_font_glyph_code_status(page_num)
+          glyph_code_text_parser = nil
           if prefer_internal_text
             font_maps = parser.page_font_maps(page_num)
             parser_opts = { strict_text_fidelity: strict_text_processing }
             # For 3D text, preserving native spans avoids accidental
             # concatenation/offset caused by run-merge heuristics.
             parser_opts[:merge_text_runs] = false if requested_text_mode == :text3d
-            text_items = TextParser.new(streams, font_maps, parser_opts, ocg_map).parse
+            parser_opts[:unmapped_font_resources] =
+              unmapped_font_resources(glyph_code_font_rows)
+            glyph_code_text_parser =
+              TextParser.new(streams, font_maps, parser_opts, ocg_map)
+            text_items = glyph_code_text_parser.parse
             text_source = :internal
             if text_items.nil? || text_items.empty?
               text_items = extract_external_page_text(
@@ -4147,7 +4185,11 @@ module BlueCollarSystems
               font_maps = parser.page_font_maps(page_num)
               parser_opts = { strict_text_fidelity: strict_text_processing }
               parser_opts[:merge_text_runs] = false if requested_text_mode == :text3d
-              text_items = TextParser.new(streams, font_maps, parser_opts, ocg_map).parse
+              parser_opts[:unmapped_font_resources] =
+                unmapped_font_resources(glyph_code_font_rows)
+              glyph_code_text_parser =
+                TextParser.new(streams, font_maps, parser_opts, ocg_map)
+              text_items = glyph_code_text_parser.parse
               text_source = :internal
             end
           end
@@ -4179,6 +4221,24 @@ module BlueCollarSystems
           stats[:text_source_span_ids].concat(
             Array(text_items).map { |item| item.source_span_id.to_s }
           )
+          # Record what this page's fonts could and could not say. Per-item
+          # records exist only where this host parsed the content stream
+          # itself; Poppler's -bbox-layout output carries no font identity, so
+          # on that path the fonts are named and the items are not.
+          begin
+            spans = glyph_code_text_parser ?
+              glyph_code_text_parser.glyph_code_spans : []
+            attribution = glyph_code_text_parser ?
+              GlyphCodeReport::ATTRIBUTION_PER_ITEM :
+              GlyphCodeReport::ATTRIBUTION_FONTS_ONLY
+            stats[:glyph_code_pages] ||= []
+            stats[:glyph_code_pages] << GlyphCodeReport.page_record(
+              page_num, glyph_code_font_rows, spans, attribution
+            )
+          rescue StandardError => e
+            Logger.warn("Pipeline",
+              "Page #{page_num}: glyph-code report unavailable: #{e.message}")
+          end
           Logger.info("Pipeline", "Page #{page_num}: text extractor=#{text_source}, items=#{text_items ? text_items.length : 0}")
           stats[:page_text_sources][page_num] = text_source if text_source
           stats[:page_text_map][page_num] = text_items if text_items && !text_items.empty?

@@ -22,6 +22,7 @@ module BlueCollarSystems
         @xref_offsets = []
         @trailer = nil
         @font_map_cache = {}
+        @font_glyph_status_cache = {}
         @ocg_map_cache = {}
       end
 
@@ -67,6 +68,7 @@ module BlueCollarSystems
         @data = nil
         @objects = {}
         @font_map_cache = {}
+        @font_glyph_status_cache = {}
         @ocg_map_cache = {}
       end
 
@@ -258,6 +260,127 @@ module BlueCollarSystems
         end
 
         @font_map_cache[page_num] = maps
+      end
+
+      # ---------------------------------------------------------------
+      # Classify every font on a page by whether its codes can become
+      # characters at all.
+      #
+      # A /Type0 font with an Identity CMap and no /ToUnicode leaves the
+      # content stream holding glyph indices into a subset program, and
+      # nothing in the PDF says what they mean. The bytes are frequently
+      # printable ASCII, so text drawn from such a font is legible and
+      # WRONG - a member mark reads "06-3" where the drawing says "MS-3" -
+      # and no scan for control characters finds it.
+      #
+      # The trigger is deliberately that exact structure and nothing wider.
+      # Plenty of fonts carry no /ToUnicode and decode perfectly, because
+      # WinAnsi and MacRoman are real encodings; a check on "no /ToUnicode"
+      # alone would condemn all of them.
+      #
+      # Returns an array of hashes, one per font resource:
+      #   { :resource, :base_font, :subtype, :encoding, :has_to_unicode,
+      #     :status, :reason }
+      # :status is 'unmapped_glyph_codes' or 'mapped'.
+      # ---------------------------------------------------------------
+      UNMAPPED_GLYPH_CODES = 'unmapped_glyph_codes'.freeze
+      MAPPED_TEXT = 'mapped'.freeze
+
+      def page_font_glyph_code_status(page_num)
+        return [] if page_num < 1 || page_num > @page_count
+        if @font_glyph_status_cache.key?(page_num)
+          return @font_glyph_status_cache[page_num]
+        end
+
+        font_dict = page_font_resource_dict(page_num)
+        return (@font_glyph_status_cache[page_num] = []) unless font_dict.is_a?(Hash)
+
+        out = []
+        font_dict.each do |font_name, font_ref|
+          out << classify_font_glyph_codes(font_name, font_ref)
+        end
+        @font_glyph_status_cache[page_num] = out
+      rescue StandardError => e
+        Logger.warn("PdfParser", "page_font_glyph_code_status failed: #{e.message}")
+        @font_glyph_status_cache[page_num] = []
+      end
+
+      # The /Font resource dictionary of a page, or nil.
+      def page_font_resource_dict(page_num)
+        page_ref = @pages[page_num - 1]
+        page_dict = to_dict(resolve_object(page_ref))
+        return nil unless page_dict
+
+        resources = find_inherited(page_dict, '/Resources')
+        res_dict = to_dict(resolve_object(resources))
+        return nil unless res_dict
+
+        to_dict(resolve_object(res_dict['/Font']))
+      end
+
+      def classify_font_glyph_codes(font_name, font_ref)
+        font_dict = to_dict(resolve_object(font_ref))
+        record = {
+          :resource => font_name.to_s,
+          :base_font => '',
+          :subtype => '',
+          :encoding => '',
+          :has_to_unicode => false,
+          :status => MAPPED_TEXT,
+          :reason => ''
+        }
+        unless font_dict.is_a?(Hash)
+          record[:reason] = 'font dictionary could not be read'
+          return record
+        end
+
+        record[:base_font] = font_dict['/BaseFont'].to_s
+        record[:subtype] = font_dict['/Subtype'].to_s
+        record[:encoding] = font_encoding_name(font_dict)
+        record[:has_to_unicode] = font_has_to_unicode?(font_dict)
+
+        if record[:has_to_unicode]
+          record[:reason] = 'the PDF carries a /ToUnicode map for this font'
+          return record
+        end
+        unless record[:subtype] == '/Type0'
+          record[:reason] =
+            'a simple font whose /Encoding is a real character encoding'
+          return record
+        end
+        unless identity_cmap?(record[:encoding])
+          record[:reason] =
+            "the CMap #{record[:encoding]} maps codes to characters"
+          return record
+        end
+
+        record[:status] = UNMAPPED_GLYPH_CODES
+        record[:reason] =
+          'a Type0 font with an Identity CMap and no /ToUnicode: its codes '           'are glyph indices into the embedded subset and the PDF does not '           'say what they mean'
+        record
+      end
+
+      # /Encoding may be a name (/Identity-H) or an embedded CMap stream.
+      # Only a name can be recognised as Identity without decoding it.
+      def font_encoding_name(font_dict)
+        enc = font_dict['/Encoding']
+        enc.is_a?(String) ? enc.to_s.strip : ''
+      end
+
+      def identity_cmap?(encoding)
+        encoding == '/Identity-H' || encoding == '/Identity-V'
+      end
+
+      # Mirrors extract_font_to_unicode_map: a descendant font may carry it.
+      def font_has_to_unicode?(font_dict)
+        return true if font_dict['/ToUnicode']
+        descendants = font_dict['/DescendantFonts']
+        return false unless descendants.is_a?(Array)
+        descendants.each do |desc_ref|
+          desc = to_dict(resolve_object(desc_ref))
+          return true if desc.is_a?(Hash) && desc['/ToUnicode']
+        end
+        false
       end
 
       # ---------------------------------------------------------------
