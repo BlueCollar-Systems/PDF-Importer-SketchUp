@@ -1240,12 +1240,17 @@ module BlueCollarSystems
       # Windows Poppler initializes its base-font table before rendering and
       # can warn about Symbol even when no source font references Symbol.
       # Only a complete, successful document inventory can prove that this
-      # specific startup warning is unrelated. Other diagnostics and actual
-      # Symbol fonts remain failures; glyph matching still certifies the ink.
+      # startup warning is unused. Render stderr may carry other lines on
+      # heavy pages; the inventory stderr must still be Symbol-startup-only.
+      # Actual Symbol font rows and other missing display fonts remain
+      # failures; glyph matching still certifies the ink.
       def self.source_missing_display_fonts(stderr, pdf_path, renderer_exe)
         missing = missing_display_fonts(stderr)
-        return missing unless missing.include?('Symbol') &&
-          symbol_startup_diagnostics_only?(stderr)
+        # Heavy-page pdftocairo stderr often carries extra non-Symbol lines
+        # alongside Poppler's unused Symbol startup warning. Consult the
+        # completed pdffonts inventory whenever Symbol is named; only the
+        # inventory side must be Symbol-startup-only and Symbol-row-free.
+        return missing unless missing.include?('Symbol')
         key = cache_key(pdf_path)
         @font_inventory_cache ||= {}
         pdf_needs_embedding?(pdf_path, renderer_exe) unless

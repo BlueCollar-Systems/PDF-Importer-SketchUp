@@ -227,8 +227,18 @@ class SvgTextEmbedTest < Minitest::Test
   def test_other_diagnostics_and_fonts_remain_unresolved
     warning = "Syntax Error: No display font for 'Symbol'\n"
     mixed = warning + "Syntax Error: damaged font data\n"
+    # Mixed render stderr without a completed inventory cannot excuse Symbol.
     assert_equal ['Symbol'], R.source_missing_display_fonts(mixed, 'drawing.pdf', 'cairo')
     assert_equal ['Arial'], R.source_missing_display_fonts("No display font for 'Arial'", 'drawing.pdf', 'cairo')
+    # Mixed render stderr may still strip unused Symbol when inventory proves
+    # no Symbol row (Helvetica substituted like the unused-symbol case).
+    inventory = PDFFONTS_WITH_UNEMBEDDED.sub('Symbol ', 'Helvetica ')
+    with_inventory_runs([inventory_run(inventory, true, warning)]) do
+      assert_empty R.source_missing_display_fonts(mixed, 'drawing.pdf', 'cairo')
+    end
+    # Inventory-side non-Symbol diagnostics still leave Symbol unresolved.
+    R.instance_variable_set(:@font_check_cache, {})
+    R.instance_variable_set(:@font_inventory_cache, {})
     with_inventory_runs([inventory_run(PDFFONTS_ALL_EMBEDDED, true, 'damaged font data')]) do
       assert_equal ['Symbol'], R.source_missing_display_fonts(warning, 'drawing.pdf', 'cairo')
     end
