@@ -994,4 +994,43 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     assert_match(/inventory/i, error.message)
     assert_empty entities.to_a
   end
+
+  def test_attributable_font_gap_allows_unaffected_item_vector_render
+    entities = ItemVectorEntities.new
+    context = source_context.merge(
+      :font_inventory_status => :failed,
+      :page_failures => [{
+        :reason_code => 'font_inventory_runtime_error',
+        :missing_fonts => ['Symbol'],
+        :missing_language_packs => []
+      }]
+    )
+    unaffected_item = ITEM.new('A', 10.0, 20.0, 12.0, 0.0, 'Arial', 12.0,
+                               9.0, 19.0, 22.0, 32.0, nil, 'text_span:1:0')
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, unaffected_item, :geometry,
+      :source_context => context
+    )
+    assert_equal true, result[:ok]
+  end
+
+  def test_attributable_font_gap_returns_impossible_result_for_affected_item
+    entities = ItemVectorEntities.new
+    context = source_context.merge(
+      :font_inventory_status => :failed,
+      :page_failures => [{
+        :reason_code => 'font_inventory_runtime_error',
+        :missing_fonts => ['Symbol'],
+        :missing_language_packs => []
+      }]
+    )
+    affected_item = ITEM.new('A', 10.0, 20.0, 12.0, 0.0, 'Symbol', 12.0,
+                             9.0, 19.0, 22.0, 32.0, nil, 'text_span:1:0')
+    result = RENDERER.render_svg(
+      entities, square_svg(70, 20), MEDIA_BOX, affected_item, :geometry,
+      :source_context => context
+    )
+    assert_equal false, result[:ok]
+    assert_equal :source_vector_geometry_absent, result[:transition_proof][:reason_code]
+  end
 end
