@@ -34,7 +34,13 @@ module BlueCollarSystems
                 'item vector renderer supports only Glyphs or Geometry'
         end
         source_id = RepresentationFidelity.source_span_id(item)
-        verify_source_context!(source_id, opts[:source_context])
+        context_check = verify_source_context!(source_id, opts[:source_context], item)
+        if context_check == :font_gap_impossible
+          return impossible_result(
+            source_id, item, mode, [], {}, opts[:source_context], {},
+            :source_vector_geometry_absent
+          )
+        end
         base_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
         base_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
         unless CairoGlyphSource.item_bbox_media_relative(item, base_x, base_y)
@@ -592,7 +598,7 @@ module BlueCollarSystems
         end.map { |pen| pen[:placement_index].to_i }.uniq.sort
       end
 
-      def self.verify_source_context!(source_id, context)
+      def self.verify_source_context!(source_id, context, item = nil)
         unless context.is_a?(Hash)
           raise RepresentationFidelity::ContractError,
                 "#{source_id}: item vector page inventory evidence is missing"
@@ -616,14 +622,27 @@ module BlueCollarSystems
                            else
                              !failures.nil?
                            end
-        complete = context[:render_status].to_s == 'complete' &&
-          context[:font_inventory_status].to_s == 'complete' &&
-          !failures_present
-        unless complete
+
+        unless context[:render_status].to_s == 'complete'
           raise RepresentationFidelity::ContractError,
                 "#{source_id}: item vector page inventory is incomplete"
         end
-        true
+
+        complete = context[:font_inventory_status].to_s == 'complete' &&
+          !failures_present
+        return true if complete
+
+        if !item.nil? && defined?(Svg3DTextRenderer) &&
+           Svg3DTextRenderer.font_attributable_page_gap?(failures)
+          if !Svg3DTextRenderer.item_font_in_gap?(item, failures)
+            return true
+          else
+            return :font_gap_impossible
+          end
+        end
+
+        raise RepresentationFidelity::ContractError,
+              "#{source_id}: item vector page inventory is incomplete"
       end
 
       def self.verify_source_bbox!(item, media_box)
