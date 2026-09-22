@@ -3,13 +3,17 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.155-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.156-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.155)
+### Recent fixes (v3.7.156)
+
+- Handle attributable font gaps in SvgItemRepresentationRenderer without hard contract error, allowing graceful ladder transition to raster patches for missing base-14 fonts.
+
+### Earlier notes (v3.7.155)
 
 - Excuse Poppler's unused Symbol startup warning when a completed pdffonts inventory proves the document has no Symbol font, even if heavy-page render stderr has extra noise. Real Symbol fonts and other missing display fonts still fail closed.
 
