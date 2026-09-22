@@ -85,6 +85,21 @@ module BlueCollarSystems
       def parse
         @text_items = []
 
+        # PDF 32000-1 7.8.2: a page's content streams "shall be concatenated to
+        # form a single stream", so the graphics state carries ACROSS the
+        # boundary. A `q` opened in one stream is closed by a `Q` in the next.
+        # Resetting here instead of per stream is what makes that true: with a
+        # per-stream reset the matching `Q` finds an empty stack, does nothing,
+        # and every `cm` translation before it leaks into all later text.
+        #
+        # Measured on a sheet whose producer split the page this way: five
+        # `1 0 0 1 0 6.71 cm` operators accumulated to 33.56 pt that no `Q` ever
+        # undid, so every text item came out 33.56 pt from where the renderer
+        # draws it. Concatenated, the same replay ends with an identity CTM and
+        # no unmatched `Q`.
+        @ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        @gs_stack = []
+
         @streams.each_with_index do |stream, stream_index|
           next unless stream && !stream.empty?
           @source_stream_index = stream_index
@@ -178,9 +193,8 @@ module BlueCollarSystems
       end
 
       def extract_text_from_stream(stream)
-        # Text state
-        @ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-        @gs_stack = []
+        # Text state. @ctm and @gs_stack are deliberately NOT reset here - they
+        # belong to the page, not to one stream (see #parse).
         @mc_layer_stack = []
         @current_ocg_layer = nil
         tm = [1, 0, 0, 1, 0, 0]   # Text matrix
