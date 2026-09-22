@@ -3,13 +3,17 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.153-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.154-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.153)
+### Recent fixes (v3.7.154)
+
+- Preserve PDF paint order, colors, nested images, and annotations in the SketchUp report sidecar, isolated from the import folder name so the certified report stays bound to the source items.
+
+### Earlier notes (v3.7.153)
 
 - Bring external text on a /Rotate page back into the displayed page frame by flipping against displayed height and mapping through PageTransform.inverse_transform_point (measured 18/24 outside -> 0/24; unrotated control unchanged). A documented ~33.6 pt residual remains on some rotated sheets.
 
