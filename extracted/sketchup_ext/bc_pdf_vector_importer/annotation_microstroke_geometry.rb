@@ -237,7 +237,9 @@ module BlueCollarSystems
       def self.symbols(value)
         case value
         when Hash
-          value.each_with_object({}) { |(key,item),result| result[key.to_sym] = symbols(item) }
+          # Ruby 2.2 (SketchUp 2017) Fixnum has no #to_sym; only String keys
+          # are symbolized, Integer/Symbol keys are kept as-is.
+          value.each_with_object({}) { |(key,item),result| result[key.is_a?(String) ? key.to_sym : key] = symbols(item) }
         when Array
           value.map { |item| symbols(item) }
         else

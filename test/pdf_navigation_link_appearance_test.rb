@@ -169,6 +169,59 @@ class PdfNavigationLinkAppearanceTest < Minitest::Test
     end
   end
 
+  def require_ghostscript
+    if ENV['BC_TEST_REQUIRE_BUNDLED_GS'] == '1'
+      executable=IMP::DependencyResolver.bundled_ghostscript_executable
+      refute_nil executable,'Required bundled Ghostscript must resolve; no skip or system fallback'
+      assert_equal executable,IMP::DependencyResolver.find_ghostscript
+    else
+      skip 'Bundled/system Ghostscript unavailable' unless IMP::DependencyResolver.find_ghostscript
+    end
+  end
+
+  # A classic xref table chained by /Prev to a cross-reference stream made
+  # Ghostscript pdfwrite abort with "/rangecheck in --runpdf--" (Acrobat 11
+  # linearized sheets). The update must chain with the source's own form.
+  def test_xref_stream_source_gets_xref_stream_update_section
+    Dir.mktmpdir('navigation_links') do |dir|
+      source=xref_stream_fixture(File.join(dir,'source.pdf'),[link,link('/AP << /N 5 0 R >>')])
+      before=File.binread(source); p=parser(source)
+      copy=File.join(dir,'prepared.pdf')
+      assert p.write_annotation_appearance_copy(copy)
+      update=File.binread(copy)[before.bytesize..-1]
+      refute_match(/^xref$/,update,'classic table must not chain to a cross-reference stream')
+      refute_match(/^trailer/,update)
+      match=/(\d+) 0 obj\n<< \/Type \/XRef [^\n]*\/Prev (\d+)[^\n]*\/W \[ 1 4 2 \] \/Index \[ ([\d ]+) \]/.match(update)
+      refute_nil match,update
+      assert_equal before[/startxref\s+(\d+)\s+%%EOF\s*\z/,1],match[2]
+      assert_includes match[3].split.each_slice(2).map(&:first),match[1],'xref stream must index itself'
+      startxref=update[/startxref\n(\d+)\n%%EOF\n\z/,1].to_i
+      assert_equal match[1]+" 0 obj\n",File.binread(copy)[startxref,match[1].length+7]
+      q=parser(copy)
+      assert_equal p.page_data(1),q.page_data(1)
+      assert_equal ['0','0','0'],q.send(:to_dict,q.resolve_object(q.page_annotation_entries(1).first))['/Border']
+    end
+  end
+
+  def test_real_writer_accepts_xref_stream_source_appearance_copy
+    require_ghostscript
+    Dir.mktmpdir('navigation_links') do |dir|
+      source=xref_stream_fixture(File.join(dir,'source.pdf'),[link,
+        '<< /Type /Annot /Subtype /Line /Rect [100 90 130 110] /AP << /N 5 0 R >> >>'])
+      before=Digest::SHA256.file(source).hexdigest
+      output,_note=PS.send(:prepare_uncached,source)
+      refute_equal source,output
+      p=parser(output)
+      assert_equal 1,p.page_count
+      refute p.page_has_annotations?(1)
+      paths=IMP::ContentStreamParser.new(p.page_data(1)[:content_streams],p,p.page_ocg_map(1),
+        IMP::ContentStreamParser.page_fill_opacity_effects(p,1)).parse
+      assert_equal 1,paths.count { |path| path.stroke_color==[0.0,1.0,0.0] },'Line AP preserved'
+      assert_equal before,Digest::SHA256.file(source).hexdigest
+      PS.cleanup(output)
+    end
+  end
+
   def test_unresolved_annotation_or_appearance_fails_before_helper
     Dir.mktmpdir('navigation_links') do |dir|
       ['999 0 R',link('/Border [0 0 bad]'),link('/AP 999 0 R'),
