@@ -3,13 +3,17 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.157-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.158-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.157)
+### Recent fixes (v3.7.158)
+
+- Decode 8-bit grayscale and gray+alpha embedded-image PNGs in the page ownership/identity proof, so sheets with a `/DeviceGray` embedded image no longer abort with "texture export must be a noninterlaced 8-bit RGB/RGBA PNG".
+
+### Earlier notes (v3.7.157)
 
 - Preserve authored PDF annotation appearances on Acrobat/linearized PDF 1.5+ documents by writing incremental preparation updates as uncompressed cross-reference streams instead of classic tables, preventing Ghostscript `/rangecheck in --runpdf--` normalization aborts.
 - Fix Ruby 2.2 / SketchUp 2017 symbolization compatibility in annotation microstroke geometry.
