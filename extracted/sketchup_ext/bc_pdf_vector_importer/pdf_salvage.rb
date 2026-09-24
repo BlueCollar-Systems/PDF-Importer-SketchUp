@@ -208,10 +208,13 @@ module BlueCollarSystems
             :artifacts=>[out], :artifact_policy=>:all_nonempty)
           unless validation && validation[:ok]
             PopplerResultValidator.log_rejection(validation, 'PdfAnnotationNormalization')
+            log_helper_output(run, input)
             detail = if run && run[:timed_out]
                        'time limit of ' + timeout_s.to_s + 's reached for ' + count.to_s + ' pages'
                      else
-                       'helper failed; see the import log for the exact process evidence'
+                       summary = helper_error_summary(run)
+                       'helper failed' + (summary ? ': ' + summary : '') +
+                         '; see the import log for the exact process evidence'
                      end
             raise SalvageError, 'Could not preserve visible PDF annotations: vector normalization failed (' +
               detail + '). No incomplete import was created.'
@@ -248,6 +251,48 @@ module BlueCollarSystems
           rescue StandardError => cleanup_error
             log_warn('Rejected annotation artifact cleanup failed: ' + cleanup_error.message)
           end
+        end
+
+        # Ghostscript prints its PostScript error dump (for example
+        # "Error: /rangecheck in --runpdf--" and the operand stack) on
+        # stdout, and only the "Unrecoverable error" summary on stderr.
+        # Log both streams in full, line by line, so a rejected helper run is
+        # diagnosable from last_import.log without rerunning it.
+        def log_helper_output(run, input)
+          run ||= {}
+          log_warn('Ghostscript annotation normalization failed: exitstatus=' +
+            run[:exitstatus].inspect + ' timed_out=' + (!!run[:timed_out]).to_s +
+            ' input=' + File.basename(input.to_s) +
+            (run[:error] ? ' error=' + run[:error].to_s : ''))
+          [[:stderr, 'stderr'], [:stdout, 'stdout']].each do |key, label|
+            text = helper_text(run[key])
+            if text.strip.empty?
+              log_warn('Ghostscript ' + label + ': (empty)')
+            else
+              text.split(/\r?\n|\r/).each do |line|
+                log_warn('Ghostscript ' + label + ': ' + line) unless line.strip.empty?
+              end
+            end
+          end
+          nil
+        rescue StandardError
+          nil
+        end
+
+        def helper_error_summary(run)
+          return nil unless run
+          lines = (helper_text(run[:stdout]) + "\n" + helper_text(run[:stderr])).split(/\r?\n|\r/)
+          line = lines.find { |value| value =~ /\A\s*Error:/ } ||
+                 lines.find { |value| value =~ /error/i && !value.strip.empty? }
+          line ? line.strip[0, 200] : nil
+        rescue StandardError
+          nil
+        end
+
+        def helper_text(value)
+          text = value.to_s.dup
+          text.force_encoding(Encoding::BINARY)
+          text.encode('UTF-8', 'BINARY', :invalid => :replace, :undef => :replace, :replace => '?')
         end
 
         # A full-document screen normalization must preserve every page, even

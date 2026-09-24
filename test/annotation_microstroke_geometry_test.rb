@@ -45,6 +45,14 @@ class AnnotationMicrostrokeGeometryTest < Minitest::Test
       matrix[2]*p[0]+matrix[6]*p[1]+matrix[10]*p[2]+matrix[14]]
   end
 
+  # SketchUp 2017 (Ruby 2.2) host acceptance raised NoMethodError
+  # "undefined method `to_sym' for Fixnum" when a snapshot hash carried an
+  # Integer key. Only String keys are symbolized.
+  def test_symbols_keeps_integer_and_symbol_keys
+    raw={'a'=>{1=>'one',:b=>[{'c'=>2,3=>nil}]},7=>'seven'}
+    assert_equal({:a=>{1=>'one',:b=>[{:c=>2,3=>nil}]},7=>'seven'},Subject.symbols(raw))
+  end
+
   def test_tiny_original_centerline_survives_scale_safe_local_construction
     plan = Subject.plan(source,context)
     assert_operator plan[:local_length], :>, 0.01

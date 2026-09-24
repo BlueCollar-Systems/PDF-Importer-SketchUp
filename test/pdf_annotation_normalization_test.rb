@@ -94,6 +94,29 @@ class PdfAnnotationNormalizationTest < Minitest::Test
     end
   end
 
+  def test_helper_failure_logs_full_stdout_and_stderr_and_names_the_error
+    Dir.mktmpdir('annotation_fixture') do |dir|
+      source=fixture(File.join(dir,'source.pdf'))
+      dump="Error: /rangecheck in --runpdf--\nOperand stack:\n   --nostringval--\nCurrent allocation mode is local\n"
+      logged=[]
+      IMP::DependencyResolver.stub(:find_ghostscript,'fake-gs') do
+        PS.stub(:log_warn,lambda { |message| logged << message }) do
+          helper_result({:ok=>false,:exitstatus=>1,:stdout=>dump,
+                         :stderr=>"GPL Ghostscript 10.07.1: Unrecoverable error, exit code 1\n"}) do
+            error=assert_raises(PS::SalvageError) { PS.send(:prepare_uncached,source) }
+            assert_match(%r{helper failed: Error: /rangecheck in --runpdf--},error.message)
+          end
+        end
+      end
+      assert logged.any? { |line| line =~ /exitstatus=1/ },logged.inspect
+      ['Ghostscript stdout: Error: /rangecheck in --runpdf--','Ghostscript stdout: Operand stack:',
+       'Ghostscript stdout: Current allocation mode is local',
+       'Ghostscript stderr: GPL Ghostscript 10.07.1: Unrecoverable error, exit code 1'].each do |line|
+        assert_includes logged,line
+      end
+    end
+  end
+
   def test_annotation_timeout_scales_with_verified_pages_and_remains_bounded
     assert_equal 120, PS.send(:annotation_timeout_s, 1)
     assert_equal 120, PS.send(:annotation_timeout_s, 24)

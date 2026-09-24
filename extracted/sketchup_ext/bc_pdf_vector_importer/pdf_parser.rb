@@ -242,7 +242,17 @@ module BlueCollarSystems
         previous = @xref_offsets.first
         raise 'annotation copy root or cross-reference is invalid' unless
           root.is_a?(String) && root =~ /\A\d+\s+\d+\s+R\z/ &&
-          previous.is_a?(Integer) && previous > 0
+          previous.is_a?(Integer) && previous > 0 && previous < @data.bytesize
+        # An update section must use the same cross-reference form as the
+        # section it chains to. A classic xref table whose /Prev names a
+        # cross-reference stream (Acrobat/linearized PDF 1.5+ files) makes
+        # Ghostscript's pdfwrite reject the file with /rangecheck in runpdf.
+        stream_xref = !@data[previous, 64].to_s.lstrip.start_with?('xref')
+        xref_object = nil
+        if stream_xref
+          xref_object = next_object
+          next_object += 1
+        end
         trailer = { '/Root' => root, '/Size' => next_object.to_s, '/Prev' => previous.to_s }
         ['/Info', '/ID'].each { |key| trailer[key] = @trailer[key] if @trailer.key?(key) }
         created = false
@@ -262,17 +272,44 @@ module BlueCollarSystems
               file.write("\nendobj\n")
             end
             xref = file.pos
-            file.write("xref\n")
-            offsets.each do |number, generation, position|
-              file.write(number.to_s + " 1\n" + format('%010d %05d n ', position, generation) + "\n")
+            if stream_xref
+              write_annotation_xref_stream(file, xref_object, offsets + [[xref_object, 0, xref]], trailer)
+            else
+              file.write("xref\n")
+              offsets.each do |number, generation, position|
+                file.write(number.to_s + " 1\n" + format('%010d %05d n ', position, generation) + "\n")
+              end
+              file.write("trailer\n" + annotation_pdf_value(trailer) + "\n")
             end
-            file.write("trailer\n" + annotation_pdf_value(trailer) + "\nstartxref\n" + xref.to_s + "\n%%EOF\n")
+            file.write("startxref\n" + xref.to_s + "\n%%EOF\n")
           end
           complete = true
           true
         ensure
           File.delete(destination) if created && !complete && File.file?(destination)
         end
+      end
+
+      # Uncompressed cross-reference stream (PDF 32000-1 7.5.8) for an update
+      # chained to a source cross-reference stream. Entries are type 1 with
+      # 4-byte offsets and 2-byte generations; the stream object lists itself.
+      def write_annotation_xref_stream(file, object_number, entries, trailer)
+        rows = entries.sort_by { |row| row[0] }
+        index = []
+        body = ''.dup.force_encoding(Encoding::BINARY)
+        rows.each do |number, generation, position|
+          raise 'annotation copy offset exceeds cross-reference stream width' unless position >= 0 && position < 4_294_967_296
+          index << number.to_s << '1'
+          body << [1, position, generation].pack('CNn')
+        end
+        dict = { '/Type' => '/XRef' }
+        trailer.each { |key, value| dict[key] = value }
+        dict['/W'] = ['1', '4', '2']
+        dict['/Index'] = index
+        dict['/Length'] = body.bytesize.to_s
+        file.write(object_number.to_s + " 0 obj\n" + annotation_pdf_value(dict) + "\nstream\n")
+        file.write(body)
+        file.write("\nendstream\nendobj\n")
       end
 
       def annotation_pdf_value(value)
