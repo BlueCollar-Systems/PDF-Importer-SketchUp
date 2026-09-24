@@ -457,7 +457,10 @@ module BlueCollarSystems
         raise_contract('PNG IHDR size is invalid') unless data.bytesize == 13
         width, height, depth, color, compression, filter, interlace =
           data.unpack('N2C5')
-        supported_color = color == 6 || (!require_alpha && color == 2)
+        # raw_to_png! writes DeviceGray (0) and gray+alpha (4) embedded
+        # images, so the RGB/RGBA inspector must decode them too; they are
+        # expanded to RGBA (g,g,g[,a]) before any pixel digest.
+        supported_color = color == 6 || (!require_alpha && [0, 2, 4].include?(color))
         unless width > 0 && height > 0 && depth == 8 && supported_color &&
                compression == 0 && filter == 0 && interlace == 0
           raise_contract(
@@ -470,7 +473,7 @@ module BlueCollarSystems
         state[:width] = width
         state[:height] = height
         state[:color_type] = color
-        state[:bytes_per_pixel] = color == 6 ? 4 : 3
+        state[:bytes_per_pixel] = { 0 => 1, 2 => 3, 4 => 2, 6 => 4 }[color]
         state[:row_bytes] = width * state[:bytes_per_pixel]
       end
       private_class_method :read_ihdr!
@@ -496,7 +499,12 @@ module BlueCollarSystems
           filter = packet.getbyte(0)
           row = packet.byteslice(1, state[:row_bytes]).dup
           unfilter!(row, state[:previous], filter, state[:bytes_per_pixel])
-          rgba = state[:color_type] == 6 ? row : rgb_to_rgba(row)
+          rgba = case state[:color_type]
+                 when 6 then row
+                 when 0 then gray_to_rgba(row, false)
+                 when 4 then gray_to_rgba(row, true)
+                 else rgb_to_rgba(row)
+                 end
           alpha_index = 3
           while alpha_index < rgba.bytesize
             alpha = rgba.getbyte(alpha_index)
@@ -533,6 +541,20 @@ module BlueCollarSystems
         rgba
       end
       private_class_method :rgb_to_rgba
+
+      def gray_to_rgba(row, with_alpha)
+        rgba = binary_string
+        step = with_alpha ? 2 : 1
+        index = 0
+        while index < row.bytesize
+          gray = row.getbyte(index)
+          alpha = with_alpha ? row.getbyte(index + 1) : 255
+          rgba << [gray, gray, gray, alpha].pack('C4')
+          index += step
+        end
+        rgba
+      end
+      private_class_method :gray_to_rgba
 
       def png_filter_none_row(row)
         filtered = binary_byte(0x00)

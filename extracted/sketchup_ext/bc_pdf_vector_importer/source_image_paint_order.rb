@@ -241,9 +241,9 @@ module BlueCollarSystems
           end
         end
 
-        # Cairo emits its alpha-mask sample plane as 8-bit gray PNG. The host
-        # image verifier deliberately accepts RGB/RGBA only, so inspect this
-        # source-only mask format separately, with complete CRC/row checks.
+        # Cairo emits its alpha-mask sample plane as 8-bit gray PNG. This
+        # source-only mask format is inspected here with complete CRC/row
+        # checks (tRNS keys refused); its digest equals PngCropper's gray->RGBA.
         def gray_mask_proof(bytes)
           raise Unproven, 'invalid gray PNG signature' unless bytes[0,8] == PngCropper::SIGNATURE
           position, width, height, compressed, ended = 8, nil, nil, String.new.force_encoding(Encoding::BINARY), false

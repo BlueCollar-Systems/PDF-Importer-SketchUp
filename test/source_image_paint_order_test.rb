@@ -214,6 +214,47 @@ class SourceImagePaintOrderTest < Minitest::Test
     end
   end
 
+  # EmbeddedImageExtractor writes /DeviceGray images as 8-bit gray PNGs
+  # (raw_to_png! channels 1/2). The page ownership proof decodes that exact
+  # file; rejecting it aborted a whole Acrobat sheet import (A04-01).
+  def test_gray_embedded_source_png_decodes_and_matches_svg_gray_image
+    Dir.mktmpdir('image-order-gray-test-') do |dir|
+      raw, png = File.join(dir,'source.gray'), File.join(dir,'source.png')
+      File.binwrite(raw,[0,128,200,255].pack('C*'))
+      Importer::PngCropper.raw_to_png!(raw,2,2,1,png)
+      assert_equal 0, File.binread(png).getbyte(25)
+      proof = Importer::PngCropper.inspect_pixels!(png,false,nil)
+      assert_equal 2, proof[:pixel_width]
+      assert_equal true, proof[:visible_pixel_present]
+      assert_equal false, proof[:transparent_pixel_present]
+      rgba_raw, rgba_png = File.join(dir,'same.rgba'), File.join(dir,'same.png')
+      File.binwrite(rgba_raw,[0,0,0,255, 128,128,128,255, 200,200,200,255, 255,255,255,255].pack('C*'))
+      Importer::PngCropper.raw_to_png!(rgba_raw,2,2,4,rgba_png)
+      assert_equal Importer::PngCropper.inspect_pixels!(rgba_png,false,nil)[:visual_pixel_sha256], proof[:visual_pixel_sha256]
+      payload = 'data:image/png;base64,' + Base64.strict_encode64(File.binread(png))
+      definition = '<image id="pic" width="2" height="2" xlink:href="'+payload+'"/>'
+      subject = Subject::Inventory.new(document(IMAGE_USE+GLYPH,definition+GLYPH_DEF))
+      assert_equal proof[:visual_pixel_sha256], subject.read_png(payload)[:visual_pixel_sha256]
+      assert_raises(Importer::RepresentationFidelity::ContractError) do
+        Importer::PngCropper.inspect_pixels!(png,true,nil)
+      end
+    end
+  end
+
+  def test_gray_alpha_embedded_source_png_expands_to_rgba
+    Dir.mktmpdir('image-order-gray-alpha-test-') do |dir|
+      raw, png = File.join(dir,'source.ga'), File.join(dir,'source.png')
+      File.binwrite(raw,[10,255, 20,0, 30,128, 40,255].pack('C*'))
+      Importer::PngCropper.raw_to_png!(raw,2,2,2,png)
+      proof = Importer::PngCropper.inspect_pixels!(png,false,nil)
+      assert_equal true, proof[:transparent_pixel_present]
+      rgba_raw, rgba_png = File.join(dir,'same.rgba'), File.join(dir,'same.png')
+      File.binwrite(rgba_raw,[10,10,10,255, 20,20,20,0, 30,30,30,128, 40,40,40,255].pack('C*'))
+      Importer::PngCropper.raw_to_png!(rgba_raw,2,2,4,rgba_png)
+      assert_equal Importer::PngCropper.inspect_pixels!(rgba_png,false,nil)[:visual_pixel_sha256], proof[:visual_pixel_sha256]
+    end
+  end
+
   def test_missing_or_nonboolean_opaque_proof_never_qualifies
     [nil,false,1,'true'].each do |invalid|
       reader = lambda { |_uri| PIXELS.merge(:all_opaque=>invalid) }
