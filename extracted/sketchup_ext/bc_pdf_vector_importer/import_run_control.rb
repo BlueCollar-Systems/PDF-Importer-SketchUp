@@ -180,6 +180,11 @@ module BlueCollarSystems
           @model = options[:model]
           @identity = stringify_hash(options[:identity] || {})
           @entity_signature_proc = options[:entity_signature]
+          # Per page, the group/typename census taken when the page was
+          # certified in THIS process. It is never persisted; it only lets a
+          # same-run signature mismatch name what changed instead of failing
+          # with a bare "retained entity signature changed".
+          @certified_census = {}
         end
 
         def assess(counts = {})
@@ -327,6 +332,7 @@ module BlueCollarSystems
           set_entity_attribute(group, 'identity_sha256', identity_digest)
           set_entity_attribute(group, 'certified', true)
           signature = entity_signature(group)
+          @certified_census[page_number] = entity_census(group)
           entry = {
             'page_number' => page_number,
             'group_persistent_id' => group_id,
@@ -376,6 +382,40 @@ module BlueCollarSystems
 
         def journal
           read_journal
+        end
+
+        # Immediately after the host committed a page THIS process certified,
+        # compare the durable tree with the certified signature. If the host's
+        # commit housekeeping changed it (empty-group purge, or anything else
+        # a given SketchUp build does at commit), record the durable
+        # signature in the journal, log what changed, and return true; the
+        # caller reports it. Only pages certified in this process qualify:
+        # a true resume from another session still fails closed in
+        # validate_page_entry!.
+        # Read-only: true when the durable tree of a page certified in this
+        # process no longer matches its journal entry. Lets the caller open a
+        # host operation only when a re-seal is actually needed.
+        def page_reseal_pending?(group, page)
+          entry, durable = durable_signature_for_reseal(group, page)
+          durable != entry['entity_signature_sha256'].to_s
+        end
+
+        def reseal_page!(group, page)
+          page_number = non_negative_integer(page, 'page')
+          entry, durable = durable_signature_for_reseal(group, page_number)
+          return nil if durable == entry['entity_signature_sha256'].to_s
+          data = read_journal
+          entry = Array(data['pages']).find do |row|
+            row['page_number'].to_i == page_number
+          end
+          detail = signature_change_details(page_number, group)
+          message = "page #{page_number} retained tree changed between certification " \
+                    "and host commit (#{detail}); journal re-sealed to the durable tree"
+          log_resume_diagnostic(message)
+          entry['entity_signature_sha256'] = durable
+          @certified_census[page_number] = entity_census(group)
+          write_journal(data)
+          message
         end
 
         private
@@ -469,9 +509,113 @@ module BlueCollarSystems
             raise ResumeMismatch, "page #{page} certification attributes changed"
           end
           unless entity_signature(group) == entry['entity_signature_sha256'].to_s
-            raise ResumeMismatch, "page #{page} retained entity signature changed"
+            message = "page #{page} retained entity signature changed"
+            detail = signature_change_details(page, group)
+            message += " (#{detail})" unless detail.empty?
+            log_resume_diagnostic(message)
+            raise ResumeMismatch, message
           end
           true
+        end
+
+        # Shared checks for the post-commit re-seal: the page must have been
+        # certified in this process, the group must be live, its identity and
+        # certification attributes intact. Returns the journal entry and the
+        # durable signature; every failure raises ResumeMismatch.
+        def durable_signature_for_reseal(group, page)
+          ensure_journal_ready!
+          page_number = non_negative_integer(page, 'page')
+          unless @certified_census.key?(page_number)
+            raise ResumeMismatch, "page #{page_number} was not certified in this run"
+          end
+          unless live_entity?(group)
+            raise ResumeMismatch, "page #{page_number} group is not live after commit"
+          end
+          data = read_journal
+          raise ResumeMismatch, 'resume journal vanished after commit' unless data
+          validate_journal_identity!(data)
+          entry = Array(data['pages']).find do |row|
+            row['page_number'].to_i == page_number
+          end
+          raise ResumeMismatch, "page #{page_number} has no journal entry" unless entry
+          unless persistent_id_for(group).to_i == entry['group_persistent_id'].to_i
+            raise ResumeMismatch, "page #{page_number} retained group identity changed"
+          end
+          unless entity_attribute(group, 'certified') == true &&
+                 entity_attribute(group, 'identity_sha256').to_s == identity_digest
+            raise ResumeMismatch, "page #{page_number} certification attributes changed"
+          end
+          [entry, entity_signature(group)]
+        end
+
+        # Group rows and per-typename counts of a retained tree. Cheap next to
+        # the signature walk (no JSON, no digest); groups are few, leaves many.
+        def entity_census(entity)
+          census = { 'groups' => [], 'counts' => {} }
+          collect_entity_census(entity, census, 0)
+          census
+        end
+
+        def collect_entity_census(entity, census, depth)
+          return if depth > 64
+          typename = entity.respond_to?(:typename) ? entity.typename.to_s : entity.class.name.to_s
+          census['counts'][typename] = census['counts'].fetch(typename, 0) + 1
+          children = entity.respond_to?(:entities) ? entity.entities : nil
+          return unless children && children.respond_to?(:to_a)
+          list = children.to_a
+          name = entity.respond_to?(:name) ? entity.name.to_s : ''
+          census['groups'] << [depth, persistent_id_for(entity), name, list.length]
+          list.each { |child| collect_entity_census(child, census, depth + 1) }
+        end
+
+        # Names what differs between the tree certified in this process and
+        # the tree now, so the log says WHICH container the host removed (or
+        # which stage added one) instead of only that the digest moved.
+        # Empty when this process did not certify the page (a true resume).
+        def signature_change_details(page, group)
+          before = @certified_census[page]
+          return '' unless before
+          after = entity_census(group)
+          key = lambda { |row| [row[0], row[1].to_i, row[2]] }
+          before_keys = before['groups'].map { |row| key.call(row) }
+          after_keys = after['groups'].map { |row| key.call(row) }
+          vanished = before['groups'].reject { |row| after_keys.include?(key.call(row)) }
+          appeared = after['groups'].reject { |row| before_keys.include?(key.call(row)) }
+          describe = lambda do |row|
+            label = row[2].to_s.empty? ? 'unnamed group' : "group '#{row[2]}'"
+            "#{label} pid #{row[1].inspect} depth #{row[0]} with #{row[3]} child(ren)"
+          end
+          parts = []
+          unless vanished.empty?
+            parts << "#{vanished.length} group(s) vanished since certification in this run: " +
+                     vanished.first(6).map { |row| describe.call(row) }.join('; ')
+          end
+          unless appeared.empty?
+            parts << "#{appeared.length} group(s) appeared after certification: " +
+                     appeared.first(6).map { |row| describe.call(row) }.join('; ')
+          end
+          count_changes = (before['counts'].keys | after['counts'].keys).sort.map do |typename|
+            was = before['counts'][typename].to_i
+            now = after['counts'][typename].to_i
+            was == now ? nil : "#{typename} #{was}->#{now}"
+          end.compact
+          unless count_changes.empty?
+            parts << "entity counts changed: #{count_changes.first(8).join(', ')}"
+          end
+          if parts.empty?
+            parts << 'same groups and entity counts; a position, layer, material, ' \
+                     'name, hidden flag or text changed inside the retained tree'
+          end
+          parts.join('. ')
+        rescue StandardError => error
+          "diagnostic unavailable: #{error.message}"
+        end
+
+        def log_resume_diagnostic(message)
+          return unless defined?(Logger) && Logger.respond_to?(:warn)
+          Logger.warn('ImportRunControl', message)
+        rescue StandardError
+          nil
         end
 
         def active_entities

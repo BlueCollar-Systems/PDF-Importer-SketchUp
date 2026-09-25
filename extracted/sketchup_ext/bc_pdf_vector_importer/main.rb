@@ -5432,9 +5432,24 @@ module BlueCollarSystems
         end
 
         # Host commit purges empty groups. Keep that automatic housekeeping out
-        # of the strict retained-tree signature by finalizing only this
-        # builder's source color containers before page certification.
+        # of the strict retained-tree signature by finalizing this builder's
+        # own empty containers (source color groups, fill-only groups) and then
+        # every other empty group left under the page by any stage, before
+        # page certification. Otherwise the immediate post-commit re-validation
+        # reads a different signature ("page N retained entity signature
+        # changed") and a multi-page import dies after its first pages.
+        pruned_fill_groups = builder.prune_empty_fill_groups!
         builder.prune_empty_color_groups!
+        pruned_groups = builder.prune_empty_page_groups!
+        if pruned_fill_groups > 0 || !pruned_groups.empty?
+          Logger.info(
+            'Pipeline',
+            "Page #{page_num}: removed #{pruned_fill_groups} empty fill container(s) and " \
+            "#{pruned_groups.length} other empty group(s) before certification " \
+            "(host commit would purge them afterwards): " \
+            "#{pruned_groups.uniq.first(8).inspect}"
+          )
+        end
         add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
 
         # Advance the running page stack only after a successful import.
@@ -5492,6 +5507,38 @@ module BlueCollarSystems
       operation_open = false
       stats[:pipeline_performance][:commit_operation_ms] =
         ((Time.now - commit_operation_started) * 1000.0).round(3)
+      # The host may still change the retained tree AT commit (empty-group
+      # purge and whatever else a given SketchUp build does). Re-read the
+      # durable tree now: if it differs from what was certified a moment ago,
+      # the journal is re-sealed to it and the difference is logged, so the
+      # orchestrator's re-validation (and every later resume) compares
+      # against what the model actually keeps.
+      if opts[:page_certifier].respond_to?(:call) &&
+         opts[:run_controller].respond_to?(:reseal_page!) &&
+         page_group_for_certification
+        reseal_started = Time.now
+        resealed = nil
+        # Read-only check first: the host sees a new operation only when the
+        # journal really has to be rewritten.
+        if opts[:run_controller].page_reseal_pending?(
+             page_group_for_certification, pages.first
+           )
+          model.start_operation('PDF Import page seal', true, false, true)
+          begin
+            resealed = opts[:run_controller].reseal_page!(
+              page_group_for_certification, pages.first
+            )
+          ensure
+            model.commit_operation
+          end
+        end
+        if resealed
+          stats[:resume_resealed_pages] ||= []
+          stats[:resume_resealed_pages] << { :page => pages.first, :detail => resealed }
+        end
+        stats[:pipeline_performance][:page_reseal_ms] =
+          ((Time.now - reseal_started) * 1000.0).round(3)
+      end
       stats[:pipeline_performance][:commit_ms] =
         ((Time.now - verified_commit_started) * 1000.0).round(3)
       stats[:pipeline_performance][:commit_includes_source_binding_verification] =
@@ -6704,6 +6751,15 @@ module BlueCollarSystems
         begin
           if img.respond_to?(:set_attribute)
             dictionary = 'BC_PDF_Importer'
+            # A terminal page raster is the root of its own source claim, like
+            # an item raster. Inside a resumable "PDF Page N" group it is no
+            # longer top-level, and the compact host-evidence snapshot keeps a
+            # nested row only for claim roots, so without this flag the page
+            # raster vanishes from the manifest and the batch harness fails
+            # with "identities are absent from manifest".
+            img.set_attribute(dictionary, 'source_claim_root', true)
+            img.set_attribute(dictionary, 'source_kind', 'page_raster')
+            img.set_attribute(dictionary, 'representation', 'raster')
             img.set_attribute(dictionary, 'raster_page_number', page_num.to_i)
             img.set_attribute(dictionary, 'raster_page_rotation',
                               PageTransform.normalize_rotation(page_rotation))
