@@ -3,13 +3,17 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.158-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.159-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
-### Recent fixes (v3.7.158)
+### Recent fixes (v3.7.159)
+
+- Stabilize retained entity signatures across SketchUp Make 2017 `commit_operation` housekeeping: finalize/skip ephemeral empty Groups, sort children stably, and quantize length noise so multi-page text3d imports no longer raise ResumeMismatch after only host purge of empty groups.
+
+### Earlier notes (v3.7.158)
 
 - Decode 8-bit grayscale and gray+alpha embedded-image PNGs in the page ownership/identity proof, so sheets with a `/DeviceGray` embedded image no longer abort with "texture export must be a noninterlaced 8-bit RGB/RGBA PNG".
 
