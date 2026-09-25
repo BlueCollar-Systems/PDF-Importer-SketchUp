@@ -378,6 +378,49 @@ module BlueCollarSystems
           read_journal
         end
 
+        # Immediately after the host committed a page THIS process certified,
+        # compare the durable tree with the certified signature. If the host's
+        # commit housekeeping changed it (empty-group purge, or anything else
+        # a given SketchUp build does at commit), record the durable
+        # signature in the journal, log what changed, and return true; the
+        # caller reports it. Only pages certified in this process qualify:
+        # a true resume from another session still fails closed in
+        # validate_page_entry!.
+        def reseal_page!(group, page)
+          ensure_journal_ready!
+          page_number = non_negative_integer(page, 'page')
+          unless @certified_census.key?(page_number)
+            raise ResumeMismatch, "page #{page_number} was not certified in this run"
+          end
+          unless live_entity?(group)
+            raise ResumeMismatch, "page #{page_number} group is not live after commit"
+          end
+          data = read_journal
+          raise ResumeMismatch, 'resume journal vanished after commit' unless data
+          validate_journal_identity!(data)
+          entry = Array(data['pages']).find do |row|
+            row['page_number'].to_i == page_number
+          end
+          raise ResumeMismatch, "page #{page_number} has no journal entry" unless entry
+          unless persistent_id_for(group).to_i == entry['group_persistent_id'].to_i
+            raise ResumeMismatch, "page #{page_number} retained group identity changed"
+          end
+          unless entity_attribute(group, 'certified') == true &&
+                 entity_attribute(group, 'identity_sha256').to_s == identity_digest
+            raise ResumeMismatch, "page #{page_number} certification attributes changed"
+          end
+          durable = entity_signature(group)
+          return nil if durable == entry['entity_signature_sha256'].to_s
+          detail = signature_change_details(page_number, group)
+          message = "page #{page_number} retained tree changed between certification " \
+                    "and host commit (#{detail}); journal re-sealed to the durable tree"
+          log_resume_diagnostic(message)
+          entry['entity_signature_sha256'] = durable
+          @certified_census[page_number] = entity_census(group)
+          write_journal(data)
+          message
+        end
+
         private
 
         def ensure_journal_ready!

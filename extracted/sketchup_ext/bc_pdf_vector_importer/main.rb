@@ -5507,6 +5507,31 @@ module BlueCollarSystems
       operation_open = false
       stats[:pipeline_performance][:commit_operation_ms] =
         ((Time.now - commit_operation_started) * 1000.0).round(3)
+      # The host may still change the retained tree AT commit (empty-group
+      # purge and whatever else a given SketchUp build does). Re-read the
+      # durable tree now: if it differs from what was certified a moment ago,
+      # the journal is re-sealed to it and the difference is logged, so the
+      # orchestrator's re-validation (and every later resume) compares
+      # against what the model actually keeps.
+      if opts[:page_certifier].respond_to?(:call) &&
+         opts[:run_controller].respond_to?(:reseal_page!) &&
+         page_group_for_certification
+        reseal_started = Time.now
+        model.start_operation('PDF Import page seal', true, false, true)
+        begin
+          resealed = opts[:run_controller].reseal_page!(
+            page_group_for_certification, pages.first
+          )
+        ensure
+          model.commit_operation
+        end
+        if resealed
+          stats[:resume_resealed_pages] ||= []
+          stats[:resume_resealed_pages] << { :page => pages.first, :detail => resealed }
+        end
+        stats[:pipeline_performance][:page_reseal_ms] =
+          ((Time.now - reseal_started) * 1000.0).round(3)
+      end
       stats[:pipeline_performance][:commit_ms] =
         ((Time.now - verified_commit_started) * 1000.0).round(3)
       stats[:pipeline_performance][:commit_includes_source_binding_verification] =

@@ -404,6 +404,56 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     assert_equal 'page 1 retained entity signature changed', error.message
   end
 
+  def test_reseal_records_the_durable_tree_when_the_host_purged_at_commit
+    model = PurgingHost::Model.new
+    builder, _result = build_page(model, [stroke_line(10.0)])
+    late = builder.page_group.entities.add_group
+    late.name = 'Late Container'
+    controller = controller_for(model)
+    certified = controller.certify_page!(builder.page_group, 1)['entity_signature_sha256']
+    model.commit_operation
+    assert_equal 1, model.purged_groups
+    message = controller.reseal_page!(builder.page_group, 1)
+    assert_match(/\Apage 1 retained tree changed between certification and host commit \(/, message)
+    assert_match(/group 'Late Container' pid #{late.persistent_id}/, message)
+    assert_match(/journal re-sealed to the durable tree\z/, message)
+    durable = controller.journal['pages'].first['entity_signature_sha256']
+    refute_equal certified, durable
+    assert_equal controller.send(:entity_signature, builder.page_group), durable
+    assert_equal [1], controller.resumable_pages
+    # A later session compares against the durable tree and still fails
+    # closed on a real edit.
+    assert_equal [1], controller_for(model).resumable_pages
+    builder.page_group.entities.add_face(
+      [Geom::Point3d.new(0, 0, 0), Geom::Point3d.new(3, 0, 0), Geom::Point3d.new(3, 3, 0)]
+    )
+    assert_raises(IRC::ResumeMismatch) { controller_for(model).resumable_pages }
+  end
+
+  def test_reseal_is_a_no_op_when_the_host_kept_the_certified_tree
+    model = PurgingHost::Model.new
+    builder, _result = build_page(model, [stroke_line(10.0)])
+    controller = controller_for(model)
+    certified = controller.certify_page!(builder.page_group, 1)['entity_signature_sha256']
+    model.commit_operation
+    assert_nil controller.reseal_page!(builder.page_group, 1)
+    assert_equal certified, controller.journal['pages'].first['entity_signature_sha256']
+  end
+
+  def test_reseal_refuses_pages_it_did_not_certify_and_identity_changes
+    model = PurgingHost::Model.new
+    builder, _result = build_page(model, [stroke_line(10.0)])
+    controller = controller_for(model)
+    controller.certify_page!(builder.page_group, 1)
+    model.commit_operation
+    other = controller_for(model)
+    error = assert_raises(IRC::ResumeMismatch) { other.reseal_page!(builder.page_group, 1) }
+    assert_equal 'page 1 was not certified in this run', error.message
+    builder.page_group.set_attribute(IRC::JOURNAL_DICTIONARY, 'certified', false)
+    error = assert_raises(IRC::ResumeMismatch) { controller.reseal_page!(builder.page_group, 1) }
+    assert_equal 'page 1 certification attributes changed', error.message
+  end
+
   def test_journal_digest_is_unchanged_by_the_census
     model = PurgingHost::Model.new
     builder, _result = build_page(model, [stroke_line(10.0), stroke_line(20.0)])
