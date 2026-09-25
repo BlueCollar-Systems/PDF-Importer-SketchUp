@@ -706,6 +706,24 @@ module SketchupBatchImport
       raise 'pipeline import_session_id is missing' if import_session_id.empty?
       report_source = stats[:import_report_path]
       report_copy = File.join(job[:output_dir], 'import_report.json')
+      begin
+        stats_dump = File.join(job[:output_dir], 'pipeline_stats.json')
+        payload = {
+          'pages' => stats[:pages],
+          'selected_pages' => stats[:selected_pages],
+          'edges' => stats[:edges],
+          'faces' => stats[:faces],
+          'text' => stats[:text],
+          'text_mode' => stats[:text_mode],
+          'elapsed_seconds' => stats[:elapsed_seconds],
+          'representation_fidelity' => stats[:representation_fidelity],
+          'import_contract_ready' => stats[:import_contract_ready],
+          'import_report_path' => stats[:import_report_path],
+          'log_path' => stats[:log_path]
+        }
+        File.open(stats_dump, 'wb') { |io| io.write(JSON.pretty_generate(payload)) }
+      rescue StandardError
+      end
       SketchupHostEvidence.copy_verified_report!(
         report_source,
         report_copy,
