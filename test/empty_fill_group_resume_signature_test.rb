@@ -436,8 +436,24 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     controller = controller_for(model)
     certified = controller.certify_page!(builder.page_group, 1)['entity_signature_sha256']
     model.commit_operation
+    refute controller.page_reseal_pending?(builder.page_group, 1)
     assert_nil controller.reseal_page!(builder.page_group, 1)
     assert_equal certified, controller.journal['pages'].first['entity_signature_sha256']
+  end
+
+  def test_reseal_pending_is_read_only_and_true_only_after_a_host_change
+    model = PurgingHost::Model.new
+    builder, _result = build_page(model, [stroke_line(10.0)])
+    late = builder.page_group.entities.add_group
+    late.name = 'Late Container'
+    controller = controller_for(model)
+    certified = controller.certify_page!(builder.page_group, 1)['entity_signature_sha256']
+    refute controller.page_reseal_pending?(builder.page_group, 1), 'nothing changed before commit'
+    model.commit_operation
+    assert controller.page_reseal_pending?(builder.page_group, 1)
+    assert_equal certified, controller.journal['pages'].first['entity_signature_sha256'],
+                 'the read-only check must not rewrite the journal'
+    assert_raises(IRC::ResumeMismatch) { controller_for(model).page_reseal_pending?(builder.page_group, 1) }
   end
 
   def test_reseal_refuses_pages_it_did_not_certify_and_identity_changes

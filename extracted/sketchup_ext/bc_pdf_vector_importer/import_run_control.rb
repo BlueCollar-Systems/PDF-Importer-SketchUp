@@ -386,31 +386,22 @@ module BlueCollarSystems
         # caller reports it. Only pages certified in this process qualify:
         # a true resume from another session still fails closed in
         # validate_page_entry!.
+        # Read-only: true when the durable tree of a page certified in this
+        # process no longer matches its journal entry. Lets the caller open a
+        # host operation only when a re-seal is actually needed.
+        def page_reseal_pending?(group, page)
+          entry, durable = durable_signature_for_reseal(group, page)
+          durable != entry['entity_signature_sha256'].to_s
+        end
+
         def reseal_page!(group, page)
-          ensure_journal_ready!
           page_number = non_negative_integer(page, 'page')
-          unless @certified_census.key?(page_number)
-            raise ResumeMismatch, "page #{page_number} was not certified in this run"
-          end
-          unless live_entity?(group)
-            raise ResumeMismatch, "page #{page_number} group is not live after commit"
-          end
+          entry, durable = durable_signature_for_reseal(group, page_number)
+          return nil if durable == entry['entity_signature_sha256'].to_s
           data = read_journal
-          raise ResumeMismatch, 'resume journal vanished after commit' unless data
-          validate_journal_identity!(data)
           entry = Array(data['pages']).find do |row|
             row['page_number'].to_i == page_number
           end
-          raise ResumeMismatch, "page #{page_number} has no journal entry" unless entry
-          unless persistent_id_for(group).to_i == entry['group_persistent_id'].to_i
-            raise ResumeMismatch, "page #{page_number} retained group identity changed"
-          end
-          unless entity_attribute(group, 'certified') == true &&
-                 entity_attribute(group, 'identity_sha256').to_s == identity_digest
-            raise ResumeMismatch, "page #{page_number} certification attributes changed"
-          end
-          durable = entity_signature(group)
-          return nil if durable == entry['entity_signature_sha256'].to_s
           detail = signature_change_details(page_number, group)
           message = "page #{page_number} retained tree changed between certification " \
                     "and host commit (#{detail}); journal re-sealed to the durable tree"
@@ -519,6 +510,36 @@ module BlueCollarSystems
             raise ResumeMismatch, message
           end
           true
+        end
+
+        # Shared checks for the post-commit re-seal: the page must have been
+        # certified in this process, the group must be live, its identity and
+        # certification attributes intact. Returns the journal entry and the
+        # durable signature; every failure raises ResumeMismatch.
+        def durable_signature_for_reseal(group, page)
+          ensure_journal_ready!
+          page_number = non_negative_integer(page, 'page')
+          unless @certified_census.key?(page_number)
+            raise ResumeMismatch, "page #{page_number} was not certified in this run"
+          end
+          unless live_entity?(group)
+            raise ResumeMismatch, "page #{page_number} group is not live after commit"
+          end
+          data = read_journal
+          raise ResumeMismatch, 'resume journal vanished after commit' unless data
+          validate_journal_identity!(data)
+          entry = Array(data['pages']).find do |row|
+            row['page_number'].to_i == page_number
+          end
+          raise ResumeMismatch, "page #{page_number} has no journal entry" unless entry
+          unless persistent_id_for(group).to_i == entry['group_persistent_id'].to_i
+            raise ResumeMismatch, "page #{page_number} retained group identity changed"
+          end
+          unless entity_attribute(group, 'certified') == true &&
+                 entity_attribute(group, 'identity_sha256').to_s == identity_digest
+            raise ResumeMismatch, "page #{page_number} certification attributes changed"
+          end
+          [entry, entity_signature(group)]
         end
 
         # Group rows and per-typename counts of a retained tree. Cheap next to

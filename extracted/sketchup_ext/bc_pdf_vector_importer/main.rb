@@ -5517,13 +5517,20 @@ module BlueCollarSystems
          opts[:run_controller].respond_to?(:reseal_page!) &&
          page_group_for_certification
         reseal_started = Time.now
-        model.start_operation('PDF Import page seal', true, false, true)
-        begin
-          resealed = opts[:run_controller].reseal_page!(
-            page_group_for_certification, pages.first
-          )
-        ensure
-          model.commit_operation
+        resealed = nil
+        # Read-only check first: the host sees a new operation only when the
+        # journal really has to be rewritten.
+        if opts[:run_controller].page_reseal_pending?(
+             page_group_for_certification, pages.first
+           )
+          model.start_operation('PDF Import page seal', true, false, true)
+          begin
+            resealed = opts[:run_controller].reseal_page!(
+              page_group_for_certification, pages.first
+            )
+          ensure
+            model.commit_operation
+          end
         end
         if resealed
           stats[:resume_resealed_pages] ||= []
