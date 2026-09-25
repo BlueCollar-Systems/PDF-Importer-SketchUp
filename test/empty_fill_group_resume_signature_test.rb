@@ -387,22 +387,30 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     assert_equal 0, model.purged_groups
   end
 
-  def test_same_run_mismatch_names_the_group_the_host_purged
+  # Stand-in for whatever a given SketchUp build removes at commit_operation
+  # that certification could not foresee (the shop-PC failure was not
+  # reproduced on this machine): the host drops a populated container.
+  def host_drops_a_populated_group!(builder)
+    victim = builder.page_group.entities.to_a.find do |entity|
+      entity.is_a?(PurgingHost::Group) && entity.entities.length > 0
+    end
+    raise 'fixture has no populated group to drop' unless victim
+    victim.erase!
+    victim
+  end
+
+  def test_same_run_mismatch_names_the_group_the_host_dropped
     model = PurgingHost::Model.new
     builder, _result = build_page(model, [stroke_line(10.0)])
-    # A stage that adds an empty container AFTER the pre-certification prune
-    # reproduces the unfixed failure; the message must now say what vanished.
-    late = builder.page_group.entities.add_group
-    late.name = 'PDF Fill'
     controller = controller_for(model)
     controller.certify_page!(builder.page_group, 1)
     model.commit_operation
-    assert_equal 1, model.purged_groups, model_dump(model)
+    victim = host_drops_a_populated_group!(builder)
     error = assert_raises(IRC::ResumeMismatch) { controller.resumable_pages }
     assert_match(/\Apage 1 retained entity signature changed \(/, error.message)
     assert_match(/1 group\(s\) vanished since certification in this run/, error.message)
-    assert_match(/group 'PDF Fill' pid #{late.persistent_id} depth 1 with 0 child\(ren\)/, error.message)
-    assert_match(/entity counts changed: Group \d+->\d+/, error.message)
+    assert_match(/pid #{victim.persistent_id} depth 1 with 1 child\(ren\)/, error.message)
+    assert_match(/entity counts changed: Edge 1->0, Group \d+->\d+/, error.message)
   end
 
   def test_true_resume_in_another_process_keeps_the_bare_message
@@ -421,18 +429,16 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     assert_equal 'page 1 retained entity signature changed', error.message
   end
 
-  def test_reseal_records_the_durable_tree_when_the_host_purged_at_commit
+  def test_reseal_records_the_durable_tree_when_the_host_changed_it_at_commit
     model = PurgingHost::Model.new
     builder, _result = build_page(model, [stroke_line(10.0)])
-    late = builder.page_group.entities.add_group
-    late.name = 'Late Container'
     controller = controller_for(model)
     certified = controller.certify_page!(builder.page_group, 1)['entity_signature_sha256']
     model.commit_operation
-    assert_equal 1, model.purged_groups, model_dump(model)
+    victim = host_drops_a_populated_group!(builder)
     message = controller.reseal_page!(builder.page_group, 1)
     assert_match(/\Apage 1 retained tree changed between certification and host commit \(/, message)
-    assert_match(/group 'Late Container' pid #{late.persistent_id}/, message)
+    assert_match(/pid #{victim.persistent_id} depth 1 with 1 child\(ren\)/, message)
     assert_match(/journal re-sealed to the durable tree\z/, message)
     durable = controller.journal['pages'].first['entity_signature_sha256']
     refute_equal certified, durable
@@ -461,12 +467,12 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
   def test_reseal_pending_is_read_only_and_true_only_after_a_host_change
     model = PurgingHost::Model.new
     builder, _result = build_page(model, [stroke_line(10.0)])
-    late = builder.page_group.entities.add_group
-    late.name = 'Late Container'
     controller = controller_for(model)
     certified = controller.certify_page!(builder.page_group, 1)['entity_signature_sha256']
     refute controller.page_reseal_pending?(builder.page_group, 1), 'nothing changed before commit'
     model.commit_operation
+    refute controller.page_reseal_pending?(builder.page_group, 1), 'the host kept the tree'
+    host_drops_a_populated_group!(builder)
     assert controller.page_reseal_pending?(builder.page_group, 1), model_dump(model)
     assert_equal certified, controller.journal['pages'].first['entity_signature_sha256'],
                  'the read-only check must not rewrite the journal'

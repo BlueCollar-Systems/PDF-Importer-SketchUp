@@ -320,6 +320,12 @@ module BlueCollarSystems
             return existing
           end
 
+          # SketchUp suspends empty-group cleanup inside start/commit_operation and
+          # purges empty Groups at commit (api-issue-tracker #797). Certify against
+          # the post-commit durable tree so host housekeeping cannot raise a false
+          # "retained entity signature changed" after a legitimate page build.
+          finalize_retained_tree_for_signature!(group)
+
           journal_id = data['journal_id']
           set_entity_attribute(group, 'journal_id', journal_id)
           set_entity_attribute(group, 'page_number', page_number)
@@ -645,6 +651,11 @@ module BlueCollarSystems
           entity.get_attribute(JOURNAL_DICTIONARY, key, nil)
         end
 
+        # Quantize host floats so commit/reopen rewrite and bounds jitter cannot
+        # flip the retained signature. One-thousandth of an inch still catches
+        # real geometry edits while absorbing typical SketchUp length noise.
+        SIGNATURE_LENGTH_QUANTUM = 0.001
+
         def entity_signature(entity)
           if @entity_signature_proc.respond_to?(:call)
             return @entity_signature_proc.call(entity).to_s
@@ -700,11 +711,85 @@ module BlueCollarSystems
           digest.update(',') unless first[0]
           first[0] = false
           digest.update(encoded)
-          children = entity.respond_to?(:entities) ? entity.entities : nil
-          Array(children && children.respond_to?(:to_a) ? children.to_a : []).each do |child|
+          signature_children(entity).each do |child|
             collect_entity_signature(child, digest, first, depth + 1)
           end
           true
+        end
+
+        def signature_children(entity)
+          return [] unless entity.respond_to?(:entities)
+          children = entity.entities
+          rows = children && children.respond_to?(:to_a) ? children.to_a : []
+          durable = rows.select do |child|
+            live_entity?(child) && !ephemeral_empty_group?(child)
+          end
+          durable.sort_by { |child| signature_child_sort_key(child) }
+        end
+
+        def signature_child_sort_key(entity)
+          [
+            persistent_id_for(entity).to_i,
+            entity.respond_to?(:typename) ? entity.typename.to_s : entity.class.name.to_s,
+            entity.respond_to?(:name) ? entity.name.to_s : ''
+          ]
+        end
+
+        # Match SketchUp commit housekeeping: empty Groups are not durable
+        # content. Skip them in the signature walk as a second guard when a
+        # caller certifies without finalize_retained_tree_for_signature!.
+        def ephemeral_empty_group?(entity)
+          return false unless entity.respond_to?(:typename)
+          return false unless entity.typename.to_s == 'Group'
+          empty_entities?(entity)
+        end
+
+        def empty_entities?(entity)
+          return false unless entity.respond_to?(:entities)
+          children = entity.entities
+          return true unless children
+          if children.respond_to?(:length)
+            children.length.to_i == 0
+          elsif children.respond_to?(:size)
+            children.size.to_i == 0
+          elsif children.respond_to?(:to_a)
+            children.to_a.empty?
+          else
+            false
+          end
+        rescue StandardError
+          false
+        end
+
+        def finalize_retained_tree_for_signature!(entity, depth = 0)
+          raise ResumeMismatch, 'retained entity tree is too deep' if depth > 64
+          return true unless entity && entity.respond_to?(:entities)
+          # Never rewrite a shared ComponentDefinition through an instance.
+          if entity.respond_to?(:typename) && entity.typename.to_s == 'ComponentInstance'
+            return true
+          end
+
+          Array(entity.entities.respond_to?(:to_a) ? entity.entities.to_a : []).each do |child|
+            next unless live_entity?(child)
+            next unless child.respond_to?(:typename) && child.typename.to_s == 'Group'
+            finalize_retained_tree_for_signature!(child, depth + 1)
+          end
+
+          Array(entity.entities.respond_to?(:to_a) ? entity.entities.to_a : []).each do |child|
+            next unless live_entity?(child)
+            next unless child.respond_to?(:typename) && child.typename.to_s == 'Group'
+            next unless empty_entities?(child)
+            erase_retained_entity!(child)
+          end
+          true
+        end
+
+        def erase_retained_entity!(entity)
+          if entity.respond_to?(:erase!)
+            entity.erase!
+            return true
+          end
+          raise ResumeMismatch, 'retained empty group cannot be removed before certification'
         end
 
         def point_signature(point)
@@ -721,8 +806,18 @@ module BlueCollarSystems
 
         def numeric_sequence(values)
           Array(values).map do |value|
-            value.respond_to?(:to_f) ? value.to_f : value.to_s
+            if value.respond_to?(:to_f)
+              quantize_signature_number(value.to_f)
+            else
+              value.to_s
+            end
           end
+        end
+
+        def quantize_signature_number(value)
+          return value unless value.finite?
+          quantum = SIGNATURE_LENGTH_QUANTUM.to_f
+          (value / quantum).round * quantum
         end
 
         def canonical_json(value)
