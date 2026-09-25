@@ -9,6 +9,10 @@
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
+### Unreleased
+
+- Remove empty importer-owned fill and geometry-batch containers before page certification, including containers emptied by later page cleanup. This prevents SketchUp's commit-time housekeeping from invalidating an otherwise unchanged retained page. Nonempty geometry, unrelated groups, and the strict resume signature remain unchanged.
+
 ### Recent fixes (v3.7.158)
 
 - Decode 8-bit grayscale and gray+alpha embedded-image PNGs in the page ownership/identity proof, so sheets with a `/DeviceGray` embedded image no longer abort with "texture export must be a noninterlaced 8-bit RGB/RGBA PNG".

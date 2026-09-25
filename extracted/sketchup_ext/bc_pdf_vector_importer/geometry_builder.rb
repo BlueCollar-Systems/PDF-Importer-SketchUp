@@ -118,6 +118,7 @@ module BlueCollarSystems
         @color_group_parents = {}
         fill_targets = {}
         @fill_only_groups = []
+        @source_group_parents = {}
 
         page_width  = PageTransform.effective_width(@media_box, @page_rotation)
         page_height_pts = PageTransform.effective_height(@media_box, @page_rotation)
@@ -189,10 +190,12 @@ module BlueCollarSystems
                 pdf_to_su(sx, sy, page_origin_x, page_origin_y)
               end
             end
+            clip_parent = staged_geometry_target(dest, path_idx)
             clip_group = draw_compound_clip_fill(
-              staged_geometry_target(dest, path_idx), loops,
+              clip_parent, loops,
               path.clip_fill_rule, path_layer, path.fill_color
             )
+            @source_group_parents[clip_group] = clip_parent if clip_group
              @fill_only_groups << { :group => clip_group, :fill_rgb => path.fill_color,
                :paint_order => path.source_paint_order,
                :opacity => (path.respond_to?(:source_fill_opacity) ? path.source_fill_opacity : nil)
@@ -210,6 +213,7 @@ module BlueCollarSystems
             fill_key = white && order ? [dest.object_id, order] : dest.object_id
             unless fill_targets[fill_key]
               fill_targets[fill_key] = dest.add_group
+              @source_group_parents[fill_targets[fill_key]] = dest
                @fill_only_groups << { :group => fill_targets[fill_key],
                  :fill_rgb => path.fill_color, :paint_order => order,
                  :opacity => (path.respond_to?(:source_fill_opacity) ? path.source_fill_opacity : nil) }
@@ -283,7 +287,7 @@ module BlueCollarSystems
         )
         finalize_geometry_staging!
         flush_deferred_small_faces!
-        prune_empty_color_groups!
+        prune_empty_source_groups!
         emit_progress(
           :geometry_completed,
           :path_count => @paths.length,
@@ -384,6 +388,34 @@ module BlueCollarSystems
         }
       end
 
+      # Fill and batch containers may become empty during page cleanup. Keep
+      # their creation-time parents after staging finalization so both nesting
+      # directions can be cleaned before the strict retained-tree signature.
+      # Never walk arbitrary page groups: only this builder's containers qualify.
+      def prune_empty_source_groups!
+        removed = 0
+        (@source_group_parents || {}).keys.reverse_each do |group|
+          if group.respond_to?(:valid?) && !group.valid?
+            @source_group_parents.delete(group)
+            @fill_only_groups.reject! { |row| row[:group] == group }
+            next
+          end
+          next unless group.entities.length == 0
+          parent = @source_group_parents[group]
+          unless parent && parent.to_a.include?(group)
+            raise 'empty source group lost its source-owned parent'
+          end
+          group.erase!
+          if parent.to_a.include?(group)
+            raise 'host did not remove an empty source group before certification'
+          end
+          @source_group_parents.delete(group)
+          @fill_only_groups.reject! { |row| row[:group] == group }
+          removed += 1
+        end
+        removed + prune_empty_color_groups!
+      end
+
       # Empty color containers are temporary construction details. SketchUp
       # deletes them at commit, so remove only our own empty containers before
       # the retained page tree is certified. Call again after page cleanup,
@@ -474,6 +506,7 @@ module BlueCollarSystems
                  group.respond_to?(:explode)
             raise 'host cannot create an exact bulk geometry staging group'
           end
+          @source_group_parents[group] = parent_entities
           group.name = "PDF Geometry Batch #{staging[:batch_count] + 1}" if
             group.respond_to?(:name=)
           slot = {
@@ -504,6 +537,11 @@ module BlueCollarSystems
           child_count = staging_group_child_count(group)
           if child_count == 0
             erase_empty_staging_group!(group)
+            parent = @source_group_parents[group]
+            if parent && parent.to_a.include?(group)
+              raise 'host did not remove an empty source group during staging'
+            end
+            @source_group_parents.delete(group)
             erased += 1
             next
           end

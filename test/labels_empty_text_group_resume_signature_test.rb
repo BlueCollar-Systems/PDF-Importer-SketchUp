@@ -502,4 +502,134 @@ class LabelsEmptyTextGroupResumeSignatureTest < Minitest::Test
     colored.entities.erase_entities(before.first)
     assert_raises(IRC::ResumeMismatch) { controller.resumable_pages }
   end
+
+  def build_empty_fill_page(model, heavy = false)
+    kept = heavy ? 500.times.map { |i| line_path(10.0 + i) } : [line_path(10.0)]
+    empty_fill = line_path(30.0)
+    empty_fill.stroke = false
+    empty_fill.fill = true
+    empty_fill.subpaths.first.segments.pop
+    builder = Builder.new(model, kept + [empty_fill], [], MEDIA_BOX,
+      :group_per_page => true, :group_by_color => true,
+      :detect_arcs => false, :import_fills => true, :import_text => false,
+      :requested_text_mode => :text3d)
+    [builder, builder.build]
+  end
+
+  def test_empty_fill_group_does_not_change_signature_at_commit
+    [false, true].each do |heavy|
+      model = FakeHost::Model.new
+      model.start_operation('PDF Import', true)
+      builder, result = build_empty_fill_page(model, heavy)
+      assert_equal heavy ? 500 : 1, result[:edges]
+      controller = IRC::Controller.new(:model => model, :pages => [1],
+        :requested_mode => :text3d, :identity => identity, :clock => lambda { 0.0 })
+      controller.certify_page!(builder.page_group, 1)
+      model.commit_operation
+      assert_equal [1], controller.resumable_pages
+      assert_equal 0, model.purged_groups
+      assert_empty builder.fill_only_groups
+    end
+  end
+
+  def build_owned_fill_page(model)
+    builder, = build_empty_fill_page(model)
+    parent = builder.page_group.entities
+    group = parent.add_group
+    group.name = 'PDF Fill'
+    group.entities.add_edges([Geom::Point3d.new(0, 0, 0), Geom::Point3d.new(1, 1, 0)])
+    builder.instance_variable_get(:@source_group_parents)[group] = parent
+    builder.fill_only_groups << { :group => group }
+    [builder, group, parent]
+  end
+
+  def test_fill_cleanup_preserves_nonempty_and_unowned_groups
+    model = FakeHost::Model.new
+    builder, group, parent = build_owned_fill_page(model)
+    unrelated = parent.add_group
+    unrelated.name = 'PDF Fill'
+    controller = IRC::Controller.new(:model => model, :pages => [1],
+      :requested_mode => :text3d, :identity => identity, :clock => lambda { 0.0 })
+    before = controller.send(:entity_signature, builder.page_group)
+    assert_equal 0, builder.prune_empty_source_groups!
+    assert_equal before, controller.send(:entity_signature, builder.page_group)
+    assert group.valid?
+    assert unrelated.valid?
+    group.entities.erase_entities(group.entities.to_a)
+    assert_equal 1, builder.prune_empty_source_groups!
+    refute group.valid?
+    assert unrelated.valid?, 'matching names do not establish ownership'
+    assert_empty builder.fill_only_groups
+    assert_equal 0, builder.prune_empty_source_groups!
+  end
+
+  def test_fill_cleanup_ignored_erase_cannot_pass_certification
+    builder, group, = build_owned_fill_page(FakeHost::Model.new)
+    group.entities.erase_entities(group.entities.to_a)
+    def group.erase!; true; end
+    error = assert_raises(RuntimeError) { builder.prune_empty_source_groups! }
+    assert_match(/host did not remove an empty source group/, error.message)
+    assert group.valid?
+    assert_equal [group], builder.fill_only_groups.map { |row| row[:group] }
+  end
+
+  def test_fill_cleanup_refuses_changed_parent_ownership
+    builder, group, parent = build_owned_fill_page(FakeHost::Model.new)
+    group.entities.erase_entities(group.entities.to_a)
+    parent.erase_entity(group)
+    error = assert_raises(RuntimeError) { builder.prune_empty_source_groups! }
+    assert_match(/lost its source-owned parent/, error.message)
+    assert group.valid?
+  end
+
+  def test_already_removed_fill_is_removed_from_display_metadata_only
+    builder, group, = build_owned_fill_page(FakeHost::Model.new)
+    group.erase!
+    assert_equal 0, builder.prune_empty_source_groups!
+    assert_empty builder.fill_only_groups
+    assert_equal 0, builder.prune_empty_source_groups!
+  end
+
+  def test_fill_inside_retained_batch_is_pruned_after_page_cleanup
+    model = FakeHost::Model.new
+    model.start_operation('PDF Import', true)
+    builder, = build_empty_fill_page(model, true)
+    parent = builder.page_group.entities
+    clip_parent = builder.send(:staged_geometry_target, parent, 999)
+    fill = clip_parent.add_group
+    fill.name = 'PDF Clipped Fill'
+    fill.entities.add_edges([Geom::Point3d.new(0, 0, 0), Geom::Point3d.new(1, 1, 0)])
+    builder.instance_variable_get(:@source_group_parents)[fill] = clip_parent
+    builder.fill_only_groups << { :group => fill }
+    builder.send(:finalize_geometry_staging!)
+    fill.entities.erase_entities(fill.entities.to_a)
+    assert_equal 2, builder.prune_empty_source_groups!
+    controller = IRC::Controller.new(:model => model, :pages => [1],
+      :requested_mode => :text3d, :identity => identity, :clock => lambda { 0.0 })
+    controller.certify_page!(builder.page_group, 1)
+    model.commit_operation
+    assert_equal [1], controller.resumable_pages
+    assert_equal 0, model.purged_groups
+    assert_empty builder.fill_only_groups
+  end
+
+  def test_retained_batch_inside_fill_is_pruned_after_page_cleanup
+    model = FakeHost::Model.new
+    model.start_operation('PDF Import', true)
+    builder, fill, = build_owned_fill_page(model)
+    fill.entities.erase_entities(fill.entities.to_a)
+    builder.send(:configure_geometry_staging!, true)
+    batch_entities = builder.send(:staged_geometry_target, fill.entities, 999)
+    batch_entities.add_edges([Geom::Point3d.new(0, 0, 0), Geom::Point3d.new(1, 1, 0)])
+    builder.send(:finalize_geometry_staging!)
+    batch_entities.erase_entities(batch_entities.to_a)
+    assert_equal 2, builder.prune_empty_source_groups!
+    controller = IRC::Controller.new(:model => model, :pages => [1],
+      :requested_mode => :text3d, :identity => identity, :clock => lambda { 0.0 })
+    controller.certify_page!(builder.page_group, 1)
+    model.commit_operation
+    assert_equal [1], controller.resumable_pages
+    assert_equal 0, model.purged_groups
+    assert_empty builder.fill_only_groups
+  end
 end
