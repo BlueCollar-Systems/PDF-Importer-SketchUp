@@ -1541,6 +1541,75 @@ class SketchupHostEvidenceTest < Minitest::Test
     )
   end
 
+  # A whole-page terminal raster delivered inside a resumable "PDF Page N"
+  # group is no longer top-level. The compact snapshot keeps a nested row
+  # only for claim roots, so the page raster must carry source_claim_root
+  # (main.rb import_page_as_raster now sets it) or the batch harness fails
+  # with "terminal_text_delivery_records[i] identities are absent from
+  # manifest" - measured on a six-page shop file whose pages 5-6 were
+  # delivered as verified page rasters (2026-09-25).
+  def test_nested_page_raster_claim_root_is_present_in_compact_owned_manifest
+    dictionary = 'BC_PDF_Importer'
+    sha256 = 'c' * 64
+    build = lambda do |claim_root|
+      attributes = {
+        [dictionary, 'source_kind'] => 'page_raster',
+        [dictionary, 'representation'] => 'raster',
+        [dictionary, 'raster_page_number'] => 5,
+        [dictionary, 'raster_page_rotation'] => 0,
+        [dictionary, 'raster_pixel_width'] => 12600,
+        [dictionary, 'raster_pixel_height'] => 9000,
+        [dictionary, 'raster_content_sha256'] => sha256,
+        [dictionary, 'raster_visual_pixel_sha256'] => sha256,
+        [dictionary, 'raster_content_bytes'] => 4800,
+        [dictionary, 'raster_source_pdf_sha256'] => sha256
+      }
+      attributes[[dictionary, 'source_claim_root']] = true if claim_root
+      image = FakeImage.new(61, :attributes => attributes)
+      page = FakeGroup.new(60, [image], :attributes => {
+        ['BC_PDF_Importer_Resume', 'page_number'] => 5,
+        ['BC_PDF_Importer_Resume', 'certified'] => true
+      })
+      [image, page]
+    end
+
+    image, page = build.call(true)
+    manifest = SketchupHostEvidence.snapshot_entities([page], :compact => true, :texture_proof => false)
+    owned = SketchupHostEvidence.owned_manifest([], manifest)
+    identities = SketchupHostEvidence.manifest_identity_sets(owned)
+    assert_includes identities['persistent_id'], image.persistent_id
+    row = manifest.first['children'].first
+    assert_equal 'Image', row['typename']
+    assert_equal true, row['representation_evidence']['source_claim_root']
+    record = {
+      :page => 5, :source_page_number => 5, :requested_strategy => :auto,
+      :effective_strategy => :raster, :semantic_text_evaluated => false,
+      :resulting_entity_ids => ["persistent_id:#{image.persistent_id}"]
+    }
+    # Raises EvidenceError when the identity is missing; silent otherwise.
+    SketchupHostEvidence.send(
+      :verify_delivery_record!, 'terminal_text_delivery_records', 6, record,
+      identities
+    )
+
+    # The unflagged image (pre-fix behaviour) is exactly what the harness
+    # could not find.
+    image, page = build.call(false)
+    manifest = SketchupHostEvidence.snapshot_entities([page], :compact => true, :texture_proof => false)
+    identities = SketchupHostEvidence.manifest_identity_sets(
+      SketchupHostEvidence.owned_manifest([], manifest)
+    )
+    refute_includes identities['persistent_id'], image.persistent_id
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
+      SketchupHostEvidence.send(
+        :verify_delivery_record!, 'terminal_text_delivery_records', 6,
+        record.merge(:resulting_entity_ids => ["persistent_id:#{image.persistent_id}"]),
+        identities
+      )
+    end
+    assert_match(/identities are absent from manifest: persistent_id:#{image.persistent_id}/, error.message)
+  end
+
   def test_source_evidence_is_attached_to_owned_root_not_every_face
     child = FakeEntity.new(51, 'Face')
     root = FakeGroup.new(50, [child])

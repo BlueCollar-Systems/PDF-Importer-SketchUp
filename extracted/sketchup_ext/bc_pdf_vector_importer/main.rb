@@ -6751,6 +6751,15 @@ module BlueCollarSystems
         begin
           if img.respond_to?(:set_attribute)
             dictionary = 'BC_PDF_Importer'
+            # A terminal page raster is the root of its own source claim, like
+            # an item raster. Inside a resumable "PDF Page N" group it is no
+            # longer top-level, and the compact host-evidence snapshot keeps a
+            # nested row only for claim roots, so without this flag the page
+            # raster vanishes from the manifest and the batch harness fails
+            # with "identities are absent from manifest".
+            img.set_attribute(dictionary, 'source_claim_root', true)
+            img.set_attribute(dictionary, 'source_kind', 'page_raster')
+            img.set_attribute(dictionary, 'representation', 'raster')
             img.set_attribute(dictionary, 'raster_page_number', page_num.to_i)
             img.set_attribute(dictionary, 'raster_page_rotation',
                               PageTransform.normalize_rotation(page_rotation))
