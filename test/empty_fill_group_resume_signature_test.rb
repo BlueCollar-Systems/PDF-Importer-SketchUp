@@ -306,6 +306,23 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     )
   end
 
+  # Failure diagnostics: the whole tree under the model, so a CI-only
+  # difference in the fake host's commit behaviour is visible in the log.
+  def tree_dump(entities, depth = 0)
+    Array(entities.to_a).map do |item|
+      name = item.respond_to?(:name) ? item.name.to_s : ''
+      line = ('  ' * depth) + "#{item.typename}#{name.empty? ? '' : " '#{name}'"} pid=#{item.persistent_id} valid=#{item.valid?}"
+      if item.respond_to?(:entities)
+        line += " children=#{item.entities.length}\n" + tree_dump(item.entities, depth + 1)
+      end
+      line
+    end.join("\n")
+  end
+
+  def model_dump(model)
+    "RUBY #{RUBY_VERSION} purged_groups=#{model.purged_groups}\n" + tree_dump(model.active_entities)
+  end
+
   def empty_groups_below(container)
     found = []
     container.entities.to_a.each do |child|
@@ -380,7 +397,7 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     controller = controller_for(model)
     controller.certify_page!(builder.page_group, 1)
     model.commit_operation
-    assert_equal 1, model.purged_groups
+    assert_equal 1, model.purged_groups, model_dump(model)
     error = assert_raises(IRC::ResumeMismatch) { controller.resumable_pages }
     assert_match(/\Apage 1 retained entity signature changed \(/, error.message)
     assert_match(/1 group\(s\) vanished since certification in this run/, error.message)
@@ -412,7 +429,7 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     controller = controller_for(model)
     certified = controller.certify_page!(builder.page_group, 1)['entity_signature_sha256']
     model.commit_operation
-    assert_equal 1, model.purged_groups
+    assert_equal 1, model.purged_groups, model_dump(model)
     message = controller.reseal_page!(builder.page_group, 1)
     assert_match(/\Apage 1 retained tree changed between certification and host commit \(/, message)
     assert_match(/group 'Late Container' pid #{late.persistent_id}/, message)
@@ -450,7 +467,7 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     certified = controller.certify_page!(builder.page_group, 1)['entity_signature_sha256']
     refute controller.page_reseal_pending?(builder.page_group, 1), 'nothing changed before commit'
     model.commit_operation
-    assert controller.page_reseal_pending?(builder.page_group, 1)
+    assert controller.page_reseal_pending?(builder.page_group, 1), model_dump(model)
     assert_equal certified, controller.journal['pages'].first['entity_signature_sha256'],
                  'the read-only check must not rewrite the journal'
     assert_raises(IRC::ResumeMismatch) { controller_for(model).page_reseal_pending?(builder.page_group, 1) }
