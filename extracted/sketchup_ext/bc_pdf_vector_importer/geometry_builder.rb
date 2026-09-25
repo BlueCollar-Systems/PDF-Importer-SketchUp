@@ -283,6 +283,9 @@ module BlueCollarSystems
         )
         finalize_geometry_staging!
         flush_deferred_small_faces!
+        # Fill containers live inside color containers: prune the inner ones
+        # first so a color group emptied by that prune is caught too.
+        prune_empty_fill_groups!
         prune_empty_color_groups!
         emit_progress(
           :geometry_completed,
@@ -408,7 +411,67 @@ module BlueCollarSystems
         removed
       end
 
+      # Fill-only containers ("PDF Fill") are created before their contours are
+      # drawn (fill_targets in #build). A fill path whose every subpath is open,
+      # degenerate or rejected by the host leaves that container EMPTY. SketchUp
+      # purges empty groups at commit_operation, i.e. after the page was
+      # certified, so PageOrchestrator's immediate re-validation then reads a
+      # different retained-tree signature ("page N retained entity signature
+      # changed", work-PC log 2026-09-25). Remove our own empty fill containers
+      # first, deterministically, and drop their records so paint-order
+      # consumers never see a dead group.
+      def prune_empty_fill_groups!
+        removed = 0
+        Array(@fill_only_groups).dup.each do |record|
+          group = record.is_a?(Hash) ? record[:group] : nil
+          next unless group
+          if group.respond_to?(:valid?) && group.valid? == false
+            @fill_only_groups.delete(record)
+            next
+          end
+          next unless staging_group_child_count(group) == 0
+          erase_empty_staging_group!(group)
+          @fill_only_groups.delete(record)
+          removed += 1
+        end
+        removed
+      end
+
+      # Every empty Group anywhere under the page group, deepest first. This is
+      # the same housekeeping the host performs at commit_operation; doing it
+      # before certification keeps the certified signature equal to what the
+      # model holds after commit, whichever stage left the container behind.
+      # Returns the names of the removed groups (for the import log).
+      def prune_empty_page_groups!
+        return [] unless @page_group
+        return [] if @page_group.respond_to?(:valid?) && @page_group.valid? == false
+        removed = []
+        prune_empty_groups_below!(@page_group, removed, 0)
+        removed
+      end
+
       private
+
+      def prune_empty_groups_below!(container, removed, depth)
+        raise 'retained page tree is too deep' if depth > 64
+        entities = container.respond_to?(:entities) ? container.entities : nil
+        return unless entities && entities.respond_to?(:to_a)
+        entities.to_a.each do |child|
+          next unless group_entity?(child)
+          next if child.respond_to?(:valid?) && child.valid? == false
+          prune_empty_groups_below!(child, removed, depth + 1)
+          next unless staging_group_child_count(child) == 0
+          label = child.respond_to?(:name) ? child.name.to_s : ''
+          erase_empty_staging_group!(child)
+          removed << label
+        end
+      end
+
+      def group_entity?(entity)
+        return false unless entity.respond_to?(:entities)
+        return entity.typename.to_s == 'Group' if entity.respond_to?(:typename)
+        defined?(Sketchup::Group) && entity.is_a?(Sketchup::Group)
+      end
 
       def emit_progress(phase, detail = {})
         callback = @progress_callback

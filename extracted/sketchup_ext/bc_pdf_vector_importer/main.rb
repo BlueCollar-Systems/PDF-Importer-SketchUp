@@ -5432,9 +5432,24 @@ module BlueCollarSystems
         end
 
         # Host commit purges empty groups. Keep that automatic housekeeping out
-        # of the strict retained-tree signature by finalizing only this
-        # builder's source color containers before page certification.
+        # of the strict retained-tree signature by finalizing this builder's
+        # own empty containers (source color groups, fill-only groups) and then
+        # every other empty group left under the page by any stage, before
+        # page certification. Otherwise the immediate post-commit re-validation
+        # reads a different signature ("page N retained entity signature
+        # changed") and a multi-page import dies after its first pages.
+        pruned_fill_groups = builder.prune_empty_fill_groups!
         builder.prune_empty_color_groups!
+        pruned_groups = builder.prune_empty_page_groups!
+        if pruned_fill_groups > 0 || !pruned_groups.empty?
+          Logger.info(
+            'Pipeline',
+            "Page #{page_num}: removed #{pruned_fill_groups} empty fill container(s) and " \
+            "#{pruned_groups.length} other empty group(s) before certification " \
+            "(host commit would purge them afterwards): " \
+            "#{pruned_groups.uniq.first(8).inspect}"
+          )
+        end
         add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
 
         # Advance the running page stack only after a successful import.

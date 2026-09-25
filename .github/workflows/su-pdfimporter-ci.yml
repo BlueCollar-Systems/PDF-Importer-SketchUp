@@ -143,6 +143,7 @@ jobs:
           ruby test/stroke_clipping_test.rb
           ruby test/stroke_color_preservation_test.rb
           ruby test/labels_empty_text_group_resume_signature_test.rb
+          ruby test/empty_fill_group_resume_signature_test.rb
           ruby test/pdf_color_display_test.rb
           ruby test/geometry_cleanup_collinear_coverage_test.rb
           ruby test/cleanup_selected_operation_test.rb
@@ -221,6 +222,7 @@ jobs:
           ruby test/stroke_clipping_test.rb
           ruby test/stroke_color_preservation_test.rb
           ruby test/labels_empty_text_group_resume_signature_test.rb
+          ruby test/empty_fill_group_resume_signature_test.rb
           ruby test/pdf_color_display_test.rb
       - name: Validate release publication state
         run: python tools/check_release_publication.py

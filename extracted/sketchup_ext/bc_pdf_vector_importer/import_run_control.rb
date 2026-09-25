@@ -180,6 +180,11 @@ module BlueCollarSystems
           @model = options[:model]
           @identity = stringify_hash(options[:identity] || {})
           @entity_signature_proc = options[:entity_signature]
+          # Per page, the group/typename census taken when the page was
+          # certified in THIS process. It is never persisted; it only lets a
+          # same-run signature mismatch name what changed instead of failing
+          # with a bare "retained entity signature changed".
+          @certified_census = {}
         end
 
         def assess(counts = {})
@@ -321,6 +326,7 @@ module BlueCollarSystems
           set_entity_attribute(group, 'identity_sha256', identity_digest)
           set_entity_attribute(group, 'certified', true)
           signature = entity_signature(group)
+          @certified_census[page_number] = entity_census(group)
           entry = {
             'page_number' => page_number,
             'group_persistent_id' => group_id,
@@ -463,9 +469,83 @@ module BlueCollarSystems
             raise ResumeMismatch, "page #{page} certification attributes changed"
           end
           unless entity_signature(group) == entry['entity_signature_sha256'].to_s
-            raise ResumeMismatch, "page #{page} retained entity signature changed"
+            message = "page #{page} retained entity signature changed"
+            detail = signature_change_details(page, group)
+            message += " (#{detail})" unless detail.empty?
+            log_resume_diagnostic(message)
+            raise ResumeMismatch, message
           end
           true
+        end
+
+        # Group rows and per-typename counts of a retained tree. Cheap next to
+        # the signature walk (no JSON, no digest); groups are few, leaves many.
+        def entity_census(entity)
+          census = { 'groups' => [], 'counts' => {} }
+          collect_entity_census(entity, census, 0)
+          census
+        end
+
+        def collect_entity_census(entity, census, depth)
+          return if depth > 64
+          typename = entity.respond_to?(:typename) ? entity.typename.to_s : entity.class.name.to_s
+          census['counts'][typename] = census['counts'].fetch(typename, 0) + 1
+          children = entity.respond_to?(:entities) ? entity.entities : nil
+          return unless children && children.respond_to?(:to_a)
+          list = children.to_a
+          name = entity.respond_to?(:name) ? entity.name.to_s : ''
+          census['groups'] << [depth, persistent_id_for(entity), name, list.length]
+          list.each { |child| collect_entity_census(child, census, depth + 1) }
+        end
+
+        # Names what differs between the tree certified in this process and
+        # the tree now, so the log says WHICH container the host removed (or
+        # which stage added one) instead of only that the digest moved.
+        # Empty when this process did not certify the page (a true resume).
+        def signature_change_details(page, group)
+          before = @certified_census[page]
+          return '' unless before
+          after = entity_census(group)
+          key = lambda { |row| [row[0], row[1].to_i, row[2]] }
+          before_keys = before['groups'].map { |row| key.call(row) }
+          after_keys = after['groups'].map { |row| key.call(row) }
+          vanished = before['groups'].reject { |row| after_keys.include?(key.call(row)) }
+          appeared = after['groups'].reject { |row| before_keys.include?(key.call(row)) }
+          describe = lambda do |row|
+            label = row[2].to_s.empty? ? 'unnamed group' : "group '#{row[2]}'"
+            "#{label} pid #{row[1].inspect} depth #{row[0]} with #{row[3]} child(ren)"
+          end
+          parts = []
+          unless vanished.empty?
+            parts << "#{vanished.length} group(s) vanished since certification in this run: " +
+                     vanished.first(6).map { |row| describe.call(row) }.join('; ')
+          end
+          unless appeared.empty?
+            parts << "#{appeared.length} group(s) appeared after certification: " +
+                     appeared.first(6).map { |row| describe.call(row) }.join('; ')
+          end
+          count_changes = (before['counts'].keys | after['counts'].keys).sort.map do |typename|
+            was = before['counts'][typename].to_i
+            now = after['counts'][typename].to_i
+            was == now ? nil : "#{typename} #{was}->#{now}"
+          end.compact
+          unless count_changes.empty?
+            parts << "entity counts changed: #{count_changes.first(8).join(', ')}"
+          end
+          if parts.empty?
+            parts << 'same groups and entity counts; a position, layer, material, ' \
+                     'name, hidden flag or text changed inside the retained tree'
+          end
+          parts.join('. ')
+        rescue StandardError => error
+          "diagnostic unavailable: #{error.message}"
+        end
+
+        def log_resume_diagnostic(message)
+          return unless defined?(Logger) && Logger.respond_to?(:warn)
+          Logger.warn('ImportRunControl', message)
+        rescue StandardError
+          nil
         end
 
         def active_entities
