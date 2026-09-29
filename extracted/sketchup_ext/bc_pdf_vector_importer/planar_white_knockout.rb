@@ -54,7 +54,12 @@ module BlueCollarSystems
         raise
       rescue StandardError => error
         # Generic host failure is never affirmative evidence for a text fallback.
-        fail_contract("native white-mask composition failed (#{error.class}): " +
+        # The failing line of this module is named so a host log says WHERE
+        # the API refused, not only that it did.
+        site = Array(error.backtrace).find { |line| line.include?('planar_white_knockout') }
+        site = site ? site[/planar_white_knockout\.rb:\d+/] : nil
+        fail_contract("native white-mask composition failed (#{error.class}" +
+                      (site ? " at #{site}" : '') + '): ' +
                       safe_error_detail(error.message))
       end
 
@@ -353,7 +358,11 @@ module BlueCollarSystems
           construction_loops = white.flat_map { |record| record[:loops] } +
                                construction_ink_loops(ink)
           construction_loops.each do |loop|
-            points = loop.map { |point| construction_point(point, origin) }
+            points = distinct_loop_points(loop.map { |point| construction_point(point, origin) })
+            # A source loop that collapses below three distinct points has no
+            # area to compose; the partition/coverage checks below still
+            # measure the white area it belonged to.
+            next if points.length < 3
             # A previously inserted coincident boundary may return nil. The
             # physical partition/coverage checks below decide success.
             stage.entities.add_face(points)
@@ -519,7 +528,9 @@ module BlueCollarSystems
           # legacy edge graph can recreate the malformed nested/outside holes.
           groups = outers.map do |outer|
             group = entities.add_group
-            created = group.entities.add_face(outer.map { |p| Geom::Point3d.new(*p) })
+            shell = distinct_loop_points(outer.map { |p| Geom::Point3d.new(*p) })
+            fail_contract('native white-mask outer reconstruction is degenerate') unless shell.length >= 3
+            created = group.entities.add_face(shell)
             fail_contract('native white-mask outer reconstruction failed') unless created
             [outer, group]
           end
@@ -529,7 +540,9 @@ module BlueCollarSystems
               strict_loop_inside?(point, pair[0].map { |p| p.first(2).map(&:to_r) })
             end
             fail_contract('native white-mask counter has no unique reconstructed shell') unless owners.length == 1
-            cut = owners[0][1].entities.add_face(hole.map { |p| Geom::Point3d.new(*p) })
+            counter = distinct_loop_points(hole.map { |p| Geom::Point3d.new(*p) })
+            fail_contract('native white-mask counter reconstruction is degenerate') unless counter.length >= 3
+            cut = owners[0][1].entities.add_face(counter)
             fail_contract('native white-mask counter reconstruction failed') unless cut
             cut.erase!
           end
@@ -598,6 +611,30 @@ module BlueCollarSystems
       def self.construction_point(point, origin)
         Geom::Point3d.new((point[0] - origin[0]) * CONSTRUCTION_SCALE,
                          (point[1] - origin[1]) * CONSTRUCTION_SCALE, 0.0)
+      end
+
+      # SketchUp's add_face raises "Duplicate points in array" for consecutive
+      # points closer than its 0.001 in vertex tolerance and for a closing
+      # point that repeats the first. Source loops can carry both (a fill
+      # contour whose last vertex closes on its first, or two vertices a
+      # sub-tolerance apart): drop the repeats, keep the loop's shape.
+      NATIVE_VERTEX_TOLERANCE = 0.001
+
+      def self.distinct_loop_points(points)
+        kept = []
+        points.each do |point|
+          last = kept.last
+          next if last && same_native_point?(last, point)
+          kept << point
+        end
+        kept.pop while kept.length > 1 && same_native_point?(kept.first, kept.last)
+        kept
+      end
+
+      def self.same_native_point?(a, b)
+        (a.x.to_f - b.x.to_f).abs < NATIVE_VERTEX_TOLERANCE &&
+          (a.y.to_f - b.y.to_f).abs < NATIVE_VERTEX_TOLERANCE &&
+          (a.z.to_f - b.z.to_f).abs < NATIVE_VERTEX_TOLERANCE
       end
 
       def self.page_point(point, origin)

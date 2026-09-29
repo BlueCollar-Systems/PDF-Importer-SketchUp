@@ -152,13 +152,18 @@ class TextModeRoutingTest < Minitest::Test
   def test_geometry_glyphs_preflight_warns_when_svg_renderer_missing
     assert_match(/svg_renderer_missing/, @main)
     assert_match(/SvgTextRenderer\.svg_renderer_available\?/, @main)
-    # User-facing contract: the preflight stops explicitly and directs the
-    # user to a free external renderer; a source-only RBZ cannot repair this
-    # by being reinstalled and the importer never offers a downgrade.
+    # User-facing contract: the import stops explicitly with ONE failure
+    # message that directs the user to a free external renderer; a
+    # source-only RBZ cannot repair this by being reinstalled and the
+    # importer never offers a downgrade. Since PR #86 (554cead) there is no
+    # mid-import modal here - the remedy rides in the raised error.
     assert_match(/free Poppler\/MuPDF SVG/, @main)
-    assert_match(/renderer, which is unavailable/, @main)
-    assert_match(/import is stopping without/, @main)
-    assert_match(/changing the requested representation/, @main)
+    assert_match(/renderer is unavailable/, @main)
+    assert_match(/representation fallback is authorized/, @main)
+    assert_match(/The requested representation will not be substituted/, @main)
+    enforce = @main[/def self\.enforce_svg_renderer_available!.*?\n    end\n/m]
+    refute_nil enforce
+    refute_match(/UI\.messagebox/, enforce)
     assert_match(/BC_PDFTOCAIRO_PATH/, @main)
     assert_match(/BC_MUTOOL_PATH/, @main)
     assert_match(/Compatibility Report/, @main)

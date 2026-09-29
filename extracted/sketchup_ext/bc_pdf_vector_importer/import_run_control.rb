@@ -19,7 +19,8 @@ module BlueCollarSystems
         :progress_callback, :run_controller, :cancel_probe, :status_sink,
         :page_certifier, :resumable_page_call, :initial_y_offset,
         :defer_final_diagnostics, :complexity_confirm, :prepared_parser,
-        :prepared_pdf_path, :preserve_prepared_parser, :preserve_logger
+        :prepared_pdf_path, :preserve_prepared_parser, :preserve_logger,
+        :stop_on_page_error
       ].freeze
       # Per-span evidence trees are restored from the live page groups on resume.
       # Cloning them into the model attribute dictionary is a multi-second JSON
@@ -922,7 +923,17 @@ module BlueCollarSystems
           @runner = options[:runner]
           @group_per_page = options.key?(:group_per_page) ?
             options[:group_per_page] == true : true
+          # Unattended multi-page imports (owner rule 2026-09-28): one page
+          # that fails is recorded and the remaining pages still import. The
+          # failed page's own operation was already aborted by the runner, so
+          # nothing partial is kept; it is never certified and a later resume
+          # retries it. Callers opt in; the bare orchestrator stays strict.
+          @continue_on_page_error = options[:continue_on_page_error] == true
+          @failed_pages = []
+          @first_page_error = nil
         end
+
+        attr_reader :failed_pages
 
         def run
           unless @group_per_page
@@ -950,7 +961,16 @@ module BlueCollarSystems
               )
               certified = true
             end
-            result = @runner.call(page, offset, certifier)
+            begin
+              result = @runner.call(page, offset, certifier)
+            rescue ImportCancelled, ResumeMismatch
+              raise
+            rescue StandardError => error
+              raise unless continue_after_page_error?(error, certified)
+              @failed_pages << page_failure_record(page, error)
+              @first_page_error ||= error
+              next
+            end
             unless certified && @controller.resumable_pages.include?(page)
               raise ResumeMismatch,
                     "page #{page} runner returned without a certified page group"
@@ -966,11 +986,18 @@ module BlueCollarSystems
             new_pages << page
           end
 
+          # Every page failed: there is no partial import to summarize, so the
+          # first real error propagates exactly as before.
+          if @first_page_error && new_pages.empty? && resumed.empty?
+            raise @first_page_error
+          end
+
           {
             :cancelled => false,
             :retained_pages => (resumed + new_pages).sort,
             :resumed_pages => resumed.sort,
             :new_pages => new_pages,
+            :failed_pages => @failed_pages.dup,
             :next_page => nil,
             :stats => aggregate
           }
@@ -980,10 +1007,30 @@ module BlueCollarSystems
           result[:resumed_pages] = resumed || []
           result[:new_pages] = new_pages || []
           result[:stats] = aggregate || {}
+          result[:failed_pages] = @failed_pages.dup
           result
         end
 
         private
+
+        # Host-policy stops (noninteractive batch refusals) and errors raised
+        # after the page was already certified are never swallowed: the first
+        # is a deliberate whole-run stop, the second would leave the resume
+        # journal claiming a page whose operation did not commit.
+        def continue_after_page_error?(error, certified)
+          return false unless @continue_on_page_error
+          return false if certified
+          return false if error.class.name.to_s =~ /NoninteractiveError\z/
+          true
+        end
+
+        def page_failure_record(page, error)
+          {
+            :page => page.to_i,
+            :error_class => error.class.name.to_s,
+            :message => error.message.to_s[0, 500]
+          }
+        end
 
         def merge_stats!(target, source)
           return target unless source.is_a?(Hash)
