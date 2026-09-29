@@ -272,6 +272,19 @@ class UnattendedMultipageImportTest < Minitest::Test
     refute_includes line, 'Failed'
   end
 
+  def test_inline_images_left_out_on_vector_pages_are_named
+    stats = { :pages => 6, :edges => 1, :text => 1,
+              :inline_image_vector_retentions => [
+                { :page => 5, :inline_image_instance_count => 2175,
+                  :vector_path_count => 15_012, :delivery => :editable_geometry },
+                { 'page' => 6, 'inline_image_instance_count' => 2175 }
+              ] }
+    assert_includes R.completion_status(stats),
+                    'Inline images not placed on pages 5-6 (vectors kept).'
+    summary = R.build_summary(stats)
+    assert_includes summary, 'Page 5: 2175 inline image piece(s)'
+  end
+
   def test_explicit_raster_request_is_not_reported_as_fallback
     stats = { :page_representation_fallbacks => [
       { :page => 1, :delivered_mode => :raster, :explicit_request => true }

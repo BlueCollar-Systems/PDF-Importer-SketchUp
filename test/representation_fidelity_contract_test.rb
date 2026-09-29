@@ -3895,6 +3895,18 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal :none, IMP.inline_image_page_delivery_decision(10, {
       :force_raster => true
     })
+    assert_equal :none, IMP.inline_image_page_delivery_decision(2175, {
+      :extract_embedded_images => true,
+      :force_raster => false,
+      :import_mode => 'auto',
+      :vector_content_present => true
+    })
+    assert_equal :none, IMP.inline_image_page_delivery_decision(2175, {
+      :extract_embedded_images => true,
+      :force_raster => false,
+      :import_mode => 'vector',
+      :vector_content_present => true
+    })
 
     main = File.read(
       File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'),

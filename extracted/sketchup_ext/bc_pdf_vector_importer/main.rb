@@ -206,18 +206,23 @@ module BlueCollarSystems
 
       message = ImportDialog.complexity_confirmation_message(assessment)
       callback = opts[:complexity_confirm]
+      # Starting the import is the consent. A large page is logged and built.
+      # Esc still cancels through the run controller. An injected callback may
+      # still decline; the operator UI does not ask again for each page unless
+      # the user explicitly opted in to per-page review.
       decision = if callback.respond_to?(:call)
                    callback.call(assessment, message)
                  elsif per_page_review_requested?(opts) &&
                        BatchHostPolicy.prompt_allowed? &&
                        defined?(UI) && UI.respond_to?(:messagebox)
+                   # Opt-in only (preference per_page_review = Yes).
                    UI.messagebox(message, MB_OKCANCEL)
                  else
                    Logger.info(
                      'Pipeline',
-                     "Page #{page_num}: #{assessment[:class]} workload " \
-                     "(#{assessment[:work_units]} work units); unattended " \
-                     'import continues with checkpoints enabled (Esc cancels).'
+                     "Page #{page_num}: #{assessment[:class]} workload; " \
+                     'continuing without a per-page confirmation. ' \
+                     "#{message.gsub(/\s+/, ' ')}"
                    )
                    true
                  end
@@ -1420,15 +1425,16 @@ module BlueCollarSystems
             "terminal raster verification failed: #{e.message}"
     end
 
-    # Inline-image paint order cannot be reconstructed by putting an opaque
-    # full-page render behind native entities: that duplicates every vector and
-    # text mark and reverses arbitrary source paint order. Auto and Hybrid may
-    # therefore choose one verified terminal page image. Explicit Vector fails
-    # closed because silently changing that requested strategy is not allowed.
+    # Inline images do not replace a page that already has vector paths.
+    # Those paths stay editable geometry and the images are placed with them.
+    # A terminal page image is only for an image page that has no vector paths.
+    # Explicit Vector still fails closed on that image-only page, because a
+    # page raster would change the requested strategy.
     def self.inline_image_page_delivery_decision(inline_image_count, opts)
       return :none unless inline_image_count.to_i > 0
       return :none if opts[:extract_embedded_images] == false
       return :none if opts[:force_raster] == true
+      return :none if opts[:vector_content_present] == true
 
       import_mode = opts[:import_mode].to_s.downcase
       import_mode = 'auto' if import_mode.empty?
@@ -4070,6 +4076,7 @@ module BlueCollarSystems
                 raster_delivery_records: [],
                 inline_images_detected: 0,
                 inline_image_page_raster_fallbacks: [],
+                inline_image_vector_retentions: [],
                 raster_fallback_used: false }
       record_source_lineage!(
         stats, source_input_path, path, salvage_note, opts
@@ -4225,9 +4232,26 @@ module BlueCollarSystems
           (Time.now - embedded_scan_started) * 1000.0
         )
 
+        vector_content_present = !paths.empty?
         inline_delivery = inline_image_page_delivery_decision(
-          inline_image_count, opts
+          inline_image_count,
+          opts.merge(:vector_content_present => vector_content_present)
         )
+        if inline_delivery == :none && inline_image_count > 0 &&
+           vector_content_present
+          stats[:inline_image_vector_retentions] << {
+            :page => page_num,
+            :inline_image_instance_count => inline_image_count,
+            :vector_path_count => paths.length,
+            :delivery => :editable_geometry
+          }
+          Logger.info(
+            'InlineImages',
+            "Page #{page_num}: keeping #{paths.length} vector paths with " \
+            "#{inline_image_count} inline image placement(s); " \
+            'page raster was not substituted.'
+          )
+        end
         if inline_delivery == :reject_vector
           raise RepresentationFidelity::ContractError,
                 "Page #{page_num}: #{inline_image_count} inline image " \

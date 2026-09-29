@@ -38,6 +38,11 @@ module BlueCollarSystems
           line += " Raster image page#{raster.length == 1 ? '' : 's'}: " +
                   raster.map { |page, reason| "#{page} (#{short_raster_reason(reason)})" }.join(', ') + '.'
         end
+        skipped = inline_image_skipped_pages(stats)
+        unless skipped.empty?
+          line += " Inline images not placed on page#{skipped.length == 1 ? '' : 's'} " +
+                  format_page_list(skipped.map { |entry| entry[0] }) + ' (vectors kept).'
+        end
         unless failed.empty?
           line += " Failed page#{failed.length == 1 ? '' : 's'} skipped: " +
                   format_page_list(failed.map { |f| f[:page] }) + '.'
@@ -85,6 +90,18 @@ module BlueCollarSystems
 
       def self.long_raster_reason(code)
         RASTER_REASON_TEXT[code.to_s] || short_raster_reason(code)
+      end
+
+      # Pages whose vector paths were kept although the page also paints
+      # inline (BI/ID/EI) images. The SketchUp host does not yet place inline
+      # images as image entities, so say so instead of implying they landed.
+      def self.inline_image_skipped_pages(stats)
+        Array(stat_value(stats, :inline_image_vector_retentions)).map do |entry|
+          [stat_value(entry, :page).to_i,
+           stat_value(entry, :inline_image_instance_count).to_i]
+        end.select { |page, count| page > 0 && count > 0 }.sort
+      rescue StandardError
+        []
       end
 
       def self.failed_page_records(stats)
@@ -292,6 +309,16 @@ module BlueCollarSystems
                    'instead of editable geometry:'
           raster.each do |page, code|
             lines << "  Page #{page}: #{long_raster_reason(code)}."
+          end
+        end
+
+        skipped = inline_image_skipped_pages(stats)
+        unless skipped.empty?
+          lines << ""
+          lines << 'Vector geometry and text were kept on pages that also contain ' \
+                   'inline images; those inline images were not placed:'
+          skipped.each do |page, count|
+            lines << "  Page #{page}: #{count} inline image piece(s) (for example a logo or stamp)."
           end
         end
 
