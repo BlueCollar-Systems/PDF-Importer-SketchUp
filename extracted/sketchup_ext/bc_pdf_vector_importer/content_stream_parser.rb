@@ -192,7 +192,9 @@ module BlueCollarSystems
 
           if word == 'BI'
             # Inline image data can contain arbitrary bytes: skip to EI.
+            header_start = i
             id_pos = bin.index(/\sID[\s\n\r]/, i)
+            ei_pos = nil
             if id_pos
               ei_pos = bin.index(/[\s\n\r]EI(?=[\s\n\r\/\[<])/, id_pos + 3)
               i = ei_pos ? ei_pos + 3 : len
@@ -200,6 +202,23 @@ module BlueCollarSystems
             if wanted_map['BI']
               yield 'BI', []
               yielded += 1
+            end
+            # 'BI_IMAGE' (opt-in) also hands over the raw header and sample
+            # bytes so a caller can decode the picture. The skip above is
+            # unchanged; an explicit /L or /Length bounds the samples exactly.
+            if wanted_map['BI_IMAGE'] && id_pos
+              header = bin.byteslice(header_start, id_pos - header_start)
+              data_start = id_pos + 4
+              declared = header =~ %r{/(?:L|Length)\s+(\d+)} ? $1.to_i : nil
+              data = if declared && data_start + declared <= len
+                       bin.byteslice(data_start, declared)
+                     elsif ei_pos && ei_pos >= data_start
+                       bin.byteslice(data_start, ei_pos - data_start)
+                     end
+              if data
+                yield 'BI_IMAGE', [header, data]
+                yielded += 1
+              end
             end
             next
           end

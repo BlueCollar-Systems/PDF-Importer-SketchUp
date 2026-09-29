@@ -146,6 +146,7 @@ jobs:
           ruby test/empty_fill_group_resume_signature_test.rb
           ruby test/no_mid_import_prompts_test.rb
           ruby test/inline_image_omission_ledger_test.rb
+          ruby test/inline_image_stitch_test.rb
           ruby test/unattended_multipage_import_test.rb
           ruby test/pdf_color_display_test.rb
           ruby test/geometry_cleanup_collinear_coverage_test.rb
@@ -228,6 +229,7 @@ jobs:
           ruby test/empty_fill_group_resume_signature_test.rb
           ruby test/no_mid_import_prompts_test.rb
           ruby test/inline_image_omission_ledger_test.rb
+          ruby test/inline_image_stitch_test.rb
           ruby test/unattended_multipage_import_test.rb
           ruby test/pdf_color_display_test.rb
       - name: Validate release publication state

@@ -388,6 +388,8 @@ module SketchupBatchImport
           Array(stats[:inline_image_page_raster_fallbacks]),
         'inline_image_vector_retentions' =>
           Array(stats[:inline_image_vector_retentions]),
+        'inline_image_stitched_deliveries' =>
+          Array(stats[:inline_image_stitched_deliveries]),
         'inline_images_detected' => stats[:inline_images_detected].to_i,
         'empty_page_source_inspections' =>
           Array(stats[:empty_page_source_inspections]),

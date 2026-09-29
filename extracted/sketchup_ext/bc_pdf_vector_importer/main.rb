@@ -1475,6 +1475,45 @@ module BlueCollarSystems
       :reject_vector
     end
 
+    def self.record_inline_image_omission!(stats, page_num, count, vector_path_count, reason)
+      stats[:inline_image_vector_retentions] ||= []
+      existing = stats[:inline_image_vector_retentions].find { |row| row[:page] == page_num }
+      if existing
+        existing[:inline_image_instance_count] += count
+        existing[:reason] = [existing[:reason], reason].compact.uniq.join('; ')
+      else
+        stats[:inline_image_vector_retentions] << {
+          :page => page_num,
+          :inline_image_instance_count => count,
+          :vector_path_count => vector_path_count,
+          :delivery => :inline_images_omitted,
+          :reason => reason
+        }
+      end
+      Logger.warn(
+        'InlineImages',
+        "Page #{page_num}: kept #{vector_path_count} vector paths as editable " \
+        "geometry, but #{count} inline image placement(s) were NOT delivered " \
+        "(#{reason}). No page raster was substituted; the omission is " \
+        'recorded in the QA report.'
+      )
+    end
+
+    # A stitched picture only counts as delivered once it is an actual native
+    # Image on the page; anything unplaced moves to the omission ledger.
+    def self.reconcile_stitched_inline_images!(stats, stitched, placed_records)
+      placed_names = Array(placed_records).map { |row| row[:asset] && row[:asset].name }
+      kept, lost = stitched[:stitched_images].partition { |item| placed_names.include?(item[:name]) }
+      return if lost.empty?
+      lost_count = lost.inject(0) { |sum, item| sum + item[:inline_image_instance_count].to_i }
+      stitched[:stitched_images] = kept
+      stitched[:stitched_image_count] = kept.length
+      stitched[:inline_image_instance_count] -= lost_count
+      stats[:inline_image_stitched_deliveries].delete(stitched) if kept.empty?
+      record_inline_image_omission!(stats, stitched[:page], lost_count,
+        stitched[:vector_path_count], 'stitched inline picture was not placed')
+    end
+
     def self.verified_item_raster_entity!(model, target_entities, pdf_path,
                                           page_num, item, media_box, opts,
                                           import_start, y_offset,
@@ -3645,6 +3684,7 @@ module BlueCollarSystems
         :raster_delivery_records => [],
         :inline_image_page_raster_fallbacks => [],
         :inline_images_detected => 0,
+        :inline_image_stitched_deliveries => [],
         :raster_fallback_used => false
       }
       record_source_lineage!(stats, path, path, nil, opts)
@@ -4097,6 +4137,7 @@ module BlueCollarSystems
                 inline_images_detected: 0,
                 inline_image_page_raster_fallbacks: [],
                 inline_image_vector_retentions: [],
+                inline_image_stitched_deliveries: [],
                 raster_fallback_used: false }
       record_source_lineage!(
         stats, source_input_path, path, salvage_note, opts
@@ -4257,29 +4298,53 @@ module BlueCollarSystems
           inline_image_count,
           opts.merge(:vector_content_present => vector_content_present)
         )
+        stitched_inline = nil
         if inline_delivery == :none && inline_image_count > 0 &&
            vector_content_present
-          # Honest accounting: the vectors and text stay editable, but the
-          # inline picture is NOT delivered (inline BI/ID/EI images are only
-          # counted; nothing decodes or places them yet). That is an omission
-          # the operator must see, not a retention: warn, so the QA contract
-          # reports NOT READY for this page, and record it for the ledgers.
-          stats[:inline_image_vector_retentions] << {
-            :page => page_num,
-            :inline_image_instance_count => inline_image_count,
-            :vector_path_count => paths.length,
-            :delivery => :inline_images_omitted,
-            :reason => 'inline image extraction is not implemented; the ' \
-                       'inline picture was not placed'
-          }
-          Logger.warn(
-            'InlineImages',
-            "Page #{page_num}: kept #{paths.length} vector paths as editable " \
-            "geometry, but #{inline_image_count} inline image placement(s) " \
-            '(an embedded picture) were NOT delivered: inline image ' \
-            'extraction is not implemented yet. No page raster was ' \
-            'substituted; the omission is recorded in the QA report.'
-          )
+          # Vectors and text stay editable. Runs of adjacent inline images
+          # (e.g. a logo painted as 1-px-tall strips) are stitched into one
+          # picture by the extractor and placed like any embedded image.
+          # Whatever could not be stitched is an honest omission: warn, so
+          # the QA contract reports NOT READY, and record it for the ledgers.
+          composites = []
+          if image_extractor && inline_image_scanner.respond_to?(:inline_composites)
+            composites = Array(inline_image_scanner.inline_composites).select do |item|
+              EmbeddedImageExtractor.placeable_sketchup_image?(item[:asset])
+            end
+          end
+          stitched_count = composites.inject(0) { |sum, item| sum + item[:strip_count].to_i }
+          stitched_count = inline_image_count if stitched_count > inline_image_count
+          unless composites.empty?
+            stitched_inline = {
+              :page => page_num,
+              :inline_image_instance_count => stitched_count,
+              :stitched_image_count => composites.length,
+              :vector_path_count => paths.length,
+              :delivery => :inline_images_stitched,
+              :stitched_images => composites.map do |item|
+                { :name => item[:asset].name,
+                  :inline_image_instance_count => item[:strip_count].to_i,
+                  :width_px => item[:width_px], :height_px => item[:height_px],
+                  :bbox_pts => item[:bbox_pts], :file_path => item[:file_path] }
+              end
+            }
+            stats[:inline_image_stitched_deliveries] ||= []
+            stats[:inline_image_stitched_deliveries] << stitched_inline
+            Logger.info(
+              'InlineImages',
+              "Page #{page_num}: stitched #{stitched_count} inline image " \
+              "placement(s) into #{composites.length} picture(s); " \
+              "#{paths.length} vector paths stay editable geometry."
+            )
+          end
+          omitted = inline_image_count - stitched_count
+          if omitted > 0
+            reasons = inline_image_scanner.respond_to?(:inline_omissions) ?
+              Array(inline_image_scanner.inline_omissions).map { |item| item[:reason] }.compact.uniq : []
+            reasons << 'stitched inline picture is not placeable' if reasons.empty? && image_extractor
+            reasons << 'embedded image extraction is disabled' if reasons.empty?
+            record_inline_image_omission!(stats, page_num, omitted, paths.length, reasons.join('; '))
+          end
         end
         if inline_delivery == :reject_vector
           raise RepresentationFidelity::ContractError,
@@ -5445,6 +5510,7 @@ module BlueCollarSystems
             "Page #{page_num}: placed #{placed}/#{embedded_assets.length} supported embedded image(s)."
           )
         end
+        reconcile_stitched_inline_images!(stats, stitched_inline, embedded_image_records) if stitched_inline
 
         paint_svg_provider = lambda do
           source_svg_document || svg_document || CairoGlyphSource.render_page_svg(
@@ -5916,6 +5982,12 @@ module BlueCollarSystems
       records.each do |record|
         asset, image = record[:asset], record[:image_entity]
         image_id = RepresentationFidelity.stable_entity_id(image)
+        if asset.obj_num.nil?
+          # Stitched inline pictures have no single source XObject for the
+          # renderer paint-order proof; they keep their source placement.
+          unqualified << { :image_id => image_id, :reason => 'stitched inline picture has no single source image object for paint-order proof' }
+          next
+        end
         if File.extname(asset.file_path).downcase != '.png'
           unqualified << { :image_id => image_id, :reason => 'original image RGBA decoder is unavailable for this source encoding' }
           next

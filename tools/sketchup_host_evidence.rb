@@ -1242,12 +1242,45 @@ module SketchupHostEvidence
       end
       omitted_total += count
     end
+    # Runs of inline images stitched into placed pictures on vector pages.
+    # A page may stitch some and omit the rest, but is never also a page
+    # Raster fallback.
+    stitched_total = 0
+    stitched_pages = {}
+    Array(hash_value(stats, :inline_image_stitched_deliveries)).each_with_index do |record, index|
+      label = "inline image stitch[#{index}]"
+      raise EvidenceError, "#{label} must be a Hash" unless record.is_a?(Hash)
+      page = exact_positive_integer!(hash_value(record, :page), "#{label} page")
+      if stitched_pages[page]
+        raise EvidenceError, "#{label} page #{page} is recorded twice"
+      end
+      stitched_pages[page] = true
+      count = exact_positive_integer!(
+        hash_value(record, :inline_image_instance_count), "#{label} count"
+      )
+      images = exact_positive_integer!(
+        hash_value(record, :stitched_image_count), "#{label} picture count"
+      )
+      raise EvidenceError, "#{label} has more pictures than pieces" if images > count
+      unless hash_value(record, :delivery).to_s == 'inline_images_stitched'
+        raise EvidenceError,
+              "#{label} must record inline_images_stitched, not " \
+              "#{hash_value(record, :delivery).inspect}"
+      end
+      stitched_total += count
+    end
+    raster_pages = Array(hash_value(stats, :inline_image_page_raster_fallbacks)).map do |record|
+      record.is_a?(Hash) ? hash_value(record, :page) : nil
+    end
+    unless (raster_pages & stitched_pages.keys).empty?
+      raise EvidenceError, 'inline image stitch page is also a page Raster fallback'
+    end
     detected = hash_value(stats, :inline_images_detected)
     unless detected.is_a?(Integer) && detected >= 0 &&
-           detected == total_inline_images + omitted_total
+           detected == total_inline_images + omitted_total + stitched_total
       raise EvidenceError,
             'inline image detection total does not match page Raster ' \
-            'fallbacks plus recorded omissions'
+            'fallbacks plus recorded omissions and stitched pictures'
     end
     true
   end

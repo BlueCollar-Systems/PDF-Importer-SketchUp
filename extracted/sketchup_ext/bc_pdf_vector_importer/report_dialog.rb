@@ -38,6 +38,13 @@ module BlueCollarSystems
           line += " Raster image page#{raster.length == 1 ? '' : 's'}: " +
                   raster.map { |page, reason| "#{page} (#{short_raster_reason(reason)})" }.join(', ') + '.'
         end
+        stitched = inline_image_stitched_pages(stats)
+        unless stitched.empty?
+          line += " Inline image pieces stitched into " +
+                  "#{stitched.inject(0) { |sum, entry| sum + entry[2] }} picture(s) on page" +
+                  "#{stitched.length == 1 ? '' : 's'} " +
+                  format_page_list(stitched.map { |entry| entry[0] }) + ' (vectors kept).'
+        end
         skipped = inline_image_skipped_pages(stats)
         unless skipped.empty?
           line += " Inline images not placed on page#{skipped.length == 1 ? '' : 's'} " +
@@ -100,6 +107,18 @@ module BlueCollarSystems
           [stat_value(entry, :page).to_i,
            stat_value(entry, :inline_image_instance_count).to_i]
         end.select { |page, count| page > 0 && count > 0 }.sort
+      rescue StandardError
+        []
+      end
+
+      # [[page, pieces, pictures], ...] for vector pages whose inline image
+      # runs (e.g. a logo painted as 1-px strips) were stitched and placed.
+      def self.inline_image_stitched_pages(stats)
+        Array(stat_value(stats, :inline_image_stitched_deliveries)).map do |entry|
+          [stat_value(entry, :page).to_i,
+           stat_value(entry, :inline_image_instance_count).to_i,
+           stat_value(entry, :stitched_image_count).to_i]
+        end.select { |page, count, images| page > 0 && count > 0 && images > 0 }.sort
       rescue StandardError
         []
       end
@@ -309,6 +328,16 @@ module BlueCollarSystems
                    'instead of editable geometry:'
           raster.each do |page, code|
             lines << "  Page #{page}: #{long_raster_reason(code)}."
+          end
+        end
+
+        stitched = inline_image_stitched_pages(stats)
+        unless stitched.empty?
+          lines << ""
+          lines << 'Inline image pieces were stitched into placed pictures ' \
+                   '(vector geometry and text stay editable):'
+          stitched.each do |page, count, images|
+            lines << "  Page #{page}: #{count} inline image piece(s) stitched into #{images} picture(s)."
           end
         end
 

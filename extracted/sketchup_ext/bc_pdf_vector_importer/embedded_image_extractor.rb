@@ -13,6 +13,7 @@ require 'zlib'
 require 'digest'
 require_relative 'content_stream_parser'
 require_relative 'png_cropper'
+require_relative 'inline_image_composer'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -21,6 +22,7 @@ module BlueCollarSystems
       # count inline images).
       PLACEMENT_OPERATORS = {
         'q' => true, 'Q' => true, 'cm' => true, 'Do' => true, 'BI' => true,
+        'BI_IMAGE' => true,
         'W' => true, 'W*' => true, 'Tr' => true, 'ET' => true,
         'n' => true, 'S' => true, 's' => true, 'f' => true, 'F' => true,
         'f*' => true, 'B' => true, 'B*' => true, 'b' => true, 'b*' => true
@@ -53,6 +55,10 @@ module BlueCollarSystems
       )
 
       attr_reader :assets, :inline_image_count
+      # Stitched inline pictures ({:asset, :strip_count, ...}) and the inline
+      # images that could not be delivered ({:count, :reason}) on the last
+      # extracted page. Only populated when image files are written.
+      attr_reader :inline_composites, :inline_omissions
 
       def initialize(pdf_parser, output_dir = nil)
         @pdf = pdf_parser
@@ -60,6 +66,9 @@ module BlueCollarSystems
         @assets = []
         @sequence = 0
         @inline_image_count = 0
+        @inline_strips = []
+        @inline_composites = []
+        @inline_omissions = []
         @soft_mask_cache = {}
         @color_space_cache = {}
       end
@@ -68,6 +77,10 @@ module BlueCollarSystems
         @assets = []
         @sequence = 0
         @inline_image_count = 0
+        @inline_strips = []
+        @inline_composites = []
+        @inline_omissions = []
+        @inline_omission_count = 0
         @soft_mask_cache.clear
 
         raw = @pdf.page_data(page_num)
@@ -86,6 +99,7 @@ module BlueCollarSystems
           0,
           original_page_clip_state(page_num, raw, streams)
         )
+        compose_inline_images(page_num, output_dir) if write_files && output_dir
         @assets
       end
 
@@ -244,6 +258,10 @@ module BlueCollarSystems
             case op
             when 'BI'
               @inline_image_count += 1
+            when 'BI_IMAGE'
+              if write_files && output_dir
+                record_inline_strip(operands[0], operands[1], current_ctm, clip_state)
+              end
             when 'q'
               ctm_stack << current_ctm.dup
               clip_stack << clip_state
@@ -401,6 +419,123 @@ module BlueCollarSystems
         @assets << asset
       rescue StandardError => e
         Logger.warn('EmbeddedImages', "image #{name} extraction failed: #{e.message}")
+      end
+
+      # ---- inline images (BI/ID/EI) ---------------------------------------
+
+      def record_inline_strip(header, data, ctm, clip_state)
+        matrix = normalize_matrix(ctm)
+        unless InlineImageComposer.axis_aligned?(matrix)
+          raise InlineImageComposer::Unsupported,
+                'rotated or sheared inline images are not composited'
+        end
+        dict = InlineImageComposer.parse_header(header)
+        width, height, channels, pixels = InlineImageComposer.decode(dict, data, @pdf)
+        @inline_strips << InlineImageComposer::Strip.new(
+          @inline_strips.length + @inline_omission_count.to_i, matrix,
+          width, height, channels, pixels,
+          InlineImageComposer.strip_bbox(matrix), clip_state
+        )
+      rescue InlineImageComposer::Unsupported => e
+        note_inline_omission(1, e.message)
+      rescue StandardError => e
+        note_inline_omission(1, "inline image decode failed: #{e.message}")
+      end
+
+      def note_inline_omission(count, reason)
+        @inline_omission_count = @inline_omission_count.to_i + count
+        existing = @inline_omissions.find { |entry| entry[:reason] == reason }
+        if existing
+          existing[:count] += count
+        else
+          @inline_omissions << { :count => count, :reason => reason }
+        end
+      end
+
+      def compose_inline_images(page_num, output_dir)
+        strips = @inline_strips
+        @inline_strips = []
+        @inline_omission_count = 0
+        return if strips.empty?
+        InlineImageComposer.clusters(strips).each_with_index do |group, index|
+          begin
+            composite = InlineImageComposer.compose(group)
+            write_inline_composite(page_num, index + 1, group, composite, output_dir)
+          rescue InlineImageComposer::Unsupported => e
+            note_inline_omission(group.length, e.message)
+          rescue StandardError => e
+            note_inline_omission(group.length, "inline picture stitch failed: #{e.message}")
+          end
+        end
+      end
+
+      def write_inline_composite(page_num, index, group, composite, output_dir)
+        FileUtils.mkdir_p(output_dir)
+        @sequence += 1
+        base = "page_%03d_inline_composite_%02d_%dstrips" % [
+          page_num.to_i, index, group.length
+        ]
+        raw_path = File.join(output_dir, base + '.raw')
+        png_path = File.join(output_dir, base + '.png')
+        File.open(raw_path, 'wb') { |f| f.write(composite[:bytes]) }
+        begin
+          PngCropper.raw_to_png!(raw_path, composite[:width], composite[:height],
+                                 composite[:channels], png_path)
+        ensure
+          delete_file(raw_path)
+        end
+        ctm = composite[:ctm]
+        corners = unit_image_corners(ctm)
+        asset = ImageAsset.new(
+          page_num, "inline_composite_#{index}", nil, @sequence,
+          composite[:width], composite[:height], 8,
+          composite[:channels] == 2 ? '/DeviceGray' : '/DeviceRGB',
+          [], nil, ctm, corners, bbox_for(corners), png_path, nil,
+          File.size(png_path), false, nil, composite[:fully_transparent], nil,
+          inline_composite_clip_proof(page_num, ctm, corners, group)
+        )
+        meta_path = File.join(output_dir, base + '.json')
+        meta = metadata_for(asset).merge(
+          :schema => 'bcs.inline_image_composite/1.0',
+          :source_kind => 'inline_image_composite',
+          :inline_image_instance_count => group.length,
+          :pixel_pitch_pts => composite[:pitch_pts]
+        )
+        File.open(meta_path, 'w') { |f| f.write(JSON.pretty_generate(meta) + "\n") }
+        asset.metadata_path = meta_path
+        @assets << asset
+        @inline_composites << {
+          :asset => asset,
+          :strip_count => group.length,
+          :width_px => composite[:width],
+          :height_px => composite[:height],
+          :bbox_pts => composite[:bbox],
+          :file_path => png_path
+        }
+      end
+
+      # FULL_FOOTPRINT only when every source strip was itself unclipped.
+      def inline_composite_clip_proof(page_num, ctm, corners, group)
+        reasons = []
+        group.each do |strip|
+          proof = original_image_clip_proof(
+            page_num, nil, strip.ctm, unit_image_corners(strip.ctm), strip.clip_state
+          )
+          reasons.concat(Array(proof[:unproven_reasons]))
+        end
+        reasons.uniq!
+        first = group.first
+        {
+          :schema => 'bcs.original_image_clip/1',
+          :status => reasons.empty? ? 'FULL_FOOTPRINT' : 'UNPROVEN',
+          :parsed_pdf_sha256 => first.clip_state[:parsed_pdf_sha256],
+          :page_number => page_num, :image_object_number => nil,
+          :placement_index => @sequence, :ctm => ctm.dup,
+          :corners_pts => corners.map { |p| p.dup },
+          :source_kind => 'inline_image_composite',
+          :inline_image_instance_count => group.length,
+          :unproven_reasons => reasons
+        }
       end
 
       def write_asset_files(asset, data, output_dir, extension)

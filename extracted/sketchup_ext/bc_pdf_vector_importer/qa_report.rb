@@ -675,6 +675,10 @@ module BlueCollarSystems
             Array(stats[:inline_image_vector_retentions]).map do |entry|
               normalize_json(entry)
             end,
+          inline_image_stitched_deliveries:
+            Array(stats[:inline_image_stitched_deliveries]).map do |entry|
+              normalize_json(entry)
+            end,
           terminal_cleanup_events: Array(stats[:terminal_cleanup_events]).map { |entry| normalize_json(entry) },
           page_representation_fallbacks: Array(stats[:page_representation_fallbacks]).map { |entry| normalize_json(entry) },
           empty_page_source_inspections: Array(stats[:empty_page_source_inspections]).map { |entry| normalize_json(entry) },
@@ -1394,8 +1398,29 @@ module BlueCollarSystems
         return false unless pages.uniq.length == pages.length &&
                             retention_pages.uniq.length == retention_pages.length
         return false unless (pages & retention_pages).empty?
+        # Stitched inline pictures are delivered images on vector pages. A
+        # page may stitch some runs and omit the rest, but never also be a
+        # page Raster fallback.
+        stitched = Array(
+          telemetry_value(stats, :inline_image_stitched_deliveries)
+        )
+        stitched_counts = stitched.map do |record|
+          return false unless record.is_a?(Hash)
+          count = telemetry_value(record, :inline_image_instance_count)
+          images = telemetry_value(record, :stitched_image_count)
+          return false unless count.is_a?(Integer) && count > 0
+          return false unless images.is_a?(Integer) && images > 0 && images <= count
+          return false unless telemetry_value(record, :delivery).to_s ==
+                              'inline_images_stitched'
+          count
+        end
+        stitched_pages = stitched.map { |record| telemetry_value(record, :page).to_i }
+        return false unless stitched_pages.all? { |page| page > 0 } &&
+                            stitched_pages.uniq.length == stitched_pages.length &&
+                            (pages & stitched_pages).empty?
         counts.inject(0) { |sum, count| sum + count } +
-          retention_counts.inject(0) { |sum, count| sum + count } == detected
+          retention_counts.inject(0) { |sum, count| sum + count } +
+          stitched_counts.inject(0) { |sum, count| sum + count } == detected
       end
 
       def validate_representation_fidelity(stats, opts = {})
