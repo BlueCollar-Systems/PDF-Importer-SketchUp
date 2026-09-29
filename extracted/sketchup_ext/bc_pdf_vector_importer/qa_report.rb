@@ -671,6 +671,10 @@ module BlueCollarSystems
             Array(stats[:inline_image_page_raster_fallbacks]).map do |entry|
               normalize_json(entry)
             end,
+          inline_image_omissions:
+            Array(stats[:inline_image_vector_retentions]).map do |entry|
+              normalize_json(entry)
+            end,
           terminal_cleanup_events: Array(stats[:terminal_cleanup_events]).map { |entry| normalize_json(entry) },
           page_representation_fallbacks: Array(stats[:page_representation_fallbacks]).map { |entry| normalize_json(entry) },
           empty_page_source_inspections: Array(stats[:empty_page_source_inspections]).map { |entry| normalize_json(entry) },
@@ -1375,8 +1379,11 @@ module BlueCollarSystems
           path_count = telemetry_value(record, :vector_path_count)
           return false unless count.is_a?(Integer) && count > 0
           return false unless path_count.is_a?(Integer) && path_count > 0
+          # A page whose inline images were not delivered is accounted as an
+          # OMISSION, never as delivered geometry; the count still balances
+          # the detection total so nothing is hidden.
           return false unless telemetry_value(record, :delivery).to_s ==
-                              'editable_geometry'
+                              'inline_images_omitted'
           count
         end
         retention_pages = retentions.map do |record|
