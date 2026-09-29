@@ -5,6 +5,7 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
+require 'zlib'
 require File.join(File.dirname(__FILE__), 'stroke_clipping')
 
 module BlueCollarSystems
@@ -65,6 +66,175 @@ module BlueCollarSystems
       DELIMITER_CHARS.each_byte { |byte| SCAN_DELIMITER[byte] = true }
       SCAN_OPERAND_WINDOW = 32
       SCAN_NUMBER_WORD = /\A[+-]?\d*\.?\d+\z/
+
+      # Inline image boundary: BI <dictionary> ID <data> EI.
+      #
+      # The data bytes can hold anything, including a whitespace-delimited
+      # "EI", so ending the image at the first EI mis-ends about one image
+      # per 25 MB of image bytes; a sheet sliced into 41,817 one-row strips
+      # carries 6 MB of them, and one wrong boundary desynchronises every
+      # operator after it. The boundary is therefore proved in this order:
+      #   1. /L (PDF 2.0) or the exact sample length of UNFILTERED data
+      #      (H rows of ceil(W * BPC * components / 8) bytes), then EI must
+      #      follow the counted bytes;
+      #   2. the first filter's own end-of-data: ASCIIHex '>', ASCII85 '~>',
+      #      RunLength 128, DCT FFD9 (EI must follow);
+      #   3. Flate: the first whitespace-delimited EI whose preceding bytes
+      #      inflate to a COMPLETE zlib/deflate stream;
+      #   4. otherwise the first whitespace-delimited EI (the old heuristic;
+      #      also the fallback whenever a proof above is contradicted).
+      # Returns { :dictionary, :data_start, :data_end, :resume } as byte
+      # offsets (resume is just past EI), or nil when no ID marker exists.
+      INLINE_EI = /[\s\n\r]EI(?=[\s\n\r\/\[<]|\z)/
+      INLINE_MAX_EI_CANDIDATES = 64
+      INLINE_JPEG_EOI = "\xFF\xD9".dup.force_encoding(Encoding::BINARY).freeze
+
+      def self.inline_image_boundary(bin, dict_start)
+        len = bin.bytesize
+        id_pos = bin.index(/\sID[\s\n\r]/, dict_start)
+        return nil unless id_pos
+        dictionary = bin.byteslice(dict_start, id_pos - dict_start)
+        data_start = id_pos + 4
+        data_end = nil
+        exact = inline_image_exact_length(dictionary)
+        if exact
+          data_end = inline_image_confirm_end(bin, data_start + exact)
+        end
+        unless data_end
+          first_filter = inline_image_filters(dictionary).first
+          case first_filter
+          when '/AHx'
+            close = bin.index('>', data_start)
+            data_end = inline_image_confirm_end(bin, close + 1) if close
+          when '/A85'
+            close = bin.index('~>', data_start)
+            data_end = inline_image_confirm_end(bin, close + 2) if close
+          when '/RL'
+            eod = data_start
+            while eod < len
+              code = bin.getbyte(eod)
+              if code == 128
+                eod += 1
+                break
+              end
+              eod += code < 128 ? code + 2 : 2
+            end
+            data_end = inline_image_confirm_end(bin, eod) if eod <= len
+          when '/DCT'
+            eoi = bin.index(INLINE_JPEG_EOI, data_start)
+            data_end = inline_image_confirm_end(bin, eoi + 2) if eoi
+          when '/Fl'
+            data_end = inline_image_flate_end(bin, data_start)
+          end
+        end
+        unless data_end
+          ei_pos = bin.index(INLINE_EI, data_start)
+          data_end = ei_pos ? ei_pos : len
+        end
+        data_end = len if data_end > len
+        ei_pos = bin.index(INLINE_EI, data_end > 0 ? data_end - 1 : 0)
+        resume = ei_pos ? ei_pos + 3 : len
+        { :dictionary => dictionary, :data_start => data_start,
+          :data_end => data_end, :resume => resume }
+      end
+
+      # Exact unfiltered sample length from an inline dictionary, or nil.
+      def self.inline_image_exact_length(dictionary)
+        if dictionary =~ %r{/L(?:ength)?\s+(\d+)}
+          return Regexp.last_match(1).to_i
+        end
+        return nil unless inline_image_filters(dictionary).empty?
+        width = dictionary =~ %r{/W(?:idth)?\s+(\d+)} ? Regexp.last_match(1).to_i : 0
+        height = dictionary =~ %r{/H(?:eight)?\s+(\d+)} ? Regexp.last_match(1).to_i : 0
+        return nil unless width > 0 && height > 0
+        mask = !(dictionary =~ %r{/I(?:mage)?M(?:ask)?\s+true}).nil?
+        bits = if dictionary =~ %r{/B(?:its)?P(?:er)?C(?:omponent)?\s+(\d+)}
+                 Regexp.last_match(1).to_i
+               else
+                 mask ? 1 : 8
+               end
+        return nil unless [1, 2, 4, 8, 16].include?(bits)
+        components = mask ? 1 : inline_image_components(dictionary)
+        return nil unless components
+        height * ((width * bits * components + 7) / 8)
+      end
+
+      def self.inline_image_components(dictionary)
+        name = nil
+        if dictionary =~ %r{/C(?:olor)?S(?:pace)?\s*(/[^\s/\[\]<>]+|\[)}
+          name = Regexp.last_match(1)
+        end
+        case name
+        when nil then 1 # no /ColorSpace and no /ImageMask: one gray component
+        when '/G', '/DeviceGray', '/CalGray', '/I', '/Indexed' then 1
+        when '/RGB', '/DeviceRGB', '/CalRGB', '/Lab' then 3
+        when '/CMYK', '/DeviceCMYK' then 4
+        when '[' then dictionary =~ %r{\[\s*/(?:I|Indexed)\b} ? 1 : nil
+        else nil # named resource colour space: components unknown here
+        end
+      end
+
+      def self.inline_image_filters(dictionary)
+        return [] unless dictionary =~ %r{/F(?:ilter)?\s*(\[[^\]]*\]|/[^\s/\[\]<>]+)}
+        value = Regexp.last_match(1)
+        value.scan(%r{/[^\s/\[\]<>]+}).map do |filter|
+          case filter
+          when '/ASCIIHexDecode' then '/AHx'
+          when '/ASCII85Decode' then '/A85'
+          when '/LZWDecode' then '/LZW'
+          when '/FlateDecode' then '/Fl'
+          when '/RunLengthDecode' then '/RL'
+          when '/CCITTFaxDecode' then '/CCF'
+          when '/DCTDecode' then '/DCT'
+          else filter
+          end
+        end
+      end
+
+      # EI must follow the proved data end after optional whitespace and be
+      # delimited itself; returns the data end or nil when contradicted.
+      def self.inline_image_confirm_end(bin, data_end)
+        len = bin.bytesize
+        return nil unless data_end >= 0 && data_end <= len
+        pos = data_end
+        pos += 1 while pos < len && SCAN_WHITESPACE[bin.getbyte(pos)]
+        return nil unless pos + 2 <= len && bin.byteslice(pos, 2) == 'EI'
+        after = pos + 2 < len ? bin.getbyte(pos + 2) : nil
+        return nil unless after.nil? || SCAN_WHITESPACE[after] || SCAN_DELIMITER[after]
+        data_end
+      end
+
+      def self.inline_image_flate_end(bin, data_start)
+        search = data_start
+        INLINE_MAX_EI_CANDIDATES.times do
+          ei_pos = bin.index(INLINE_EI, search)
+          return nil unless ei_pos
+          slice = bin.byteslice(data_start, ei_pos - data_start)
+          return ei_pos if inline_image_complete_deflate?(slice)
+          search = ei_pos + 1
+        end
+        nil
+      end
+
+      def self.inline_image_complete_deflate?(bytes)
+        return false if bytes.nil? || bytes.bytesize < 2
+        [Zlib::MAX_WBITS, -Zlib::MAX_WBITS].each do |window|
+          inflater = Zlib::Inflate.new(window)
+          begin
+            inflater.inflate(bytes)
+            return true if inflater.finished?
+          rescue Zlib::Error
+            nil
+          ensure
+            begin
+              inflater.close
+            rescue StandardError
+              nil
+            end
+          end
+        end
+        false
+      end
 
       # Walk a content stream operator by operator WITHOUT materialising a
       # token array. The Form XObject placement tracker and the embedded
@@ -191,13 +361,19 @@ module BlueCollarSystems
           i = j
 
           if word == 'BI'
-            # Inline image data can contain arbitrary bytes: skip to EI.
-            id_pos = bin.index(/\sID[\s\n\r]/, i)
-            if id_pos
-              ei_pos = bin.index(/[\s\n\r]EI(?=[\s\n\r\/\[<])/, id_pos + 3)
-              i = ei_pos ? ei_pos + 3 : len
-            end
-            if wanted_map['BI']
+            # Inline image data can contain arbitrary bytes (including the
+            # letters "EI"): the boundary is proved by length, filter
+            # end-of-data or a complete inflate before any EI scan is trusted.
+            boundary = ContentStreamParser.inline_image_boundary(bin, i)
+            if boundary
+              if wanted_map['BI']
+                yield 'BI', [boundary[:dictionary],
+                             bin.byteslice(boundary[:data_start],
+                                           boundary[:data_end] - boundary[:data_start])]
+                yielded += 1
+              end
+              i = boundary[:resume]
+            elsif wanted_map['BI']
               yield 'BI', []
               yielded += 1
             end
@@ -633,6 +809,18 @@ module BlueCollarSystems
           if word == 'BI'
             @nonpath_paint_orders << [@source_stream_index, i] if @nonpath_paint_orders
             @other_paint_orders << [@source_stream_index, i] if @other_paint_orders
+            # Binary streams take the proved boundary (length / filter EOD /
+            # complete inflate) so a stray "EI" inside image bytes cannot
+            # desynchronise the vector parse; other encodings keep the
+            # character-indexed marker scan.
+            boundary = nil
+            if stream.encoding == Encoding::BINARY
+              boundary = ContentStreamParser.inline_image_boundary(stream, j)
+            end
+            if boundary
+              i = boundary[:resume]
+              next
+            end
             # Find 'ID' marker (signals start of binary image data)
             id_pos = inline_image_id_marker(stream, j)
             if id_pos

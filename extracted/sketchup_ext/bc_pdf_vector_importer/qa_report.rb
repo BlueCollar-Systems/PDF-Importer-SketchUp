@@ -675,6 +675,10 @@ module BlueCollarSystems
             Array(stats[:inline_image_vector_retentions]).map do |entry|
               normalize_json(entry)
             end,
+          inline_image_composites:
+            Array(stats[:inline_image_composites]).map do |entry|
+              normalize_json(entry)
+            end,
           terminal_cleanup_events: Array(stats[:terminal_cleanup_events]).map { |entry| normalize_json(entry) },
           page_representation_fallbacks: Array(stats[:page_representation_fallbacks]).map { |entry| normalize_json(entry) },
           empty_page_source_inspections: Array(stats[:empty_page_source_inspections]).map { |entry| normalize_json(entry) },
@@ -1389,13 +1393,57 @@ module BlueCollarSystems
         retention_pages = retentions.map do |record|
           telemetry_value(record, :page).to_i
         end
+        # Inline images composited into PLACED native images. Each record
+        # names its regions' artifacts (sha256, pixel size, instances) and
+        # the entities that hold them; the artifact instances must add up
+        # to the record's count. A page may be partly composited and partly
+        # omitted (two records), but never composited and page-rastered.
+        composites = Array(telemetry_value(stats, :inline_image_composites))
+        composite_counts = composites.map do |record|
+          return false unless record.is_a?(Hash)
+          count = telemetry_value(record, :inline_image_instance_count)
+          path_count = telemetry_value(record, :vector_path_count)
+          regions = telemetry_value(record, :region_count)
+          artifacts = Array(telemetry_value(record, :artifacts))
+          entity_ids = Array(telemetry_value(record, :resulting_entity_ids))
+          return false unless count.is_a?(Integer) && count > 0
+          return false unless path_count.is_a?(Integer) && path_count > 0
+          return false unless telemetry_value(record, :delivery).to_s ==
+                              'inline_images_composited'
+          return false unless telemetry_value(record, :placed) == true
+          return false unless regions.is_a?(Integer) && regions > 0 &&
+                              artifacts.length == regions &&
+                              entity_ids.length == regions
+          artifact_total = 0
+          artifacts.each do |artifact|
+            return false unless artifact.is_a?(Hash)
+            sha = telemetry_value(artifact, :sha256).to_s.downcase
+            return false unless sha =~ /\A[0-9a-f]{64}\z/
+            instances = telemetry_value(artifact, :instance_count)
+            return false unless instances.is_a?(Integer) && instances > 0
+            width = telemetry_value(artifact, :pixel_width)
+            height = telemetry_value(artifact, :pixel_height)
+            return false unless width.is_a?(Integer) && width > 0 &&
+                                height.is_a?(Integer) && height > 0
+            artifact_total += instances
+          end
+          return false unless artifact_total == count
+          count
+        end
+        composite_pages = composites.map do |record|
+          telemetry_value(record, :page).to_i
+        end
         return false unless pages.all? { |page| page > 0 } &&
-                            retention_pages.all? { |page| page > 0 }
+                            retention_pages.all? { |page| page > 0 } &&
+                            composite_pages.all? { |page| page > 0 }
         return false unless pages.uniq.length == pages.length &&
-                            retention_pages.uniq.length == retention_pages.length
+                            retention_pages.uniq.length == retention_pages.length &&
+                            composite_pages.uniq.length == composite_pages.length
         return false unless (pages & retention_pages).empty?
+        return false unless (pages & composite_pages).empty?
         counts.inject(0) { |sum, count| sum + count } +
-          retention_counts.inject(0) { |sum, count| sum + count } == detected
+          retention_counts.inject(0) { |sum, count| sum + count } +
+          composite_counts.inject(0) { |sum, count| sum + count } == detected
       end
 
       def validate_representation_fidelity(stats, opts = {})

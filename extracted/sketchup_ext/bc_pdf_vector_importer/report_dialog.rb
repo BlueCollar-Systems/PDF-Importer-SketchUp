@@ -38,6 +38,13 @@ module BlueCollarSystems
           line += " Raster image page#{raster.length == 1 ? '' : 's'}: " +
                   raster.map { |page, reason| "#{page} (#{short_raster_reason(reason)})" }.join(', ') + '.'
         end
+        composited = inline_image_composited_pages(stats)
+        unless composited.empty?
+          pictures = composited.inject(0) { |sum, entry| sum + entry[2] }
+          line += " Inline image pieces composited into #{pictures} placed " \
+                  "picture#{pictures == 1 ? '' : 's'} on page#{composited.length == 1 ? '' : 's'} " +
+                  format_page_list(composited.map { |entry| entry[0] }) + ' (vectors kept).'
+        end
         skipped = inline_image_skipped_pages(stats)
         unless skipped.empty?
           line += " Inline images not placed on page#{skipped.length == 1 ? '' : 's'} " +
@@ -100,6 +107,19 @@ module BlueCollarSystems
           [stat_value(entry, :page).to_i,
            stat_value(entry, :inline_image_instance_count).to_i]
         end.select { |page, count| page > 0 && count > 0 }.sort
+      rescue StandardError
+        []
+      end
+
+      # [[page, pieces, pictures], ...] for vector pages whose inline image
+      # strips (a logo or stamp painted as one-row pieces) were composited
+      # into placed native pictures beside the editable vectors.
+      def self.inline_image_composited_pages(stats)
+        Array(stat_value(stats, :inline_image_composites)).map do |entry|
+          [stat_value(entry, :page).to_i,
+           stat_value(entry, :inline_image_instance_count).to_i,
+           stat_value(entry, :region_count).to_i]
+        end.select { |page, count, pictures| page > 0 && count > 0 && pictures > 0 }.sort
       rescue StandardError
         []
       end
@@ -309,6 +329,17 @@ module BlueCollarSystems
                    'instead of editable geometry:'
           raster.each do |page, code|
             lines << "  Page #{page}: #{long_raster_reason(code)}."
+          end
+        end
+
+        composited = inline_image_composited_pages(stats)
+        unless composited.empty?
+          lines << ""
+          lines << 'Inline image pieces were composited into placed pictures ' \
+                   '(vector geometry and text stay editable):'
+          composited.each do |page, count, pictures|
+            lines << "  Page #{page}: #{count} inline image piece(s) composited into " \
+                     "#{pictures} picture#{pictures == 1 ? '' : 's'}."
           end
         end
 

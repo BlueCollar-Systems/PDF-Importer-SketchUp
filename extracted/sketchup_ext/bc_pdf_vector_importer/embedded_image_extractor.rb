@@ -13,6 +13,7 @@ require 'zlib'
 require 'digest'
 require_relative 'content_stream_parser'
 require_relative 'png_cropper'
+require_relative 'inline_image_composite'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -49,10 +50,19 @@ module BlueCollarSystems
         :soft_mask_obj_num,
         :fully_transparent,
         :placement_error,
-        :original_clip_proof
+        :original_clip_proof,
+        :inline_composite
       )
 
-      attr_reader :assets, :inline_image_count
+      # Inline images (BI/ID/EI) captured during the walk when assets are
+      # written; composited into native PNG assets by extract_page.
+      InlineMember = Struct.new(
+        :sequence, :dictionary_text, :data, :ctm, :clip_state, :resources
+      )
+      INLINE_CAPTURE_LIMIT = 250_000
+
+      attr_reader :assets, :inline_image_count,
+                  :inline_image_composites, :inline_image_omissions
 
       def initialize(pdf_parser, output_dir = nil)
         @pdf = pdf_parser
@@ -60,6 +70,10 @@ module BlueCollarSystems
         @assets = []
         @sequence = 0
         @inline_image_count = 0
+        @inline_members = []
+        @inline_image_composites = []
+        @inline_image_omissions = []
+        @capture_inline_images = false
         @soft_mask_cache = {}
         @color_space_cache = {}
       end
@@ -68,6 +82,10 @@ module BlueCollarSystems
         @assets = []
         @sequence = 0
         @inline_image_count = 0
+        @inline_members = []
+        @inline_image_composites = []
+        @inline_image_omissions = []
+        @capture_inline_images = write_files && !output_dir.nil?
         @soft_mask_cache.clear
 
         raw = @pdf.page_data(page_num)
@@ -86,6 +104,7 @@ module BlueCollarSystems
           0,
           original_page_clip_state(page_num, raw, streams)
         )
+        composite_inline_images!(page_num, output_dir) if @capture_inline_images
         @assets
       end
 
@@ -102,6 +121,313 @@ module BlueCollarSystems
       end
 
       private
+
+      # ---- inline images (BI/ID/EI) -------------------------------------
+      # The walk hands each inline image's dictionary text and proved data
+      # bytes here (ContentStreamParser.inline_image_boundary). Members are
+      # kept in paint order and composited once the page walk is complete.
+
+      def capture_inline_image(operands, ctm, clip_state, resources)
+        text = operands[0]
+        data = operands[1]
+        unless text.is_a?(String) && data.is_a?(String)
+          note_inline_omission('inline image bytes could not be delimited', 1)
+          return
+        end
+        if @inline_members.length >= INLINE_CAPTURE_LIMIT
+          note_inline_omission(
+            "inline image count exceeds the #{INLINE_CAPTURE_LIMIT}-image composite budget", 1
+          )
+          return
+        end
+        @inline_members << InlineMember.new(
+          @inline_image_count, text, data, normalize_matrix(ctm), clip_state, resources
+        )
+      end
+
+      def note_inline_omission(reason, count)
+        text = reason.to_s
+        entry = @inline_image_omissions.find { |row| row[:reason] == text }
+        if entry
+          entry[:count] += count
+        else
+          @inline_image_omissions << { :count => count, :reason => text }
+        end
+      end
+
+      def composite_inline_images!(page_num, output_dir)
+        members = @inline_members
+        @inline_members = []
+        return if members.empty?
+        prepared = []
+        members.each do |member|
+          begin
+            prepared << prepare_inline_member(member)
+          rescue InlineImageComposite::Unsupported => error
+            note_inline_omission(error.message, 1)
+          rescue StandardError => error
+            note_inline_omission("inline image could not be prepared: #{error.message}", 1)
+          end
+        end
+        jpegs = prepared.select { |entry| entry[:spec][:kind] == :jpeg }
+        strips = prepared.reject { |entry| entry[:spec][:kind] == :jpeg }
+        jpegs.each { |entry| deliver_inline_jpeg(page_num, entry, output_dir) }
+        groups = {}
+        strips.each { |entry| (groups[entry[:frame][:key]] ||= []) << entry }
+        groups.values.each { |group| composite_inline_group(page_num, group, output_dir) }
+      end
+
+      def prepare_inline_member(member)
+        dictionary = InlineImageComposite.normalize_dictionary(
+          InlineImageComposite.parse_dictionary(member.dictionary_text)
+        )
+        spec = InlineImageComposite.describe(dictionary)
+        frame = InlineImageComposite.frame_for(member.ctm)
+        unless frame
+          raise InlineImageComposite::Unsupported,
+                'sheared or degenerate inline image placement is not composited'
+        end
+        entry = { :member => member, :dictionary => dictionary, :spec => spec, :frame => frame }
+        if spec[:kind] == :lossless
+          device = inline_device_color_space(dictionary['/ColorSpace'], member.resources)
+          info = color_space_info(device)
+          validate_color_info!(info)
+          entry[:device] = device
+          entry[:color_info] = info
+          entry[:components] = InlineImageComposite.components_for(device)
+        end
+        entry
+      end
+
+      # Reduce the inline colour space (abbreviated, inline array, or a name
+      # from the page's /ColorSpace resources) to a device form.
+      def inline_device_color_space(value, resources)
+        resolved = value
+        if value.is_a?(String) &&
+           !InlineImageComposite::DEVICE_COMPONENTS.key?(value) &&
+           !['/CalGray', '/CalRGB'].include?(value)
+          resolved = named_color_space(value, resources)
+          unless resolved
+            raise InlineImageComposite::Unsupported,
+                  "colour space #{value} is not defined in the page resources"
+          end
+        end
+        if resolved.is_a?(Array) && resolved.length > 1 && reference?(resolved[1])
+          resolved = resolved.dup
+          resolved[1] = normalize_pdf_value(@pdf.resolve_object(resolved[1]))
+        end
+        stream_n = lambda do |ref|
+          dict = to_dict(@pdf.resolve_object(ref))
+          dict ? int_value(dict['/N']) : nil
+        end
+        InlineImageComposite.device_color_space(resolved, stream_n)
+      end
+
+      def named_color_space(name, resources)
+        return nil unless resources
+        spaces = to_dict(@pdf.resolve_object(resources['/ColorSpace']))
+        return nil unless spaces
+        entry = spaces[name] || spaces[name.sub(%r{\A/}, '')]
+        return nil unless entry
+        normalize_pdf_value(@pdf.resolve_object(entry))
+      rescue StandardError
+        nil
+      end
+
+      def reference?(value)
+        value.is_a?(String) && !(value =~ /\A\d+\s+\d+\s+R\z/).nil?
+      end
+
+      def inline_lossless_prefix(data, filters)
+        out = data
+        filters.each do |filter|
+          out = case filter
+                when '/ASCIIHexDecode' then InlineImageComposite.ascii_hex_decode(out)
+                when '/ASCII85Decode' then InlineImageComposite.ascii85_decode(out)
+                when '/RunLengthDecode' then InlineImageComposite.run_length_decode(out)
+                when '/FlateDecode' then InlineImageComposite.inflate(out)
+                else out
+                end
+        end
+        out
+      end
+
+      # A DCT (JPEG) inline image is delivered as its own encoded file, the
+      # way a JPEG XObject is; JPEG bytes are never resampled here.
+      def deliver_inline_jpeg(page_num, entry, output_dir)
+        member = entry[:member]
+        spec = entry[:spec]
+        data = inline_lossless_prefix(member.data, spec[:filters][0...-1])
+        @sequence += 1
+        ctm = member.ctm.dup
+        corners = unit_image_corners(ctm)
+        base = 'page_%03d_inline_%03d_jpeg' % [page_num, @sequence]
+        FileUtils.mkdir_p(output_dir)
+        path = File.join(output_dir, base + '.jpg')
+        File.open(path, 'wb') { |f| f.write(data) }
+        info = {
+          :schema => 'bcs.inline_image_composite/1.0', :kind => 'jpeg',
+          :instance_count => 1,
+          :member_sequences => [member.sequence, member.sequence],
+          :region_box_pts => bbox_for(corners),
+          :orientation_deg => entry[:frame][:angle_deg],
+          :canvas_pixel_width => spec[:width], :canvas_pixel_height => spec[:height],
+          :downsampled => false, :coverage => 1.0,
+          :source_sha256 => Digest::SHA256.hexdigest(member.dictionary_text + "\n" + member.data),
+          :file_sha256 => Digest::SHA256.hexdigest(data)
+        }
+        asset = ImageAsset.new(
+          page_num, "inline_#{@sequence}", nil, @sequence,
+          spec[:width], spec[:height], spec[:bits],
+          normalize_pdf_value(entry[:dictionary]['/ColorSpace']),
+          spec[:filters], normalize_pdf_value(entry[:dictionary]['/DecodeParms']),
+          normalize_matrix(ctm), corners, bbox_for(corners),
+          path, nil, data.bytesize, true, nil, false, nil,
+          original_image_clip_proof(page_num, nil, ctm, corners, member.clip_state),
+          info
+        )
+        write_inline_metadata(asset, output_dir, base)
+        @assets << asset
+        @inline_image_composites << inline_composite_record(asset)
+      rescue StandardError => error
+        note_inline_omission("inline JPEG could not be delivered: #{error.message}", 1)
+      end
+
+      def composite_inline_group(page_num, group, output_dir)
+        angle = group.first[:frame][:angle_deg]
+        u, n = InlineImageComposite.axes_for_angle(angle)
+        boxes = group.map { |entry| InlineImageComposite.frame_box(entry[:member].ctm, u, n) }
+        regions = InlineImageComposite.cluster(boxes, InlineImageComposite::TOUCH_GAP_PT)
+        density = lambda do |indices|
+          sx = indices.map { |i| group[i][:spec][:width] / group[i][:frame][:u_length] }.max
+          sy = indices.map { |i| group[i][:spec][:height] / group[i][:frame][:v_length] }.max
+          [sx, sy]
+        end
+        member_area = lambda do |indices|
+          indices.inject(0.0) { |sum, i| sum + InlineImageComposite.box_area(boxes[i]) }
+        end
+        all_sx, all_sy = density.call((0...group.length).to_a)
+        pixels_for = lambda do |box|
+          ((box[2] - box[0]) * all_sx).ceil * ((box[3] - box[1]) * all_sy).ceil
+        end
+        regions = InlineImageComposite.merge_regions(regions, member_area, pixels_for)
+        regions.each do |region|
+          composite_inline_region(page_num, group, region, boxes, u, n, angle, density, output_dir)
+        end
+      end
+
+      def composite_inline_region(page_num, group, region, boxes, u, n, angle, density, output_dir)
+        indices = region[:members]
+        box = region[:box]
+        composited = []
+        sx, sy = density.call(indices)
+        plan = InlineImageComposite.plan_canvas(box, sx, sy, MAX_IMAGE_PIXELS)
+        wc, hc = plan[:width], plan[:height]
+        canvas = InlineImageComposite.blank_canvas(wc, hc)
+        painted = 0
+        indices.each do |i|
+          entry = group[i]
+          member = entry[:member]
+          begin
+            samples = InlineImageComposite.decode_samples(
+              entry[:dictionary], member.data, entry[:spec], entry[:components],
+              entry[:device].is_a?(Array)
+            )
+            painted += InlineImageComposite.paint_member!(
+              canvas, plan, box, u, n,
+              { :ctm => member.ctm, :width => entry[:spec][:width],
+                :height => entry[:spec][:height], :samples => samples,
+                :components => entry[:components], :color_info => entry[:color_info] },
+              boxes[i]
+            )
+            composited << member
+          rescue InlineImageComposite::Unsupported, ArgumentError, Zlib::Error => error
+            note_inline_omission(error.message, 1)
+          end
+        end
+        return if composited.empty?
+
+        @sequence += 1
+        full = painted == wc * hc
+        channels = full ? 3 : 4
+        raw = full ? InlineImageComposite.strip_alpha(canvas, wc, hc) : canvas
+        base = 'page_%03d_inline_composite_%03d' % [page_num, @sequence]
+        FileUtils.mkdir_p(output_dir)
+        raw_path = File.join(output_dir, base + '.raw')
+        png_path = File.join(output_dir, base + '.png')
+        File.open(raw_path, 'wb') { |f| f.write(raw) }
+        png = begin
+          PngCropper.raw_to_png!(raw_path, wc, hc, channels, png_path)
+        ensure
+          delete_file(raw_path)
+        end
+        ctm = InlineImageComposite.canvas_ctm(box, u, n)
+        corners = unit_image_corners(ctm)
+        digest = Digest::SHA256.new
+        composited.each do |member|
+          digest.update(member.dictionary_text)
+          digest.update("\n")
+          digest.update(member.data)
+        end
+        info = {
+          :schema => 'bcs.inline_image_composite/1.0', :kind => 'composite',
+          :instance_count => composited.length,
+          :member_sequences => [composited.first.sequence, composited.last.sequence],
+          :region_box_pts => bbox_for(corners), :orientation_deg => angle,
+          :canvas_pixel_width => wc, :canvas_pixel_height => hc, :channels => channels,
+          :native_density_px_per_pt => [sx, sy],
+          :canvas_density_px_per_pt => [wc / plan[:width_pt], hc / plan[:height_pt]],
+          :downsampled => plan[:downsampled],
+          :coverage => painted.to_f / (wc * hc),
+          :source_sha256 => digest.hexdigest,
+          :file_sha256 => png[:content_sha256]
+        }
+        asset = ImageAsset.new(
+          page_num, "inline_composite_#{@sequence}", nil, @sequence,
+          wc, hc, 8, '/DeviceRGB', [], nil,
+          normalize_matrix(ctm), corners, bbox_for(corners),
+          png[:png_path], nil, png[:content_byte_size].to_i, false, nil, false, nil,
+          original_image_clip_proof(page_num, nil, ctm, corners, shared_inline_clip_state(composited)),
+          info
+        )
+        write_inline_metadata(asset, output_dir, base)
+        @assets << asset
+        @inline_image_composites << inline_composite_record(asset)
+      rescue StandardError => error
+        note_inline_omission(
+          "inline composite failed: #{error.message}",
+          composited.empty? ? indices.length : composited.length
+        )
+      end
+
+      def shared_inline_clip_state(members)
+        first = members.first.clip_state
+        return first if members.all? { |member| member.clip_state == first }
+        first.merge(
+          :unknown => first[:unknown] + ['inline composite members were painted under differing clip states']
+        )
+      end
+
+      def write_inline_metadata(asset, output_dir, base)
+        meta_path = File.join(output_dir, base + '.json')
+        File.open(meta_path, 'w') do |f|
+          f.write(JSON.pretty_generate(metadata_for(asset)) + "\n")
+        end
+        asset.metadata_path = meta_path
+      end
+
+      def inline_composite_record(asset)
+        info = asset.inline_composite
+        {
+          :asset => asset, :kind => info[:kind],
+          :instance_count => info[:instance_count],
+          :file_path => asset.file_path, :sha256 => info[:file_sha256],
+          :pixel_width => asset.width, :pixel_height => asset.height,
+          :region_box_pts => asset.bbox_pts, :downsampled => info[:downsampled],
+          :coverage => info[:coverage], :source_sha256 => info[:source_sha256],
+          :member_sequences => info[:member_sequences]
+        }
+      end
 
       def page_resources(page_num)
         if @pdf.respond_to?(:page_resources)
@@ -244,6 +570,9 @@ module BlueCollarSystems
             case op
             when 'BI'
               @inline_image_count += 1
+              if @capture_inline_images
+                capture_inline_image(operands, current_ctm, clip_state, resources)
+              end
             when 'q'
               ctm_stack << current_ctm.dup
               clip_stack << clip_state
@@ -582,7 +911,8 @@ module BlueCollarSystems
           soft_mask_object: asset.soft_mask_obj_num,
           fully_transparent: asset.fully_transparent,
           placement_error: asset.placement_error,
-          original_clip_proof: asset.original_clip_proof
+          original_clip_proof: asset.original_clip_proof,
+          inline_composite: asset.inline_composite
         }
       end
 

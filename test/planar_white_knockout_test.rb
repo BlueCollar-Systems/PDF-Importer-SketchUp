@@ -636,4 +636,22 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     vectors = [glyph, glyph.merge(:loops => [rect(2, 0, 5, 3)])]
     assert_equal vectors.flat_map { |face| face[:loops] }, Subject.construction_ink_loops(vectors)
   end
+
+  # SketchUp's add_face raises "Duplicate points in array" for a closing
+  # point that repeats the first and for consecutive points inside its
+  # 0.001 in vertex tolerance (a title-block sheet did both and the whole
+  # page failed). The loop keeps its shape; only the repeats go.
+  def test_distinct_loop_points_drops_closing_and_sub_tolerance_repeats
+    p = lambda { |x, y| Geom::Point3d.new(x, y, 0) }
+    closed = [p[0, 0], p[10, 0], p[10, 10], p[0, 10], p[0, 0]]
+    assert_equal [[0, 0], [10, 0], [10, 10], [0, 10]],
+                 Subject.distinct_loop_points(closed).map { |q| [q.x, q.y] }
+    jittered = [p[0, 0], p[0.0004, 0.0002], p[10, 0], p[10, 10], p[10, 10.0009], p[0, 10]]
+    assert_equal [[0, 0], [10, 0], [10, 10], [0, 10]],
+                 Subject.distinct_loop_points(jittered).map { |q| [q.x, q.y] }
+    kept = [p[0, 0], p[0.002, 0], p[10, 0]]
+    assert_equal 3, Subject.distinct_loop_points(kept).length, 'points beyond the tolerance stay'
+    assert_equal 1, Subject.distinct_loop_points([p[1, 1], p[1, 1], p[1, 1]]).length
+    assert_equal [], Subject.distinct_loop_points([])
+  end
 end

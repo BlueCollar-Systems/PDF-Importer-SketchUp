@@ -192,6 +192,10 @@ readonly SMOKE_TESTS=(
   test/embedded_image_extractor_test.rb
   test/embedded_image_placement_test.rb
   test/poppler_active_boundary_validation_test.rb
+  test/no_mid_import_prompts_test.rb
+  test/inline_image_boundary_test.rb
+  test/inline_image_composite_test.rb
+  test/inline_image_delivery_accounting_test.rb
 )
 for test_file in "${SMOKE_TESTS[@]}"; do
   "$RUBY_EXE" --disable-gems "$test_file"

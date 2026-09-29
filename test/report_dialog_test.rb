@@ -35,6 +35,24 @@ class ReportDialogTest < Minitest::Test
     assert_equal "1-3, 7, 9-10", R.format_page_list([3, 2, 1, 10, 9, 7])
   end
 
+  def test_completion_status_names_composited_inline_pictures_and_omissions
+    stats = {
+      pages: 6, edges: 10, text: 4,
+      inline_image_composites: [
+        { page: 5, inline_image_instance_count: 2175, region_count: 1, delivery: :inline_images_composited, placed: true },
+        { page: 6, inline_image_instance_count: 2000, region_count: 2, delivery: :inline_images_composited, placed: true }
+      ],
+      inline_image_vector_retentions: [
+        { page: 6, inline_image_instance_count: 175, delivery: :inline_images_omitted }
+      ]
+    }
+    status = R.completion_status(stats)
+    assert_includes status, 'Inline image pieces composited into 3 placed pictures on pages 5-6 (vectors kept).'
+    assert_includes status, 'Inline images not placed on page 6 (vectors kept).'
+    assert_equal [[5, 2175, 1], [6, 2000, 2]], R.inline_image_composited_pages(stats)
+    assert_empty R.inline_image_composited_pages(inline_image_composites: [{ page: 7, inline_image_instance_count: 0, region_count: 1 }])
+  end
+
   def test_report_notes_dense_glyph_component_performance_mode
     summary = R.build_summary(
       pages: 1,

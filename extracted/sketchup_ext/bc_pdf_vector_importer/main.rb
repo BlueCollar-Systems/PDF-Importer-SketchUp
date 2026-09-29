@@ -3645,6 +3645,7 @@ module BlueCollarSystems
         :raster_delivery_records => [],
         :inline_image_page_raster_fallbacks => [],
         :inline_images_detected => 0,
+        :inline_image_composites => [],
         :raster_fallback_used => false
       }
       record_source_lineage!(stats, path, path, nil, opts)
@@ -4097,6 +4098,7 @@ module BlueCollarSystems
                 inline_images_detected: 0,
                 inline_image_page_raster_fallbacks: [],
                 inline_image_vector_retentions: [],
+                inline_image_composites: [],
                 raster_fallback_used: false }
       record_source_lineage!(
         stats, source_input_path, path, salvage_note, opts
@@ -4219,6 +4221,8 @@ module BlueCollarSystems
 
         embedded_assets = []
         inline_image_count = 0
+        inline_composites = []
+        inline_omissions = []
         embedded_scan_started = Time.now
         if inline_image_scanner
           scanned_assets = inline_image_scanner.extract_page(
@@ -4228,6 +4232,12 @@ module BlueCollarSystems
           )
           embedded_assets = scanned_assets if image_extractor
           inline_image_count = inline_image_scanner.inline_image_count.to_i
+          if inline_image_scanner.respond_to?(:inline_image_composites)
+            inline_composites = Array(inline_image_scanner.inline_image_composites).dup
+            inline_omissions = Array(inline_image_scanner.inline_image_omissions).map do |row|
+              { :count => row[:count].to_i, :reason => row[:reason].to_s }
+            end
+          end
           stats[:inline_images_detected] += inline_image_count
           if inline_image_count > 0
             Logger.info(
@@ -4257,28 +4267,30 @@ module BlueCollarSystems
           inline_image_count,
           opts.merge(:vector_content_present => vector_content_present)
         )
+        page_inline_accounting = nil
         if inline_delivery == :none && inline_image_count > 0 &&
            vector_content_present
-          # Honest accounting: the vectors and text stay editable, but the
-          # inline picture is NOT delivered (inline BI/ID/EI images are only
-          # counted; nothing decodes or places them yet). That is an omission
-          # the operator must see, not a retention: warn, so the QA contract
-          # reports NOT READY for this page, and record it for the ledgers.
-          stats[:inline_image_vector_retentions] << {
-            :page => page_num,
-            :inline_image_instance_count => inline_image_count,
-            :vector_path_count => paths.length,
-            :delivery => :inline_images_omitted,
-            :reason => 'inline image extraction is not implemented; the ' \
-                       'inline picture was not placed'
+          # The vectors and text stay editable. The inline pictures were
+          # composited into native image assets by the extractor (one PNG
+          # per touching region, JPEGs as files); they are placed with the
+          # page's other embedded images below, and only THEN is the page
+          # accounted: every detected instance ends in a placed composite
+          # or in a recorded omission with its reason
+          # (record_inline_image_delivery!). Nothing is claimed before it
+          # exists in the model.
+          page_inline_accounting = {
+            :count => inline_image_count,
+            :composites => inline_composites,
+            :omissions => inline_omissions,
+            :vector_path_count => paths.length
           }
-          Logger.warn(
+          Logger.info(
             'InlineImages',
-            "Page #{page_num}: kept #{paths.length} vector paths as editable " \
-            "geometry, but #{inline_image_count} inline image placement(s) " \
-            '(an embedded picture) were NOT delivered: inline image ' \
-            'extraction is not implemented yet. No page raster was ' \
-            'substituted; the omission is recorded in the QA report.'
+            "Page #{page_num}: #{inline_image_count} inline image " \
+            "placement(s) beside #{paths.length} vector paths; " \
+            "#{inline_composites.length} composite image(s) prepared, " \
+            "#{inline_omissions.inject(0) { |sum, row| sum + row[:count] }} " \
+            'instance(s) not compositable. Delivery is accounted after placement.'
           )
         end
         if inline_delivery == :reject_vector
@@ -5445,6 +5457,11 @@ module BlueCollarSystems
             "Page #{page_num}: placed #{placed}/#{embedded_assets.length} supported embedded image(s)."
           )
         end
+        if page_inline_accounting
+          record_inline_image_delivery!(
+            stats, page_num, page_inline_accounting, embedded_image_records
+          )
+        end
 
         paint_svg_provider = lambda do
           source_svg_document || svg_document || CairoGlyphSource.render_page_svg(
@@ -5485,9 +5502,34 @@ module BlueCollarSystems
           }
         end
 
-        unless embedded_image_records.empty?
+        # An inline composite stands for hundreds or thousands of source
+        # strips; Cairo paints each strip as its own <image>, so the
+        # single-image paint-order proof can never bind it and would decode
+        # every strip trying. Composites are recorded as unqualified (the
+        # same standing an unproven XObject image has) without that render.
+        composite_image_records = []
+        source_image_records = []
+        embedded_image_records.each do |record|
+          if inline_composite_asset?(record[:asset])
+            composite_image_records << record
+          else
+            source_image_records << record
+          end
+        end
+        unless composite_image_records.empty?
+          stats[:embedded_image_paint_order] ||= []
+          stats[:embedded_image_paint_order] << {
+            :page => page_num, :source_svg_sha256 => nil, :qualified_count => 0,
+            :unqualified => composite_image_records.map do |record|
+              { :image_id => RepresentationFidelity.stable_entity_id(record[:image_entity]),
+                :reason => 'inline composite: the source paints its strips as ' \
+                           'separate images; no single-image paint-order proof is attempted' }
+            end
+          }
+        end
+        unless source_image_records.empty?
           display_plan = prepare_embedded_image_display_plans(
-            builder.page_group, embedded_image_records, paint_svg_provider.call,
+            builder.page_group, source_image_records, paint_svg_provider.call,
             media_box, :scale => opts[:scale], :svg_page_box => svg_page_box,
             :parsed_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
             :page_number => page_num,
@@ -5847,6 +5889,117 @@ module BlueCollarSystems
         end
       end
       placed
+    end
+
+    def self.inline_composite_asset?(asset)
+      asset.respond_to?(:inline_composite) && asset.inline_composite.is_a?(Hash)
+    end
+
+    # Three-way accounting for a page that kept its vectors and carried
+    # inline images: every detected instance is in a PLACED composite
+    # (delivered, with the entity and the artifact proof) or in a recorded
+    # omission with its reason. A composite that was prepared but never
+    # reached the model (no page group, placement refused) is an omission,
+    # never a delivery. Both ledgers balance detected == page-raster +
+    # composited + omitted.
+    def self.record_inline_image_delivery!(stats, page_num, accounting, placed_records)
+      placed_records = Array(placed_records)
+      delivered = []
+      omissions = Array(accounting[:omissions]).map do |row|
+        { :count => row[:count].to_i, :reason => row[:reason].to_s }
+      end
+      Array(accounting[:composites]).each do |record|
+        asset = record[:asset]
+        placed = placed_records.find { |row| row[:asset].equal?(asset) }
+        if placed
+          delivered << record.merge(
+            :entity_id => RepresentationFidelity.stable_entity_id(placed[:image_entity])
+          )
+        else
+          reason = if asset.respond_to?(:placement_error) && asset.placement_error
+                     asset.placement_error.to_s
+                   elsif placed_records.empty?
+                     'no page group received the composite image'
+                   else
+                     'composite image was not placed'
+                   end
+          omissions << { :count => record[:instance_count].to_i,
+                         :reason => "inline composite not placed: #{reason}" }
+        end
+      end
+      composited_total = delivered.inject(0) { |sum, row| sum + row[:instance_count].to_i }
+      omitted_total = omissions.inject(0) { |sum, row| sum + row[:count] }
+      remainder = accounting[:count].to_i - composited_total - omitted_total
+      if remainder > 0
+        reason = if Array(accounting[:composites]).empty? && Array(accounting[:omissions]).empty?
+                   'inline images were counted but not extracted: this import ' \
+                   'mode writes no image assets'
+                 else
+                   'inline image instances were not accounted by the extractor'
+                 end
+        omissions << { :count => remainder, :reason => reason }
+        omitted_total += remainder
+      elsif remainder < 0
+        raise RepresentationFidelity::ContractError,
+              "Page #{page_num}: inline image accounting (#{composited_total} " \
+              "composited + #{omitted_total} omitted) exceeds the " \
+              "#{accounting[:count]} detected placement(s)"
+      end
+      merged = []
+      omissions.each do |row|
+        next if row[:count] <= 0
+        existing = merged.find { |entry| entry[:reason] == row[:reason] }
+        if existing
+          existing[:count] += row[:count]
+        else
+          merged << { :count => row[:count], :reason => row[:reason] }
+        end
+      end
+      unless delivered.empty?
+        stats[:inline_image_composites] ||= []
+        stats[:inline_image_composites] << {
+          :page => page_num,
+          :inline_image_instance_count => composited_total,
+          :vector_path_count => accounting[:vector_path_count].to_i,
+          :delivery => :inline_images_composited,
+          :placed => true,
+          :region_count => delivered.length,
+          :resulting_entity_ids => delivered.map { |row| row[:entity_id] },
+          :artifacts => delivered.map do |row|
+            { :kind => row[:kind], :file_path => row[:file_path],
+              :sha256 => row[:sha256], :source_sha256 => row[:source_sha256],
+              :instance_count => row[:instance_count].to_i,
+              :pixel_width => row[:pixel_width], :pixel_height => row[:pixel_height],
+              :region_box_pts => row[:region_box_pts],
+              :downsampled => row[:downsampled] == true, :coverage => row[:coverage],
+              :member_sequences => row[:member_sequences] }
+          end
+        }
+        Logger.info(
+          'InlineImages',
+          "Page #{page_num}: composited #{composited_total} inline image " \
+          "placement(s) into #{delivered.length} native image(s) beside " \
+          "#{accounting[:vector_path_count]} editable vector paths."
+        )
+      end
+      if omitted_total > 0
+        stats[:inline_image_vector_retentions] << {
+          :page => page_num,
+          :inline_image_instance_count => omitted_total,
+          :vector_path_count => accounting[:vector_path_count].to_i,
+          :delivery => :inline_images_omitted,
+          :reason => merged.map { |row| "#{row[:count]} x #{row[:reason]}" }.join('; '),
+          :reasons => merged
+        }
+        Logger.warn(
+          'InlineImages',
+          "Page #{page_num}: #{omitted_total} of #{accounting[:count]} inline " \
+          'image placement(s) were NOT delivered (' +
+          merged.map { |row| "#{row[:count]} x #{row[:reason]}" }.join('; ') +
+          '). The vectors stay editable; the omission is recorded in the QA report.'
+        )
+      end
+      { :composited => composited_total, :omitted => omitted_total }
     end
 
     # Join final-page crop proof to the actual existing native Image. These
