@@ -11,7 +11,7 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 ### Unattended multi-page import
 
-A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > Import Health has the full summary. Per-page review is an opt-in that is off by default: `Sketchup.write_default('BlueCollarSystems_PDFVectorImporter', 'per_page_review', 'Yes')`.
+A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > Import Health has the full summary.
 
 ### Recent fixes (v3.7.159)
 

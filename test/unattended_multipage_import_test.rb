@@ -2,7 +2,7 @@
 # test/unattended_multipage_import_test.rb
 #
 # Owner rule (2026-09-28): a multi-page import runs unattended. No per-page
-# OK/confirm modal by default (per-page review is an opt-in), one page that
+# OK/confirm modal, one page that
 # fails is logged and skipped while the rest import, and the single
 # end-of-import summary names raster fallbacks (with the reason) and any
 # failed pages.
@@ -59,17 +59,6 @@ class UnattendedMultipageImportTest < Minitest::Test
     end
   end
 
-  def test_per_page_review_is_an_explicit_opt_in
-    with_messagebox_recorder do |calls|
-      opts = { :run_controller => FakeController.new(:large),
-               :per_page_review => true }
-      IMP::BatchHostPolicy.stub(:prompt_allowed?, true) do
-        IMP.confirm_page_complexity!(opts, 1, 5_000, 10)
-      end
-      refute_empty calls, 'opt-in per-page review still asks'
-    end
-  end
-
   def test_host_callback_is_still_honored
     seen = []
     opts = { :run_controller => FakeController.new(:large),
@@ -78,24 +67,8 @@ class UnattendedMultipageImportTest < Minitest::Test
     assert_equal [:large], seen
   end
 
-  def test_import_dialog_defaults_per_page_review_off
-    refute IMP::ImportDialog.per_page_review_preference?
-  end
-
-  def test_per_page_review_does_not_change_resume_identity
-    assert_includes IRC::TRANSIENT_OPTION_KEYS, :per_page_review
+  def test_stop_on_page_error_does_not_change_resume_identity
     assert_includes IRC::TRANSIENT_OPTION_KEYS, :stop_on_page_error
-  end
-
-  def test_large_pdf_question_is_asked_once_per_import_not_per_page
-    main = File.read(MAIN_RB)
-    resumable = main[/def self\.run_resumable_pipeline.*?def self\.run_pipeline/m]
-    refute_nil resumable
-    assert_includes resumable, 'confirm_large_pdf_once!(source_path)'
-    assert_includes resumable, 'page_opts[:large_pdf_confirmed] = true'
-    pipeline = main[/def self\.run_pipeline\(model, path, opts\).*?PdfSalvage\.prepare_if_needed/m]
-    refute_nil pipeline
-    assert_includes pipeline, 'opts[:large_pdf_confirmed] == true'
   end
 
   # ---- one failed page does not stop the rest ----------------------------

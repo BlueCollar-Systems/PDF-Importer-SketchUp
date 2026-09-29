@@ -603,22 +603,8 @@ module BlueCollarSystems
           import_mode:      mode_str,
           match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes',
           extrude_to_3d: SHAPE_EXTRUSION_UI_ENABLED && (raw[:extrude_to_3d] || 'No') == 'Yes',
-          extrude_depth_mm: SHAPE_EXTRUSION_UI_ENABLED ? parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth]) : nil,
-          # Unattended by default: no per-page confirmation. Opt-in only.
-          per_page_review:  per_page_review_preference?
+          extrude_depth_mm: SHAPE_EXTRUSION_UI_ENABLED ? parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth]) : nil
         }
-      end
-
-      # Hidden opt-in preference (off by default). Set with
-      #   Sketchup.write_default('BlueCollarSystems_PDFVectorImporter',
-      #                          'per_page_review', 'Yes')
-      # to be asked before each large page of a multi-page import.
-      def self.per_page_review_preference?
-        return false unless defined?(Sketchup) && Sketchup.respond_to?(:read_default)
-        value = Sketchup.read_default(PREF_KEY, 'per_page_review', nil)
-        %w[yes true 1].include?(value.to_s.strip.downcase)
-      rescue StandardError
-        false
       end
 
       def self.parse_extrude_depth_mm(value)

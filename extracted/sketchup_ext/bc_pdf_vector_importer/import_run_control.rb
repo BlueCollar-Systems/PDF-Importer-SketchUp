@@ -20,7 +20,7 @@ module BlueCollarSystems
         :page_certifier, :resumable_page_call, :initial_y_offset,
         :defer_final_diagnostics, :complexity_confirm, :prepared_parser,
         :prepared_pdf_path, :preserve_prepared_parser, :preserve_logger,
-        :per_page_review, :stop_on_page_error
+        :stop_on_page_error
       ].freeze
       # Per-span evidence trees are restored from the live page groups on resume.
       # Cloning them into the model attribute dictionary is a multi-second JSON
