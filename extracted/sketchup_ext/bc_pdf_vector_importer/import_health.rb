@@ -31,6 +31,11 @@ module BlueCollarSystems
           scale_crosscheck: stats[:scale_crosscheck],
           import_contract_ready: stats[:import_contract_ready],
           representation_fidelity: stats[:representation_fidelity],
+          result_status: stat_value(stats, :result_status).to_s,
+          requested_pages: stat_value(stats, :requested_pages),
+          retained_pages: stat_value(stats, :retained_pages),
+          failed_pages: Array(stat_value(stats, :failed_pages)),
+          cancelled: stat_value(stats, :cancelled) == true,
           recorded_at: Time.now
         }
       end
@@ -58,9 +63,46 @@ module BlueCollarSystems
         lines << "Edges: #{snap[:edges]}  |  Text: #{snap[:text]}  |  Layers: #{snap[:layers]}"
         lines << "Text mode: #{snap[:text_mode].empty? ? 'n/a' : snap[:text_mode]}"
 
+        failed_pages = snap[:failed_pages].map do |entry|
+          stat_value(entry, :page).to_i
+        end.select { |page| page > 0 }.uniq.sort
+        requested = Array(snap[:requested_pages]).map { |page| page.to_i }
+        retained = Array(snap[:retained_pages]).map { |page| page.to_i }
+        missing = requested - retained
+        has_page_ledger = !snap[:requested_pages].nil? ||
+                          !snap[:retained_pages].nil?
+        pages_ready = snap[:failed_pages].empty? && !snap[:cancelled] &&
+          (snap[:result_status].empty? || snap[:result_status] == 'success')
+        if has_page_ledger
+          pages_ready &&= snap[:requested_pages].is_a?(Array) &&
+            snap[:retained_pages].is_a?(Array) && missing.empty? &&
+            (retained - requested).empty?
+          lines << "Requested pages: #{requested.join(', ')}"
+          lines << "Retained pages: #{retained.join(', ')}"
+        end
+        status = if snap[:cancelled] || snap[:result_status] == 'cancelled'
+                   'cancelled'
+                 elsif !pages_ready
+                   'incomplete'
+                 else
+                   snap[:result_status]
+                 end
+        lines << "Result: #{status}" unless status.empty?
+        unless snap[:failed_pages].empty?
+          numbers = failed_pages.empty? ? 'unknown' : failed_pages.join(', ')
+          lines << "Failed pages: #{numbers}"
+          snap[:failed_pages].each do |entry|
+            message = stat_value(entry, :message).to_s
+            next if message.empty?
+            lines << "Page #{stat_value(entry, :page)}: #{message}"
+          end
+        end
+        lines << "Pages not retained: #{missing.join(', ')}" unless missing.empty?
+
         contract = snap[:import_contract_ready]
         ready = contract.is_a?(Hash) &&
-          (contract[:ready] == true || contract['ready'] == true)
+          (contract[:ready] == true || contract['ready'] == true) &&
+          pages_ready
         lines << "QA contract: #{ready ? 'READY' : 'NOT READY'}"
         unless ready
           fidelity = snap[:representation_fidelity]
@@ -125,6 +167,11 @@ module BlueCollarSystems
         return 'n/a' if text.empty?
         return text if text.length <= 72
         "...#{text[-69, 69]}"
+      end
+
+      def stat_value(hash, key)
+        return nil unless hash.is_a?(Hash)
+        hash.key?(key) ? hash[key] : hash[key.to_s]
       end
 
     end

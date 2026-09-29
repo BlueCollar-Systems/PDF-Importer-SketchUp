@@ -193,6 +193,15 @@ readonly SMOKE_TESTS=(
   test/embedded_image_placement_test.rb
   test/poppler_active_boundary_validation_test.rb
   test/no_mid_import_prompts_test.rb
+  test/import_run_control_test.rb
+  test/import_run_control_integration_test.rb
+  test/unattended_multipage_import_test.rb
+  test/failed_page_outcome_test.rb
+  test/qa_report_test.rb
+  test/representation_fidelity_contract_test.rb
+  test/batch_host_nonmodal_policy_test.rb
+  test/planar_region_partition_test.rb
+  test/planar_white_knockout_test.rb
   test/inline_image_boundary_test.rb
   test/inline_image_composite_test.rb
   test/inline_image_delivery_accounting_test.rb

@@ -41,9 +41,11 @@ class ImportRunControlIntegrationTest < Minitest::Test
   end
 
   def test_pipeline_abort_remains_the_partial_page_cleanup_boundary
-    start = MAIN.rindex('rescue ImportRunControl::ImportCancelled')
+    pipeline = MAIN[/    def self\.run_pipeline\(.*?(?=    def self\.place_embedded_images)/m]
+    refute_nil pipeline
+    start = pipeline.rindex('rescue ImportRunControl::ImportCancelled')
     refute_nil start
-    rescue_block = MAIN[start, 700]
+    rescue_block = pipeline[start, 700]
     refute_nil rescue_block
     assert_includes rescue_block, 'abort_open_operation!'
     assert_includes rescue_block, 'raise'
@@ -172,7 +174,8 @@ class ImportRunControlIntegrationTest < Minitest::Test
               rows = @options[:pages].map do |page|
                 @options[:runner].call(page, 0, nil)[:stats]
               end
-              {:stats => rows.last.merge(:observed_pages => rows)}
+              {:requested_pages => @options[:pages], :result_status => 'success',
+               :stats => rows.last.merge(:observed_pages => rows)}
             end
           end
         end
@@ -191,11 +194,13 @@ class ImportRunControlIntegrationTest < Minitest::Test
       lineage = MAIN[/    def self\.record_source_lineage!.*?(?=    def self\.finalize_import_diagnostics!)/m]
       preparation = MAIN[/      salvage_note = nil\n      if opts\[:prepared_parser\].*?(?=      if parser\.page_count == 0)/m]
       guard = MAIN[/    def self\.confirm_large_pdf_once!.*?(?=    def self\.confirm_page_complexity!)/m]
+      terminal_guard = MAIN[/    def self\.preserve_terminal_import_error.*?(?=    def self\.import_result_status)/m]
       refute_nil outer
       refute_nil lineage
       refute_nil preparation
       refute_nil guard
-      scope.module_eval(outer + lineage + guard, __FILE__, __LINE__)
+      refute_nil terminal_guard
+      scope.module_eval(outer + lineage + guard + terminal_guard, __FILE__, __LINE__)
       scope.module_eval("def self.run_pipeline(model, path, opts)\n" \
         "source_path = path\n" + preparation +
         "stats = {}\nrecord_source_lineage!(stats, source_path, path, salvage_note, opts)\n" \
@@ -203,6 +208,9 @@ class ImportRunControlIntegrationTest < Minitest::Test
       result = scope.run_resumable_pipeline(nil, source,
         :pages => [1, 2], :text_mode => :text3d, :group_per_page => true,
         :cancel_probe => lambda { false }, :status_sink => lambda { |_| })
+      assert_equal [1, 2], result[:requested_pages]
+      assert_equal [1, 2], result[:selected_pages]
+      assert_equal 'success', result[:result_status]
       yield result[:observed_pages], source, prepared, note
     end
   end

@@ -301,7 +301,7 @@ module BlueCollarSystems
         end
         elapsed_ms = ((stats[:elapsed_seconds] || 0).to_f * 1000.0).round(1)
         layers = Array(stats[:layers]).compact
-        warnings = Array(stats[:failed_pages]).length
+        warnings = Array(telemetry_value(stats, :failed_pages)).length
         warnings += 1 if stats[:layer_warning]
         degraded_renderers = Array(stats[:text_renderers]).select do |entry|
           entry[:degraded] || entry['degraded']
@@ -395,6 +395,11 @@ module BlueCollarSystems
         end
         report[:extra][:representation_fidelity] =
           validate_representation_fidelity(stats, opts)
+        outcome = page_outcome_block(stats, opts)
+        if outcome
+          report[:result_status] = outcome[:result_status]
+          report[:extra].merge!(outcome)
+        end
         enrich_report_extras!(report)
         attach_source_provenance!(report, stats)
         report
@@ -960,8 +965,10 @@ module BlueCollarSystems
         # empty host text count can mean "no source text", but it can also mean
         # every requested item was dropped; it must never bypass the ledger.
         fidelity_ok = fidelity[:ready] == true || fidelity['ready'] == true
+        outcome = page_outcome_block(extra)
+        pages_ok = outcome.nil? || outcome[:page_outcomes][:ready]
         ready = has_stamp && has_crosscheck && text_ok && fidelity_ok &&
-                host_delivery_ok &&
+                host_delivery_ok && pages_ok &&
                 open_failure.nil?
         {
           ready: ready,
@@ -970,9 +977,11 @@ module BlueCollarSystems
             scale_crosscheck: has_crosscheck,
             actual_text_entity_types: text_ok,
             host_entity_delivery: host_delivery_ok,
+            requested_pages_retained: pages_ok,
             requested_representation_fidelity: fidelity_ok,
             no_open_failure: open_failure.nil?
           },
+          errors: outcome ? outcome[:page_outcomes][:errors] : [],
           note: 'diagnostics stub — Report Doctor may recompute client-side'
         }
       end
@@ -992,6 +1001,61 @@ module BlueCollarSystems
       def telemetry_key?(hash, key)
         hash.respond_to?(:key?) &&
           (hash.key?(key) || hash.key?(key.to_s))
+      end
+
+      # A page outcome ledger describes the entire request, including pages
+      # that never produced stats. Never expand All from the successful count.
+      # Older single-page callers without this ledger retain their old checks.
+      def page_outcome_block(stats, opts = {})
+        failed = Array(telemetry_value(stats, :failed_pages))
+        cancelled = telemetry_value(stats, :cancelled) == true
+        declared_status = telemetry_value(stats, :result_status).to_s.downcase
+        present = [:requested_pages, :retained_pages, :result_status].any? do |key|
+          telemetry_key?(stats, key)
+        end
+        return nil unless present || cancelled || !failed.empty?
+
+        requested_raw = telemetry_value(stats, :requested_pages)
+        requested_raw = telemetry_value(opts, :pages) if requested_raw.nil?
+        requested_known = requested_raw.is_a?(Array)
+        retained_raw = telemetry_value(stats, :retained_pages)
+        retained_known = retained_raw.is_a?(Array)
+        requested = requested_known ? fidelity_page_list(requested_raw, 0) : []
+        retained = retained_known ? fidelity_page_list(retained_raw, 0) : []
+        failed_numbers = failed.map do |entry|
+          telemetry_value(entry, :page).to_i
+        end.select { |page| page > 0 }.uniq.sort
+        missing = requested - retained
+        errors = []
+        errors << 'requested_page_set_missing' unless requested_known
+        errors << 'retained_page_set_missing' unless retained_known
+        unless failed.empty?
+          names = failed_numbers.empty? ? 'unknown' : failed_numbers.join(',')
+          errors << "failed_pages:#{names}"
+        end
+        errors << "unretained_requested_pages:#{missing.join(',')}" unless missing.empty?
+        unexpected = retained - requested
+        if requested_known && !unexpected.empty?
+          errors << "unexpected_retained_pages:#{unexpected.join(',')}"
+        end
+        cancelled ||= declared_status == 'cancelled'
+        errors << 'import_cancelled' if cancelled
+        if !declared_status.empty? &&
+           !%w[success incomplete cancelled].include?(declared_status)
+          errors << "import_result_status:#{declared_status}"
+        elsif declared_status == 'incomplete' && errors.empty?
+          errors << 'import_incomplete'
+        end
+        status = cancelled ? 'cancelled' : (errors.empty? ? 'success' : 'incomplete')
+        {
+          result_status: status,
+          requested_pages: requested,
+          retained_pages: retained,
+          failed_pages: failed.map { |entry| normalize_json(entry) },
+          missing_pages: missing,
+          cancelled: cancelled,
+          page_outcomes: { ready: errors.empty?, errors: errors }
+        }
       end
 
       def symbolized_transition_proof(entry)
@@ -1110,9 +1174,14 @@ module BlueCollarSystems
           stats[:selected_pages] || stats['selected_pages'], stats[:pages]
         )
         opts_has_pages = opts.key?(:pages) || opts.key?('pages')
-        opts_pages = fidelity_page_list(
-          opts[:pages] || opts['pages'], stats[:pages]
-        )
+        requested = telemetry_value(stats, :requested_pages)
+        opts_raw = opts[:pages] || opts['pages']
+        opts_pages = if requested.is_a?(Array) &&
+                        (opts_raw == :all || opts_raw.to_s.strip.downcase == 'all')
+                       fidelity_page_list(requested, 0)
+                     else
+                       fidelity_page_list(opts_raw, stats[:pages])
+                     end
         if stats_has_pages && opts_has_pages && stats_pages != opts_pages
           errors << 'selected_pages_do_not_match_import_request'
         end
@@ -1480,6 +1549,8 @@ module BlueCollarSystems
           stats['source_glyph_physical_deliveries']
         )
         errors = []
+        page_outcome = page_outcome_block(stats, opts)
+        errors.concat(page_outcome[:page_outcomes][:errors]) if page_outcome
         errors << 'inline_image_page_raster_ledger_invalid' unless
           fidelity_inline_image_ledger_valid?(stats)
         requested_mode = fidelity_requested_mode(stats, opts)
@@ -2191,6 +2262,8 @@ module BlueCollarSystems
         {
           ready: errors.empty?,
           checks: {
+            requested_pages_retained: page_outcome.nil? ||
+              page_outcome[:page_outcomes][:ready],
             source_span_set_equality: !errors.include?('source_delivery_set_mismatch') &&
                                       !errors.include?('source_attempt_set_mismatch'),
             positive_stable_entity_ids: errors.none? { |error| error.include?('ids_invalid') || error.include?('duplicate_live') },
@@ -2606,6 +2679,16 @@ module BlueCollarSystems
         pdf_name = 'the PDF' if pdf_name.empty?
 
         parts = []
+        status = extra['result_status'].to_s
+        if status == 'incomplete' || status == 'cancelled'
+          parts << "Import #{status}"
+          failed = Array(extra['failed_pages']).map do |entry|
+            telemetry_value(entry, :page).to_i
+          end.select { |page| page > 0 }.uniq.sort
+          parts << "Failed pages: #{failed.join(', ')}" unless failed.empty?
+          missing = Array(extra['missing_pages'])
+          parts << "Pages not retained: #{missing.join(', ')}" unless missing.empty?
+        end
         page_phrase = pages > 0 ? "#{pages} page#{'s' if pages != 1}" : 'the PDF'
         lead = "Imported #{page_phrase} from #{pdf_name} into #{host} using #{mode} mode"
         lead += " with #{text_mode}" unless text_mode.empty?

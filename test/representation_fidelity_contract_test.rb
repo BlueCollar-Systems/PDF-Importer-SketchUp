@@ -1728,7 +1728,7 @@ class RepresentationFidelityContractTest < Minitest::Test
                  main)
     refute_match(/next\s+unless\s+raw/, main)
     refute_match(/Continue to next page instead of aborting/, main)
-    assert_match(/rescue\s+StandardError\s*=>\s*e.*?safe_abort_operation\(model,\s*'Pipeline'\).*?raise\s+e/m,
+    assert_match(/rescue\s+StandardError\s*=>\s*e.*?abort_open_operation!\(model,\s*operation_open,\s*'Pipeline'\).*?raise\s+e/m,
                  main)
   end
 
@@ -1742,6 +1742,7 @@ class RepresentationFidelityContractTest < Minitest::Test
 
       def abort_operation
         @abort_count += 1
+        true
       end
     end.new
 
@@ -2591,9 +2592,9 @@ class RepresentationFidelityContractTest < Minitest::Test
       :encoding => 'UTF-8'
     )
     assert_match(
-      /start_operation\(name, true, false, true\)/,
+      /start_operation\(name, true, false, false\)/,
       main,
-      'vector/raster imports must pass disable_update to start_operation'
+      'vector/raster imports disable UI updates without chaining to prior operations'
     )
     assert_match(
       /extract_external_page_text/,

@@ -140,6 +140,10 @@ module BlueCollarSystems
 
       class ResumeMismatch < StandardError; end
 
+      # An uncertain host rollback invalidates the page boundary. It must
+      # stop even an unattended run that normally skips individual errors.
+      class RollbackFailure < ResumeMismatch; end
+
       class EscapeCancelProbe
         ESCAPE_VIRTUAL_KEY = 0x1B
 
@@ -919,7 +923,7 @@ module BlueCollarSystems
         def initialize(options = {})
           @model = options[:model]
           @controller = options[:controller]
-          @pages = Array(options[:pages]).map { |page| page.to_i }
+          @pages = Array(options[:pages]).map { |page| page.to_i }.uniq.sort
           @runner = options[:runner]
           @group_per_page = options.key?(:group_per_page) ?
             options[:group_per_page] == true : true
@@ -992,8 +996,11 @@ module BlueCollarSystems
             raise @first_page_error
           end
 
-          {
+          result_status = @failed_pages.empty? ? 'success' : 'incomplete'
+          result = {
             :cancelled => false,
+            :requested_pages => @pages.dup,
+            :result_status => result_status,
             :retained_pages => (resumed + new_pages).sort,
             :resumed_pages => resumed.sort,
             :new_pages => new_pages,
@@ -1001,6 +1008,8 @@ module BlueCollarSystems
             :next_page => nil,
             :stats => aggregate
           }
+          record_request_outcome!(result)
+          result
         rescue ImportCancelled => error
           result = @controller.cancelled_result(error)
           result[:retained_pages] = @controller.retained_pages.dup
@@ -1008,10 +1017,27 @@ module BlueCollarSystems
           result[:new_pages] = new_pages || []
           result[:stats] = aggregate || {}
           result[:failed_pages] = @failed_pages.dup
+          result[:requested_pages] = @pages.dup
+          result[:result_status] = 'cancelled'
+          record_request_outcome!(result)
           result
         end
 
         private
+
+        # Individual certified page stats stay page-local in the journal.
+        # The final aggregate describes the entire request, including pages
+        # that failed or had not started when cancellation was requested.
+        def record_request_outcome!(result)
+          stats = result[:stats]
+          stats[:requested_pages] = @pages.dup
+          stats[:selected_pages] = @pages.dup
+          [:result_status, :cancelled, :retained_pages, :resumed_pages,
+           :new_pages, :failed_pages, :next_page].each do |key|
+            value = result[key]
+            stats[key] = value.is_a?(Array) ? value.dup : value
+          end
+        end
 
         # Host-policy stops (noninteractive batch refusals) and errors raised
         # after the page was already certified are never swallowed: the first

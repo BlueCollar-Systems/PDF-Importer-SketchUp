@@ -120,6 +120,30 @@ class UnattendedMultipageImportTest < Minitest::Test
     def initialize; super; @active_entities = Entities.new; end
   end
 
+  class TransactionModel < Model
+    attr_reader :abort_count, :operation_calls
+    attr_accessor :abort_result
+    def initialize
+      super
+      @abort_count = 0
+      @operation_calls = []
+      @abort_result = true
+    end
+    def start_operation(*args)
+      @operation_calls << args
+      @before_operation = @active_entities.to_a
+      true
+    end
+    def abort_operation
+      @abort_count += 1
+      raise @abort_result if @abort_result.is_a?(Exception)
+      if @abort_result == true
+        @active_entities = Entities.new(@before_operation)
+      end
+      @abort_result
+    end
+  end
+
   NoninteractiveError = Class.new(StandardError)
 
   def controller(model)
@@ -165,6 +189,10 @@ class UnattendedMultipageImportTest < Minitest::Test
     assert_equal 2, failure[:page]
     assert_match(/boom/, failure[:message])
     assert_equal 4, result[:stats][:edges]
+    assert_equal 'incomplete', result[:result_status]
+    assert_equal [1, 2, 3], result[:requested_pages]
+    assert_equal [1, 2, 3], result[:stats][:selected_pages]
+    assert_equal result[:failed_pages], result[:stats][:failed_pages]
   end
 
   def test_failed_page_is_retried_on_resume
@@ -175,6 +203,9 @@ class UnattendedMultipageImportTest < Minitest::Test
     assert_equal [2], calls.map { |c| c[0] }
     assert_equal [1, 2, 3], resumed[:retained_pages]
     assert_empty resumed[:failed_pages]
+    assert_equal 'success', resumed[:result_status]
+    assert_equal [1, 2, 3], resumed[:stats][:requested_pages]
+    assert_equal [1, 2, 3], resumed[:stats][:selected_pages]
   end
 
   def test_bare_orchestrator_stays_strict
@@ -210,6 +241,268 @@ class UnattendedMultipageImportTest < Minitest::Test
     result = orchestrate(model, runner(model, [], 2 => cancel))
     assert result[:cancelled]
     assert_equal [1], result[:retained_pages]
+    assert_equal 'cancelled', result[:result_status]
+    assert_equal [1, 2, 3], result[:requested_pages]
+    assert_equal [1, 2, 3], result[:stats][:selected_pages]
+    assert_equal [1], result[:stats][:retained_pages]
+  end
+
+  def test_normalized_request_is_preserved_without_expanding_page_journal_stats
+    model = Model.new
+    ctrl = controller(model)
+    run = lambda do |page, offset, certify|
+      group = model.active_entities.add(Group.new(100 + page, page))
+      stats = { :pages => 1, :selected_pages => [page] }
+      certify.call(group, offset + 10.0, stats)
+      { :stats => stats, :next_y_offset => offset + 10.0 }
+    end
+    result = IRC::PageOrchestrator.new(
+      :controller => ctrl, :pages => ['3', 1, 3, 2], :runner => run
+    ).run
+    assert_equal [1, 2, 3], result[:requested_pages]
+    assert_equal [1, 2, 3], result[:stats][:selected_pages]
+    assert_equal [2], ctrl.page_stats(2)[:selected_pages]
+  end
+
+  def test_import_operation_does_not_chain_to_a_previously_committed_page
+    model = TransactionModel.new
+    IMP.start_import_operation!(model, 'Import page')
+    assert_equal [['Import page', true, false, false]], model.operation_calls
+  end
+
+  # Exercise the production page and outer rescue clauses together. Host
+  # construction is represented by a partial group and a build exception;
+  # the nested cleanup/propagation behavior is the actual main.rb source.
+  def pipeline_failure_boundary
+    source = File.read(MAIN_RB)
+    page_rescues = source[/^      rescue ImportRunControl::RollbackFailure\n.*?(?=^      end\n      end)/m]
+    outer_rescues = source[/^    rescue ImportRunControl::RollbackFailure\n      # A failed rollback.*?(?=^    end\n)/m]
+    refute_nil page_rescues
+    refute_nil outer_rescues
+    boundary = Module.new
+    boundary.const_set(:ImportRunControl, IRC)
+    boundary.const_set(:RepresentationFidelity, IMP::RepresentationFidelity)
+    logger = Module.new
+    logger.define_singleton_method(:error) { |*_| }
+    logger.define_singleton_method(:flush_log) { }
+    boundary.const_set(:Logger, logger)
+    boundary.define_singleton_method(:abort_open_operation!) do |*args|
+      IMP.abort_open_operation!(*args)
+    end
+    boundary.define_singleton_method(:preserve_terminal_import_error) do |error, &block|
+      IMP.preserve_terminal_import_error(error, &block)
+    end
+    boundary.define_singleton_method(:report_pipeline_progress) { |*_| }
+    boundary.define_singleton_method(:cleanup_item_raster_page_cache!) do |opts|
+      raise IMP::RepresentationFidelity::ContractError, 'cache cleanup failed' if opts[:cleanup_failure]
+    end
+    boundary.module_eval("def self.fail_page(model, error, cleanup_failure)\n" \
+      "opts = {:preserve_prepared_parser => true, :cleanup_failure => cleanup_failure}\n" \
+      "operation_open = true\npage_num = 2\nbegin\nraise error\n" +
+      page_rescues + "end\n" + outer_rescues + "end\n", MAIN_RB)
+    boundary
+  end
+
+  def run_with_failed_page_transaction(model, calls, error = RuntimeError.new('build failed'), cleanup_failure = false)
+    boundary = pipeline_failure_boundary
+    normal_runner = runner(model, calls)
+    run = lambda do |page, offset, certify|
+      if page == 2
+        calls << [page, offset]
+        IMP.start_import_operation!(model, 'Import page 2')
+        model.active_entities.add(Group.new(999, page))
+        boundary.fail_page(model, error, cleanup_failure)
+      end
+      normal_runner.call(page, offset, certify)
+    end
+    orchestrate(model, run)
+  end
+
+  def test_failed_or_unconfirmed_rollback_stops_without_retry_or_later_page
+    [RuntimeError.new('host abort failed'), false, nil].each do |failure|
+      model = TransactionModel.new
+      model.abort_result = failure
+      calls = []
+      error = assert_raises(IRC::RollbackFailure) do
+        run_with_failed_page_transaction(model, calls)
+      end
+      assert_match(/could not confirm rollback/, error.message)
+      assert_equal [1, 2], calls.map { |call| call[0] }
+      assert_equal 1, model.abort_count, 'outer rescue must not retry uncertain rollback'
+      assert_equal [101, 999], model.active_entities.to_a.map(&:persistent_id)
+    end
+  end
+
+  def test_confirmed_rollback_removes_partial_page_and_keeps_committed_pages
+    model = TransactionModel.new
+    result = run_with_failed_page_transaction(model, [])
+    assert_equal [1, 3], result[:retained_pages]
+    assert_equal [101, 103], model.active_entities.to_a.map(&:persistent_id)
+    assert_equal 1, model.abort_count
+    assert_equal 'incomplete', result[:result_status]
+  end
+
+  def test_cancel_with_failed_rollback_is_terminal_instead_of_resumable
+    model = TransactionModel.new
+    model.abort_result = false
+    calls = []
+    assert_raises(IRC::RollbackFailure) do
+      run_with_failed_page_transaction(model, calls, IRC::ImportCancelled.new([1], 2, {}))
+    end
+    assert_equal [1, 2], calls.map { |call| call[0] }
+    assert_equal 1, model.abort_count
+  end
+
+  def test_cleanup_error_cannot_hide_failed_rollback_or_start_another_page
+    model = TransactionModel.new
+    model.abort_result = false
+    calls = []
+    assert_raises(IRC::RollbackFailure) do
+      run_with_failed_page_transaction(model, calls, RuntimeError.new('build failed'), true)
+    end
+    assert_equal [1, 2], calls.map { |call| call[0] }
+    assert_equal 1, model.abort_count
+  end
+
+  def test_cleanup_error_cannot_turn_cancel_or_resume_mismatch_into_a_skipped_page
+    model = TransactionModel.new
+    calls = []
+    cancelled = run_with_failed_page_transaction(
+      model, calls, IRC::ImportCancelled.new([1], 2, {}), true
+    )
+    assert_equal 'cancelled', cancelled[:result_status]
+    assert_equal [1, 2], calls.map { |call| call[0] }
+    assert_equal [101], model.active_entities.to_a.map(&:persistent_id)
+    model = TransactionModel.new
+    calls = []
+    mismatch = IRC::ResumeMismatch.new('retained group changed')
+    error = assert_raises(IRC::ResumeMismatch) do
+      run_with_failed_page_transaction(model, calls, mismatch, true)
+    end
+    assert_same mismatch, error
+    assert_equal [1, 2], calls.map { |call| call[0] }
+  end
+
+  def test_resumable_cleanup_preserves_the_active_terminal_error
+    source = File.read(MAIN_RB)
+    method = source[/^    def self\.run_resumable_pipeline.*?(?=^    def self\.release_original_annotation_cache!)/m]
+    ensure_body = method[/^      ensure\n(.*)(?=^      end\n    end\n)/m, 1]
+    refute_nil ensure_body
+    boundary = Module.new
+    boundary.define_singleton_method(:preserve_terminal_import_error) do |error, &block|
+      IMP.preserve_terminal_import_error(error, &block)
+    end
+    boundary.define_singleton_method(:release_original_annotation_cache!) do |_|
+      raise IMP::RepresentationFidelity::ContractError, 'annotation cache cleanup failed'
+    end
+    boundary.module_eval("def self.unwind(error)\noriginal_annotation_cache = {}\n" \
+      "begin\nraise error\nensure\n" + ensure_body + "end\nend\n", MAIN_RB)
+    [IRC::RollbackFailure.new('rollback failed'), IRC::ResumeMismatch.new('journal changed'),
+     IRC::ImportCancelled.new([1], 2, {})].each do |terminal|
+      raised = assert_raises(terminal.class) { boundary.unwind(terminal) }
+      assert_same terminal, raised
+    end
+    cleanup = assert_raises(IMP::RepresentationFidelity::ContractError) do
+      boundary.unwind(RuntimeError.new('ordinary failure'))
+    end
+    assert_equal 'annotation cache cleanup failed', cleanup.message
+  end
+
+  # Execute the real native-import and folder-batch entrypoints with only
+  # their host/UI/pipeline boundaries replaced; no SketchUp process is needed.
+  def entrypoint_scope(outcomes, folder = nil)
+    calls, messages, aborts = [], [], []
+    scope = Module.new
+    host = Module.new
+    importer = Class.new
+    importer.const_set(:ImportSuccess, 0)
+    importer.const_set(:ImportFail, 1)
+    importer.const_set(:ImportCanceled, 2)
+    host.const_set(:Importer, importer)
+    host.define_singleton_method(:active_model) { Object.new }
+    host.define_singleton_method(:status_text=) { |_| }
+    ui = Module.new
+    ui.define_singleton_method(:inputbox) { |*_| [folder] }
+    ui.define_singleton_method(:messagebox) { |message, *_| messages << message; 6 }
+    dialog = Module.new
+    dialog.const_set(:MODES, {'Auto' => {}})
+    dialog.define_singleton_method(:show) { |_| {} }
+    dialog.define_singleton_method(:build_opts) { |opts| opts }
+    logger = Module.new
+    logger.define_singleton_method(:error) { |*_| }
+    namespace = Module.new
+    namespace.const_set(:PDFVectorImporter, scope)
+    scope.const_set(:BlueCollarSystems, namespace)
+    scope.const_set(:Sketchup, host)
+    scope.const_set(:UI, ui)
+    scope.const_set(:ImportDialog, dialog)
+    scope.const_set(:ImportRunControl, IRC)
+    scope.const_set(:Logger, logger)
+    scope.const_set(:MB_YESNO, 4)
+    scope.const_set(:IDYES, 6)
+    scope.define_singleton_method(:handle_open_gate) { |*_| false }
+    scope.define_singleton_method(:import_result_status) { |stats| IMP.import_result_status(stats) }
+    scope.define_singleton_method(:safe_abort_operation) { |*args| aborts << args }
+    scope.define_singleton_method(:run_pipeline) do |_model, path, _opts|
+      calls << path
+      outcome = outcomes.shift
+      raise outcome if outcome.is_a?(Exception)
+      outcome
+    end
+    source = File.read(MAIN_RB)
+    load_file = source[/^      def load_file\(.*?^      end\n/m]
+    batch = source[/^    def self\.batch_import\n.*?^    end\n/m]
+    refute_nil load_file
+    refute_nil batch
+    scope.module_eval("class NativeImporter\n" + load_file + "end\n" + batch, MAIN_RB)
+    [scope, calls, messages, aborts]
+  end
+
+  def test_native_importer_reports_explicit_outcomes_and_preserves_legacy_success
+    outcomes = [{:result_status => 'incomplete'}, {:cancelled => true},
+      {:result_status => 'cancelled'}, {:failed_pages => [{:page => 2}]},
+      {:result_status => 'success'}, {:pages => 1}, nil,
+      IRC::ImportCancelled.new([1], 2, {})]
+    scope, = entrypoint_scope(outcomes)
+    importer = scope.const_get(:NativeImporter).new
+    results = 8.times.map { importer.load_file('fixture.pdf', nil) }
+    assert_equal [1, 2, 2, 1, 0, 0, 1, 2], results
+  end
+
+  def test_native_importer_does_not_retry_failed_rollback
+    scope, _calls, _messages, aborts = entrypoint_scope([IRC::RollbackFailure.new('rollback failed')])
+    assert_equal 1, scope.const_get(:NativeImporter).new.load_file('fixture.pdf', nil)
+    assert_empty aborts
+  end
+
+  def with_batch_fixture(outcomes)
+    Dir.mktmpdir('batch-outcome') do |folder|
+      3.times { |index| File.binwrite(File.join(folder, "#{index}.pdf"), '%PDF-test') }
+      scope, calls, messages, aborts = entrypoint_scope(outcomes, folder)
+      scope.batch_import
+      yield calls, messages.last, aborts
+    end
+  end
+
+  def test_folder_batch_does_not_count_incomplete_or_nil_results_as_success
+    with_batch_fixture([{:result_status => 'incomplete'}, {:pages => 1}, nil]) do |calls, summary, _|
+      assert_equal 3, calls.length
+      assert_includes summary, '1 imported, 2 failed, 0 cancelled'
+    end
+  end
+
+  def test_folder_batch_stops_after_cancellation_or_uncertain_rollback
+    with_batch_fixture([{:cancelled => true}, {:pages => 1}]) do |calls, summary, _|
+      assert_equal 1, calls.length
+      assert_includes summary, '0 imported, 0 failed, 1 cancelled'
+      assert_includes summary, 'remaining PDFs were not started'
+    end
+    with_batch_fixture([IRC::RollbackFailure.new('rollback could not be confirmed'), {:pages => 1}]) do |calls, summary, aborts|
+      assert_equal 1, calls.length
+      assert_includes summary, '0 imported, 1 failed, 0 cancelled'
+      assert_includes summary, 'Stopped: rollback could not be confirmed'
+      assert_empty aborts
+    end
   end
 
   # ---- single end-of-import summary --------------------------------------

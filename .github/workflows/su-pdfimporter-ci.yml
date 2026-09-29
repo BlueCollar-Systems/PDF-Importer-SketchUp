@@ -150,6 +150,10 @@ jobs:
           ruby test/inline_image_composite_test.rb
           ruby test/inline_image_delivery_accounting_test.rb
           ruby test/unattended_multipage_import_test.rb
+          ruby test/failed_page_outcome_test.rb
+          ruby test/qa_report_test.rb
+          ruby test/representation_fidelity_contract_test.rb
+          ruby test/batch_host_nonmodal_policy_test.rb
           ruby test/pdf_color_display_test.rb
           ruby test/geometry_cleanup_collinear_coverage_test.rb
           ruby test/cleanup_selected_operation_test.rb
@@ -166,6 +170,7 @@ jobs:
           ruby test/covered_clip_fill_test.rb
           ruby test/compound_fill_closed_contour_test.rb
           ruby test/planar_white_knockout_test.rb
+          ruby test/planar_region_partition_test.rb
           ruby test/late_pdf_overlays_test.rb
           ruby test/svg_paint_binding_test.rb
           ruby test/svg_region_boundary_test.rb
@@ -235,6 +240,8 @@ jobs:
           ruby test/inline_image_composite_test.rb
           ruby test/inline_image_delivery_accounting_test.rb
           ruby test/unattended_multipage_import_test.rb
+          ruby test/failed_page_outcome_test.rb
+          ruby test/batch_host_nonmodal_policy_test.rb
           ruby test/pdf_color_display_test.rb
       - name: Validate release publication state
         run: python tools/check_release_publication.py

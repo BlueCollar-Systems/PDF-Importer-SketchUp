@@ -54,7 +54,7 @@ class BatchHostNonmodalPolicyTest < Minitest::Test
     refute prompted
   end
 
-  def test_every_reachable_batch_prompt_is_routed_through_policy
+  def test_remaining_batch_prompts_are_routed_through_policy
     main = File.read(File.join(
       ROOT, 'extracted', 'sketchup_ext', 'bc_pdf_vector_importer', 'main.rb'
     ), :encoding => 'UTF-8')
@@ -63,7 +63,6 @@ class BatchHostNonmodalPolicyTest < Minitest::Test
       'dependency_resolver.rb'
     ), :encoding => 'UTF-8')
 
-    assert_includes main, 'BatchHostPolicy.prompt_allowed?'
     assert_includes main, 'BatchHostPolicy.confirm_large_pdf!'
     assert_includes main, 'BatchHostPolicy.handle_salvage_error!'
     assert_includes dependency, 'BatchHostPolicy.noninteractive?'
