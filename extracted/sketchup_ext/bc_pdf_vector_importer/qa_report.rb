@@ -1366,8 +1366,29 @@ module BlueCollarSystems
           count
         end
         pages = records.map { |record| telemetry_value(record, :page).to_i }
-        pages.all? { |page| page > 0 } && pages.uniq.length == pages.length &&
-          counts.inject(0) { |sum, count| sum + count } == detected
+        retentions = Array(
+          telemetry_value(stats, :inline_image_vector_retentions)
+        )
+        retention_counts = retentions.map do |record|
+          return false unless record.is_a?(Hash)
+          count = telemetry_value(record, :inline_image_instance_count)
+          path_count = telemetry_value(record, :vector_path_count)
+          return false unless count.is_a?(Integer) && count > 0
+          return false unless path_count.is_a?(Integer) && path_count > 0
+          return false unless telemetry_value(record, :delivery).to_s ==
+                              'editable_geometry'
+          count
+        end
+        retention_pages = retentions.map do |record|
+          telemetry_value(record, :page).to_i
+        end
+        return false unless pages.all? { |page| page > 0 } &&
+                            retention_pages.all? { |page| page > 0 }
+        return false unless pages.uniq.length == pages.length &&
+                            retention_pages.uniq.length == retention_pages.length
+        return false unless (pages & retention_pages).empty?
+        counts.inject(0) { |sum, count| sum + count } +
+          retention_counts.inject(0) { |sum, count| sum + count } == detected
       end
 
       def validate_representation_fidelity(stats, opts = {})
