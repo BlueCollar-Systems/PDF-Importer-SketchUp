@@ -1215,11 +1215,39 @@ module SketchupHostEvidence
         raise EvidenceError, "#{label} source lineage mismatch"
       end
     end
+    # A page that kept its vectors and did NOT deliver its inline images is
+    # recorded as an omission (main.rb inline_image_vector_retentions with
+    # :delivery => inline_images_omitted). The ledger balances only when
+    # every detected inline instance is either in a page Raster fallback or
+    # in a recorded omission; a silent drop cannot balance.
+    omitted_total = 0
+    Array(hash_value(stats, :inline_image_vector_retentions)).each_with_index do |record, index|
+      label = "inline image omission[#{index}]"
+      raise EvidenceError, "#{label} must be a Hash" unless record.is_a?(Hash)
+      page = exact_positive_integer!(hash_value(record, :page), "#{label} page")
+      if seen_pages[page]
+        raise EvidenceError, "#{label} page #{page} is also a page Raster fallback"
+      end
+      seen_pages[page] = true
+      count = exact_positive_integer!(
+        hash_value(record, :inline_image_instance_count), "#{label} count"
+      )
+      exact_positive_integer!(
+        hash_value(record, :vector_path_count), "#{label} vector path count"
+      )
+      unless hash_value(record, :delivery).to_s == 'inline_images_omitted'
+        raise EvidenceError,
+              "#{label} must record inline_images_omitted, not " \
+              "#{hash_value(record, :delivery).inspect}"
+      end
+      omitted_total += count
+    end
     detected = hash_value(stats, :inline_images_detected)
     unless detected.is_a?(Integer) && detected >= 0 &&
-           detected == total_inline_images
+           detected == total_inline_images + omitted_total
       raise EvidenceError,
-            'inline image detection total does not match page Raster fallbacks'
+            'inline image detection total does not match page Raster ' \
+            'fallbacks plus recorded omissions'
     end
     true
   end

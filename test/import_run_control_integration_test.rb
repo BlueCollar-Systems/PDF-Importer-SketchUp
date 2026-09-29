@@ -179,15 +179,22 @@ class ImportRunControlIntegrationTest < Minitest::Test
         def self.resumable_import?(*); true; end
         def self.report_pipeline_progress(*); end
         def self.finalize_import_diagnostics!(*); end
+        module BatchHostPolicy
+          LARGE_PDF_BYTES = 100 * 1024 * 1024
+          class NoninteractiveError < StandardError; end
+          def self.confirm_large_pdf!(*); true; end
+        end
       RUBY
       scope.const_get(:PdfSalvage).result = [prepared, note]
       outer = MAIN[/    def self\.run_resumable_pipeline.*?(?=    def self\.create_resumable_page_group!)/m]
       lineage = MAIN[/    def self\.record_source_lineage!.*?(?=    def self\.finalize_import_diagnostics!)/m]
       preparation = MAIN[/      salvage_note = nil\n      if opts\[:prepared_parser\].*?(?=      if parser\.page_count == 0)/m]
+      guard = MAIN[/    def self\.confirm_large_pdf_once!.*?(?=    def self\.confirm_page_complexity!)/m]
       refute_nil outer
       refute_nil lineage
       refute_nil preparation
-      scope.module_eval(outer + lineage, __FILE__, __LINE__)
+      refute_nil guard
+      scope.module_eval(outer + lineage + guard, __FILE__, __LINE__)
       scope.module_eval("def self.run_pipeline(model, path, opts)\n" \
         "source_path = path\n" + preparation +
         "stats = {}\nrecord_source_lineage!(stats, source_path, path, salvage_note, opts)\n" \

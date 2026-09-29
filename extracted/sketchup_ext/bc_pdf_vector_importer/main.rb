@@ -185,6 +185,60 @@ module BlueCollarSystems
       true
     end
 
+    # The one operator question an import may ask, and only before anything
+    # is built: a very large file. Returns true to continue, false when the
+    # operator declined. Noninteractive batch runs keep raising
+    # BatchHostPolicy::NoninteractiveError (policy unchanged). An unreadable
+    # size is logged and never blocks the import.
+    def self.confirm_large_pdf_once!(path, file_size_bytes = nil)
+      file_size_bytes ||= File.size(path)
+      return true unless file_size_bytes.to_i > BatchHostPolicy::LARGE_PDF_BYTES
+      size_mb = (file_size_bytes / (1024.0 * 1024.0)).round(1)
+      choice = BatchHostPolicy.confirm_large_pdf!(file_size_bytes) do
+        if defined?(UI) && UI.respond_to?(:messagebox)
+          UI.messagebox(
+            "This PDF is very large (#{size_mb} MB). Import may take a " \
+            'significant amount of time and use considerable memory. This ' \
+            'is the only question this import will ask: press Esc during ' \
+            'the import to stop after the current page; completed pages ' \
+            "are kept and can be resumed.\n\nContinue?",
+            MB_OKCANCEL
+          )
+        else
+          true
+        end
+      end
+      accepted = choice == true
+      accepted ||= defined?(IDOK) && choice == IDOK
+      unless accepted
+        Logger.info('Pipeline', "Very large PDF (#{size_mb} MB): operator declined before the import started.")
+      end
+      accepted
+    rescue BatchHostPolicy::NoninteractiveError
+      raise
+    rescue StandardError => e
+      Logger.warn('Pipeline', "File size check failed: #{e.message}")
+      true
+    end
+
+    # Result of an import the operator declined before page 1: nothing was
+    # built, nothing to resume. Same shape as PageOrchestrator's cancelled
+    # result so ReportDialog.announce_cancelled can show it.
+    def self.cancelled_before_start(source_path, reason)
+      {
+        :cancelled => true,
+        :cancelled_before_start => true,
+        :cancel_reason => reason,
+        :retained_pages => [],
+        :resumed_pages => [],
+        :new_pages => [],
+        :next_page => nil,
+        :message => "Import of #{File.basename(source_path.to_s)} was not " \
+                    "started (#{reason}). The model was not changed.",
+        :resume_message => 'Nothing was imported; run the import again to start.'
+      }
+    end
+
     def self.confirm_page_complexity!(opts, page_num, path_count, text_count)
       controller = opts.is_a?(Hash) ? opts[:run_controller] : nil
       return nil unless controller && controller.respond_to?(:assess)
@@ -293,21 +347,16 @@ module BlueCollarSystems
         "#{requested_label} text was requested, but a free Poppler/MuPDF SVG " \
         'renderer is unavailable. The requested representation will not be substituted.'
       )
-      if BatchHostPolicy.prompt_allowed? &&
-         defined?(UI) && UI.respond_to?(:messagebox)
-        UI.messagebox(
-          "#{requested_label} text requires a free Poppler/MuPDF SVG " \
-          "renderer, which is unavailable.\n\nThe import is stopping without " \
-          "changing the requested representation. Install Poppler or MuPDF " \
-          "and expose it on PATH, or configure BC_PDFTOCAIRO_PATH / " \
-          "BC_MUTOOL_PATH. Then open Extensions > PDF Vector Importer > " \
-          'Compatibility Report to verify detection.'
-        )
-      end
+      # No modal here: this runs per page and can fire after earlier pages
+      # were already imported. The import stops with ONE failure message
+      # (import_pdf shows it) that carries the remedy.
       safe_abort_operation(model, 'Pipeline')
       raise RepresentationFidelity::ContractError,
             "requested #{requested_label} renderer is unavailable; no " \
-            'representation fallback is authorized'
+            'representation fallback is authorized. Install Poppler or ' \
+            'MuPDF and expose it on PATH, or configure BC_PDFTOCAIRO_PATH / ' \
+            'BC_MUTOOL_PATH, then open Extensions > PDF Vector Importer > ' \
+            'Compatibility Report to verify detection.'
     end
 
     def self.record_text_renderer(stats, page_num, attrs)
@@ -3723,6 +3772,13 @@ module BlueCollarSystems
     end
 
     def self.run_resumable_pipeline(model, source_path, opts)
+      # Decide once, before anything is built. Every page call below carries
+      # :large_pdf_confirmed, so no page can put a question in front of the
+      # operator mid-import; Esc (run controller) and resume are the safety net.
+      unless confirm_large_pdf_once!(source_path)
+        return cancelled_before_start(source_path, 'very large PDF declined')
+      end
+      opts = opts.merge(:large_pdf_confirmed => true)
       unless resumable_import?(opts)
         inner_opts = opts.dup
         inner_opts[:resumable_page_call] = true
@@ -3748,6 +3804,18 @@ module BlueCollarSystems
           page.to_i >= 1 && page.to_i <= parser.page_count
         end.map { |page| page.to_i }.uniq.sort
         return nil if pages.empty?
+
+        # The import plan, stated once. Nothing below asks the operator
+        # anything; heavy pages are logged and built, Esc stops after the
+        # current page, completed pages are kept and resumable.
+        Logger.info(
+          'Pipeline',
+          "Import plan: #{pages.length} page(s) #{pages.first}-#{pages.last} " \
+          "of #{parser.page_count}, text mode #{opts[:text_mode]}, import mode " \
+          "#{opts[:import_mode].to_s.empty? ? 'auto' : opts[:import_mode]}. " \
+          'No confirmation will be asked during the import; Esc stops after ' \
+          'the current page and completed pages are kept and resumable.'
+        )
 
         identity = ImportRunControl.identity_for(
           source_path, opts, File.dirname(__FILE__)
@@ -3791,7 +3859,7 @@ module BlueCollarSystems
           page_stats = run_pipeline(model, source_path, page_opts)
           {
             :stats => page_stats,
-            :next_y_offset => page_stats[:next_y_offset]
+            :next_y_offset => page_stats.is_a?(Hash) ? page_stats[:next_y_offset] : nil
           }
         end
         result = ImportRunControl::PageOrchestrator.new(
@@ -3921,23 +3989,12 @@ module BlueCollarSystems
         return run_forced_raster_pipeline(model, path, opts)
       end
 
-      # ── File size warning for very large PDFs ──
-      begin
-        file_size_bytes = File.size(path)
-        if file_size_bytes > BatchHostPolicy::LARGE_PDF_BYTES
-          size_mb = (file_size_bytes / (1024.0 * 1024.0)).round(1)
-          choice = BatchHostPolicy.confirm_large_pdf!(file_size_bytes) do
-            UI.messagebox(
-              "This PDF is very large (#{size_mb} MB). Import may take a significant " \
-              "amount of time and use considerable memory. Continue?",
-              MB_OKCANCEL)
-          end
-          return nil unless choice == IDOK
-        end
-      rescue BatchHostPolicy::NoninteractiveError
-        raise
-      rescue StandardError => e
-        Logger.warn("Pipeline", "File size check failed: #{e.message}")
+      # ── File size warning for very large PDFs: asked ONCE per import ──
+      # run_resumable_pipeline asks before page 1 and marks the options, so a
+      # per-page call never asks again. Direct (non-resumable) callers still
+      # get the single question here.
+      unless opts[:large_pdf_confirmed]
+        return nil unless confirm_large_pdf_once!(path)
       end
 
       # Round 18: encrypted (empty-password) and damaged-xref files are
@@ -4191,17 +4248,26 @@ module BlueCollarSystems
         )
         if inline_delivery == :none && inline_image_count > 0 &&
            vector_content_present
+          # Honest accounting: the vectors and text stay editable, but the
+          # inline picture is NOT delivered (inline BI/ID/EI images are only
+          # counted; nothing decodes or places them yet). That is an omission
+          # the operator must see, not a retention: warn, so the QA contract
+          # reports NOT READY for this page, and record it for the ledgers.
           stats[:inline_image_vector_retentions] << {
             :page => page_num,
             :inline_image_instance_count => inline_image_count,
             :vector_path_count => paths.length,
-            :delivery => :editable_geometry
+            :delivery => :inline_images_omitted,
+            :reason => 'inline image extraction is not implemented; the ' \
+                       'inline picture was not placed'
           }
-          Logger.info(
+          Logger.warn(
             'InlineImages',
-            "Page #{page_num}: keeping #{paths.length} vector paths with " \
-            "#{inline_image_count} inline image placement(s); " \
-            'page raster was not substituted.'
+            "Page #{page_num}: kept #{paths.length} vector paths as editable " \
+            "geometry, but #{inline_image_count} inline image placement(s) " \
+            '(an embedded picture) were NOT delivered: inline image ' \
+            'extraction is not implemented yet. No page raster was ' \
+            'substituted; the omission is recorded in the QA report.'
           )
         end
         if inline_delivery == :reject_vector
