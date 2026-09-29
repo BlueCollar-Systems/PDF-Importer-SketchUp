@@ -8,15 +8,19 @@ module Geom
     def transform(t); t.point(self); end
   end
   class Transformation
-    attr_reader :scale, :offset
-    def initialize(scale = 1.0, offset = [0, 0, 0]); @scale, @offset = scale, offset; end
+    attr_reader :scale, :offset, :weight
+    def initialize(scale = 1.0, offset = [0, 0, 0], weight = 1.0); @scale, @offset, @weight = scale, offset, weight; end
     def self.translation(p); new(1.0, [p.x, p.y, p.z]); end
-    def self.scaling(s); new(s); end
-    def *(other)
-      Transformation.new(scale * other.scale, offset.each_with_index.map { |v, i| v + scale * other.offset[i] })
+    def self.scaling(*values)
+      raise 'test scaling must be uniform' unless [1, 3].include?(values.length) && values.uniq.length == 1
+      new(values.first)
     end
-    def inverse; Transformation.new(1.0 / scale, offset.map { |v| -v / scale }); end
-    def point(p); Point3d.new(*[p.x, p.y, p.z].each_with_index.map { |v, i| v * scale + offset[i] }); end
+    def *(other)
+      Transformation.new(scale * other.scale,
+        offset.each_with_index.map { |v, i| v * other.weight + scale * other.offset[i] }, weight * other.weight)
+    end
+    def inverse; Transformation.new(1.0 / scale, offset.map { |v| -v / (scale * weight) }, 1.0 / weight); end
+    def point(p); Point3d.new(*[p.x, p.y, p.z].each_with_index.map { |v, i| (v * scale + offset[i]) / weight }); end
   end
 end
 
@@ -369,6 +373,44 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     assert retained.any? { |r| Subject.contains?(r, [1 + delta / 2, 2, 0]) }, 'thin source-white strip is retained'
     assert retained.any? { |r| r[:loops].first.map { |p| p[0] }.minmax == [1.0, 1.0 + delta] }
     refute retained.any? { |r| Subject.contains?(r, [2, 2, 0]) }, 'physical ink remains uncovered'
+  end
+
+  def test_legacy_single_argument_scale_cannot_change_source_coordinates
+    legacy_scaling = lambda do |*values|
+      if values.length == 1
+        # SketchUp2017 stores the reciprocal in the homogeneous matrix entry.
+        Geom::Transformation.new(1.0, [0,0,0], 1.0 / values.first)
+      else
+        raise 'nonuniform test scale' unless values.length == 3 && values.uniq.length == 1
+        Geom::Transformation.new(values.first)
+      end
+    end
+    [0.0, 2.0**-35].each do |delta|
+      original = Face.new([rect(2.1, 0.1, 6.1, 4.1)])
+      white = Group.new(Entities.new([original]))
+      parent = Geom::Transformation.new(1.0, [0,36,0])
+      white.transformation = parent
+      white.entities.native_tolerance = Subject::NATIVE_VERTEX_TOLERANCE
+      text = Group.new(Entities.new([Face.new([rect(3.1,0.6,5.1,1.6)]),
+                                    Face.new([rect(3.1 + delta,1.1,5.1,2.6)])]))
+      text.owner = true
+      text.transformation = parent
+      sources = Subject.snapshots(white, parent, false)
+      ink = Subject.collect_text_faces([text])
+      cells = BlueCollarSystems::PDFVectorImporter::PlanarRegionPartition.partition(sources, ink)
+      expected = cells.select { |cell| cell[:region] == :white }.flat_map do |cell|
+        cell[:loop].map { |point| point.map(&:to_f) }
+      end.uniq.sort
+      Geom::Transformation.stub(:scaling, legacy_scaling) do
+        Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }], [text])
+      end
+      stage = white.entities.stage
+      actual = Subject.snapshots(stage, parent * stage.transformation, false).flat_map do |record|
+        record[:loops].flatten(1)
+      end.uniq.sort
+      assert_equal expected, actual, 'native frame must recover every source vertex exactly'
+      assert original.erased
+    end
   end
 
   def test_scale_selection_uses_corner_altitude_and_the_smallest_bounded_binary_step

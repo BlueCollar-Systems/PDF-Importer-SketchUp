@@ -359,8 +359,11 @@ module BlueCollarSystems
           scale = partition_construction_scale(source_cells)
           stage = entities.add_group
           stage.name = 'PDF planar white composition' if stage.respond_to?(:name=)
+          inverse_scale = 1.0 / scale
+          # SketchUp2017's single-argument overload uses a homogeneous weight,
+          # changing Float rounding after translation. Use the affine overload.
           page_transform = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
-                           Geom::Transformation.scaling(1.0 / scale)
+                           Geom::Transformation.scaling(inverse_scale, inverse_scale, inverse_scale)
           stage.transformation = transform.inverse * page_transform
           point_map = partition_construction_points(source_cells, origin, scale)
           verify_adaptive_page_points!(point_map, origin, scale, page_transform,
@@ -478,14 +481,15 @@ module BlueCollarSystems
         fail_contract('exact white-mask construction scale budget exceeded')
       end
 
-      # Binary scale steps leave the ordinary 1000x path unchanged. Adaptive
+      # Binary scale steps retain the ordinary 1000x scale selection. Adaptive
       # points must recover each source coordinate's Float value exactly and
-      # preserve the original composed page transform, not merely its area.
+      # preserve the canonical 1000x composed page frame, not merely its area.
       def self.verify_adaptive_page_points!(mapped, origin, scale, page_transform,
                                            transform, stage_transform)
         return if scale == CONSTRUCTION_SCALE
+        inverse_scale = 1.0 / CONSTRUCTION_SCALE
         baseline_page = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
-                        Geom::Transformation.scaling(1.0 / CONSTRUCTION_SCALE)
+                        Geom::Transformation.scaling(inverse_scale, inverse_scale, inverse_scale)
         baseline_world = transform * (transform.inverse * baseline_page)
         world = transform * stage_transform
         mapped.each do |source, point|
