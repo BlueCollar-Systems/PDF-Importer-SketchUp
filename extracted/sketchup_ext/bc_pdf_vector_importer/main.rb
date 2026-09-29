@@ -3856,6 +3856,7 @@ module BlueCollarSystems
           page_opts[:original_annotation_cache] = original_annotation_cache
           page_opts[:preserve_logger] = true
           page_opts[:defer_final_diagnostics] = true
+          page_opts[:large_pdf_confirmed] = true
           page_stats = run_pipeline(model, source_path, page_opts)
           {
             :stats => page_stats,
@@ -3867,9 +3868,19 @@ module BlueCollarSystems
           :controller => controller,
           :pages => pages,
           :runner => runner,
-          :group_per_page => opts[:group_per_page]
+          :group_per_page => opts[:group_per_page],
+          :continue_on_page_error => opts[:stop_on_page_error] != true
         ).run
         stats = result[:stats] || {}
+        stats[:failed_pages] = Array(result[:failed_pages])
+        stats[:failed_pages].each do |failure|
+          Logger.warn(
+            'Pipeline',
+            "Page #{failure[:page]} failed and was skipped " \
+            "(#{failure[:error_class]}): #{failure[:message]}; " \
+            'the remaining pages continued.'
+          )
+        end
         stats[:cancelled] = result[:cancelled] == true
         stats[:retained_pages] = result[:retained_pages]
         stats[:resumed_pages] = result[:resumed_pages]
@@ -4724,9 +4735,19 @@ module BlueCollarSystems
 
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — #{paths.length} paths, #{text_items.length} text items... [#{(Time.now - import_start).round(1)}s]"
 
-        confirm_page_complexity!(
+        complexity = confirm_page_complexity!(
           opts, page_num, paths.length, text_items.length
         )
+        if complexity.is_a?(Hash) && complexity[:class] != :normal
+          stats[:complexity_notices] ||= []
+          stats[:complexity_notices] << {
+            :page => page_num.to_i,
+            :class => complexity[:class].to_s,
+            :work_units => complexity[:work_units].to_i,
+            :paths => paths.length,
+            :text_items => text_items.length
+          }
+        end
 
         prebuild_analysis_started = Time.now
         page_data = PrimitiveExtractor.extract(paths, text_items, media_box, page_num,
