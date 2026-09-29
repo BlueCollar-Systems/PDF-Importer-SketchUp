@@ -2214,7 +2214,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       assert_equal :ruby_zlib_stream, inspected[:decoder_backend]
       assert_equal 0, inspected[:temp_bytes_written]
       refute inspected.key?(:raw_path)
-      assert_equal ['page.png'], Dir.children(directory).sort
+      assert_equal ['page.png'], (Dir.entries(directory) - ['.', '..']).sort
     end
   end
 
@@ -2242,7 +2242,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       assert_equal :native_zlib_stream, native[:decoder_backend]
       assert_equal 0, native[:temp_bytes_written]
       refute native.key?(:raw_path)
-      assert_equal ['page.png'], Dir.children(directory).sort
+      assert_equal ['page.png'], (Dir.entries(directory) - ['.', '..']).sort
     end
   end
 
@@ -2262,7 +2262,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       assert_equal ruby[:alpha_channel_verified],
                    native[:alpha_channel_verified]
       assert_equal ruby[:visual_pixel_sha256], native[:visual_pixel_sha256]
-      assert_equal [], Dir.children(directory) - ['page.png']
+      assert_equal [], (Dir.entries(directory) - ['.', '..']) - ['page.png']
     end
   end
 
@@ -2312,7 +2312,7 @@ class RepresentationFidelityContractTest < Minitest::Test
           IMP::PngCropper.inspect_pixels!(page, true, helper)
         end
       end
-      assert_equal ['page.png'], Dir.children(directory).sort
+      assert_equal ['page.png'], (Dir.entries(directory) - ['.', '..']).sort
     end
   end
 
