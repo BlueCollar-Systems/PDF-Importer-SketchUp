@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.159-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.160-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -13,7 +13,14 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > Import Health has the full summary.
 
-### Recent fixes (v3.7.159)
+### Recent fixes (v3.7.160)
+
+- Multi-page imports run unattended: no question appears after an import starts. The very-large-file warning is asked once before page 1; large pages are logged instead of prompting.
+- A page that fails is logged and skipped while the remaining pages import; resume retries it.
+- One non-blocking end-of-import status line (and Import Health) names raster-fallback pages with the reason, failed pages, and inline images that were not placed.
+- Pages that paint inline images (e.g. a logo drawn as 1-px strips) keep their vector paths and text instead of being delivered as a whole-page raster; the omitted inline images are reported honestly.
+
+### Earlier notes (v3.7.159)
 
 - Stabilize retained entity signatures across SketchUp Make 2017 `commit_operation` housekeeping: finalize/skip ephemeral empty Groups, sort children stably, and quantize length noise so multi-page text3d imports no longer raise ResumeMismatch after only host purge of empty groups.
 
