@@ -1221,6 +1221,7 @@ module SketchupHostEvidence
     # every detected inline instance is either in a page Raster fallback or
     # in a recorded omission; a silent drop cannot balance.
     omitted_total = 0
+    omission_pages = {}
     Array(hash_value(stats, :inline_image_vector_retentions)).each_with_index do |record, index|
       label = "inline image omission[#{index}]"
       raise EvidenceError, "#{label} must be a Hash" unless record.is_a?(Hash)
@@ -1228,7 +1229,8 @@ module SketchupHostEvidence
       if seen_pages[page]
         raise EvidenceError, "#{label} page #{page} is also a page Raster fallback"
       end
-      seen_pages[page] = true
+      raise EvidenceError, "#{label} page #{page} is repeated" if omission_pages[page]
+      omission_pages[page] = true
       count = exact_positive_integer!(
         hash_value(record, :inline_image_instance_count), "#{label} count"
       )
@@ -1242,12 +1244,70 @@ module SketchupHostEvidence
       end
       omitted_total += count
     end
+    # Inline images composited into PLACED native images (main.rb
+    # record_inline_image_delivery!). Each record proves its regions: one
+    # artifact (sha256, pixel size, instance count) and one resulting entity
+    # per region, instances adding up to the record. A page may be partly
+    # composited and partly omitted, never composited and page-rastered.
+    composited_total = 0
+    composite_pages = {}
+    Array(hash_value(stats, :inline_image_composites)).each_with_index do |record, index|
+      label = "inline image composite[#{index}]"
+      raise EvidenceError, "#{label} must be a Hash" unless record.is_a?(Hash)
+      page = exact_positive_integer!(hash_value(record, :page), "#{label} page")
+      if seen_pages[page]
+        raise EvidenceError, "#{label} page #{page} is also a page Raster fallback"
+      end
+      raise EvidenceError, "#{label} page #{page} is repeated" if composite_pages[page]
+      composite_pages[page] = true
+      count = exact_positive_integer!(
+        hash_value(record, :inline_image_instance_count), "#{label} count"
+      )
+      exact_positive_integer!(
+        hash_value(record, :vector_path_count), "#{label} vector path count"
+      )
+      unless hash_value(record, :delivery).to_s == 'inline_images_composited' &&
+             hash_value(record, :placed) == true
+        raise EvidenceError,
+              "#{label} must record a placed inline_images_composited delivery"
+      end
+      regions = exact_positive_integer!(
+        hash_value(record, :region_count), "#{label} region count"
+      )
+      artifacts = hash_value(record, :artifacts)
+      entity_ids = hash_value(record, :resulting_entity_ids)
+      unless artifacts.is_a?(Array) && artifacts.length == regions &&
+             entity_ids.is_a?(Array) && entity_ids.length == regions &&
+             entity_ids.all? { |id| !id.nil? && !id.to_s.strip.empty? } &&
+             entity_ids.map { |id| id.to_s }.uniq.length == regions
+        raise EvidenceError, "#{label} region entity proof is incomplete"
+      end
+      artifact_total = 0
+      artifacts.each do |artifact|
+        sha = hash_value(artifact, :sha256).to_s.downcase
+        instances = hash_value(artifact, :instance_count)
+        width = hash_value(artifact, :pixel_width)
+        height = hash_value(artifact, :pixel_height)
+        unless artifact.is_a?(Hash) && sha =~ /\A[0-9a-f]{64}\z/ &&
+               instances.is_a?(Integer) && instances > 0 &&
+               width.is_a?(Integer) && width > 0 &&
+               height.is_a?(Integer) && height > 0 &&
+               !hash_value(artifact, :file_path).to_s.strip.empty?
+          raise EvidenceError, "#{label} artifact proof is incomplete"
+        end
+        artifact_total += instances
+      end
+      unless artifact_total == count
+        raise EvidenceError, "#{label} artifact instance counts do not add up to its count"
+      end
+      composited_total += count
+    end
     detected = hash_value(stats, :inline_images_detected)
     unless detected.is_a?(Integer) && detected >= 0 &&
-           detected == total_inline_images + omitted_total
+           detected == total_inline_images + composited_total + omitted_total
       raise EvidenceError,
             'inline image detection total does not match page Raster ' \
-            'fallbacks plus recorded omissions'
+            'fallbacks plus composites plus recorded omissions'
     end
     true
   end
