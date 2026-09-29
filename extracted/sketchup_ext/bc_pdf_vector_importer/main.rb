@@ -142,23 +142,53 @@ module BlueCollarSystems
     end
 
     def self.safe_abort_operation(model, source)
-      return unless model
-      model.abort_operation
+      return false unless model
+      return true if model.abort_operation == true
+      Logger.warn(source, 'abort_operation did not confirm rollback')
+      false
     rescue StandardError => e
       Logger.warn(source, "abort_operation failed: #{e.message}")
-    end
-
-    def self.abort_open_operation!(model, operation_open, source)
-      safe_abort_operation(model, source) if operation_open
       false
     end
 
-    # disable_ui, disable_transparency, disable_update. SketchUp 2017+ skips
-    # viewport rebuilds until commit. Same geometry/style SHA; cheaper explode
-    # and host serialize on dense 3D Text / path pages.
+    def self.abort_open_operation!(model, operation_open, source)
+      return false unless operation_open
+      unless safe_abort_operation(model, source)
+        raise ImportRunControl::RollbackFailure,
+              'SketchUp could not confirm rollback of the failed page. ' \
+              'The import stopped because partial geometry may remain; ' \
+              'inspect the model before importing again.'
+      end
+      false
+    end
+
+    # Cleanup must not turn cancellation, an invalid resume boundary, or an
+    # uncertain rollback into a skippable page exception.
+    def self.preserve_terminal_import_error(error)
+      yield
+    rescue StandardError
+      if error.is_a?(ImportRunControl::ResumeMismatch) ||
+         error.is_a?(ImportRunControl::ImportCancelled)
+        raise error
+      end
+      raise
+    end
+
+    def self.import_result_status(stats)
+      return 'failed' unless stats
+      return 'success' unless stats.is_a?(Hash)
+      outcome = stats[:result_status].to_s
+      return 'cancelled' if stats[:cancelled] == true || outcome == 'cancelled'
+      return 'incomplete' unless Array(stats[:failed_pages]).empty?
+      outcome.empty? ? 'success' : outcome
+    end
+
+    # Disable viewport updates, but keep the import operation independent.
+    # A transparent operation chains to the previous one, so aborting a failed
+    # page could otherwise undo an earlier, already certified page as well.
     def self.start_import_operation!(model, name)
       begin
-        model.start_operation(name, true, false, true)
+        model.start_operation(name, true, false, false)
       rescue ArgumentError, TypeError
         model.start_operation(name, true)
       end
@@ -227,6 +257,7 @@ module BlueCollarSystems
     def self.cancelled_before_start(source_path, reason)
       {
         :cancelled => true,
+        :result_status => 'cancelled',
         :cancelled_before_start => true,
         :cancel_reason => reason,
         :retained_pages => [],
@@ -350,7 +381,7 @@ module BlueCollarSystems
       # No modal here: this runs per page and can fire after earlier pages
       # were already imported. The import stops with ONE failure message
       # (import_pdf shows it) that carries the remedy.
-      safe_abort_operation(model, 'Pipeline')
+      # The pipeline owns the open operation and performs its single rollback.
       raise RepresentationFidelity::ContractError,
             "requested #{requested_label} renderer is unavailable; no " \
             'representation fallback is authorized. Install Poppler or ' \
@@ -3751,14 +3782,18 @@ module BlueCollarSystems
           "#{stats[:pages]} page(s)"
       end
       stats
+    rescue ImportRunControl::RollbackFailure
+      raise
     rescue StandardError => e
-      safe_abort_operation(model, 'Raster Pipeline') if operation_open
+      operation_open = abort_open_operation!(model, operation_open, 'Raster Pipeline')
       raise e
     ensure
-      begin
-        parser.release if parser
-      rescue StandardError => e
-        Logger.warn('Raster Pipeline', "parser.release failed: #{e.message}")
+      preserve_terminal_import_error($!) do
+        begin
+          parser.release if parser
+        rescue StandardError => e
+          Logger.warn('Raster Pipeline', "parser.release failed: #{e.message}")
+        end
       end
     end
 
@@ -3873,6 +3908,9 @@ module BlueCollarSystems
           :continue_on_page_error => opts[:stop_on_page_error] != true
         ).run
         stats = result[:stats] || {}
+        stats[:requested_pages] = Array(result[:requested_pages]).dup
+        stats[:selected_pages] = stats[:requested_pages].dup
+        stats[:result_status] = result[:result_status]
         stats[:failed_pages] = Array(result[:failed_pages])
         stats[:failed_pages].each do |failure|
           Logger.warn(
@@ -3899,14 +3937,16 @@ module BlueCollarSystems
         report_pipeline_progress(opts, 'finalize_diagnostics_completed')
         stats
       ensure
-        release_original_annotation_cache!(original_annotation_cache)
-        begin
-          parser.release if parser
-        rescue StandardError => e
-          Logger.warn('Pipeline', "parser.release failed: #{e.message}")
+        preserve_terminal_import_error($!) do
+          release_original_annotation_cache!(original_annotation_cache)
+          begin
+            parser.release if parser
+          rescue StandardError => e
+            Logger.warn('Pipeline', "parser.release failed: #{e.message}")
+          end
+          Logger.flush_log
+          PdfSalvage.cleanup(prepared_path) if defined?(PdfSalvage)
         end
-        Logger.flush_log
-        PdfSalvage.cleanup(prepared_path) if defined?(PdfSalvage)
       end
     end
 
@@ -5607,6 +5647,8 @@ module BlueCollarSystems
           stats, :page_total_ms, (Time.now - page_started) * 1000.0
         )
 
+      rescue ImportRunControl::RollbackFailure
+        raise
       rescue RepresentationFidelity::ContractError => e
         Logger.error(
           'Pipeline',
@@ -5788,6 +5830,10 @@ module BlueCollarSystems
       end
       report_pipeline_progress(opts, 'pipeline_return_ready')
       stats
+    rescue ImportRunControl::RollbackFailure
+      # A failed rollback is terminal; a retry could affect a different host
+      # operation and must never turn this into a skippable page error.
+      raise
     rescue ImportRunControl::ImportCancelled
       operation_open =
         abort_open_operation!(model, operation_open, 'Pipeline cancellation')
@@ -5797,26 +5843,28 @@ module BlueCollarSystems
         abort_open_operation!(model, operation_open, 'Pipeline')
       raise e
     ensure
-      begin
-        report_pipeline_progress(opts, 'pipeline_ensure_started') if
+      preserve_terminal_import_error($!) do
+        begin
+          report_pipeline_progress(opts, 'pipeline_ensure_started') if
+            defined?(opts) && opts.is_a?(Hash)
+        rescue StandardError
+        end
+        cleanup_item_raster_page_cache!(opts) if
           defined?(opts) && opts.is_a?(Hash)
-      rescue StandardError
-      end
-      cleanup_item_raster_page_cache!(opts) if
-        defined?(opts) && opts.is_a?(Hash)
-      if defined?(opts) && opts.is_a?(Hash) && !opts[:preserve_prepared_parser]
-        release_original_annotation_cache!(opts[:original_annotation_cache])
-      end
-      Logger.flush_log
-      if defined?(PdfSalvage) &&
-         !(defined?(opts) && opts.is_a?(Hash) &&
-           opts[:preserve_prepared_parser])
-        PdfSalvage.cleanup(path)
-      end
-      begin
-        report_pipeline_progress(opts, 'pipeline_ensure_finished') if
-          defined?(opts) && opts.is_a?(Hash)
-      rescue StandardError
+        if defined?(opts) && opts.is_a?(Hash) && !opts[:preserve_prepared_parser]
+          release_original_annotation_cache!(opts[:original_annotation_cache])
+        end
+        Logger.flush_log
+        if defined?(PdfSalvage) &&
+           !(defined?(opts) && opts.is_a?(Hash) &&
+             opts[:preserve_prepared_parser])
+          PdfSalvage.cleanup(path)
+        end
+        begin
+          report_pipeline_progress(opts, 'pipeline_ensure_finished') if
+            defined?(opts) && opts.is_a?(Hash)
+        rescue StandardError
+        end
       end
     end
 
@@ -7222,7 +7270,7 @@ module BlueCollarSystems
           UI.messagebox("No vector content found in PDF.")
         end
       rescue StandardError => e
-        safe_abort_operation(model, "Import")
+        safe_abort_operation(model, "Import") unless e.is_a?(ImportRunControl::RollbackFailure)
         Logger.error("Import", "Import failed", e)
         log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
         UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
@@ -7248,7 +7296,7 @@ module BlueCollarSystems
           UI.messagebox("No vector content found in PDF.")
         end
       rescue StandardError => e
-        safe_abort_operation(model, "ImportSafe")
+        safe_abort_operation(model, "ImportSafe") unless e.is_a?(ImportRunControl::RollbackFailure)
         Logger.error("ImportSafe", "Safe mode import failed", e)
         log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
         UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
@@ -7270,7 +7318,8 @@ module BlueCollarSystems
       pdfs = (Dir.glob(File.join(folder, "*.pdf")) + Dir.glob(File.join(folder, "*.PDF"))).uniq
       return UI.messagebox("No PDF files found.") if pdfs.empty?
       return unless UI.messagebox("Import #{pdfs.length} PDF(s) with Auto mode?", MB_YESNO) == IDYES
-      ok = 0; fail_c = 0
+      ok = 0; fail_c = 0; cancel_c = 0
+      stop_reason = nil
       # BCS-ARCH-001: batch import uses Auto mode — per-page strategy selection.
       mode_raw = ImportDialog::MODES['Auto']
       sym_attrs = {}
@@ -7284,12 +7333,33 @@ module BlueCollarSystems
             fail_c += 1
             next
           end
-          ok += 1 if run_pipeline(model, pdf, opts)
+          outcome = import_result_status(run_pipeline(model, pdf, opts))
+          if outcome == 'success'
+            ok += 1
+          elsif outcome == 'cancelled'
+            cancel_c += 1
+            stop_reason = 'Import cancelled; remaining PDFs were not started.'
+            break
+          else
+            fail_c += 1
+          end
+        rescue ImportRunControl::ImportCancelled
+          cancel_c += 1
+          stop_reason = 'Import cancelled; remaining PDFs were not started.'
+          break
+        rescue ImportRunControl::ResumeMismatch => e
+          fail_c += 1
+          Logger.error('Batch', File.basename(pdf), e)
+          stop_reason = e.message
+          break
         rescue StandardError => e
           fail_c += 1; Logger.error("Batch", File.basename(pdf), e)
         end
       end
-      UI.messagebox("Batch: #{ok} imported, #{fail_c} failed, #{pdfs.length} total.")
+      summary = "Batch: #{ok} imported, #{fail_c} failed, " \
+                "#{cancel_c} cancelled, #{pdfs.length} total."
+      summary += " Stopped: #{stop_reason}" if stop_reason
+      UI.messagebox(summary)
     end
 
     def self.scale_by_reference; ScaleTool.activate; end
@@ -7308,9 +7378,20 @@ module BlueCollarSystems
       operation_open = false
       UI.messagebox("Cleanup:\n"+total.select{|_,v|v>0}.map{|k,v|"  #{v} #{k}"}.join("\n"))
     rescue StandardError => error
-      operation_open = abort_open_operation!(model, operation_open, 'Cleanup')
+      rollback_failure = nil
+      begin
+        operation_open = abort_open_operation!(model, operation_open, 'Cleanup')
+      rescue ImportRunControl::RollbackFailure => failure
+        rollback_failure = failure
+      end
       Logger.error('Cleanup', error.message, error)
-      UI.messagebox("Cleanup failed: #{error.message}")
+      message = "Cleanup failed: #{error.message}"
+      if rollback_failure
+        Logger.error('Cleanup', rollback_failure.message, rollback_failure)
+        message += "\nSketchUp could not confirm rollback. Model geometry may " \
+                   'have changed; inspect the model before continuing.'
+      end
+      UI.messagebox(message)
       nil
     end
 
@@ -7380,9 +7461,17 @@ module BlueCollarSystems
         model = Sketchup.active_model
         return Sketchup::Importer::ImportFail unless model
         stats = BlueCollarSystems::PDFVectorImporter.run_pipeline(model, file_path, opts)
-        stats ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
+        outcome = BlueCollarSystems::PDFVectorImporter.import_result_status(stats)
+        if outcome == 'cancelled'
+          return Sketchup::Importer::ImportCanceled
+        end
+        outcome == 'success' ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
+      rescue BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled
+        Sketchup::Importer::ImportCanceled
       rescue StandardError => e
-        BlueCollarSystems::PDFVectorImporter.safe_abort_operation(model, "PDFFileImporter")
+        unless e.is_a?(BlueCollarSystems::PDFVectorImporter::ImportRunControl::RollbackFailure)
+          BlueCollarSystems::PDFVectorImporter.safe_abort_operation(model, "PDFFileImporter")
+        end
         Logger.error("PDFFileImporter", "load_file failed", e)
         Sketchup::Importer::ImportFail
       end

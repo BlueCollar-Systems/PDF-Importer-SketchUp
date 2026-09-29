@@ -348,6 +348,94 @@ class SketchupBatchHostContractTest < Minitest::Test
                  'baseline, pre-heal, stabilized, and reopen must use compact physical partitions'
   end
 
+  def test_partition_failure_diagnostic_preserves_arguments_error_and_original_method
+    load_runner_library
+    Dir.mktmpdir('partition_diagnostic_test_') do |directory|
+      importer = Module.new
+      partition = Module.new
+      importer.const_set(:PlanarWhiteKnockout, partition)
+      failure = ArgumentError.new('Duplicate points in array')
+      payload = { :schema => 'bcs.planar_partition_diagnostic/1',
+                  :white => [{ :loops => [[[0.0, 0.0, 0.0]]] }],
+                  :ink => [], :origin => [0.0, 0.0, 0.0],
+                  :error => failure.message }
+      fills, roots, received, prior_payloads = [], [], [], []
+      partition.define_singleton_method(:compose!) do |actual_fills, actual_roots, opts|
+        received << [actual_fills, actual_roots, opts[:sentinel]]
+        opts[:partition_diagnostic].call(payload)
+        raise failure
+      end
+      original_location = partition.method(:compose!).source_location
+      prior = lambda { |value| prior_payloads << value }
+      options = { :sentinel => true, :partition_diagnostic => prior }
+      binding = { 'job_id' => 'fictional-job', 'job_sha256' => 'a' * 64 }
+      job = { :output_dir => directory, :pages => [6],
+              :immutable_pdf_sha256 => 'b' * 64,
+              :source_tree_sha256 => 'c' * 64 }
+      session = SketchupBatchImport::RealHostSession.new
+      error = assert_raises(ArgumentError) do
+        session.send(:with_partition_diagnostics, importer, job, binding) do
+          partition.compose!(fills, roots, options)
+        end
+      end
+      assert_same failure, error
+      assert_same fills, received[0][0]
+      assert_same roots, received[0][1]
+      assert_equal true, received[0][2]
+      assert_same prior, options[:partition_diagnostic]
+      assert_same payload, prior_payloads[0]
+      assert_equal original_location, partition.method(:compose!).source_location
+      receipt = JSON.parse(File.read(File.join(directory, 'planar_partition_failure_001.json')))
+      assert_equal binding['job_id'], receipt['job_id']
+      assert_equal binding['job_sha256'], receipt['job_sha256']
+      assert_equal [6], receipt['requested_pages']
+      assert_equal 'b' * 64, receipt['source_pdf_sha256']
+      assert_equal 'c' * 64, receipt['source_tree_sha256']
+      assert_equal JSON.parse(JSON.generate(payload)), receipt['partition']
+    end
+  end
+
+  def test_partition_diagnostic_write_failure_cannot_mask_import_failure
+    load_runner_library
+    importer, partition = Module.new, Module.new
+    importer.const_set(:PlanarWhiteKnockout, partition)
+    failure = RuntimeError.new('original host failure')
+    partition.define_singleton_method(:compose!) do |_fills, _roots, opts|
+      opts[:partition_diagnostic].call(:error => failure.message)
+      raise failure
+    end
+    original_location = partition.method(:compose!).source_location
+    writer = lambda { |_path, _payload| raise IOError, 'diagnostic output unavailable' }
+    capture_io do
+      SketchupHostEvidence.stub(:atomic_write_json, writer) do
+        error = assert_raises(RuntimeError) do
+          SketchupBatchImport::RealHostSession.new.send(
+            :with_partition_diagnostics, importer, { :output_dir => 'unused' }, {}
+          ) { partition.compose!([], [], {}) }
+        end
+        assert_same failure, error
+      end
+    end
+    assert_equal original_location, partition.method(:compose!).source_location
+  end
+
+  def test_successful_partition_has_no_diagnostic_and_keeps_its_result
+    load_runner_library
+    Dir.mktmpdir('partition_diagnostic_success_') do |directory|
+      importer, partition = Module.new, Module.new
+      importer.const_set(:PlanarWhiteKnockout, partition)
+      result = { :removed_area => 1.25 }
+      partition.define_singleton_method(:compose!) { |_fills, _roots, _opts| result }
+      original_location = partition.method(:compose!).source_location
+      actual = SketchupBatchImport::RealHostSession.new.send(
+        :with_partition_diagnostics, importer, { :output_dir => directory }, {}
+      ) { partition.compose!([], [], {}) }
+      assert_same result, actual
+      assert_equal [], Dir.entries(directory).reject { |name| name == '.' || name == '..' }
+      assert_equal original_location, partition.method(:compose!).source_location
+    end
+  end
+
   def test_labels_visual_equivalent_profile_uses_authoritative_reopened_ownership
     load_runner_library
     session = SketchupBatchImport::RealHostSession.new
@@ -384,7 +472,7 @@ class SketchupBatchHostContractTest < Minitest::Test
   def test_runner_hashes_the_source_tree_before_load_and_after_import
     before = source.index('source_tree_sha256_before_load =')
     plugin_load = source.index("load File.join(plugin_root")
-    pipeline = source.index('stats = importer.run_pipeline(')
+    pipeline = source.index('importer.run_pipeline(@model,')
     after = source.index('source_tree_sha256_after_import =')
 
     refute_nil before

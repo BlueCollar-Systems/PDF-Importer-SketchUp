@@ -1728,7 +1728,7 @@ class RepresentationFidelityContractTest < Minitest::Test
                  main)
     refute_match(/next\s+unless\s+raw/, main)
     refute_match(/Continue to next page instead of aborting/, main)
-    assert_match(/rescue\s+StandardError\s*=>\s*e.*?safe_abort_operation\(model,\s*'Pipeline'\).*?raise\s+e/m,
+    assert_match(/rescue\s+StandardError\s*=>\s*e.*?abort_open_operation!\(model,\s*operation_open,\s*'Pipeline'\).*?raise\s+e/m,
                  main)
   end
 
@@ -1742,6 +1742,7 @@ class RepresentationFidelityContractTest < Minitest::Test
 
       def abort_operation
         @abort_count += 1
+        true
       end
     end.new
 
@@ -2213,7 +2214,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       assert_equal :ruby_zlib_stream, inspected[:decoder_backend]
       assert_equal 0, inspected[:temp_bytes_written]
       refute inspected.key?(:raw_path)
-      assert_equal ['page.png'], Dir.children(directory).sort
+      assert_equal ['page.png'], (Dir.entries(directory) - ['.', '..']).sort
     end
   end
 
@@ -2241,7 +2242,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       assert_equal :native_zlib_stream, native[:decoder_backend]
       assert_equal 0, native[:temp_bytes_written]
       refute native.key?(:raw_path)
-      assert_equal ['page.png'], Dir.children(directory).sort
+      assert_equal ['page.png'], (Dir.entries(directory) - ['.', '..']).sort
     end
   end
 
@@ -2261,7 +2262,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       assert_equal ruby[:alpha_channel_verified],
                    native[:alpha_channel_verified]
       assert_equal ruby[:visual_pixel_sha256], native[:visual_pixel_sha256]
-      assert_equal [], Dir.children(directory) - ['page.png']
+      assert_equal [], (Dir.entries(directory) - ['.', '..']) - ['page.png']
     end
   end
 
@@ -2311,7 +2312,7 @@ class RepresentationFidelityContractTest < Minitest::Test
           IMP::PngCropper.inspect_pixels!(page, true, helper)
         end
       end
-      assert_equal ['page.png'], Dir.children(directory).sort
+      assert_equal ['page.png'], (Dir.entries(directory) - ['.', '..']).sort
     end
   end
 
@@ -2591,9 +2592,9 @@ class RepresentationFidelityContractTest < Minitest::Test
       :encoding => 'UTF-8'
     )
     assert_match(
-      /start_operation\(name, true, false, true\)/,
+      /start_operation\(name, true, false, false\)/,
       main,
-      'vector/raster imports must pass disable_update to start_operation'
+      'vector/raster imports disable UI updates without chaining to prior operations'
     )
     assert_match(
       /extract_external_page_text/,

@@ -58,7 +58,9 @@ module SketchupBatchImport
       )
       SketchupBatchImport.write_progress!(job, binding, 'import_started')
       pipeline_options = import_options(importer, job, binding)
-      stats = importer.run_pipeline(@model, job[:pdf_path], pipeline_options)
+      stats = with_partition_diagnostics(importer, job, binding) do
+        importer.run_pipeline(@model, job[:pdf_path], pipeline_options)
+      end
       raise 'run_pipeline returned nil' unless stats.is_a?(Hash)
       SketchupBatchImport.write_progress!(job, binding, 'pipeline_returned')
       source_tree_sha256_after_import =
@@ -109,6 +111,7 @@ module SketchupBatchImport
       live_after_manifest = SketchupHostEvidence.snapshot_entities(
         @model.active_entities, :compact => true,
         :texture_proof => !pure_terminal_page_raster,
+        :inline_image_composites => stats[:inline_image_composites],
         :performance_telemetry => post_import_evidence_performance
       )
       SketchupBatchImport.write_progress!(
@@ -119,6 +122,14 @@ module SketchupBatchImport
       )
       raise 'no recursively owned imported host entities found' if
         owned_manifest.empty?
+      inline_image_composite_physical_proof = {
+        'post_import' => SketchupHostEvidence.verify_inline_image_composites!(
+          stats, owned_manifest, :require_no_omissions => true,
+          :selected_pages => job[:pages]
+        ),
+        'host_heal' => nil,
+        'reopen' => nil
+      }
       unless pure_terminal_page_raster
         SketchupHostEvidence.verify_delivery_evidence!(
           stats, owned_manifest, requested_mode, job[:pages], true
@@ -160,6 +171,7 @@ module SketchupBatchImport
         host_heal_evidence_performance = {}
         after_manifest = SketchupHostEvidence.snapshot_entities(
           stabilize_model.active_entities, :compact => true,
+          :inline_image_composites => stats[:inline_image_composites],
           :performance_telemetry => host_heal_evidence_performance
         )
         stabilized_owned_manifest = SketchupHostEvidence.owned_manifest(
@@ -175,6 +187,12 @@ module SketchupBatchImport
             source_delivery_manifest, stabilized_owned_manifest
           )
         end
+        inline_image_composite_physical_proof['host_heal'] =
+          SketchupHostEvidence.verify_inline_image_composites!(
+            stats, stabilized_owned_manifest, :require_no_omissions => true,
+            :selected_pages => job[:pages],
+            :expected_proof => inline_image_composite_physical_proof['post_import']
+          )
         raise 'stabilized model save failed' unless
           stabilize_model.save(job[:model_path])
         SketchupBatchImport.write_progress!(
@@ -232,6 +250,8 @@ module SketchupBatchImport
         'stabilized_owned_entities' => stabilized_owned_manifest,
         'post_import_entities' => after_manifest,
         'post_import_entities_pre_heal' => live_after_manifest,
+        'inline_image_composite_physical_proof' =>
+          inline_image_composite_physical_proof,
         'evidence_performance' => evidence_performance,
         'host_heal_required' => host_heal_required,
         'host_heal_preservation_verified' => true
@@ -250,6 +270,7 @@ module SketchupBatchImport
       reopen_evidence_performance = {}
       reopened_manifest = SketchupHostEvidence.snapshot_entities(
         reopened_model.active_entities, :compact => true,
+        :inline_image_composites => stats[:inline_image_composites],
         :performance_telemetry => reopen_evidence_performance
       )
       evidence_performance['reopen_snapshot'] =
@@ -284,6 +305,12 @@ module SketchupBatchImport
         SketchupHostEvidence.verify_item_raster_display!(
           stats, reopened_owned_manifest, true
         )
+        inline_image_composite_physical_proof['reopen'] =
+          SketchupHostEvidence.verify_inline_image_composites!(
+            stats, reopened_owned_manifest, :require_no_omissions => true,
+            :selected_pages => job[:pages],
+            :expected_proof => inline_image_composite_physical_proof['post_import']
+          )
         labels_visual_equivalent_census =
           verify_labels_visual_equivalent_profile!(
             job, stats, reopened_owned_manifest
@@ -390,6 +417,8 @@ module SketchupBatchImport
           Array(stats[:inline_image_vector_retentions]),
         'inline_image_composites' =>
           Array(stats[:inline_image_composites]),
+        'inline_image_composite_physical_proof' =>
+          inline_image_composite_physical_proof,
         'inline_images_detected' => stats[:inline_images_detected].to_i,
         'empty_page_source_inspections' =>
           Array(stats[:empty_page_source_inspections]),
@@ -482,6 +511,44 @@ module SketchupBatchImport
       version = source[/^\s*VERSION\s*=\s*['"]([^'"]+)['"]/, 1]
       raise 'worktree metadata version is missing' if version.to_s.empty?
       version
+    end
+
+    # Capture the existing failure-only hook while this isolated host runs.
+    # The product method, its arguments and every acceptance gate stay intact;
+    # restore the original method even when import fails or is cancelled.
+    def with_partition_diagnostics(importer, job, binding)
+      partition = importer::PlanarWhiteKnockout
+      original = partition.method(:compose!)
+      singleton = class << partition; self; end
+      sequence = 0
+      capture = lambda do |payload|
+        begin
+          sequence += 1
+          path = File.join(job[:output_dir],
+                           format('planar_partition_failure_%03d.json', sequence))
+          diagnostic = binding.merge(
+            'requested_pages' => job[:pages],
+            'source_pdf_sha256' => job[:immutable_pdf_sha256],
+            'source_tree_sha256' => job[:source_tree_sha256],
+            'partition' => payload
+          )
+          SketchupHostEvidence.atomic_write_json(path, diagnostic)
+        rescue StandardError => error
+          warn "Planar partition diagnostic could not be saved: #{error.message}"
+        end
+      end
+      singleton.send(:define_method, :compose!) do |fills, roots, options = {}|
+        prior = options[:partition_diagnostic]
+        callback = lambda do |payload|
+          capture.call(payload)
+          prior.call(payload) if prior.respond_to?(:call)
+        end
+        original.call(fills, roots,
+                      options.merge(:partition_diagnostic => callback))
+      end
+      yield
+    ensure
+      singleton.send(:define_method, :compose!, original) if singleton && original
     end
 
     def verify_source_tree_sha256!(job, actual, phase)

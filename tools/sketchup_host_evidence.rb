@@ -687,6 +687,9 @@ module SketchupHostEvidence
       :canonical_json_cache => {},
       :texture_proof => !(options.is_a?(Hash) &&
                            options[:texture_proof] == false),
+      :inline_composite_ids => inline_composite_identity_map(
+        options.is_a?(Hash) ? options[:inline_image_composites] : nil
+      ),
       :performance_telemetry => performance_telemetry
     }
     rows = []
@@ -1313,6 +1316,156 @@ module SketchupHostEvidence
   end
   private_class_method :verify_inline_image_page_raster_fallbacks!
 
+  # Inline composites are ordinary source images, not canonical text claims.
+  # Bind their declared persistent identities to native TextureWriter pixels.
+  # Capture the source PNG proof once; subsequent save/reopen checks reuse it
+  # so acceptance never depends on the extracted image cache surviving.
+  def self.verify_inline_image_composites!(stats, manifest, options = {})
+    raise EvidenceError, 'inline composite stats are missing' unless stats.is_a?(Hash)
+    records = hash_value(stats, :inline_image_composites)
+    records = [] if records.nil?
+    identities = inline_composite_identity_map(records)
+    if hash_key?(stats, :inline_images_detected) || !records.empty?
+      verify_inline_image_page_raster_fallbacks!(stats)
+    end
+    if options[:require_no_omissions] == true &&
+       !Array(hash_value(stats, :inline_image_vector_retentions)).empty?
+      raise EvidenceError, 'inline image omissions are not allowed by host acceptance'
+    end
+    rows = persistent_rows(manifest)
+    observed = rows.select do |_id, row|
+      hash_value(row, :inline_composite_image) == true
+    end
+    unless observed.keys.sort == identities.keys.sort
+      raise EvidenceError, 'inline composite manifest identity set mismatch'
+    end
+    expected = options[:expected_proof]
+    expected_rows = nil
+    if expected
+      unless expected.is_a?(Hash) &&
+             hash_value(expected, :schema) == 'bcs.inline_composite_physical_proof/1.0' &&
+             hash_value(expected, :verified) == true &&
+             hash_value(expected, :composites).is_a?(Array)
+        raise EvidenceError, 'initial inline composite physical proof is invalid'
+      end
+      expected_rows = {}
+      hash_value(expected, :composites).each do |row|
+        unless row.is_a?(Hash) && hash_value(row, :persistent_id).is_a?(Integer)
+          raise EvidenceError, 'initial inline composite identity is invalid'
+        end
+        id = hash_value(row, :persistent_id)
+        raise EvidenceError, 'duplicate initial inline composite identity' if expected_rows.key?(id)
+        expected_rows[id] = row
+      end
+      unless expected_rows.keys.sort == identities.keys.sort
+        raise EvidenceError, 'inline composite initial identity set mismatch'
+      end
+    end
+    selected = options[:selected_pages]
+    selected = Array(selected).map(&:to_i) unless selected.nil?
+    verified = []
+    records.each do |record|
+      page = exact_positive_integer!(hash_value(record, :page), 'inline composite page')
+      if selected && !selected.include?(page)
+        raise EvidenceError, 'inline composite is outside the requested pages'
+      end
+      artifacts = hash_value(record, :artifacts)
+      ids = hash_value(record, :resulting_entity_ids)
+      unless artifacts.is_a?(Array) && artifacts.length == ids.length
+        raise EvidenceError, 'inline composite artifact/identity count mismatch'
+      end
+      ids.each_with_index do |identity, index|
+        id = identity.split(':').last.to_i
+        row = observed[id]
+        unless image_typename?(hash_value(row, :typename)) &&
+               hash_value(row, :valid) == true && hash_value(row, :deleted) == false
+          raise EvidenceError, "inline composite #{identity} is not a live Image"
+        end
+        artifact = artifacts[index]
+        sha = hash_value(artifact, :sha256).to_s.downcase
+        path = hash_value(artifact, :file_path).to_s
+        unless sha =~ /\A[0-9a-f]{64}\z/ && !path.strip.empty?
+          raise EvidenceError, 'inline composite source artifact binding is invalid'
+        end
+        width = exact_positive_integer!(hash_value(artifact, :pixel_width), 'inline composite width')
+        height = exact_positive_integer!(hash_value(artifact, :pixel_height), 'inline composite height')
+        instances = exact_positive_integer!(hash_value(artifact, :instance_count), 'inline composite instances')
+        source_pixels = if expected_rows
+                          hash_value(expected_rows[id], :visual_pixel_sha256).to_s
+                        else
+                          unless File.file?(path) && Digest::SHA256.file(path).hexdigest == sha
+                            raise EvidenceError, 'inline composite source PNG SHA256 mismatch'
+                          end
+                          pixels = BlueCollarSystems::PDFVectorImporter::PngCropper.inspect_pixels!(path, false)
+                          unless pixels[:pixel_width] == width && pixels[:pixel_height] == height
+                            raise EvidenceError, 'inline composite source PNG dimensions mismatch'
+                          end
+                          pixels[:visual_pixel_sha256].to_s
+                        end
+        unless source_pixels =~ /\A[0-9a-f]{64}\z/
+          raise EvidenceError, 'inline composite source pixel digest is invalid'
+        end
+        content = hash_value(row, :content_evidence)
+        unless content.is_a?(Hash) &&
+               hash_value(content, :host_texture_export_verified) == true &&
+               hash_value(content, :host_visual_pixel_sha256) == source_pixels &&
+               hash_value(content, :host_pixel_width) == width &&
+               hash_value(content, :host_pixel_height) == height
+          raise EvidenceError, "inline composite #{identity} native pixels differ from source PNG"
+        end
+        exact_positive_integer!(hash_value(content, :host_texture_export_byte_size), 'inline composite texture export size')
+        transform = hash_value(row, :transformation)
+        unless transform.is_a?(Array) && transform.length == 16 &&
+               transform.all? { |value| value.is_a?(Numeric) && value.to_f.finite? }
+          raise EvidenceError, 'inline composite native transformation is invalid'
+        end
+        verified << {
+          'page' => page, 'persistent_id' => id, 'artifact_path' => path,
+          'artifact_sha256' => sha, 'visual_pixel_sha256' => source_pixels,
+          'pixel_width' => width, 'pixel_height' => height,
+          'instance_count' => instances, 'transformation' => transform.dup
+        }
+      end
+    end
+    proof = {
+      'schema' => 'bcs.inline_composite_physical_proof/1.0', 'verified' => true,
+      'composite_count' => verified.length,
+      'inline_instance_count' => verified.inject(0) { |sum, row| sum + row['instance_count'] },
+      'pages' => verified.map { |row| row['page'] }.uniq.sort,
+      'composites' => verified.sort_by { |row| [row['page'], row['persistent_id']] }
+    }
+    if expected && !evidence_payload_equal?(proof, expected)
+      raise EvidenceError, 'inline composite source/placement proof changed after save or reopen'
+    end
+    proof
+  rescue EvidenceError
+    raise
+  rescue StandardError => error
+    raise EvidenceError, "inline composite physical proof failed: #{error.message}"
+  end
+
+  def self.inline_composite_identity_map(records)
+    records = [] if records.nil?
+    raise EvidenceError, 'inline composite ledger must be an Array' unless records.is_a?(Array)
+    identities = {}
+    records.each do |record|
+      ids = record.is_a?(Hash) ? hash_value(record, :resulting_entity_ids) : nil
+      unless ids.is_a?(Array) && !ids.empty?
+        raise EvidenceError, 'inline composite persistent identities are missing'
+      end
+      ids.each do |identity|
+        unless identity.is_a?(String) && identity =~ /\Apersistent_id:([1-9][0-9]*)\z/
+          raise EvidenceError, 'inline composite requires a persistent_id identity'
+        end
+        id = identity.split(':').last.to_i
+        raise EvidenceError, 'duplicate inline composite persistent identity' if identities.key?(id)
+        identities[id] = true
+      end
+    end
+    identities
+  end
+  private_class_method :inline_composite_identity_map
+
   def self.copy_verified_report!(source_path, destination_path, expectations)
     source = File.expand_path(source_path.to_s)
     destination = File.expand_path(destination_path.to_s)
@@ -1430,7 +1583,10 @@ module SketchupHostEvidence
       entity.get_attribute('BC_PDF_Importer', 'original_annotation_capsule', false) == true
     annotation_image = entity.respond_to?(:get_attribute) &&
       entity.get_attribute('BC_PDF_Importer', 'annotation_composite_image', false) == true
-    include_row = !compact || top_level || decorative_image || decorative_wrapper || annotation_capsule || annotation_image || source_claim_root?(representation) ||
+    inline_composite = image_typename?(typename) &&
+      context[:inline_composite_ids].is_a?(Hash) &&
+      context[:inline_composite_ids][host_positive_id(entity, :persistent_id, 'persistent_id')] == true
+    include_row = !compact || top_level || inline_composite || decorative_image || decorative_wrapper || annotation_capsule || annotation_image || source_claim_root?(representation) ||
       !child_rows.empty?
     return [nil, physical_tree] unless include_row
 
@@ -1452,12 +1608,13 @@ module SketchupHostEvidence
       # using its matrix here can falsely report movement of a source image.
       'transformation' => transformation_payload(entity),
       'representation_evidence' => representation,
-      'content_evidence' => host_content_evidence(entity, typename, context),
+      'content_evidence' => host_content_evidence(entity, typename, context, inline_composite),
       'geometry_evidence' => physical['geometry_evidence'],
       'style_evidence' => physical['style_evidence'],
       'children' => child_rows
     }
     row['decorative_source_image'] = true if decorative_image
+    row['inline_composite_image'] = true if inline_composite
     if child_rows.any? { |child| child['original_annotation_capsule'] == true }
       row['annotation_highest_other_z'] = BlueCollarSystems::PDFVectorImporter::AnnotationMicrostrokeDisplay.highest_other_z(entity.entities)
     end
@@ -1805,7 +1962,7 @@ module SketchupHostEvidence
   private_class_method :record_texture_proof_performance!
 
   def self.image_content_evidence(entity, typename, texture_proof = true,
-                                  performance_telemetry = nil)
+                                  performance_telemetry = nil, inline_composite = false)
     return nil unless image_typename?(typename)
     width = entity.respond_to?(:width) ? entity.width.to_f : 0.0
     height = entity.respond_to?(:height) ? entity.height.to_f : 0.0
@@ -1860,7 +2017,7 @@ module SketchupHostEvidence
       entity.get_attribute('BC_PDF_Importer', 'decorative_source_image', false) == true
     annotation_image = entity.respond_to?(:get_attribute) &&
       entity.get_attribute('BC_PDF_Importer', 'annotation_composite_image', false) == true
-    unless claimed_visual_sha.empty? && !decorative_image && !annotation_image
+    unless claimed_visual_sha.empty? && !decorative_image && !annotation_image && !inline_composite
       if texture_proof
         evidence.merge!(
           texture_pixel_evidence(entity, performance_telemetry)
@@ -1914,12 +2071,12 @@ module SketchupHostEvidence
   end
   private_class_method :native_text_content_evidence
 
-  def self.host_content_evidence(entity, typename, context = nil)
+  def self.host_content_evidence(entity, typename, context = nil, inline_composite = false)
     texture_proof = !context.is_a?(Hash) || context[:texture_proof] != false
     performance_telemetry = context.is_a?(Hash) ?
       context[:performance_telemetry] : nil
     image = image_content_evidence(
-      entity, typename, texture_proof, performance_telemetry
+      entity, typename, texture_proof, performance_telemetry, inline_composite
     )
     return image if image
     native_text_content_evidence(entity, typename)

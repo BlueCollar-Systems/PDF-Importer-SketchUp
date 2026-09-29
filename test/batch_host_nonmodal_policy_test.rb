@@ -20,7 +20,7 @@ class BatchHostNonmodalPolicyTest < Minitest::Test
   def test_noninteractive_large_pdf_fails_without_invoking_prompt
     ENV['BC_PDF_IMPORTER_BATCH_NONINTERACTIVE'] = '1'
     prompted = false
-    error = assert_raises(StandardError) do
+    error = assert_raises(BlueCollarSystems::PDFVectorImporter::BatchHostPolicy::NoninteractiveError) do
       BlueCollarSystems::PDFVectorImporter::BatchHostPolicy.
         confirm_large_pdf!(101 * 1024 * 1024) do
           prompted = true
@@ -44,7 +44,7 @@ class BatchHostNonmodalPolicyTest < Minitest::Test
     assert_equal false,
                  BlueCollarSystems::PDFVectorImporter::BatchHostPolicy.
                    prompt_allowed?
-    error = assert_raises(StandardError) do
+    error = assert_raises(BlueCollarSystems::PDFVectorImporter::BatchHostPolicy::NoninteractiveError) do
       BlueCollarSystems::PDFVectorImporter::BatchHostPolicy.
         handle_salvage_error!(RuntimeError.new('damaged xref')) do
           prompted = true
@@ -54,7 +54,7 @@ class BatchHostNonmodalPolicyTest < Minitest::Test
     refute prompted
   end
 
-  def test_every_reachable_batch_prompt_is_routed_through_policy
+  def test_remaining_batch_prompts_are_routed_through_policy
     main = File.read(File.join(
       ROOT, 'extracted', 'sketchup_ext', 'bc_pdf_vector_importer', 'main.rb'
     ), :encoding => 'UTF-8')
@@ -63,7 +63,6 @@ class BatchHostNonmodalPolicyTest < Minitest::Test
       'dependency_resolver.rb'
     ), :encoding => 'UTF-8')
 
-    assert_includes main, 'BatchHostPolicy.prompt_allowed?'
     assert_includes main, 'BatchHostPolicy.confirm_large_pdf!'
     assert_includes main, 'BatchHostPolicy.handle_salvage_error!'
     assert_includes dependency, 'BatchHostPolicy.noninteractive?'

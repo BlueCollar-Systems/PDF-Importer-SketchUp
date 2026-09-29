@@ -3,11 +3,16 @@
 # No text geometry, representation, identity, or depth is changed here.
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'svg_region_boundary')
+require File.join(File.dirname(__FILE__), 'planar_region_partition')
 
 module BlueCollarSystems
   module PDFVectorImporter
     module PlanarWhiteKnockout
       CONSTRUCTION_SCALE = 1000.0
+      NATIVE_VERTEX_TOLERANCE = 0.001
+      CONSTRUCTION_CLEARANCE = NATIVE_VERTEX_TOLERANCE * 8.0
+      MAX_CONSTRUCTION_SCALE_STEPS = 30
+      MAX_CONSTRUCTION_COORDINATE = 2.0**40
       PLANE_TOLERANCE = 1.0e-7
       DICTIONARY = 'BC_PDF_Importer'.freeze
       GRID_SIZE = 0.25
@@ -45,7 +50,7 @@ module BlueCollarSystems
           candidates = overlaps.select { |face| earlier_mask?(record, face, opts) }
           result[:skipped_unproven_order] += overlaps.length - candidates.length
           next if candidates.empty?
-          result[:removed_area] += compose_group!(group, transform, white, candidates)
+          result[:removed_area] += compose_group!(group, transform, white, candidates, opts)
           group.erase! if child_entities(group).to_a.empty?
           result[:composed_groups] += 1
         end
@@ -339,7 +344,7 @@ module BlueCollarSystems
         end
       end
 
-      def self.compose_group!(group, transform, white, ink)
+      def self.compose_group!(group, transform, white, ink, opts = {})
         # The geometric operation preserves original face materials/alpha.
         # compose! supplies the default opaque-white eligibility policy; callers
         # proving another exact source-composite relationship may use this
@@ -350,30 +355,34 @@ module BlueCollarSystems
         begin
           box = union_bounds(white)
           origin = [(box[0] + box[2]) * 0.5, (box[1] + box[3]) * 0.5, 0.0]
+          source_cells = PlanarRegionPartition.partition(white, ink)
+          scale = partition_construction_scale(source_cells)
           stage = entities.add_group
           stage.name = 'PDF planar white composition' if stage.respond_to?(:name=)
+          inverse_scale = 1.0 / scale
+          # SketchUp2017's single-argument overload uses a homogeneous weight,
+          # changing Float rounding after translation. Use the affine overload.
           page_transform = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
-                           Geom::Transformation.scaling(1.0 / CONSTRUCTION_SCALE)
+                           Geom::Transformation.scaling(inverse_scale, inverse_scale, inverse_scale)
           stage.transformation = transform.inverse * page_transform
-          construction_loops = white.flat_map { |record| record[:loops] } +
-                               construction_ink_loops(ink)
-          construction_loops.each do |loop|
-            points = distinct_loop_points(loop.map { |point| construction_point(point, origin) })
-            # A source loop that collapses below three distinct points has no
-            # area to compose; the partition/coverage checks below still
-            # measure the white area it belonged to.
-            next if points.length < 3
-            # A previously inserted coincident boundary may return nil. The
-            # physical partition/coverage checks below decide success.
-            stage.entities.add_face(points)
+          point_map = partition_construction_points(source_cells, origin, scale)
+          verify_adaptive_page_points!(point_map, origin, scale, page_transform,
+                                       transform, stage.transformation)
+          source_cells.each do |cell|
+            # A convex source cell has no holes and cannot cross a source
+            # boundary. Keep cells in separate identity groups so legacy host
+            # face discovery cannot merge adjacent regions across that boundary.
+            container = stage.entities.add_group
+            points = cell[:loop].map { |point| point_map.fetch(point) }
+            face = container.entities.add_face(points)
+            fail_contract('native exact white-mask cell construction failed') unless face
+            verify_partition_face!(face, points)
           end
-          subdivide_native_boundaries!(stage.entities)
-          repair_native_hole_topology!(stage.entities)
           cells = partition_faces(stage.entities)
           fail_contract('native white-mask subdivision produced no faces') if cells.empty?
           white_index = spatial_index(white)
           ink_index = spatial_index(ink)
-          plan = classify_cells(cells, origin, white_index, ink_index)
+          plan = classify_cells(cells, origin, white_index, ink_index, scale)
           expected = source_area(white)
           partition_area = plan.inject(0.0) do |sum, cell|
             cell[:region] == :outside ? sum : sum + cell[:area]
@@ -408,6 +417,7 @@ module BlueCollarSystems
           end
           removed.inject(0.0) { |sum, cell| sum + cell[:area] }
         rescue StandardError => error
+          partition_diagnostic(opts, white, ink, origin, error)
           stage.erase! if stage && stage.valid?
           if error.is_a?(RepresentationFidelity::ContractError)
             bounds = union_bounds(white).map { |value| format('%.8g', value) }.join(',')
@@ -417,6 +427,150 @@ module BlueCollarSystems
           end
           raise
         end
+      end
+
+      def self.verify_partition_face!(face, points)
+        unless face.typename.to_s == 'Face' && face.valid? && face.loops.to_a.length == 1
+          fail_contract('native exact white-mask cell changed face topology')
+        end
+        expected = points.map { |point| [point.x.to_f, point.y.to_f, point.z.to_f] }
+        actual = face.outer_loop.vertices.map do |vertex|
+          point = vertex.position
+          [point.x.to_f, point.y.to_f, point.z.to_f]
+        end
+        unless canonical_loop(actual) == canonical_loop(expected)
+          fail_contract('native exact white-mask cell changed source boundary vertices')
+        end
+      end
+
+      # Minimum exact distance between cell vertices and between each corner
+      # and its opposite chord. The latter also protects a thin, almost straight
+      # corner whose vertex pairs are all farther apart than host tolerance.
+      # Cells remain separate, so unrelated vertices in different cells do not
+      # impose an unnecessary scale. No nonzero source feature is discarded.
+      def self.partition_clearance_squared(cells)
+        minimum = nil
+        cells.each do |cell|
+          loop = cell[:loop]
+          loop.each_with_index do |a, i|
+            loop.drop(i + 1).each do |b|
+              distance = (b[0] - a[0])**2 + (b[1] - a[1])**2
+              fail_contract('exact white-mask cell repeats a source vertex') unless distance > 0
+              minimum = distance if minimum.nil? || distance < minimum
+            end
+            b, c = loop[(i + 1) % loop.length], loop[(i + 2) % loop.length]
+            cross = SvgRegionBoundary.cross(SvgRegionBoundary.minus(b, a), SvgRegionBoundary.minus(c, b))
+            chord = (c[0] - a[0])**2 + (c[1] - a[1])**2
+            fail_contract('exact white-mask cell has a nonconvex source corner') unless cross > 0 && chord > 0
+            altitude = cross * cross / chord
+            minimum = altitude if minimum.nil? || altitude < minimum
+          end
+        end
+        minimum
+      end
+
+      def self.partition_construction_scale(cells)
+        clearance = partition_clearance_squared(cells)
+        return CONSTRUCTION_SCALE unless clearance
+        target = CONSTRUCTION_CLEARANCE.to_r**2
+        scale = CONSTRUCTION_SCALE
+        (MAX_CONSTRUCTION_SCALE_STEPS + 1).times do
+          return scale if clearance * scale.to_r**2 >= target
+          scale *= 2.0
+        end
+        fail_contract('exact white-mask construction scale budget exceeded')
+      end
+
+      # Binary scale steps retain the ordinary 1000x scale selection. Adaptive
+      # points must recover each source coordinate's Float value exactly and
+      # preserve the canonical 1000x composed page frame, not merely its area.
+      def self.verify_adaptive_page_points!(mapped, origin, scale, page_transform,
+                                           transform, stage_transform)
+        return if scale == CONSTRUCTION_SCALE
+        inverse_scale = 1.0 / CONSTRUCTION_SCALE
+        baseline_page = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
+                        Geom::Transformation.scaling(inverse_scale, inverse_scale, inverse_scale)
+        baseline_world = transform * (transform.inverse * baseline_page)
+        world = transform * stage_transform
+        mapped.each do |source, point|
+          expected = [source[0].to_f, source[1].to_f, 0.0]
+          on_page = point.transform(page_transform)
+          unless [on_page.x.to_f, on_page.y.to_f, on_page.z.to_f] == expected &&
+                 page_point(point, origin, scale) == expected
+            fail_contract('adaptive white-mask construction cannot restore exact page coordinates')
+          end
+          values = [0, 1].map do |axis|
+            ((source[axis] - origin[axis].to_r) * CONSTRUCTION_SCALE.to_r).to_f
+          end + [0.0]
+          previous = Geom::Point3d.new(*values).transform(baseline_world)
+          current = point.transform(world)
+          before = [previous.x.to_f, previous.y.to_f, previous.z.to_f]
+          after = [current.x.to_f, current.y.to_f, current.z.to_f]
+          unless before.all?(&:finite?) && after == before
+            fail_contract('adaptive white-mask construction changed the final page transform')
+          end
+        end
+      end
+
+      def self.partition_construction_points(cells, origin, scale = CONSTRUCTION_SCALE)
+        real_scale = scale.is_a?(Float) || scale.is_a?(Integer) || scale.is_a?(Rational)
+        unless real_scale && scale.to_f.finite? && scale >= CONSTRUCTION_SCALE &&
+               scale <= CONSTRUCTION_SCALE * (2.0**MAX_CONSTRUCTION_SCALE_STEPS)
+          fail_contract('invalid exact white-mask construction scale')
+        end
+        mapped, owners = {}, {}
+        cells.each do |cell|
+          cell[:loop].each do |point|
+            next if mapped.key?(point)
+            values = [0, 1].map do |axis|
+              ((point[axis] - origin[axis].to_r) * scale.to_r).to_f
+            end + [0.0]
+            fail_contract('exact white-mask cell has nonfinite host coordinates') unless values.all?(&:finite?)
+            if scale != CONSTRUCTION_SCALE && values.any? { |value| value.abs > MAX_CONSTRUCTION_COORDINATE }
+              fail_contract('adaptive white-mask host coordinate budget exceeded')
+            end
+            if owners.key?(values) && owners[values] != point
+              fail_contract('exact white-mask vertices collapse in host coordinates')
+            end
+            owners[values] = point
+            mapped[point] = Geom::Point3d.new(*values)
+          end
+          native = cell[:loop].map { |point| p = mapped.fetch(point); [p.x.to_r, p.y.to_r] }
+          unless SvgRegionBoundary.signed_area2(native) > 0
+            fail_contract('exact white-mask cell collapses or reverses in host coordinates')
+          end
+          native.each_index do |i|
+            a, b, c = native[i], native[(i + 1) % native.length], native[(i + 2) % native.length]
+            turn = SvgRegionBoundary.cross(SvgRegionBoundary.minus(b, a), SvgRegionBoundary.minus(c, b))
+            unless turn > 0
+              fail_contract('exact white-mask cell loses a convex corner in host coordinates')
+            end
+          end
+          if scale != CONSTRUCTION_SCALE &&
+             partition_clearance_squared([:loop => native]) < (CONSTRUCTION_CLEARANCE * 0.5).to_r**2
+            fail_contract('adaptive white-mask native cell lost construction clearance')
+          end
+        end
+        mapped
+      end
+
+      # An explicit harness callback may save private source contours outside
+      # the repository. Normal imports never log or write those coordinates.
+      def self.partition_diagnostic(opts, white, ink, origin, error)
+        callback = opts[:partition_diagnostic]
+        return unless callback.respond_to?(:call)
+        copy = lambda do |records|
+          records.map do |record|
+            { :loops => record[:loops].map { |loop| loop.map(&:dup) },
+              :source_span_id => record[:source_span_id] }
+          end
+        end
+        callback.call(:schema => 'bcs.planar_partition_diagnostic/1',
+                      :white => copy.call(white), :ink => copy.call(ink),
+                      :origin => origin && origin.dup, :error => error.message.to_s)
+      rescue StandardError
+        # Failure to collect optional evidence cannot replace the import error.
+        nil
       end
 
       def self.construction_ink_loops(ink)
@@ -608,9 +762,9 @@ module BlueCollarSystems
         end
       end
 
-      def self.construction_point(point, origin)
-        Geom::Point3d.new((point[0] - origin[0]) * CONSTRUCTION_SCALE,
-                         (point[1] - origin[1]) * CONSTRUCTION_SCALE, 0.0)
+      def self.construction_point(point, origin, scale = CONSTRUCTION_SCALE)
+        Geom::Point3d.new((point[0] - origin[0]) * scale,
+                         (point[1] - origin[1]) * scale, 0.0)
       end
 
       # SketchUp's add_face raises "Duplicate points in array" for consecutive
@@ -618,8 +772,6 @@ module BlueCollarSystems
       # point that repeats the first. Source loops can carry both (a fill
       # contour whose last vertex closes on its first, or two vertices a
       # sub-tolerance apart): drop the repeats, keep the loop's shape.
-      NATIVE_VERTEX_TOLERANCE = 0.001
-
       def self.distinct_loop_points(points)
         kept = []
         points.each do |point|
@@ -637,20 +789,20 @@ module BlueCollarSystems
           (a.z.to_f - b.z.to_f).abs < NATIVE_VERTEX_TOLERANCE
       end
 
-      def self.page_point(point, origin)
-        [point.x.to_f / CONSTRUCTION_SCALE + origin[0],
-         point.y.to_f / CONSTRUCTION_SCALE + origin[1], 0.0]
+      def self.page_point(point, origin, scale = CONSTRUCTION_SCALE)
+        [point.x.to_f / scale + origin[0],
+         point.y.to_f / scale + origin[1], 0.0]
       end
 
       # Several interior barycentric probes per native triangle prevent an
       # unsplit face that crosses a mask/glyph boundary being erased wholesale.
-      def self.face_samples(face, origin)
+      def self.face_samples(face, origin, scale = CONSTRUCTION_SCALE)
         mesh = face.mesh(0)
         mesh.polygons.inject([]) do |samples, polygon|
           native = polygon.map { |index| mesh.point_at(index.abs) }
           fail_contract('native face mesh is not triangulated') unless native.length == 3
           next samples if degenerate_mesh_triangle?(native)
-          points = native.map { |point| page_point(point, origin) }
+          points = native.map { |point| page_point(point, origin, scale) }
           [[1.0 / 3, 1.0 / 3, 1.0 / 3], [0.8, 0.1, 0.1],
            [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]].each do |weights|
             samples << [0, 1, 2].map do |axis|
@@ -673,9 +825,9 @@ module BlueCollarSystems
         (term1 - term2).abs <= 8.0 * Float::EPSILON * (term1.abs + term2.abs)
       end
 
-      def self.classify_cells(cells, origin, white, ink)
+      def self.classify_cells(cells, origin, white, ink, scale = CONSTRUCTION_SCALE)
         cells.map do |face|
-          samples = face_samples(face, origin)
+          samples = face_samples(face, origin, scale)
           regions = samples.map { |point| region_at(point, white, ink) }.uniq
           unless regions.length == 1
             probes = regions.first(3).map do |region|
@@ -687,10 +839,10 @@ module BlueCollarSystems
           end
           loops = [face.outer_loop] + face.loops.to_a.reject { |loop| loop == face.outer_loop }
           { :face => face, :region => regions[0], :sample => samples[0],
-            :area => face.area.to_f / (CONSTRUCTION_SCALE * CONSTRUCTION_SCALE),
-            :loops => loops.map { |loop| loop.vertices.map { |v| page_point(v.position, origin) } },
-            :bounds => page_point(face.bounds.min, origin).first(2) +
-                       page_point(face.bounds.max, origin).first(2) }
+            :area => face.area.to_f / (scale * scale),
+            :loops => loops.map { |loop| loop.vertices.map { |v| page_point(v.position, origin, scale) } },
+            :bounds => page_point(face.bounds.min, origin, scale).first(2) +
+                       page_point(face.bounds.max, origin, scale).first(2) }
         end
       end
 
