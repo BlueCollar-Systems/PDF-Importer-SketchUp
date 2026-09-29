@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.160-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.161-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -13,7 +13,13 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > Import Health has the full summary.
 
-### Recent fixes (v3.7.160)
+### Recent fixes (v3.7.161)
+
+- Pages that paint a pasted picture as one-pixel-tall inline image strips (BI/ID/EI), such as the AG&E title-block logo, keep their vectors and text editable and get that picture back as one placed native image at the source position and scale.
+- Inline-image boundaries are proved (exact sample length or /L, filter end-of-data) so a long strip run cannot desynchronize the rest of the page.
+- A page-6 white-mask failure (duplicate points) is fixed so that page can finish.
+
+### Earlier notes (v3.7.160)
 
 - Multi-page imports run unattended: no question appears after an import starts. The very-large-file warning is asked once before page 1; large pages are logged instead of prompting.
 - A page that fails is logged and skipped while the remaining pages import; resume retries it.
