@@ -394,6 +394,199 @@ class SketchupHostEvidenceTest < Minitest::Test
     }]
   end
 
+  def with_inline_composite_fixture
+    Dir.mktmpdir('bc_inline_physical_') do |directory|
+      source = File.join(directory, 'source.png')
+      exported = File.join(directory, 'host.png')
+      pixels = [[21, 45, 90, 255], [210, 31, 7, 150]]
+      write_rgba_png(source, 2, 1, pixels, 0)
+      write_rgba_png(exported, 2, 1, pixels, 9)
+      artifact = {
+        :file_path => source, :sha256 => Digest::SHA256.file(source).hexdigest,
+        :pixel_width => 2, :pixel_height => 1, :instance_count => 2175
+      }
+      stats = {
+        :inline_images_detected => 2175,
+        :inline_image_page_raster_fallbacks => [],
+        :inline_image_vector_retentions => [],
+        :inline_image_composites => [{
+          :page => 5, :inline_image_instance_count => 2175,
+          :vector_path_count => 15014, :delivery => 'inline_images_composited',
+          :placed => true, :region_count => 1,
+          :resulting_entity_ids => ['persistent_id:7070'], :artifacts => [artifact]
+        }]
+      }
+      matrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 0, 1]
+      image = FakeImage.new(70, :persistent_id => 7070, :transformation => matrix)
+      parent = FakeGroup.new(69, [image])
+      writer = FakeTextureWriter.new(exported)
+      rows = with_texture_writer(writer) do
+        SketchupHostEvidence.snapshot_entities([parent], :compact => true,
+          :inline_image_composites => stats[:inline_image_composites])
+      end
+      yield stats, rows, source, exported, parent, writer
+    end
+  end
+
+  def inline_physical_proof(stats, rows, options = {})
+    SketchupHostEvidence.verify_inline_image_composites!(stats, rows,
+      { :require_no_omissions => true, :selected_pages => [5, 6] }.merge(options))
+  end
+
+  def test_inline_composite_compact_snapshot_binds_real_pixels_without_text_claims
+    with_inline_composite_fixture do |stats, rows, source, exported|
+      refute_equal Digest::SHA256.file(source).hexdigest, Digest::SHA256.file(exported).hexdigest
+      image = rows.first['children'].first
+      assert_equal true, image['inline_composite_image']
+      assert_equal true, image['content_evidence']['host_texture_export_verified']
+      assert_nil image['representation_evidence']
+      proof = inline_physical_proof(stats, rows)
+      assert_equal true, proof['verified']
+      assert_equal 1, proof['composite_count']
+      assert_equal 2175, proof['inline_instance_count']
+      assert_equal [5], proof['pages']
+      assert_equal 7070, proof['composites'].first['persistent_id']
+      assert_equal image['content_evidence']['host_visual_pixel_sha256'],
+                   proof['composites'].first['visual_pixel_sha256']
+    end
+  end
+
+  def test_inline_composite_proof_survives_deleted_source_cache_and_reopened_entity_ids
+    with_inline_composite_fixture do |stats, rows, source, _exported, parent, writer|
+      proof = inline_physical_proof(stats, rows)
+      File.delete(source)
+      parent.entities.first.instance_variable_set(:@entityID, 570)
+      reopened = with_texture_writer(writer) do
+        SketchupHostEvidence.snapshot_entities([parent], :compact => true,
+          :inline_image_composites => stats[:inline_image_composites])
+      end
+      assert_equal proof, inline_physical_proof(stats, reopened, :expected_proof => proof)
+      assert SketchupHostEvidence.verify_reopen_continuity!(rows, reopened)
+    end
+  end
+
+  def test_inline_composite_reopened_changed_physical_pixels_fail
+    with_inline_composite_fixture do |stats, rows, _source, exported, parent, writer|
+      proof = inline_physical_proof(stats, rows)
+      write_rgba_png(exported, 2, 1, [[1, 2, 3, 255], [4, 5, 6, 255]])
+      reopened = with_texture_writer(writer) do
+        SketchupHostEvidence.snapshot_entities([parent], :compact => true,
+          :inline_image_composites => stats[:inline_image_composites])
+      end
+      error = assert_raises(SketchupHostEvidence::EvidenceError) do
+        inline_physical_proof(stats, reopened, :expected_proof => proof)
+      end
+      assert_match(/native pixels differ/, error.message)
+    end
+  end
+
+  def test_inline_composite_missing_or_extra_manifest_identity_fails
+    with_inline_composite_fixture do |stats, rows|
+      proof = inline_physical_proof(stats, rows)
+      missing = Marshal.load(Marshal.dump(rows))
+      missing.first['children'].clear
+      assert_raises(SketchupHostEvidence::EvidenceError) do
+        inline_physical_proof(stats, missing, :expected_proof => proof)
+      end
+      extra = Marshal.load(Marshal.dump(rows))
+      duplicate = Marshal.load(Marshal.dump(extra.first['children'].first))
+      duplicate['persistent_id'] = 8080
+      duplicate['entity_id'] = 80
+      extra.first['children'] << duplicate
+      assert_raises(SketchupHostEvidence::EvidenceError) { inline_physical_proof(stats, extra) }
+    end
+  end
+
+  def test_inline_composite_duplicate_or_transient_ledger_identity_fails
+    with_inline_composite_fixture do |stats, rows|
+      record = stats[:inline_image_composites].first
+      record[:resulting_entity_ids] << 'persistent_id:7070'
+      assert_raises(SketchupHostEvidence::EvidenceError) { inline_physical_proof(stats, rows) }
+      record[:resulting_entity_ids] = ['entity_id:70']
+      assert_raises(SketchupHostEvidence::EvidenceError) { inline_physical_proof(stats, rows) }
+    end
+  end
+
+  def test_inline_composite_group_cannot_stand_in_for_native_image
+    with_inline_composite_fixture do |stats, rows|
+      rows.first['children'].first['typename'] = 'Group'
+      assert_raises(SketchupHostEvidence::EvidenceError) { inline_physical_proof(stats, rows) }
+    end
+  end
+
+  def test_inline_composite_source_png_bytes_and_dimensions_are_required
+    with_inline_composite_fixture do |stats, rows, source|
+      artifact = stats[:inline_image_composites].first[:artifacts].first
+      artifact[:pixel_width] = 3
+      assert_raises(SketchupHostEvidence::EvidenceError) { inline_physical_proof(stats, rows) }
+      artifact[:pixel_width] = 2
+      File.open(source, 'ab') { |file| file.write('changed') }
+      assert_raises(SketchupHostEvidence::EvidenceError) { inline_physical_proof(stats, rows) }
+    end
+  end
+
+  def test_inline_composite_saved_source_binding_cannot_be_replaced_after_cache_deletion
+    with_inline_composite_fixture do |stats, rows, source|
+      proof = inline_physical_proof(stats, rows)
+      File.delete(source)
+      stats[:inline_image_composites].first[:artifacts].first[:sha256] = 'a' * 64
+      error = assert_raises(SketchupHostEvidence::EvidenceError) do
+        inline_physical_proof(stats, rows, :expected_proof => proof)
+      end
+      assert_match(/source\/placement proof changed/, error.message)
+    end
+  end
+
+  def test_inline_composite_native_placement_and_dimensions_must_survive
+    with_inline_composite_fixture do |stats, rows|
+      proof = inline_physical_proof(stats, rows)
+      image = rows.first['children'].first
+      image['content_evidence']['host_pixel_height'] = 2
+      assert_raises(SketchupHostEvidence::EvidenceError) do
+        inline_physical_proof(stats, rows, :expected_proof => proof)
+      end
+      image['content_evidence']['host_pixel_height'] = 1
+      image['transformation'][12] += 1
+      assert_raises(SketchupHostEvidence::EvidenceError) do
+        inline_physical_proof(stats, rows, :expected_proof => proof)
+      end
+    end
+  end
+
+  def test_inline_composite_acceptance_rejects_recorded_omissions_and_wrong_page_scope
+    with_inline_composite_fixture do |stats, rows|
+      assert_raises(SketchupHostEvidence::EvidenceError) do
+        inline_physical_proof(stats, rows, :selected_pages => [6])
+      end
+      stats[:inline_images_detected] += 1
+      stats[:inline_image_vector_retentions] << {
+        :page => 6, :inline_image_instance_count => 1,
+        :vector_path_count => 1, :delivery => 'inline_images_omitted'
+      }
+      assert_raises(SketchupHostEvidence::EvidenceError) { inline_physical_proof(stats, rows) }
+      assert inline_physical_proof(stats, rows, :require_no_omissions => false)['verified']
+    end
+  end
+
+  def test_inline_composite_acceptance_rejects_invalid_or_extra_initial_proof
+    with_inline_composite_fixture do |stats, rows|
+      proof = inline_physical_proof(stats, rows)
+      proof['composites'] << proof['composites'].first.dup
+      assert_raises(SketchupHostEvidence::EvidenceError) do
+        inline_physical_proof(stats, rows, :expected_proof => proof)
+      end
+      assert_raises(SketchupHostEvidence::EvidenceError) do
+        inline_physical_proof(stats, rows, :expected_proof => { 'verified' => true })
+      end
+    end
+  end
+
+  def test_no_inline_composites_need_no_texture_or_source_cache
+    proof = inline_physical_proof({}, [])
+    assert_equal 0, proof['composite_count']
+    assert_equal [], proof['composites']
+  end
+
   def test_texture_writer_pixels_are_physical_and_survive_reopen_verification
     Dir.mktmpdir('bc_texture_writer_test_') do |directory|
       first_path = File.join(directory, 'first.png')
