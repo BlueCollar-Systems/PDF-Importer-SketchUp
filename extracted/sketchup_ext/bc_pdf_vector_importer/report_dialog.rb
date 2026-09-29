@@ -16,16 +16,87 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       def self.announce(stats)
         return unless defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
-        pg = stats[:pages] || 0
+        Sketchup.status_text = completion_status(stats)
+      rescue StandardError
+        nil
+      end
+
+      # One end-of-import line: pages imported, any page delivered as a raster
+      # image (with the reason), and any page that failed and was skipped.
+      def self.completion_status(stats)
+        pg = (stats[:pages] || 0).to_i
         edges = stats[:edges] || 0
         text = stats[:text] || 0
         elapsed = stats[:elapsed_seconds]
         time_str = elapsed ? " — #{elapsed}s" : ""
-        Sketchup.status_text =
-          "PDF import complete — #{pg} page#{pg == 1 ? '' : 's'}, " \
-          "#{edges} edges, #{text} text#{time_str}. See Extensions > Import Health for details."
+        failed = failed_page_records(stats)
+        head = failed.empty? ? 'PDF import complete' : 'PDF import finished with problems'
+        line = "#{head} — #{pg} page#{pg == 1 ? '' : 's'}, " \
+               "#{edges} edges, #{text} text#{time_str}."
+        raster = raster_fallback_pages(stats)
+        unless raster.empty?
+          line += " Raster image page#{raster.length == 1 ? '' : 's'}: " +
+                  raster.map { |page, reason| "#{page} (#{short_raster_reason(reason)})" }.join(', ') + '.'
+        end
+        unless failed.empty?
+          line += " Failed page#{failed.length == 1 ? '' : 's'} skipped: " +
+                  format_page_list(failed.map { |f| f[:page] }) + '.'
+        end
+        line + ' See Extensions > Import Health for details.'
+      end
+
+      RASTER_REASON_TEXT = {
+        'inline_image_paint_order_requires_terminal_page_raster' =>
+          'the page contains inline images, so Auto/Hybrid delivered the ' \
+          'whole page as one verified image',
+        'visible_nontext_source_only' =>
+          'the page has no importable vector or text content (image/scan only)'
+      }.freeze
+
+      RASTER_REASON_SHORT = {
+        'inline_image_paint_order_requires_terminal_page_raster' => 'inline images',
+        'visible_nontext_source_only' => 'image-only page'
+      }.freeze
+
+      def self.stat_value(entry, key)
+        return nil unless entry.is_a?(Hash)
+        entry.key?(key) ? entry[key] : entry[key.to_s]
+      end
+
+      # [[page, reason_code], ...] for pages the importer delivered as a raster
+      # image although the user did not ask for Raster.
+      def self.raster_fallback_pages(stats)
+        seen = {}
+        Array(stat_value(stats, :page_representation_fallbacks)).each do |entry|
+          next unless stat_value(entry, :delivered_mode).to_s == 'raster'
+          next if stat_value(entry, :explicit_request) == true
+          page = stat_value(entry, :page).to_i
+          next if page <= 0 || seen.key?(page)
+          seen[page] = stat_value(entry, :reason_code).to_s
+        end
+        seen.keys.sort.map { |page| [page, seen[page]] }
       rescue StandardError
-        nil
+        []
+      end
+
+      def self.short_raster_reason(code)
+        RASTER_REASON_SHORT[code.to_s] || (code.to_s.empty? ? 'raster fallback' : code.to_s.tr('_', ' '))
+      end
+
+      def self.long_raster_reason(code)
+        RASTER_REASON_TEXT[code.to_s] || short_raster_reason(code)
+      end
+
+      def self.failed_page_records(stats)
+        Array(stat_value(stats, :failed_pages)).map do |entry|
+          {
+            :page => stat_value(entry, :page).to_i,
+            :error_class => stat_value(entry, :error_class).to_s,
+            :message => stat_value(entry, :message).to_s
+          }
+        end
+      rescue StandardError
+        []
       end
 
       def self.cancelled_status(stats)
@@ -124,6 +195,8 @@ module BlueCollarSystems
           end
         end
 
+        append_unattended_run_lines(lines, stats)
+
         comps = stats[:components] || 0
         lines << "#{comps} repeated symbols converted to components." if comps > 0
 
@@ -209,6 +282,36 @@ module BlueCollarSystems
         end
 
         lines.join("\n")
+      end
+
+      def self.append_unattended_run_lines(lines, stats)
+        raster = raster_fallback_pages(stats)
+        unless raster.empty?
+          lines << ""
+          lines << "#{raster.length} page(s) were imported as a raster image " \
+                   'instead of editable geometry:'
+          raster.each do |page, code|
+            lines << "  Page #{page}: #{long_raster_reason(code)}."
+          end
+        end
+
+        failed = failed_page_records(stats)
+        unless failed.empty?
+          lines << ""
+          lines << "#{failed.length} page(s) failed and were skipped; the " \
+                   'other pages were imported:'
+          failed.each do |failure|
+            lines << "  Page #{failure[:page]}: #{failure[:message]}"
+          end
+        end
+
+        heavy = Array(stat_value(stats, :complexity_notices))
+        unless heavy.empty?
+          pages = heavy.map { |entry| stat_value(entry, :page) }
+          lines << ""
+          lines << "Large page(s) imported without stopping for confirmation: " \
+                   "#{format_page_list(pages)}."
+        end
       end
 
       def self.append_text_renderer_lines(lines, stats)

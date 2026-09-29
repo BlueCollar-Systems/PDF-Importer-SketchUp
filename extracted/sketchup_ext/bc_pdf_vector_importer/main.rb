@@ -185,6 +185,16 @@ module BlueCollarSystems
       true
     end
 
+    # Owner rule (2026-09-28): a multi-page import runs unattended. A large or
+    # very large page is logged and listed in the end-of-import summary; it
+    # never parks the run on a per-page modal that a user who walked away
+    # comes back to. Per-page review is an explicit opt-in (import option
+    # :per_page_review, preference 'per_page_review' = Yes) and is off by
+    # default. A host-supplied :complexity_confirm callback is still honored.
+    def self.per_page_review_requested?(opts)
+      opts.is_a?(Hash) && opts[:per_page_review] == true
+    end
+
     def self.confirm_page_complexity!(opts, page_num, path_count, text_count)
       controller = opts.is_a?(Hash) ? opts[:run_controller] : nil
       return nil unless controller && controller.respond_to?(:assess)
@@ -198,14 +208,16 @@ module BlueCollarSystems
       callback = opts[:complexity_confirm]
       decision = if callback.respond_to?(:call)
                    callback.call(assessment, message)
-                 elsif BatchHostPolicy.prompt_allowed? &&
+                 elsif per_page_review_requested?(opts) &&
+                       BatchHostPolicy.prompt_allowed? &&
                        defined?(UI) && UI.respond_to?(:messagebox)
                    UI.messagebox(message, MB_OKCANCEL)
                  else
                    Logger.info(
                      'Pipeline',
-                     "Page #{page_num}: #{assessment[:class]} workload; " \
-                     'noninteractive run continues with checkpoints enabled.'
+                     "Page #{page_num}: #{assessment[:class]} workload " \
+                     "(#{assessment[:work_units]} work units); unattended " \
+                     'import continues with checkpoints enabled (Esc cancels).'
                    )
                    true
                  end
@@ -3720,6 +3732,24 @@ module BlueCollarSystems
       )
     end
 
+    def self.confirm_large_pdf_once!(path)
+      file_size_bytes = File.size(path)
+      return true unless file_size_bytes > BatchHostPolicy::LARGE_PDF_BYTES
+      size_mb = (file_size_bytes / (1024.0 * 1024.0)).round(1)
+      choice = BatchHostPolicy.confirm_large_pdf!(file_size_bytes) do
+        UI.messagebox(
+          "This PDF is very large (#{size_mb} MB). Import may take a significant " \
+          "amount of time and use considerable memory. Continue?",
+          MB_OKCANCEL)
+      end
+      choice == true || (defined?(IDOK) && choice == IDOK)
+    rescue BatchHostPolicy::NoninteractiveError
+      raise
+    rescue StandardError => e
+      Logger.warn('Pipeline', "File size check failed: #{e.message}")
+      true
+    end
+
     def self.run_resumable_pipeline(model, source_path, opts)
       unless resumable_import?(opts)
         inner_opts = opts.dup
@@ -3731,6 +3761,9 @@ module BlueCollarSystems
       prepared_path = source_path
       parser = nil
       original_annotation_cache = {}
+      # The large-file warning is a pre-import question: ask it once here,
+      # never again from each per-page run_pipeline call.
+      return nil unless confirm_large_pdf_once!(source_path)
       begin
         prepared_path, salvage_note = PdfSalvage.prepare_if_needed(source_path)
         Logger.info('Pipeline', salvage_note) if salvage_note
@@ -3786,6 +3819,7 @@ module BlueCollarSystems
           page_opts[:original_annotation_cache] = original_annotation_cache
           page_opts[:preserve_logger] = true
           page_opts[:defer_final_diagnostics] = true
+          page_opts[:large_pdf_confirmed] = true
           page_stats = run_pipeline(model, source_path, page_opts)
           {
             :stats => page_stats,
@@ -3797,9 +3831,19 @@ module BlueCollarSystems
           :controller => controller,
           :pages => pages,
           :runner => runner,
-          :group_per_page => opts[:group_per_page]
+          :group_per_page => opts[:group_per_page],
+          :continue_on_page_error => opts[:stop_on_page_error] != true
         ).run
         stats = result[:stats] || {}
+        stats[:failed_pages] = Array(result[:failed_pages])
+        stats[:failed_pages].each do |failure|
+          Logger.warn(
+            'Pipeline',
+            "Page #{failure[:page]} failed and was skipped " \
+            "(#{failure[:error_class]}): #{failure[:message]}; " \
+            'the remaining pages continued.'
+          )
+        end
         stats[:cancelled] = result[:cancelled] == true
         stats[:retained_pages] = result[:retained_pages]
         stats[:resumed_pages] = result[:resumed_pages]
@@ -3921,7 +3965,7 @@ module BlueCollarSystems
 
       # ── File size warning for very large PDFs ──
       begin
-        file_size_bytes = File.size(path)
+        file_size_bytes = opts[:large_pdf_confirmed] == true ? 0 : File.size(path)
         if file_size_bytes > BatchHostPolicy::LARGE_PDF_BYTES
           size_mb = (file_size_bytes / (1024.0 * 1024.0)).round(1)
           choice = BatchHostPolicy.confirm_large_pdf!(file_size_bytes) do
@@ -4638,9 +4682,19 @@ module BlueCollarSystems
 
         Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — #{paths.length} paths, #{text_items.length} text items... [#{(Time.now - import_start).round(1)}s]"
 
-        confirm_page_complexity!(
+        complexity = confirm_page_complexity!(
           opts, page_num, paths.length, text_items.length
         )
+        if complexity.is_a?(Hash) && complexity[:class] != :normal
+          stats[:complexity_notices] ||= []
+          stats[:complexity_notices] << {
+            :page => page_num.to_i,
+            :class => complexity[:class].to_s,
+            :work_units => complexity[:work_units].to_i,
+            :paths => paths.length,
+            :text_items => text_items.length
+          }
+        end
 
         prebuild_analysis_started = Time.now
         page_data = PrimitiveExtractor.extract(paths, text_items, media_box, page_num,

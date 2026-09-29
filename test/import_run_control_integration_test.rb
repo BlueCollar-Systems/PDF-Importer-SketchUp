@@ -177,6 +177,7 @@ class ImportRunControlIntegrationTest < Minitest::Test
           end
         end
         def self.resumable_import?(*); true; end
+        def self.confirm_large_pdf_once!(*); true; end
         def self.report_pipeline_progress(*); end
         def self.finalize_import_diagnostics!(*); end
       RUBY
