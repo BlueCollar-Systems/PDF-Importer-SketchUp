@@ -25,9 +25,11 @@ module BlueCollarSystems
           aspect = vw / vh
           height = [height, width / aspect].max if aspect > 0.0
         else
+          # Bounds are already padded. With no window size, cover the longer
+          # side so a square view still shows a landscape sheet.
           height = [height, width].max
         end
-        height * 1.04
+        height
       end
 
       def padded_fit_corners(x0, y0, x1, y1, scale = 1.0)
