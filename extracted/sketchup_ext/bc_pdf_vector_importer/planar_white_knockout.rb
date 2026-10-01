@@ -98,7 +98,10 @@ module BlueCollarSystems
         return false unless record.is_a?(Hash) && record[:group]
         rgb = record[:fill_rgb]
         return false unless rgb.is_a?(Array) && rgb.length == 3 && rgb.all? do |value|
-          value.is_a?(Numeric) && value.finite? && value >= 0.0 && value <= 1.0
+          # Ruby 2.2 only supplies finite? on Float. Keep integer/rational
+          # range checks exact: conversion could round an invalid channel in.
+          real = value.is_a?(Integer) || value.is_a?(Rational) || value.is_a?(Float)
+          real && (!value.is_a?(Float) || value.finite?) && value >= 0 && value <= 1
         end
         alpha = record.key?(:opacity) ? record[:opacity] : 1.0
         alpha.is_a?(Numeric) && alpha == 1.0

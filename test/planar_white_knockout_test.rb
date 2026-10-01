@@ -1,4 +1,6 @@
 require 'minitest/autorun'
+require 'open3'
+require 'rbconfig'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/planar_white_knockout'
 
 module Geom
@@ -39,6 +41,41 @@ class PlanarWhiteKnockoutTest < Minitest::Test
   Loop = Struct.new(:vertices)
   Bounds = Struct.new(:min, :max)
   Normal = Struct.new(:z)
+
+  def test_opaque_rgb_preserves_exact_real_channels_and_rejects_invalid_values
+    [[0,1,0], [0.0,0.5,1.0], [Rational(0,1),Rational(1,3),Rational(1,1)]].each do |rgb|
+      record={:group=>Object.new,:fill_rgb=>rgb.freeze,:opacity=>1.0}
+      assert Subject.opaque_fill?(record)
+      assert_same rgb,record[:fill_rgb]
+    end
+    tiny=Rational(1,10**400)
+    [Float::NAN, Float::INFINITY, -Float::INFINITY, -1, 2, 10**400,
+     Rational(10**400,1), -tiny, Rational(1,1)+tiny,
+     Complex(0,0), Complex(1,1), true, false, nil, '1'].each do |value|
+      refute Subject.opaque_fill?(:group=>Object.new,:fill_rgb=>[value,0,1])
+    end
+  end
+
+  def test_integer_and_rational_rgb_work_without_modern_numeric_finite_api
+    # Remove the modern API only in a child process, reproducing Ruby 2.2
+    # without changing the numeric classes used by other tests.
+    source=File.expand_path('../extracted/sketchup_ext/bc_pdf_vector_importer/planar_white_knockout.rb',File.dirname(__FILE__))
+    program=<<'RUBY'
+require ARGV.fetch(0)
+[Integer,Rational].each do |type|
+  type.class_eval { undef_method :finite? if method_defined?(:finite?) }
+end
+subject=BlueCollarSystems::PDFVectorImporter::PlanarWhiteKnockout
+raise 'legacy RGB rejected' unless subject.opaque_fill?(:group=>Object.new,:fill_rgb=>[1,Rational(1,2),0])
+raise 'float RGB rejected' unless subject.opaque_fill?(:group=>Object.new,:fill_rgb=>[1.0,0.5,0.0])
+tiny=Rational(1,10**400)
+[-tiny,Rational(1,1)+tiny,10**400,Float::INFINITY,Float::NAN,Complex(1,0)].each do |value|
+  raise 'invalid RGB accepted' if subject.opaque_fill?(:group=>Object.new,:fill_rgb=>[value,0,1])
+end
+RUBY
+    _stdout,stderr,status=Open3.capture3(RbConfig.ruby,'-e',program,source)
+    assert status.success?,stderr
+  end
 
   class Mesh
     def initialize(points); @points = points; end
@@ -519,11 +556,11 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     page = Geom::Transformation.scaling(1.0 / scale)
     identity = Geom::Transformation.new
     changed = Geom::Transformation.new(1.0 / scale, [1.0e-12,0,0])
-    error = assert_raises(ContractError) do
+    error = assert_raises(Subject::ConstructionFrameError) do
       Subject.verify_adaptive_page_points!(mapped, origin, scale, page, identity, changed)
     end
     assert_match(/changed the final page transform/, error.message)
-    error = assert_raises(ContractError) do
+    error = assert_raises(Subject::ConstructionFrameError) do
       Subject.verify_adaptive_page_points!(mapped, origin, scale, changed, identity, page)
     end
     assert_match(/restore exact page coordinates/, error.message)
