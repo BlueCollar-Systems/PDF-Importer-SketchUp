@@ -10,6 +10,28 @@ module BlueCollarSystems
 
       module_function
 
+
+      # Parallel-projection camera height, in model units, that shows the
+      # whole sheet. A landscape print in an unknown or square window used
+      # to keep only the vertical span, so the sides were clipped and the
+      # user was left to orbit. When the viewport aspect is known, the
+      # height grows just enough to cover the width.
+      def ortho_view_height(dx, dy, viewport_width = nil, viewport_height = nil)
+        width = dx.to_f.abs
+        height = [dy.to_f.abs, 1.0e-6].max
+        vw = viewport_width.to_f
+        vh = viewport_height.to_f
+        if vw > 0.0 && vh > 0.0
+          aspect = vw / vh
+          height = [height, width / aspect].max if aspect > 0.0
+        else
+          # Bounds are already padded. With no window size, cover the longer
+          # side so a square view still shows a landscape sheet.
+          height = [height, width].max
+        end
+        height
+      end
+
       def padded_fit_corners(x0, y0, x1, y1, scale = 1.0)
         s = scale.to_f
         s = 1.0 if s <= 0.0

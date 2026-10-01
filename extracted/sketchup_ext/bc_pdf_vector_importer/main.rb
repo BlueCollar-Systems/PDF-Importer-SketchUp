@@ -3271,25 +3271,35 @@ module BlueCollarSystems
       nil
     end
 
+
+    def self.lock_parallel_projection(view)
+      return unless view && view.respond_to?(:camera)
+      camera = view.camera
+      return unless camera && camera.respond_to?(:perspective=)
+      return unless camera.perspective
+      camera.perspective = false
+      view.camera = camera if view.respond_to?(:camera=)
+    rescue StandardError
+      nil
+    end
+
     def self.apply_camera_top_ortho(view, bb)
       return unless view && fit_usable_bounds?(bb)
       center = bb.center
       dx = (bb.max.x.to_f - bb.min.x.to_f).abs
       dy = (bb.max.y.to_f - bb.min.y.to_f).abs
-      height = [dy, 1.0e-6].max
+      vw = nil
+      vh = nil
       begin
         if view.respond_to?(:vpwidth) && view.respond_to?(:vpheight)
-          vw = view.vpwidth.to_f
-          vh = view.vpheight.to_f
-          if vw > 0.0 && vh > 0.0
-            aspect = vw / vh
-            height = [height, dx / aspect].max if aspect > 0.0
-          end
+          vw = view.vpwidth
+          vh = view.vpheight
         end
       rescue StandardError
-        # keep bbox-height fit
+        vw = nil
+        vh = nil
       end
-      height = height * 1.10
+      height = ImportBounds.ortho_view_height(dx, dy, vw, vh)
       eye_z = [1000.0, height * 10.0].max
       eye = Geom::Point3d.new(center.x, center.y, center.z + eye_z)
       target = center
@@ -3453,7 +3463,10 @@ module BlueCollarSystems
       end
 
       # Last resort: model-wide extents when we have no import bounds at all.
+      lock_parallel_projection(view)
       view.zoom_extents unless framed
+      # zoom_extents can put the navigation camera back into perspective.
+      lock_parallel_projection(view)
     rescue StandardError => e
       Logger.warn("Pipeline", "Auto-fit view failed: #{e.message}")
       begin
