@@ -41,6 +41,7 @@ require 'digest/md5'
 
 require File.join(File.dirname(__FILE__), 'svg_text_renderer')
 require File.join(File.dirname(__FILE__), 'logger')
+require File.join(File.dirname(__FILE__), 'svg_region_boundary')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -1367,6 +1368,20 @@ module BlueCollarSystems
               ]
             end
           end
+          unclipped_loops = ink_loops
+          ink_loops = clip_page_glyph_loops(ink_loops, svg_page_box, media_box)
+          if ink_loops != unclipped_loops && opts[:page_clip_evidence].is_a?(Array)
+            opts[:page_clip_evidence] << {
+              :placement_index => placement_index, :glyph_id => p[:glyph_id],
+              :source_svg_offset => p[:source_svg_offset],
+              :render_box => svg_page_box.dup, :media_box => media_box.dup,
+              :source_contours_pdf => unclipped_loops,
+              :visible_contours_pdf => ink_loops,
+              :visible_ink_empty => ink_loops.empty?,
+              :proof => :source_nonzero_fill_intersection_with_page_rectangle
+            }
+          end
+          next if ink_loops.empty?
           ink_points = ink_loops.flatten(1)
           xs = ink_points.map { |point| point[0] }
           ys = ink_points.map { |point| point[1] }
@@ -1418,6 +1433,79 @@ module BlueCollarSystems
         values[0].to_f.abs >= values[1].to_f.abs ? :x : :y
       rescue StandardError
         :x
+      end
+
+      # SVG glyph definitions retain the complete outline even when a PDF page
+      # boundary hides part of it. The viewport is a source clip, not a request
+      # to fit or move that glyph. Clip visible contours before either native
+      # construction or independent source-binding inspection.
+      def self.clip_page_glyph_loops(loops, render_box, media_box)
+        unless render_box.is_a?(Array) && render_box.length >= 4 &&
+               media_box.is_a?(Array) && media_box.length >= 4
+          raise ArgumentError, 'glyph page clip requires source page boxes'
+        end
+        bounds = [render_box[0].to_f - media_box[0].to_f,
+                  render_box[1].to_f - media_box[1].to_f,
+                  render_box[2].to_f - media_box[0].to_f,
+                  render_box[3].to_f - media_box[1].to_f]
+        unless bounds.all? { |value| value.finite? } &&
+               bounds[2] > bounds[0] && bounds[3] > bounds[1]
+          raise ArgumentError, 'glyph page clip has invalid source bounds'
+        end
+        return loops if loops.all? do |loop|
+          loop.all? do |point|
+            point[0] >= bounds[0] && point[0] <= bounds[2] &&
+              point[1] >= bounds[1] && point[1] <= bounds[3]
+          end
+        end
+        clipped = loops.map { |loop| clip_glyph_contour_to_rectangle(loop, bounds) }.reject(&:empty?)
+        return [] if clipped.empty?
+        # Clipping a concave contour can create multiple components joined by
+        # coincident zero-width segments. Resolve their filled boundary exactly;
+        # keep holes according to the source nonzero winding, not loop area alone.
+        normalized = SvgRegionBoundary.normalize(
+          [{ :loops => clipped, :fill_rule => :nonzero }], :svg
+        )
+        raise ArgumentError, 'glyph page clip topology could not be verified' unless normalized
+        normalized.map do |contour|
+          points = contour.map { |point| point.first(2) }
+          points + [points[0].dup]
+        end
+      end
+
+      def self.clip_glyph_contour_to_rectangle(loop, bounds)
+        points = loop.map { |point| point.first(2).map { |value| value.to_r } }
+        bounds = bounds.map { |value| value.to_r }
+        points.pop if points.length > 1 && points[-1] == points[0]
+        [[0,bounds[0],1], [0,bounds[2],-1], [1,bounds[1],1], [1,bounds[3],-1]].each do |axis, limit, sign|
+          break if points.empty?
+          output = []
+          previous = points[-1]
+          previous_inside = sign * (previous[axis] - limit) >= 0.0
+          points.each do |point|
+            inside = sign * (point[axis] - limit) >= 0.0
+            if inside != previous_inside
+              fraction = (limit - previous[axis]) / (point[axis] - previous[axis])
+              other = 1 - axis
+              crossing = [0.0, 0.0]
+              crossing[axis] = limit
+              crossing[other] = previous[other] + fraction * (point[other] - previous[other])
+              output << crossing unless output[-1] == crossing
+            end
+            output << point if inside && output[-1] != point
+            previous, previous_inside = point, inside
+          end
+          points = output
+        end
+        points.pop if points.length > 1 && points[-1] == points[0]
+        return [] if points.uniq.length < 3
+        area = points.each_with_index.inject(0.to_r) do |sum, pair|
+          point, index = pair
+          following = points[(index + 1) % points.length]
+          sum + point[0] * following[1] - following[0] * point[1]
+        end
+        return [] if area == 0.0
+        points + [points[0].dup]
       end
 
       # ------------------------------------------------------------------
@@ -1584,6 +1672,17 @@ module BlueCollarSystems
               ]
             end
           end
+          clipped_loops_pdf = clip_page_glyph_loops(ink_loops_pdf, svg_page_box, media_box)
+          next if clipped_loops_pdf.empty?
+          page_clipped = clipped_loops_pdf != ink_loops_pdf
+          if page_clipped
+            ink_loops_pdf = clipped_loops_pdf
+            loops = ink_loops_pdf.map do |contour|
+              contour.map { |point| Geom::Point3d.new(point[0] * unit, point[1] * unit + y_offset, 0.0) }
+            end
+            ink_x = ink_loops_pdf.flatten(1).map { |point| point[0] }
+            ink_y = ink_loops_pdf.flatten(1).map { |point| point[1] }
+          end
 
           pen_x_pdf = (e - vb_min_x) + (svg_min_x - media_min_x)
           pen_y_pdf = (vb_h + vb_min_y - f) + (svg_min_y - media_min_y)
@@ -1600,15 +1699,16 @@ module BlueCollarSystems
             ink_bbox_pdf: [ink_x.min, ink_y.min, ink_x.max, ink_y.max],
             fill_rgb: p[:fill_rgb] && p[:fill_rgb].dup,
             fill_opacity: p[:fill_opacity],
-            cache_definition_loops: cache_definition_loops,
-            cache_instance_transformation: [
+            cache_definition_loops: page_clipped ? nil : cache_definition_loops,
+            cache_instance_transformation: page_clipped ? nil : [
               a, -b, 0.0, 0.0,
               -c, d, 0.0, 0.0,
               0.0, 0.0, 1.0, 0.0,
               tx, ty, 0.0, 1.0
             ],
-            cache_local_loops: cache_local_loops,
-            cache_origin: [tx, ty, 0.0],
+            cache_local_loops: page_clipped ? nil : cache_local_loops,
+            cache_origin: page_clipped ? nil : [tx, ty, 0.0],
+            page_clip_applied: page_clipped,
             loops: loops
           }
         end
@@ -1648,7 +1748,8 @@ module BlueCollarSystems
       # A sidecar pen/bbox cannot certify geometry: each placement index, glyph,
       # pen, and ink extent must agree with both the raw SVG and the actual loops.
       def self.verify_model_loop_bindings(svg, media_box, placed, opts = {})
-        raw = pen_placements_pdf(svg, media_box, opts)
+        page_clips = []
+        raw = pen_placements_pdf(svg, media_box, opts.merge(:page_clip_evidence => page_clips))
         failures = []
         raw_by_index = unique_placement_index_map(raw, :raw_svg, failures)
         model_by_index = unique_placement_index_map(
@@ -1714,6 +1815,7 @@ module BlueCollarSystems
           :ok => failures.empty?,
           :raw_placement_count => raw.length,
           :model_placement_count => Array(placed).length,
+          :page_clip_evidence => page_clips,
           :failures => failures
         }
       rescue StandardError => e

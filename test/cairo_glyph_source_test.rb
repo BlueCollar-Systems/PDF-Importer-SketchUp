@@ -74,6 +74,73 @@ class CairoGlyphSourceTest < Minitest::Test
     File.open(FIXTURE_SVG, 'rb') { |f| f.read }
   end
 
+  def clipped_glyph_svg
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">' +
+      '<defs><g id="glyph-0-0"><path d="M 0 0 L 10 0 L 10 -10 L 0 -10 Z"/></g></defs>' +
+      '<g><use xlink:href="#glyph-0-0" x="95" y="20"/>' +
+      '<use xlink:href="#glyph-0-0" x="120" y="20"/>' +
+      '<use xlink:href="#glyph-0-0" x="20" y="20"/></g></svg>'
+  end
+
+  def test_page_clip_retains_partial_visible_ink_and_exact_source_inventory
+    placed = CGS.model_space_loops(clipped_glyph_svg, [0,0,100,100])
+    assert_equal [0,2], placed.map { |entry| entry[:placement_index] }
+    partial = placed.first
+    assert_equal [95.0,80.0], partial[:pen_pdf]
+    [95.0,80.0,100.0,90.0].zip(partial[:ink_bbox_pdf]).each do |expected, actual|
+      assert_in_delta expected, actual, 1.0e-12
+    end
+    expected = [[95.0,80.0],[100.0,80.0],[100.0,90.0],[95.0,90.0]]
+    expected.flatten.zip(partial[:ink_loops_pdf].first[0...-1].flatten).each do |a,b|
+      assert_in_delta a,b,1.0e-12
+    end
+    assert partial[:page_clip_applied]
+    assert_nil partial[:cache_definition_loops]
+    assert_nil partial[:cache_local_loops]
+    assert_nil partial[:cache_instance_transformation]
+    refute placed.last[:page_clip_applied]
+    refute_nil placed.last[:cache_definition_loops]
+    binding = CGS.verify_model_loop_bindings(clipped_glyph_svg, [0,0,100,100], placed)
+    assert binding[:ok]
+    assert_equal [0,1], binding[:page_clip_evidence].map { |row| row[:placement_index] }
+    clipped_out = binding[:page_clip_evidence].last
+    assert_equal true, clipped_out[:visible_ink_empty]
+    refute_empty clipped_out[:source_contours_pdf]
+    assert_empty clipped_out[:visible_contours_pdf]
+  end
+
+  def test_clipped_source_binding_rejects_restored_invisible_outline
+    placed = CGS.model_space_loops(clipped_glyph_svg, [0,0,100,100])
+    partial = placed.first
+    partial[:loops][0][1] = Geom::Point3d.new(105.0/72.0,80.0/72.0,0)
+    refute CGS.verify_model_loop_bindings(clipped_glyph_svg, [0,0,100,100], placed)[:ok]
+  end
+
+  def test_concave_clip_splits_disconnected_components_without_bridge_ink
+    loop = [[-1,0],[1,0],[1,4],[3,4],[3,0],[5,0],[5,6],[-1,6],[-1,0]]
+    clipped = CGS.clip_page_glyph_loops([loop], [0,0,4,3], [0,0,4,3])
+    assert_equal 2, clipped.length
+    bounds = clipped.map { |c| [c.map(&:first).min,c.map(&:last).min,c.map(&:first).max,c.map(&:last).max] }
+    assert_equal [[0.0,0.0,1.0,3.0],[3.0,0.0,4.0,3.0]], bounds
+  end
+
+  def test_clip_preserves_hole_winding_and_opens_boundary_crossing_hole
+    outer = [[-1,-1],[5,-1],[5,5],[-1,5],[-1,-1]]
+    hole = [[1,1],[1,3],[3,3],[3,1],[1,1]]
+    clipped = CGS.clip_page_glyph_loops([outer,hole], [0,0,4,4], [0,0,4,4])
+    assert_equal 2, clipped.length
+    areas = clipped.map { |c| BlueCollarSystems::PDFVectorImporter::SvgRegionBoundary.signed_area2(c).to_f / 2 }
+    assert_equal [16.0,-4.0], areas
+    notch = CGS.clip_page_glyph_loops([outer,hole], [0,0,2,4], [0,0,4,4])
+    assert_equal 1, notch.length
+    assert_equal 6.0, BlueCollarSystems::PDFVectorImporter::SvgRegionBoundary.signed_area2(notch.first).to_f / 2
+  end
+
+  def test_boundary_contact_has_no_filled_ink_and_is_not_a_thin_solid
+    loop = [[100,10],[110,10],[110,20],[100,20],[100,10]]
+    assert_empty CGS.clip_page_glyph_loops([loop], [0,0,100,100], [0,0,100,100])
+  end
+
   # ── 1+2. parse -> loops -> extents, known-value coordinate mapping ──────
 
   def test_fixture_parses_to_placed_outline_loops

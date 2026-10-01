@@ -33,7 +33,11 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError,
                 'item vector renderer supports only Glyphs or Geometry'
         end
-        source_id = RepresentationFidelity.source_span_id(item)
+        source_unit = opts[:source_unit_id]
+        source_id = source_unit || RepresentationFidelity.source_span_id(item)
+        if source_unit && (item || source_unit.to_s !~ /\Asvg_glyph_placements:page:[1-9]\d*\z/)
+          raise RepresentationFidelity::ContractError, 'source-only glyph identity is invalid'
+        end
         context_check = verify_source_context!(source_id, opts[:source_context], item)
         if context_check == :font_gap_impossible
           return impossible_result(
@@ -43,7 +47,7 @@ module BlueCollarSystems
         end
         base_x = media_box.is_a?(Array) ? media_box[0].to_f : 0.0
         base_y = media_box.is_a?(Array) ? media_box[1].to_f : 0.0
-        unless CairoGlyphSource.item_bbox_media_relative(item, base_x, base_y)
+        unless source_unit || CairoGlyphSource.item_bbox_media_relative(item, base_x, base_y)
           return impossible_result(
             source_id, item, mode, [], {}, opts[:source_context], {},
             :source_item_bbox_unavailable
@@ -83,10 +87,15 @@ module BlueCollarSystems
           opts[:progress_callback], 'svg_item_selection_started',
           "source_id=#{source_id}; mode=#{mode}"
         )
-        selection = select_item_placements(
-          source_id, mode, match, pens, media_box, opts[:peer_items],
-          opts[:precomputed_peer_boxes], opts[:precomputed_peer_owners]
-        )
+        selection = if source_unit
+                      { :indices => Array(opts[:source_unit_placement_indices]),
+                        :strategy => :unassigned_source_svg_placements }
+                    else
+                      select_item_placements(
+                        source_id, mode, match, pens, media_box, opts[:peer_items],
+                        opts[:precomputed_peer_boxes], opts[:precomputed_peer_owners]
+                      )
+                    end
         indices = selection[:indices]
         emit_progress_callback(
           opts[:progress_callback], 'svg_item_selection_join_started',
@@ -185,7 +194,10 @@ module BlueCollarSystems
                          :svg_item_flat_geometry
                        end,
           :mode => mode,
-          :source_span_id => source_id,
+          :source_span_id => source_unit ? nil : source_id,
+          :source_unit_id => source_unit,
+          :source_kind => source_unit ? :svg_glyph_placement : :text_span,
+          :source_svg_sha256 => Digest::SHA256.hexdigest(svg.to_s),
           :source_item => item,
           :group => group,
           :group_entity_id => group_id,
@@ -236,6 +248,36 @@ module BlueCollarSystems
         raise error if error.is_a?(RepresentationFidelity::ContractError)
         raise RepresentationFidelity::ContractError,
               "item #{mode || requested_mode} renderer failed: #{error.message}"
+      end
+
+      # Source-only marks keep their own physical identity. Recompute the
+      # authoritative whole-page match so a stale caller selection cannot
+      # duplicate a placement already delivered for a semantic item.
+      def self.render_unmatched_svg(entities, svg, media_box, text_items, mode, opts = {})
+        placed = CairoGlyphSource.model_space_loops(svg, media_box, opts)
+        binding = CairoGlyphSource.verify_model_loop_bindings(svg, media_box, placed, opts)
+        unless binding[:ok] == true
+          raise RepresentationFidelity::ContractError, 'source-only glyph loops do not match source SVG'
+        end
+        pens = placed.map { |entry| CairoGlyphSource.placement_pen_record(entry) }
+        match = CairoGlyphSource.match_spans(pens, Array(text_items), media_box)
+        assigned = Array(match[:placement_matches]).map { |row| row[:placement_index].to_i }
+        indices = Array(match[:unmatched_placements]).select do |row|
+          row.is_a?(Hash) && row.key?(:placement_index)
+        end.map { |row| row[:placement_index].to_i }.uniq.sort
+        return nil if indices.empty?
+        unless (indices & assigned).empty?
+          raise RepresentationFidelity::ContractError, 'source-only glyph selection overlaps semantic text'
+        end
+        page = opts[:page_number].to_i
+        raise RepresentationFidelity::ContractError, 'source-only glyph page is invalid' unless page > 0
+        result = render_svg(entities, svg, media_box, nil, mode, opts.merge(
+          :source_unit_id => "svg_glyph_placements:page:#{page}",
+          :source_unit_placement_indices => indices,
+          :precomputed_placed => placed, :precomputed_pens => pens,
+          :precomputed_match => match))
+        result[:source_loop_binding] = binding
+        result
       end
 
       def self.verify_transformed_delivery!(result)
@@ -350,6 +392,42 @@ module BlueCollarSystems
         result[:physical_geometry_verified] = true
         result[:physical_style_verified] = true
         result[:transform_verified] = true
+        result
+      end
+
+      def self.finalize_source_unit_evidence!(result, page_rotation = 0.0)
+        verify_transformed_delivery!(result)
+        unit = result[:source_unit_id].to_s
+        unless unit =~ /\Asvg_glyph_placements:page:[1-9]\d*\z/ &&
+               result[:source_span_id].nil? && result[:page_transform_verified] == true &&
+               Array(result[:source_page_transformation]).length == 16
+          raise RepresentationFidelity::ContractError, 'source-only vector page binding is incomplete'
+        end
+        group = result[:group]
+        expected_box = RepresentationFidelity.transformed_extent_bounds(
+          result[:source_extent], result[:source_page_transformation], 0.0, 0.0)
+        actual = bounds_hash(group)
+        values = [:min_x,:min_y,:min_z,:max_x,:max_y,:max_z].map { |key| actual[key] }
+        unless values.zip(expected_box[:min]+expected_box[:max]).all? do |a,b|
+          (a.to_f-b.to_f).abs <= SIZE_TOLERANCE_INCHES
+        end
+          raise RepresentationFidelity::ContractError, 'source-only vector bounds differ from visible source ink'
+        end
+        expected = RepresentationFidelity.source_unit_expected_evidence(unit,result[:mode],
+          :source_identity => { :svg_sha256 => result[:source_svg_sha256],
+            :glyph_ids => result[:glyph_ids], :placement_indices => result[:placement_indices],
+            :source_extent => result[:source_extent] },
+          :entities => [group], :source_anchor => expected_box[:min],
+          :source_rotation_radians => page_rotation.to_f * Math::PI / 180.0,
+          :expected_width => expected_box[:max][0]-expected_box[:min][0],
+          :expected_height => expected_box[:max][1]-expected_box[:min][1],
+          :expected_depth => 0.0, :expected_bounds => expected_box,
+          :expected_transformation => RepresentationFidelity.entity_transformation_payload(group))
+        RepresentationFidelity.attach_source_unit_evidence!([group],expected,result[:renderer].to_s)
+        result[:expected_evidence] = expected
+        [:content_verified,:physical_geometry_verified,:physical_style_verified,:transform_verified].each do |key|
+          result[key] = true
+        end
         result
       end
 
@@ -603,7 +681,11 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError,
                 "#{source_id}: item vector page inventory evidence is missing"
         end
-        binding = RepresentationFidelity.proof_binding(source_id)
+        unit_match = /\Asvg_glyph_placements:page:([1-9]\d*)\z/.match(source_id.to_s)
+        binding = unit_match ?
+          { :importer_id => RepresentationFidelity::IMPORTER_ID,
+            :page_number => unit_match[1].to_i } :
+          RepresentationFidelity.proof_binding(source_id)
         importer_id = context[:importer_id].to_s.strip
         page = context[:page_number]
         unless importer_id == binding[:importer_id] &&
@@ -961,6 +1043,7 @@ module BlueCollarSystems
         cache_hits = 0
         fill = new_fill_summary
         Array(entries).each_with_index do |entry, entry_index|
+          entry = page_clipped_component_entry(entry)
           key = glyph_definition_cache_key(entry)
           cached = component_cache[key]
           definition = cached.is_a?(Hash) ? cached[:definition] : nil
@@ -1046,6 +1129,20 @@ module BlueCollarSystems
           :glyph_component_cache_hits => cache_hits,
           :glyph_component_instances => instance_count
         }.merge(fill)
+      end
+
+      def self.page_clipped_component_entry(entry)
+        return entry unless entry[:page_clip_applied] == true
+        points = Array(entry[:loops]).flatten(1)
+        raise RepresentationFidelity::ContractError, 'clipped glyph has no visible points' if points.empty?
+        origin = [:x, :y, :z].map { |axis| points.map { |point| point.send(axis).to_f }.min }
+        loops = entry[:loops].map do |contour|
+          contour.map do |point|
+            Geom::Point3d.new(point.x-origin[0], point.y-origin[1], point.z-origin[2])
+          end
+        end
+        entry.merge(:cache_definition_loops => loops,
+          :cache_instance_transformation => [1,0,0,0,0,1,0,0,0,0,1,0,origin[0],origin[1],origin[2],1])
       end
 
       def self.glyph_definition_cache_key(entry)
@@ -1523,8 +1620,9 @@ module BlueCollarSystems
       def self.assign_identity!(entity, source_id, mode, glyph_id, indices)
         return true unless entity.respond_to?(:set_attribute)
         dictionary = 'BC_PDF_Importer'
-        entity.set_attribute(dictionary, 'source_span_id', source_id)
-        entity.set_attribute(dictionary, 'source_kind', 'text_span')
+        source_unit = source_id.to_s =~ /\Asvg_glyph_placements:page:[1-9]\d*\z/
+        entity.set_attribute(dictionary, source_unit ? 'source_unit_id' : 'source_span_id', source_id)
+        entity.set_attribute(dictionary, 'source_kind', source_unit ? 'svg_glyph_placement' : 'text_span')
         entity.set_attribute(dictionary, 'representation', mode.to_s)
         entity.set_attribute(
           dictionary, 'renderer',

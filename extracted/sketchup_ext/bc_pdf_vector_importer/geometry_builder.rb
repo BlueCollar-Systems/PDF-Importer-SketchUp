@@ -182,6 +182,33 @@ module BlueCollarSystems
             dash_layer = classify_dash(path.dash_pattern)
           end
 
+          # A paint occurrence owns its fill independently of its true stroke.
+          # Equal shapes and pale colours may occur on opposite sides of text
+          # in the source stream, so never merge their native fill identities.
+          # Keep the complete editable source fill beneath a separate visible
+          # composition; only the latter may be partitioned around later ink.
+          fill_dest = nil
+          if should_fill
+            order = path.respond_to?(:source_paint_order) ? path.source_paint_order : nil
+            fill_key = order ? [dest.object_id, order] : dest.object_id
+            unless fill_targets[fill_key]
+              fill_group = dest.add_group
+              fill_group.name = 'PDF Fill'
+              original = fill_group.entities.add_group
+              original.name = 'PDF source fill'
+              if original.respond_to?(:set_attribute)
+                original.set_attribute('BC_PDF_Importer', 'source_fill_original', true)
+                original.set_attribute('BC_PDF_Importer', 'source_fill_rgb', path.fill_color)
+                original.set_attribute('BC_PDF_Importer', 'source_fill_paint_order', order) if order
+              end
+              fill_targets[fill_key] = original.entities
+              @fill_only_groups << { :group => fill_group, :fill_rgb => path.fill_color,
+                :paint_order => order, :preserve_source => true,
+                :opacity => (path.respond_to?(:source_fill_opacity) ? path.source_fill_opacity : nil) }
+            end
+            fill_dest = fill_targets[fill_key]
+          end
+
           if should_fill && path.respond_to?(:clip_fill_rule) && path.clip_fill_rule
             loops = path.subpaths.map do |subpath|
               subpath_to_points(subpath).map do |pt|
@@ -189,34 +216,12 @@ module BlueCollarSystems
                 pdf_to_su(sx, sy, page_origin_x, page_origin_y)
               end
             end
-            clip_group = draw_compound_clip_fill(
-              staged_geometry_target(dest, path_idx), loops,
+            draw_compound_clip_fill(
+              staged_geometry_target(fill_dest, path_idx), loops,
               path.clip_fill_rule, path_layer, path.fill_color
             )
-             @fill_only_groups << { :group => clip_group, :fill_rgb => path.fill_color,
-               :paint_order => path.source_paint_order,
-               :opacity => (path.respond_to?(:source_fill_opacity) ? path.source_fill_opacity : nil)
-             } if path.respond_to?(:source_paint_order)
-            next
-          end
-
-          # Fill-only faces own their boundaries separately from true strokes.
-          # This permits hidden fill edges without hiding neighboring linework,
-          # while retaining the existing batching for tiny host-tolerance fills.
-          if should_fill && !should_stroke
-            white = Array(path.fill_color).length >= 3 &&
-              path.fill_color.first(3).all? { |v| (v.to_f - 1.0).abs < 1.0e-9 }
-            order = path.respond_to?(:source_paint_order) ? path.source_paint_order : nil
-            fill_key = white && order ? [dest.object_id, order] : dest.object_id
-            unless fill_targets[fill_key]
-              fill_targets[fill_key] = dest.add_group
-               @fill_only_groups << { :group => fill_targets[fill_key],
-                 :fill_rgb => path.fill_color, :paint_order => order,
-                 :opacity => (path.respond_to?(:source_fill_opacity) ? path.source_fill_opacity : nil) }
-            end
-            fill_group = fill_targets[fill_key]
-            fill_group.name = 'PDF Fill'
-            dest = fill_group.entities
+            should_fill = false
+            next unless should_stroke
           end
 
           # Keep the source style local to this path, including retained batches.
@@ -252,7 +257,7 @@ module BlueCollarSystems
                 style_stroke_edge(edge, stroke_style)
                 @edge_count += 1
               end
-              draw_face(draw_dest, su_points, path_layer, path.fill_color, false) if should_fill && subpath.closed && su_points.length >= 3
+              draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true) if should_fill && subpath.closed && su_points.length >= 3
               next
             end
 
@@ -270,7 +275,7 @@ module BlueCollarSystems
             else
               draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, stroke_style) if should_stroke
               if should_fill && subpath.closed && su_points.length >= 3
-                draw_face(draw_dest, su_points, path_layer, path.fill_color, !should_stroke)
+                draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true)
               end
             end
           end
@@ -429,6 +434,7 @@ module BlueCollarSystems
             @fill_only_groups.delete(record)
             next
           end
+          prune_empty_groups_below!(group, [], 0)
           next unless staging_group_child_count(group) == 0
           erase_empty_staging_group!(group)
           @fill_only_groups.delete(record)
@@ -3346,14 +3352,24 @@ module BlueCollarSystems
         g = (rgb[1].to_f * 255).round
         b = (rgb[2].to_f * 255).round
         key = "PDF_#{r}_#{g}_#{b}"
-        return @material_cache[key] if @material_cache[key]
-        mat = @model.materials[key]
-        unless mat
+        expected = [r,g,b]
+        mat = @material_cache[key] || @model.materials[key]
+        unless exact_fill_material?(mat, expected)
+          # A familiar name is not source-style proof. SketchUp allocates a
+          # unique name on collision, preserving any user's material intact.
           mat = @model.materials.add(key)
           mat.color = Sketchup::Color.new(r, g, b)
+          unless exact_fill_material?(mat, expected)
+            raise StrokeStyleFailure, 'native fill material did not retain source RGB/opacity'
+          end
         end
         @material_cache[key] = mat
         mat
+      end
+
+      def exact_fill_material?(material, expected)
+        material && material.color && stroke_material_rgb(material) == expected &&
+          material.alpha == 1.0 && material.texture.nil?
       end
 
       # Compute bounding box of a VectorPath in PDF user-space points.

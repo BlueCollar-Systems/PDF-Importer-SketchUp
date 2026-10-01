@@ -197,6 +197,8 @@ readonly SMOKE_TESTS=(
   test/import_run_control_integration_test.rb
   test/unattended_multipage_import_test.rb
   test/failed_page_outcome_test.rb
+  test/retained_page_view_fit_test.rb
+  test/opaque_mask_source_unit_test.rb
   test/qa_report_test.rb
   test/representation_fidelity_contract_test.rb
   test/batch_host_nonmodal_policy_test.rb

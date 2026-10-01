@@ -304,6 +304,9 @@ module BlueCollarSystems
             entities, placed, match, depth, opts, owned_groups, result,
             solid_cache
           )
+          Array(result[:unmatched_source_results]).each do |row|
+            row[:source_svg_sha256] = Digest::SHA256.hexdigest(svg)
+          end
         end
 
         # Item failures already clean their own partial group. Preserve verified
@@ -482,6 +485,59 @@ module BlueCollarSystems
         }
         row[:expected_evidence] = expected
         row[:content_verified] = true
+        row[:physical_geometry_verified] = true
+        row[:physical_style_verified] = row[:ink_applied] == true
+        row[:transform_verified] = true
+        row
+      end
+
+      def self.finalize_source_unit_evidence!(row, page_rotation = 0.0,
+                                              definition_cache = nil,
+                                              canonical_cache = nil)
+        unless row.is_a?(Hash) && row[:group] && row[:source_span_id].nil? &&
+               row[:source_kind] == :svg_glyph_placement &&
+               row[:page_transform_verified] == true &&
+               Array(row[:source_page_transformation]).length == 16
+          raise RepresentationFidelity::ContractError,
+                'physical source glyphs lack an independently verified page transform'
+        end
+        expected_box = RepresentationFidelity.transformed_extent_bounds(
+          row[:source_extent], row[:source_page_transformation], 0.0, row[:depth]
+        )
+        actual = bounds_hash(row[:group])
+        actual_values = [:min_x, :min_y, :min_z, :max_x, :max_y, :max_z].map do |key|
+          actual[key]
+        end
+        expected_values = expected_box[:min] + expected_box[:max]
+        unless actual_values.each_with_index.all? do |value, index|
+          close_size?(value, expected_values[index])
+        end
+          raise RepresentationFidelity::ContractError,
+                'physical source glyph bounds differ from their source outlines'
+        end
+        expected = RepresentationFidelity.source_unit_expected_evidence(
+          row[:source_unit_id], :text3d,
+          :entities => [row[:group]],
+          :source_identity => {
+            :svg_sha256 => row[:source_svg_sha256],
+            :placement_indices => row[:placement_indices],
+            :glyph_ids => row[:glyph_ids],
+            :source_extent => row[:source_extent]
+          },
+          :expected_width => expected_box[:max][0] - expected_box[:min][0],
+          :expected_height => expected_box[:max][1] - expected_box[:min][1],
+          :expected_depth => expected_box[:max][2] - expected_box[:min][2],
+          :expected_bounds => expected_box,
+          :source_rotation_radians => page_rotation.to_f * Math::PI / 180.0,
+          :expected_transformation => row[:source_page_transformation],
+          :physical_definition_tree_cache => definition_cache,
+          :physical_canonical_json_cache => canonical_cache,
+          :physical_root_style_cache_keys => row.delete(:component_definition_style_cache_keys)
+        )
+        RepresentationFidelity.attach_source_unit_evidence!(
+          [row[:group]], expected, 'svg_source_3d_text'
+        )
+        row[:expected_evidence] = expected
         row[:physical_geometry_verified] = true
         row[:physical_style_verified] = row[:ink_applied] == true
         row[:transform_verified] = true

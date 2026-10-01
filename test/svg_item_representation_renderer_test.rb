@@ -280,6 +280,10 @@ class ItemVectorGroup
     @attributes[[dictionary, key]] = value
   end
 
+  def get_attribute(dictionary, key, default = nil)
+    @attributes.fetch([dictionary,key],default)
+  end
+
   def bounds
     points = []
     @entities.to_a.each do |entity|
@@ -355,6 +359,120 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     assert_equal 'geometry', result[:group].attributes[
       ['BC_PDF_Importer', 'representation']
     ]
+  end
+
+  def mixed_page_svg
+    square_svg.sub('</g></svg>', '<use href="#glyph-0-0" x="95" y="20"/></g></svg>')
+  end
+
+  def test_unique_clipped_source_marks_keep_requested_vector_mode_and_physical_identity
+    [:glyphs,:geometry].each do |mode|
+      entities = ItemVectorEntities.new
+      model = ItemVectorModel.new
+      opts = { :scale=>1.0, :svg_page_box=>MEDIA_BOX,
+        :source_context=>source_context, :page_number=>1,
+        :model=>model, :glyph_component_cache=>{} }
+      semantic = RENDERER.render_svg(entities,mixed_page_svg,MEDIA_BOX,item,mode,opts)
+      physical = RENDERER.render_unmatched_svg(entities,mixed_page_svg,MEDIA_BOX,[item],mode,opts)
+      assert semantic[:ok]
+      assert physical[:ok]
+      assert_equal [0], semantic[:placement_indices]
+      assert_equal [1], physical[:placement_indices]
+      assert_equal mode, physical[:mode]
+      assert_nil physical[:source_span_id]
+      assert_nil physical[:source_item]
+      assert_equal 'svg_glyph_placements:page:1', physical[:source_unit_id]
+      assert_equal Digest::SHA256.hexdigest(mixed_page_svg), physical[:source_svg_sha256]
+      assert_equal 2, entities.to_a.length
+      assert_nil physical[:group].attributes[['BC_PDF_Importer','source_span_id']]
+      assert_equal 'svg_glyph_placement', physical[:group].attributes[['BC_PDF_Importer','source_kind']]
+      box = physical[:group].bounds
+      assert_in_delta 95.0/72.0,box.min.x,1.0e-9
+      assert_in_delta 100.0/72.0,box.max.x,1.0e-9
+      assert_in_delta 0.0,box.max.z,1.0e-9
+      assert_nil physical[:transition_proof]
+      if mode == :glyphs
+        assert_equal 2, model.definitions.items.length, 'clipped contours cannot reuse full glyph definition'
+        assert_equal 'ComponentInstance', physical[:group].entities.to_a.first.typename
+      else
+        assert physical[:group].entities.to_a.all? { |entity| ['Edge','Face'].include?(entity.typename) }
+      end
+    end
+  end
+
+  def test_unmatched_source_delivery_does_not_duplicate_fully_assigned_page
+    entities = ItemVectorEntities.new
+    result = RENDERER.render_unmatched_svg(entities,square_svg,MEDIA_BOX,[item],:glyphs,
+      :source_context=>source_context,:page_number=>1)
+    assert_nil result
+    assert_empty entities.to_a
+  end
+
+  def test_source_only_vector_finalization_persists_exact_clipped_claim_without_text_digest
+    [:glyphs,:geometry].each do |mode|
+      result = RENDERER.render_unmatched_svg(ItemVectorEntities.new,mixed_page_svg,MEDIA_BOX,[item],mode,
+        :source_context=>source_context,:page_number=>1)
+      result[:source_page_transformation] = [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
+      result[:page_transform_verified] = true
+      RENDERER.finalize_source_unit_evidence!(result)
+      expected = result[:expected_evidence]
+      assert_equal mode,expected[:representation]
+      assert_equal [1],expected[:source_identity][:placement_indices]
+      assert_equal Digest::SHA256.hexdigest(mixed_page_svg),expected[:source_identity][:svg_sha256]
+      assert_in_delta 5.0/72.0,expected[:expected_width],1.0e-8
+      assert_equal true,result[:group].get_attribute('BC_PDF_Importer','source_claim_root')
+      assert_nil result[:group].get_attribute('BC_PDF_Importer','source_span_id')
+      refute expected.key?(:source_text_sha256)
+      require 'bc_pdf_vector_importer/main'
+      stats = { :pages=>1, :selected_pages=>[1], :text_source_span_ids=>[], :text_attempts=>[] }
+      IMP.record_source_unit_vector_delivery!(stats,1,result)
+      report = IMP::QAReport.validate_representation_fidelity(stats,:text_mode=>mode,:pages=>[1])
+      assert_equal true,report[:ready],report[:errors].inspect
+      serialized = JSON.parse(JSON.generate(stats))
+      report = IMP::QAReport.validate_representation_fidelity(serialized,:text_mode=>mode,:pages=>[1])
+      assert_equal true,report[:ready],report[:errors].inspect
+      [:mode,:type,:missing_certificate,:placement,:physical,:different_certificate].each do |fault|
+        corrupted = Marshal.load(Marshal.dump(stats))
+        delivery = corrupted[:source_glyph_physical_deliveries][0]
+        provenance = corrupted[:source_provenance_objects][0]
+        case fault
+        when :mode
+          delivery[:delivered_mode] = mode == :glyphs ? :geometry : :glyphs
+        when :type
+          provenance[:created_entity_type] = 'source_glyph_3d_text'
+        when :missing_certificate
+          delivery.delete(:expected_evidence)
+        when :placement
+          delivery[:placement_indices] = ['1junk']
+        when :physical
+          delivery[:physical_geometry_verified] = false
+        when :different_certificate
+          changed = Marshal.load(Marshal.dump(delivery[:expected_evidence]))
+          changed[:physical_geometry_sha256] = 'f'*64
+          changed[:evidence_sha256] = FIDELITY.canonical_sha256(changed.reject { |key,_| key == :evidence_sha256 })
+          delivery[:expected_evidence] = changed
+        end
+        rejected = IMP::QAReport.validate_representation_fidelity(corrupted,:text_mode=>mode,:pages=>[1])
+        assert_equal false,rejected[:ready],"#{mode} #{fault}"
+      end
+    end
+  end
+
+  def test_unmatched_source_delivery_rejects_ambiguous_claims_and_incomplete_inventory
+    entities = ItemVectorEntities.new
+    conflict = { :placement_matches=>[{:placement_index=>1}],
+      :unmatched_placements=>[{:placement_index=>1}] }
+    assert_raises(FIDELITY::ContractError) do
+      IMP::CairoGlyphSource.stub(:match_spans,conflict) do
+        RENDERER.render_unmatched_svg(entities,mixed_page_svg,MEDIA_BOX,[item],:geometry,
+          :source_context=>source_context,:page_number=>1)
+      end
+    end
+    assert_raises(FIDELITY::ContractError) do
+      RENDERER.render_unmatched_svg(entities,mixed_page_svg,MEDIA_BOX,[item],:glyphs,
+        :source_context=>source_context.merge(:render_status=>:failed),:page_number=>1)
+    end
+    assert_empty entities.to_a
   end
 
   def test_geometry_constructs_close_letters_large_without_welding_source_vertices
