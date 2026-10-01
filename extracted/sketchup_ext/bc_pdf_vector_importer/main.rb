@@ -3203,6 +3203,7 @@ module BlueCollarSystems
       rescue StandardError
         # keep bbox-height fit
       end
+      height = height * 1.10
       eye_z = [1000.0, height * 10.0].max
       eye = Geom::Point3d.new(center.x, center.y, center.z + eye_z)
       target = center

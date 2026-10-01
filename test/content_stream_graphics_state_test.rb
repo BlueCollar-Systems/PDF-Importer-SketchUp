@@ -93,4 +93,43 @@ class ContentStreamGraphicsStateTest < Minitest::Test
 
     assert_equal first, second, 'a second parse must not inherit the first'
   end
+
+  def test_font_state_persists_across_stream_boundary
+    streams = ["/F2 16.5 Tf\n", "BT 1 0 0 1 0 0 Tm (Item) Tj ET\n"]
+    items = TPX.new(streams, {}, { :strict_text_fidelity => true }, {}).parse
+    assert_equal 1, items.size
+    assert_equal "/F2", items.first.font_name
+    assert_in_delta 16.5, items.first.font_size, 0.001
+  end
+
+  def test_q_and_Q_restore_font_state_across_streams
+    streams = ["/F1 18 Tf\nq\n/F2 10 Tf\n", "Q\nBT 1 0 0 1 0 0 Tm (Item) Tj ET\n"]
+    items = TPX.new(streams, {}, { :strict_text_fidelity => true }, {}).parse
+    assert_equal 1, items.size
+    assert_equal "/F1", items.first.font_name
+    assert_in_delta 18.0, items.first.font_size, 0.001
+  end
+
+  def test_text_object_spans_stream_boundary
+    streams = ["/F3 14 Tf\nBT\n1 0 0 1 10 20 Tm\n", "(CrossStream) Tj\nET\n"]
+    items = TPX.new(streams, {}, { :strict_text_fidelity => true }, {}).parse
+    assert_equal 1, items.size
+    assert_equal "CrossStream", items.first.text
+    assert_equal "/F3", items.first.font_name
+    assert_in_delta 10.0, items.first.x, 0.001
+    assert_in_delta 20.0, items.first.y, 0.001
+  end
+
+  def test_steel_dimension_fractions_and_diameters_are_readable
+    parser = TPX.new([], {}, {})
+    [
+      "13/16\"", "1/2\"", "1-1/2\"", "3/4\"", "5/8\"", "7/8\"",
+      "13/16\"Ø", "Ø13/16\"", "13/16\" DIA", "(4) 13/16\"Ø", "4X 13/16\"",
+      "10'-6\"", "10'-6 1/2\"", "2 @ 3\" = 6\"", "1/4\" THK", "45°",
+      "12.5mm", "6\"", "1.5\"", "1/4", "3/8", "1-1/2", "1/2\" PL",
+      "±1/16\"", "+0.005\"", "-1/8\""
+    ].each do |dim|
+      assert parser.send(:readable_text?, dim), "#{dim} must be recognized as readable"
+    end
+  end
 end
