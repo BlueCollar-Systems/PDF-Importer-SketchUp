@@ -99,6 +99,11 @@ module BlueCollarSystems
         # no unmatched `Q`.
         @ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
         @gs_stack = []
+        @tm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        @tlm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        @font_size = 12.0
+        @font_name = ""
+        @in_text = false
 
         @streams.each_with_index do |stream, stream_index|
           next unless stream && !stream.empty?
@@ -197,11 +202,11 @@ module BlueCollarSystems
         # belong to the page, not to one stream (see #parse).
         @mc_layer_stack = []
         @current_ocg_layer = nil
-        tm = [1, 0, 0, 1, 0, 0]   # Text matrix
-        tlm = [1, 0, 0, 1, 0, 0]  # Text line matrix
-        font_size = 12.0
-        font_name = ""
-        in_text = false
+        tm = @tm ? @tm.dup : [1, 0, 0, 1, 0, 0]   # Text matrix
+        tlm = @tlm ? @tlm.dup : [1, 0, 0, 1, 0, 0]  # Text line matrix
+        font_size = @font_size || 12.0
+        font_name = @font_name || ""
+        in_text = @in_text || false
 
         tokens = tokenize(stream)
         operand_stack = []
@@ -217,10 +222,14 @@ module BlueCollarSystems
 
             case op
             when 'q'
-              save_graphics_state
+              save_graphics_state(font_name, font_size)
 
             when 'Q'
-              restore_graphics_state
+              restored = restore_graphics_state
+              if restored.is_a?(Hash)
+                font_name = restored[:font_name] || font_name
+                font_size = restored[:font_size] || font_size
+              end
 
             when 'cm'
               concat_matrix(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]) if nums.length >= 6
@@ -237,6 +246,8 @@ module BlueCollarSystems
               # Set font and size
               font_size = nums.last.to_f if nums.last
               font_name = names.last.to_s if names.last
+              @font_size = font_size
+              @font_name = font_name
 
             when 'Tm'
               # Set text matrix directly
@@ -349,6 +360,12 @@ module BlueCollarSystems
             operand_stack << token
           end
         end
+
+        @tm = tm
+        @tlm = tlm
+        @font_size = font_size
+        @font_name = font_name
+        @in_text = in_text
       end
 
       def emit_text(text, tm, font_size, font_name,
@@ -540,6 +557,8 @@ module BlueCollarSystems
         t
       end
 
+      DIMENSION_PATTERN = /\A[-+±]?\s*[Øø⌀\u2300\u00D8\u00F8\u2205]?\s*(?:\(?\d+\)?\s*[-xX@*]?\s*)?[Øø⌀\u2300\u00D8\u00F8\u2205]?\s*(?:\d+['′](?:[-_\s]*\d+(?:[-_\s]\d+\/\d+|\/\d+)?(?:\.\d+)?["″']?)?|\d+(?:[-_\s]\d+\/\d+|\/\d+)(?:["″']|mm|cm|in|ft|ga|GA)?|\d+(?:\.\d+)?(?:["″']|mm|cm|in|ft|ga|GA|deg|°)?)\s*[Øø⌀\u2300\u00D8\u00F8\u2205]?(?:\s*[-xX=]\s*[-+±]?\s*[Øø⌀\u2300\u00D8\u00F8\u2205]?(?:\d+['′](?:[-_\s]*\d+(?:[-_\s]\d+\/\d+|\/\d+)?(?:\.\d+)?["″']?)?|\d+(?:[-_\s]\d+\/\d+|\/\d+)(?:["″']|mm|cm|in|ft)?|\d+(?:\.\d+)?(?:["″']|mm|cm|in|ft|deg|°)?))*(?:\s*(?:DIA|dia|THK|thk|PL|pl|TYP|typ|MAX|max|MIN|min|R|r|REF|ref|CLR|clr|O\.?C\.?)\.?)?\z/i
+
       def readable_text?(text)
         raw = text.to_s
         return false if raw.empty?
@@ -563,10 +582,10 @@ module BlueCollarSystems
 
         # Normal words / part marks / callouts.
         return true if letter_ratio >= 0.15
-        return true if compact =~ /\A[A-Za-z0-9][A-Za-z0-9_\-:\/\.]{0,31}\z/
+        return true if compact =~ /\A[A-Za-z0-9#@Øø⌀°±\(\)][A-Za-z0-9_\-:\/\.\#\(\)\+\@\*"\'″′°±Øø⌀&]{0,40}\z/
 
         # Dimension-like numeric text.
-        return true if compact =~ /\A\d+(?:\/\d+|(?:\.\d+)?(?:["']|mm|cm|in|ft)?)\z/i
+        return true if t =~ DIMENSION_PATTERN
         return true if compact =~ /\A\d+[-xX]\d+(?:\/\d+)?\z/
 
         false
@@ -576,9 +595,10 @@ module BlueCollarSystems
         return items if items.empty?
 
         meaningful = items.count do |it|
-          txt = it.text.to_s.gsub(/\s+/, '')
+          raw_it = it.text.to_s
+          txt = raw_it.gsub(/\s+/, '')
           txt =~ /[A-Za-z]/ ||
-            txt =~ /\A\d+(?:\/\d+|(?:\.\d+)?(?:["']|mm|cm|in|ft)?)\z/i ||
+            raw_it =~ DIMENSION_PATTERN ||
             txt =~ /\A\d+[-xX]\d+(?:\/\d+)?\z/
         end
 
@@ -1066,13 +1086,28 @@ module BlueCollarSystems
         items
       end
 
-      def save_graphics_state
-        @gs_stack << @ctm.dup
+      def save_graphics_state(font_name = @font_name, font_size = @font_size)
+        @font_name = font_name
+        @font_size = font_size
+        @gs_stack << {
+          :ctm => @ctm.dup,
+          :font_name => font_name,
+          :font_size => font_size
+        }
       end
 
       def restore_graphics_state
         saved = @gs_stack.pop
-        @ctm = saved if saved
+        return nil unless saved
+        if saved.is_a?(Hash)
+          @ctm = saved[:ctm] if saved[:ctm]
+          @font_name = saved[:font_name] if saved[:font_name]
+          @font_size = saved[:font_size] if saved[:font_size]
+          saved
+        else
+          @ctm = saved
+          nil
+        end
       end
 
       def concat_matrix(a, b, c, d, e, f)
