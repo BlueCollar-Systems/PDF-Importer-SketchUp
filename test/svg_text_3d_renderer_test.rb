@@ -740,6 +740,55 @@ class SvgText3DRendererTest < Minitest::Test
     assert_equal 2, instances.length
   end
 
+  def test_page_clipped_glyph_has_its_own_physical_solid_and_page_visible_bounds
+    model = Svg3DModel.new(:with_definitions => true)
+    entities = Svg3DEntities.new(:model => model)
+    svg = square_svg_with_unjoined_source_glyph.sub('x="70"', 'x="95"')
+
+    result = RENDERER.render_svg(
+      entities, svg, MEDIA_BOX, [], :depth => 0.05, :page_number => 1
+    )
+
+    assert result[:ok], result[:failures].inspect
+    assert_equal 2, result[:solid_cache][:definition_builds]
+    assert_equal 0, result[:solid_cache][:cache_hits]
+    delivered = result[:unmatched_source_results][0]
+    assert_equal [0, 1], delivered[:placement_indices]
+    assert delivered[:depth_verified]
+    instances = delivered[:group].entities.to_a.select do |entity|
+      entity.typename == 'ComponentInstance'
+    end.sort_by { |entity| entity.bounds.min.x }
+    assert_equal 2, instances.length
+    refute_same instances[0].definition, instances[1].definition
+    assert_in_delta 10.0 / 72.0,
+      instances[0].bounds.max.x - instances[0].bounds.min.x, 1.0e-9
+    assert_in_delta 5.0 / 72.0,
+      instances[1].bounds.max.x - instances[1].bounds.min.x, 1.0e-9
+    assert_in_delta 95.0 / 72.0, instances[1].bounds.min.x, 1.0e-9
+    assert_in_delta 100.0 / 72.0, instances[1].bounds.max.x, 1.0e-9
+    assert_in_delta 0.05, instances[1].bounds.max.z, 1.0e-9
+  end
+
+  def test_boundary_contact_retains_positive_clip_evidence_without_a_false_solid
+    entities = Svg3DEntities.new
+    svg = square_svg.sub('x="10"', 'x="100"')
+
+    result = RENDERER.render_svg(
+      entities, svg, MEDIA_BOX, [], :depth => 0.05, :page_number => 1
+    )
+
+    assert result[:ok], result[:failures].inspect
+    assert_empty entities.groups
+    assert_empty result[:unmatched_source_results]
+    assert_empty result[:transition_proofs]
+    evidence = result[:source_loop_binding][:page_clip_evidence]
+    assert_equal 1, evidence.length
+    assert_equal 0, evidence[0][:placement_index]
+    assert evidence[0][:visible_ink_empty]
+    refute_empty evidence[0][:source_contours_pdf]
+    assert_empty evidence[0][:visible_contours_pdf]
+  end
+
   def test_affine_placements_reuse_one_exact_solid_without_changing_world_bounds
     model = Svg3DModel.new(:with_definitions => true)
     entities = Svg3DEntities.new(:model => model)
@@ -1528,6 +1577,88 @@ class SvgText3DRendererTest < Minitest::Test
       source[:group].attributes[['BC_PDF_Importer', 'source_kind']]
     assert_empty result[:transition_proofs]
     assert_empty result[:failures]
+  end
+
+  def test_full_page_preserves_clipped_unmatched_ink_once_beside_semantic_text
+    entities = Svg3DEntities.new
+    svg = square_svg_with_unjoined_source_glyph.sub('x="70"', 'x="95"')
+    result = RENDERER.render_svg(
+      entities, svg, MEDIA_BOX, [span], :depth => 0.05, :page_number => 1,
+      :preserve_unmatched_source_placements => true
+    )
+
+    assert result[:ok], result[:failures].inspect
+    assert_equal 1, result[:span_results].length
+    assert_equal 1, result[:unmatched_source_results].length
+    semantic = result[:span_results][0]
+    physical = result[:unmatched_source_results][0]
+    assert_equal [0], semantic[:placement_indices]
+    assert_equal [1], physical[:placement_indices]
+    assert_equal 2, entities.groups.length
+    assert physical[:identity_verified]
+    assert physical[:depth_verified]
+    assert_in_delta 95.0 / 72.0, physical[:bounds][:min_x], 1.0e-9
+    assert_in_delta 100.0 / 72.0, physical[:bounds][:max_x], 1.0e-9
+    assert_equal 'text_span:1:0', semantic[:source_span_id]
+    assert_nil physical[:source_span_id]
+    assert_empty result[:transition_proofs]
+  end
+
+  def physical_source_row
+    result = RENDERER.render_svg(Svg3DEntities.new,square_svg,MEDIA_BOX,[],
+      :depth=>0.05,:page_number=>1)
+    assert result[:ok],result[:failures].inspect
+    row = result[:unmatched_source_results][0]
+    row[:source_page_transformation] = [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
+    row[:page_transform_verified] = true
+    row
+  end
+
+  def test_physical_source_unit_producer_persists_exact_evidence_without_semantic_identity
+    row = physical_source_row
+    RENDERER.finalize_source_unit_evidence!(row)
+    expected = row[:expected_evidence]
+    assert_equal 'bcs.source_unit_expected/1.0', expected[:schema]
+    assert_equal 'svg_glyph_placements:page:1',expected[:source_unit_id]
+    assert_equal Digest::SHA256.hexdigest(square_svg),expected[:source_identity][:svg_sha256]
+    assert_equal [0],expected[:source_identity][:placement_indices]
+    refute expected.key?(:source_span_id)
+    refute expected.key?(:source_text_sha256)
+    assert_equal true,row[:group].get_attribute('BC_PDF_Importer','source_claim_root')
+    assert_nil row[:group].get_attribute('BC_PDF_Importer','source_span_id')
+    assert_equal expected[:evidence_sha256],row[:group].get_attribute('BC_PDF_Importer','source_evidence_sha256')
+  end
+
+  def test_source_unit_producer_rejects_missing_extent_empty_roots_and_lost_attributes
+    row = physical_source_row
+    saved = row[:source_extent]
+    row[:source_extent] = nil
+    assert_raises(FIDELITY::ContractError) { RENDERER.finalize_source_unit_evidence!(row) }
+    row[:source_extent] = saved
+    RENDERER.finalize_source_unit_evidence!(row)
+    expected = row[:expected_evidence]
+    [[],[nil]].each do |entities|
+      assert_raises(FIDELITY::ContractError) do
+        FIDELITY.attach_source_unit_evidence!(entities,expected,'svg_source_3d_text')
+      end
+    end
+    row[:group].attributes.clear
+    row[:group].stub(:set_attribute,nil) do
+      assert_raises(FIDELITY::ContractError) do
+        FIDELITY.attach_source_unit_evidence!([row[:group]],expected,'svg_source_3d_text')
+      end
+    end
+  end
+
+  def test_source_unit_producer_rejects_physical_corruption_before_attachment
+    row = physical_source_row
+    RENDERER.finalize_source_unit_evidence!(row)
+    row[:group].entities.to_a.each do |face|
+      face.instance_variable_get(:@points).each { |point| point.x += 0.25 }
+    end
+    assert_raises(FIDELITY::ContractError) do
+      FIDELITY.attach_source_unit_evidence!([row[:group]],row[:expected_evidence],'svg_source_3d_text')
+    end
   end
 
   def test_subset_fallback_does_not_materialize_other_page_glyphs

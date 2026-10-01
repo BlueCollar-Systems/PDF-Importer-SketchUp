@@ -1515,6 +1515,27 @@ module BlueCollarSystems
           composite_counts.inject(0) { |sum, count| sum + count } == detected
       end
 
+      def fidelity_vector_source_unit_certificate(entry, unit_id, page, placements, mode)
+        evidence = telemetry_value(entry, :expected_evidence)
+        identity = telemetry_value(evidence, :source_identity) if evidence.is_a?(Hash)
+        return nil unless evidence.is_a?(Hash) && identity.is_a?(Hash) &&
+          unit_id == "svg_glyph_placements:page:#{page}" &&
+          telemetry_value(evidence, :schema) == 'bcs.source_unit_expected/1.0' &&
+          telemetry_value(evidence, :source_unit_id) == unit_id &&
+          RepresentationFidelity.normalize_mode(telemetry_value(evidence, :representation)) == mode &&
+          telemetry_value(identity, :placement_indices).is_a?(Array) &&
+          telemetry_value(identity, :placement_indices).sort == placements.sort &&
+          telemetry_value(evidence, :source_identity_sha256) == RepresentationFidelity.canonical_sha256(identity) &&
+          telemetry_value(evidence, :expected_depth) == 0 &&
+          [:physical_geometry_verified, :physical_style_verified, :transform_verified].all? { |key| telemetry_value(entry,key) == true }
+        digest = telemetry_value(evidence, :evidence_sha256)
+        unsigned = evidence.reject { |key,_value| key.to_s == 'evidence_sha256' }
+        return nil unless digest == RepresentationFidelity.canonical_sha256(unsigned)
+        digest
+      rescue StandardError
+        nil
+      end
+
       def validate_representation_fidelity(stats, opts = {})
         execution_scope = (stats[:execution_scope] ||
                            stats['execution_scope']).to_s
@@ -1621,13 +1642,22 @@ module BlueCollarSystems
             )
             placements = telemetry_value(entry, :source_placement_indices)
             placements = placements.is_a?(Array) ?
-              placements.map { |value| value.to_i } : []
+              placements : []
+            physical_mode = { 'source_glyph_3d_text' => :text3d,
+              'glyph_outline' => :glyphs, 'page_path_geometry' => :geometry }[entity_type]
+            vector_certificate = nil
+            vector_certificate = fidelity_vector_source_unit_certificate(
+              entry, unit_id, page, placements, physical_mode) if [:glyphs,:geometry].include?(physical_mode)
+            mode_verified = physical_mode == :text3d ?
+              telemetry_value(entry, :positive_z_depth_verified) == true :
+              physical_mode == requested_mode && !vector_certificate.nil?
             valid_physical = !unit_id.empty? && page > 0 && ids &&
-              entity_type == 'source_glyph_3d_text' &&
+              mode_verified &&
+              (selected_pages.empty? || selected_pages.include?(page)) &&
               telemetry_value(entry, :span_id).to_s.strip.empty? &&
               telemetry_value(entry, :semantic_identity_available) == false &&
               telemetry_value(entry, :source_glyph_identity_verified) == true &&
-              telemetry_value(entry, :positive_z_depth_verified) == true &&
+              placements.all? { |index| index.is_a?(Integer) && index >= 0 } &&
               !placements.empty? && placements.uniq.length == placements.length &&
               !physical_provenance.key?(unit_id)
             unless valid_physical
@@ -1643,7 +1673,8 @@ module BlueCollarSystems
             end
             physical_provenance[unit_id] = {
               :page => page, :ids => ids.sort,
-              :placements => placements.sort
+              :placements => placements.sort, :mode => physical_mode,
+              :vector_certificate => vector_certificate
             }
             next
           end
@@ -1683,17 +1714,25 @@ module BlueCollarSystems
             telemetry_value(entry, :resulting_entity_ids)
           )
           placements = telemetry_value(entry, :placement_indices)
-          placements = placements.is_a?(Array) ?
-            placements.map { |value| value.to_i }.sort : []
+          placements = placements.is_a?(Array) &&
+            placements.all? { |index| index.is_a?(Integer) && index >= 0 } ? placements.sort : []
           expected = physical_provenance[unit_id]
+          delivered_mode = RepresentationFidelity.normalize_mode(
+            telemetry_value(entry, :delivered_mode))
+          mode_verified = if delivered_mode == :text3d
+                            telemetry_value(entry, :positive_z_depth_verified) == true
+                          elsif expected && [:glyphs,:geometry].include?(delivered_mode)
+                            certificate = fidelity_vector_source_unit_certificate(
+                              entry,unit_id,telemetry_value(entry,:page).to_i,placements,delivered_mode)
+                            !certificate.nil? && certificate == expected[:vector_certificate]
+                          else
+                            false
+                          end
           valid = expected && !seen_physical_units.key?(unit_id) && ids &&
             expected[:page] == telemetry_value(entry, :page).to_i &&
             expected[:ids] == ids.sort && expected[:placements] == placements &&
-            RepresentationFidelity.normalize_mode(
-              telemetry_value(entry, :delivered_mode)
-            ) == :text3d &&
+            delivered_mode == expected[:mode] && mode_verified &&
             telemetry_value(entry, :visual_fidelity_verified) == true &&
-            telemetry_value(entry, :positive_z_depth_verified) == true &&
             telemetry_value(entry, :source_glyph_identity_verified) == true
           unless valid
             errors << 'physical_glyph_delivery_crosslink_invalid'

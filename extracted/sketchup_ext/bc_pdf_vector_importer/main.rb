@@ -717,6 +717,44 @@ module BlueCollarSystems
       true
     end
 
+    def self.record_source_unit_vector_delivery!(stats, page_num, result)
+      mode = result[:mode]
+      unless [:glyphs,:geometry].include?(mode) && result[:source_span_id].nil? &&
+             result[:source_unit_id].to_s == "svg_glyph_placements:page:#{page_num.to_i}" &&
+             [:identity_verified,:placement_verified,:size_verified,:content_verified,
+              :physical_geometry_verified,:physical_style_verified,:transform_verified].all? { |key| result[key] == true } &&
+             result[:expected_evidence].is_a?(Hash)
+        raise RepresentationFidelity::ContractError, 'source-only vector delivery evidence is incomplete'
+      end
+      ids = [result[:group_entity_id]]
+      record = {
+        :page => page_num.to_i, :source_unit_id => result[:source_unit_id],
+        :placement_indices => result[:placement_indices], :resulting_entity_ids => ids,
+        :delivered_mode => mode, :renderer => result[:renderer].to_s,
+        :visual_fidelity_verified => true, :source_glyph_identity_verified => true,
+        :physical_geometry_verified => true, :physical_style_verified => true,
+        :transform_verified => true, :expected_evidence => result[:expected_evidence]
+      }
+      stats[:source_glyph_physical_deliveries] ||= []
+      stats[:source_glyph_physical_deliveries] << record
+      stats[:source_provenance_objects] ||= []
+      stats[:source_provenance_objects] << record.merge(
+        :object_id => result[:source_unit_id], :span_id => nil,
+        :source_kind => 'svg_glyph_placement', :semantic_identity_available => false,
+        :created_entity_type => mode == :glyphs ? 'glyph_outline' : 'page_path_geometry',
+        :source_placement_indices => result[:placement_indices], :source_glyph_ids => result[:glyph_ids])
+      record_text_renderer(stats,page_num,
+        :renderer => result[:renderer], :mode => mode, :requested_mode => mode,
+        :delivered_mode => mode, :count => 1, :source_unit_count => 1,
+        :resulting_entity_ids => ids, :degraded => false,
+        :unjoined_source_glyph_placement_count => result[:placement_indices].length,
+        :visual_fidelity_verified => true)
+      stats[:text] = stats[:text].to_i + 1
+      stats[:edges] = stats[:edges].to_i + result[:edge_count].to_i
+      stats[:faces] = stats[:faces].to_i + result[:face_count].to_i
+      record
+    end
+
     def self.record_item_vector_delivery!(stats, page_num, item,
                                           requested_mode, result, history,
                                           transitions)
@@ -1909,10 +1947,15 @@ module BlueCollarSystems
         }
       end
       physical_rows.each do |row|
+        Svg3DTextRenderer.finalize_source_unit_evidence!(
+          row, page_rotation, physical_definition_tree_cache,
+          physical_canonical_json_cache
+        )
         required = [
           :identity_verified, :placement_verified, :rotation_verified,
           :size_verified, :depth_verified,
-          :physical_source_identity_verified
+          :physical_source_identity_verified, :physical_geometry_verified,
+          :physical_style_verified, :transform_verified
         ]
         unless row[:source_kind] == :svg_glyph_placement &&
                !row[:source_unit_id].to_s.empty? &&
@@ -1930,6 +1973,7 @@ module BlueCollarSystems
           :span_id => nil,
           :page => page_num.to_i,
           :source_kind => 'svg_glyph_placement',
+          :source_unit_id => row[:source_unit_id],
           :semantic_identity_available => false,
           :created_entity_type => 'source_glyph_3d_text',
           :renderer => 'svg_source_3d_text',
@@ -1937,6 +1981,7 @@ module BlueCollarSystems
           :source_placement_indices => row[:placement_indices],
           :source_glyph_identity_verified => true,
           :positive_z_depth_verified => true,
+          :expected_evidence => row[:expected_evidence],
           :width => row[:width], :height => row[:height], :depth => row[:depth]
         }
         stats[:source_glyph_physical_deliveries] ||= []
@@ -1946,6 +1991,7 @@ module BlueCollarSystems
           :placement_indices => row[:placement_indices],
           :resulting_entity_ids => [row[:group_entity_id]],
           :delivered_mode => :text3d,
+          :expected_evidence => row[:expected_evidence],
           :visual_fidelity_verified => true,
           :source_glyph_identity_verified => true,
           :positive_z_depth_verified => true
@@ -2668,6 +2714,7 @@ module BlueCollarSystems
       Array(text_items).each do |item|
         source_ids[item.source_span_id.to_s] = true if item.respond_to?(:source_span_id)
       end
+      source_units = Array(opts[:source_units])
       roots = []
       walk = lambda do |entities, parent_transform|
         entities.to_a.each do |entity|
@@ -2677,9 +2724,12 @@ module BlueCollarSystems
           mask = masks_by_id[entity.entityID]
           mask[:transformation] = transform if mask
           source_id = entity.get_attribute('BC_PDF_Importer', 'source_span_id', '').to_s
-          if source_ids.key?(source_id)
+          unit_id = entity.get_attribute('BC_PDF_Importer', 'source_unit_id', '').to_s
+          unit = unit_id.empty? ? nil : source_units.find { |row| row[:source_unit_id].to_s == unit_id }
+          if source_ids.key?(source_id) || unit
+            verify_composition_source_unit!(entity, unit) if unit
             roots << { :group => entity, :transformation => transform,
-              :parent_transform => parent_transform }
+              :parent_transform => parent_transform, :verified_source_unit => !!unit }
           elsif kind != 'Image'
             children = entity.respond_to?(:entities) ? entity.entities : entity.definition.entities
             walk.call(children, transform)
@@ -2687,6 +2737,9 @@ module BlueCollarSystems
         end
       end
       walk.call(builder.page_group.entities, Geom::Transformation.new)
+      unless roots.count { |root| root[:verified_source_unit] } == source_units.length
+        raise RepresentationFidelity::ContractError, 'source-unit physical roots are missing or duplicated before mask composition'
+      end
       highest_text_z = 0.0
       roots.each do |root|
         bounds = root[:group].bounds
@@ -2695,18 +2748,24 @@ module BlueCollarSystems
           highest_text_z = z if z > highest_text_z
         end
       end
-      inventory = { :white_paths => [], :glyphs => [] }
+      inventory = { :white_paths => [], :opaque_paths => [], :glyphs => [] }
       unless roots.all? { |root| root[:group].typename.to_s == 'Image' }
         document = opts[:svg_provider].call
         unless document && !document[:svg].to_s.empty?
           raise RepresentationFidelity::ContractError,
             'source SVG is unavailable for native paint-order verification'
         end
+        source_units.each do |unit|
+          expected = unit[:expected_evidence]
+          unless expected && expected[:source_identity][:svg_sha256] == Digest::SHA256.hexdigest(document[:svg].to_s)
+            raise RepresentationFidelity::ContractError, 'source-unit paint order uses a different source SVG'
+          end
+        end
         inventory = SvgPaintOrder.build(document[:svg], media_box,
           :scale => opts[:scale], :svg_page_box => opts[:svg_page_box], :y_offset => 0.0)
         transform = page_representation_transform(media_box, opts[:scale],
           opts[:page_rotation], opts[:y_offset])
-        [:white_paths, :glyphs].each do |key|
+        [:white_paths, :opaque_paths, :glyphs].each do |key|
           inventory[key] = Array(inventory[key]).map do |record|
             copy = record.dup
             copy[:loops] = Array(record[:loops]).map do |loop|
@@ -2722,8 +2781,35 @@ module BlueCollarSystems
       bound = SvgPaintBinding.prepare(masks, roots, inventory, :scale => opts[:scale])
       report = PlanarWhiteKnockout.compose!(bound[:masks], roots, :ink_faces => bound[:ink_faces])
       report[:source_binding] = bound[:binding]
+      report[:source_svg_sha256] = Digest::SHA256.hexdigest(document[:svg].to_s) if document
       { :report => report, :highest_text_z => highest_text_z,
         :final_page_crops => bound[:ink_faces].select { |face| face[:final_page_crop] == true } }
+    end
+
+    def self.verify_composition_source_unit!(entity, row)
+      expected = row[:expected_evidence]
+      dictionary = 'BC_PDF_Importer'
+      unless expected.is_a?(Hash) && expected[:schema] == 'bcs.source_unit_expected/1.0' &&
+             expected[:source_identity].is_a?(Hash) &&
+             expected[:source_unit_id] == row[:source_unit_id] &&
+             expected[:evidence_sha256] == RepresentationFidelity.canonical_sha256(
+               expected.reject { |key, _value| key == :evidence_sha256 }) &&
+             entity.get_attribute(dictionary, 'source_claim_root', false) == true &&
+             entity.get_attribute(dictionary, 'source_unit_id', '') == expected[:source_unit_id] &&
+             entity.get_attribute(dictionary, 'source_kind', '') == 'svg_glyph_placement' &&
+             entity.get_attribute(dictionary, 'representation', '') == expected[:representation].to_s &&
+             entity.get_attribute(dictionary, 'source_span_id', '').to_s.empty? &&
+             entity.get_attribute(dictionary, 'source_evidence_sha256', '') == expected[:evidence_sha256] &&
+             entity.get_attribute(dictionary, 'source_placement_indices', []) == expected[:source_identity][:placement_indices]
+        raise RepresentationFidelity::ContractError, 'source-unit paint order lacks certified physical identity'
+      end
+      physical = RepresentationFidelity.physical_evidence([entity])
+      unless [:physical_geometry_sha256, :physical_style_sha256, :physical_entity_count].all? do |key|
+        physical[key] == expected[key]
+      end
+        raise RepresentationFidelity::ContractError, 'source-unit geometry changed before mask composition'
+      end
+      true
     end
 
     # True when all four PDF media-space bbox corners are present (may be 0.0).
@@ -3218,7 +3304,10 @@ module BlueCollarSystems
       eye = Geom::Point3d.new(center.x, center.y, center.z + eye_z)
       target = center
       up = Geom::Vector3d.new(0, 1, 0)
-      camera = Sketchup::Camera.new(eye, target, up)
+      # Update the view's native camera in place. In SketchUp 2017 assigning a
+      # replacement camera can display correctly while save/reopen restores the
+      # previous perspective camera. Camera#set also commits the native view.
+      camera = view.camera
       camera.perspective = false
       framed = false
       begin
@@ -3229,7 +3318,8 @@ module BlueCollarSystems
       rescue StandardError
         framed = false
       end
-      view.camera = camera
+      camera.set(eye, target, up)
+      view.invalidate if view.respond_to?(:invalidate)
       begin
         view.refresh if view.respond_to?(:refresh)
       rescue StandardError
@@ -3386,6 +3476,47 @@ module BlueCollarSystems
         view.zoom_extents if view
       rescue StandardError
       end
+    end
+
+    # A resumable run builds one page at a time, including pages retained from
+    # an earlier run. Fit the complete retained set once; fitting inside each
+    # page call leaves the operator looking only at the final page. Journal
+    # offsets describe the actual stack (failed pages consume no space).
+    def self.fit_retained_pages(model, parser, controller, stats, opts)
+      return unless model && parser
+      retained = Array(stats[:retained_pages]).map { |page| page.to_i }
+      return if retained.empty?
+      journal = controller.journal
+      return unless journal.is_a?(Hash)
+      entries = Array(journal['pages']).select do |entry|
+        retained.include?(entry['page_number'].to_i)
+      end
+      return if entries.empty?
+      bounds = Geom::BoundingBox.new
+      scale = opts[:scale].to_f
+      scale = 1.0 if scale <= 0.0
+      arrangement = normalize_page_arrangement(opts[:page_arrangement])
+      gap = normalize_page_gap_ratio(opts[:page_gap_ratio])
+      entries.each do |entry|
+        raw = parser.page_data(entry['page_number'].to_i)
+        raise ArgumentError, 'Retained-page source bounds are unavailable' unless raw.is_a?(Hash)
+        media = raw[:media_box] || [0, 0, 612, 792]
+        render = raw[:crop_box]
+        render = media unless render.is_a?(Array) && render.length >= 4
+        rotation = PageTransform.normalize_rotation(raw[:rotation])
+        height = PageTransform.effective_height(render, rotation) / 72.0 * scale
+        height = 11.0 * scale if height <= 0.0
+        offset = entry['next_y_offset'].to_f - page_stack_step(height, arrangement, gap)
+        add_page_fit_bounds(bounds, media, render, scale, offset, rotation)
+      end
+      ids = entries.map { |entry| entry['group_persistent_id'].to_i }
+      groups = model.active_entities.to_a.select do |entity|
+        entity && entity.valid? && entity.respond_to?(:persistent_id) &&
+          ids.include?(entity.persistent_id.to_i)
+      end
+      apply_top_view_fit(model, bounds, groups)
+    rescue StandardError => error
+      Logger.warn('Pipeline', "Retained-page view fit failed: #{error.message}")
     end
 
     def self.import_contract_ready?(stats)
@@ -3906,6 +4037,7 @@ module BlueCollarSystems
           page_opts[:original_annotation_cache] = original_annotation_cache
           page_opts[:preserve_logger] = true
           page_opts[:defer_final_diagnostics] = true
+          page_opts[:defer_view_fit] = true
           page_opts[:large_pdf_confirmed] = true
           page_stats = run_pipeline(model, source_path, page_opts)
           {
@@ -3943,6 +4075,7 @@ module BlueCollarSystems
         stats[:resume_schema] = ImportRunControl::JOURNAL_SCHEMA
         stats[:resume_supported] = true
         stats[:log_path] = Logger.log_path
+        fit_retained_pages(model, parser, controller, stats, opts)
         report_pipeline_progress(
           opts, 'finalize_diagnostics_started',
           "text_attempts=#{Array(stats[:text_attempts]).length}"
@@ -5188,11 +5321,11 @@ module BlueCollarSystems
           representation_parent = builder.page_group.entities
           depth = opts[:text_3d_depth]
           depth = Svg3DTextRenderer::DEFAULT_DEPTH_INCHES if depth.nil?
-          # When semantic spans exist, do not also emit anonymous unmatched
-          # glyph groups — partial matcher leftovers beside delivered spans
-          # read as ghosted duplicates on shop drawings. Truly source-only
-          # symbol ink without a span identity still advances via the item
-          # fallback ladder / transition proofs, not a second anonymous paint.
+          # The whole-page inventory includes visible source glyphs outside
+          # semantic span boxes (for example a clipped edge annotation). The
+          # renderer preserves only unassigned placement IDs in its separate
+          # physically verified source-ink group, so matched text is not painted
+          # twice and text without a semantic span is not silently discarded.
           text3d_render_started = Time.now
           text3d_render_cpu_started = pipeline_cpu_ms
           text3d_result = Svg3DTextRenderer.render_svg(
@@ -5205,7 +5338,7 @@ module BlueCollarSystems
             :model => model,
             :page_number => page_num,
             :run_controller => opts[:run_controller],
-            :preserve_unmatched_source_placements => Array(text_items).empty?,
+            :preserve_unmatched_source_placements => true,
             :decorative_text_containers => page_text_opts[:decorative_text_containers],
             :source_context => svg_source_context(
               svg_document, page_num, svg_failure
@@ -5472,6 +5605,19 @@ module BlueCollarSystems
               )
             end
           end
+          source_unit = SvgItemRepresentationRenderer.render_unmatched_svg(
+            representation_parent, svg_document[:svg], media_box, text_items,
+            requested_text_mode, :scale => opts[:scale], :svg_page_box => svg_page_box,
+            :y_offset => 0.0, :page_number => page_num, :model => model,
+            :layer => text_layer, :glyph_component_cache => glyph_component_cache,
+            :source_context => svg_source_context(svg_document,page_num,svg_failure))
+          if source_unit
+            transformed = apply_and_verify_page_representation_transform(
+              source_unit[:group],media_box,opts[:scale],page_rotation,page_y_offset,source_unit)
+            raise RepresentationFidelity::ContractError, 'source-only vector transform is unverified' unless transformed
+            SvgItemRepresentationRenderer.finalize_source_unit_evidence!(source_unit,page_rotation)
+            record_source_unit_vector_delivery!(stats,page_num,source_unit)
+          end
           stats[:pipeline_performance][:item_delivery_ms] =
             ((Time.now - delivery_started) * 1000.0).round(3)
           stats[:pipeline_performance][:glyph_component_definition_count] =
@@ -5524,7 +5670,8 @@ module BlueCollarSystems
         composition = compose_page_white_masks!(builder, text_items, media_box,
           :scale => opts[:scale], :svg_page_box => svg_page_box,
           :page_rotation => page_rotation, :y_offset => page_y_offset,
-          :svg_provider => paint_svg_provider)
+          :svg_provider => paint_svg_provider,
+          :source_units => Array(stats[:source_glyph_physical_deliveries]).select { |row| row[:page] == page_num })
         if composition
           stats[:planar_white_knockout] ||= []
           stats[:planar_white_knockout] << composition[:report].merge(:page => page_num)
@@ -5795,7 +5942,7 @@ module BlueCollarSystems
 
       report_pipeline_progress(opts, 'view_fit_started')
       view_fit_started = Time.now
-      apply_top_view_fit(model, page_fit_bounds, imported_entities)
+      apply_top_view_fit(model, page_fit_bounds, imported_entities) unless opts[:defer_view_fit]
       stats[:pipeline_performance][:view_fit_ms] =
         ((Time.now - view_fit_started) * 1000.0).round(3)
       report_pipeline_progress(

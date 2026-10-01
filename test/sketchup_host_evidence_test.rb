@@ -1826,6 +1826,66 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_nil child.get_attribute('BC_PDF_Importer', 'source_span_id')
   end
 
+  def source_unit_claim_fixture(mode)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    depth = mode == :text3d ? 0.1 : 0.0
+    matrix = [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
+    bounds = FakeBounds.new(FakePoint.new(0,0,0),FakePoint.new(1,1,depth))
+    children = [FakeEntity.new(52,'Edge'),FakeEntity.new(53,'Face')]
+    children = [FakeGroup.new(51,children)] if mode == :glyphs
+    group = FakeGroup.new(50,children,:bounds=>bounds,:transformation=>matrix)
+    expected = fidelity.source_unit_expected_evidence('svg_glyph_placements:page:1',mode,
+      :source_identity=>{:svg_sha256=>'a'*64,:placement_indices=>[7],
+        :glyph_ids=>['glyph-0-0'],:source_extent=>[0.0,0.0,1.0,1.0]},
+      :entities=>[group], :expected_width=>1.0,:expected_height=>1.0,
+      :expected_depth=>depth,:expected_bounds=>{:min=>[0.0,0.0,0.0],:max=>[1.0,1.0,depth]},
+      :expected_transformation=>matrix)
+    fidelity.attach_source_unit_evidence!([group],expected,'source-unit-fixture')
+    page = FakeGroup.new(49,[group])
+    rows = SketchupHostEvidence.snapshot_entities([page],:compact=>true).first['children']
+    record = { :source_unit_id=>'svg_glyph_placements:page:1',:placement_indices=>[7],
+      :source_kind=>'svg_glyph_placement',:delivered_mode=>mode,
+      :resulting_entity_ids=>['persistent_id:1050'],:expected_evidence=>expected }
+    [record,rows]
+  end
+
+  def test_compact_source_only_claim_survives_and_verifies_each_requested_vector_mode
+    [:text3d,:glyphs,:geometry].each do |mode|
+      record,rows = source_unit_claim_fixture(mode)
+      assert_equal [1050],rows.map { |row| row['persistent_id'] }
+      assert_nil rows[0]['representation_evidence']['source_span_id']
+      assert SketchupHostEvidence.send(:verify_host_representation!,
+        :source_glyph_physical_deliveries,0,record,rows)
+    end
+  end
+
+  def test_source_only_claim_rejects_mutated_geometry_identity_and_source_extent
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    [:geometry,:identity,:extent,:semantic,:bounds].each do |fault|
+      record,rows = source_unit_claim_fixture(:geometry)
+      case fault
+      when :geometry
+        rows[0]['geometry_evidence']['sha256'] = 'f'*64
+      when :identity
+        rows[0]['representation_evidence']['source_placement_indices'] = [8]
+      when :semantic
+        rows[0]['representation_evidence']['source_span_id'] = 'text_span:1:0'
+      when :bounds
+        rows[0]['bounds']['max'][0] += 0.25
+      when :extent
+        expected = record[:expected_evidence]
+        expected[:source_identity][:source_extent] = [0,0,0,0]
+        expected[:source_identity_sha256] = fidelity.canonical_sha256(expected[:source_identity])
+        expected[:evidence_sha256] = fidelity.canonical_sha256(expected.reject { |key,_| key == :evidence_sha256 })
+        rows[0]['representation_evidence']['source_evidence_sha256'] = expected[:evidence_sha256]
+      end
+      assert_raises(SketchupHostEvidence::EvidenceError,fault.to_s) do
+        SketchupHostEvidence.send(:verify_host_representation!,
+          :source_glyph_physical_deliveries,0,record,rows)
+      end
+    end
+  end
+
   def test_snapshot_preserves_representation_identity_attributes
     entity = FakeGroup.new(20, [FakeEntity.new(21, 'Edge')],
       :attributes => {

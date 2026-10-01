@@ -174,7 +174,7 @@ class ImportRunControlIntegrationTest < Minitest::Test
               rows = @options[:pages].map do |page|
                 @options[:runner].call(page, 0, nil)[:stats]
               end
-              {:requested_pages => @options[:pages], :result_status => 'success',
+              {:requested_pages => @options[:pages], :retained_pages => @options[:pages], :result_status => 'success',
                :stats => rows.last.merge(:observed_pages => rows)}
             end
           end
@@ -183,6 +183,9 @@ class ImportRunControlIntegrationTest < Minitest::Test
         def self.confirm_large_pdf_once!(*); true; end
         def self.report_pipeline_progress(*); end
         def self.finalize_import_diagnostics!(*); end
+        def self.fit_retained_pages(_model, _parser, _controller, stats, _opts)
+          stats[:observed_final_fit_pages] = stats[:retained_pages].dup
+        end
         module BatchHostPolicy
           LARGE_PDF_BYTES = 100 * 1024 * 1024
           class NoninteractiveError < StandardError; end
@@ -204,6 +207,7 @@ class ImportRunControlIntegrationTest < Minitest::Test
       scope.module_eval("def self.run_pipeline(model, path, opts)\n" \
         "source_path = path\n" + preparation +
         "stats = {}\nrecord_source_lineage!(stats, source_path, path, salvage_note, opts)\n" \
+        "stats[:observed_defer_view_fit] = opts[:defer_view_fit]\n" \
         "stats[:next_y_offset] = 0\nstats\nend", __FILE__, __LINE__)
       result = scope.run_resumable_pipeline(nil, source,
         :pages => [1, 2], :text_mode => :text3d, :group_per_page => true,
@@ -211,6 +215,8 @@ class ImportRunControlIntegrationTest < Minitest::Test
       assert_equal [1, 2], result[:requested_pages]
       assert_equal [1, 2], result[:selected_pages]
       assert_equal 'success', result[:result_status]
+      assert_equal [1, 2], result[:observed_final_fit_pages]
+      assert result[:observed_pages].all? { |row| row[:observed_defer_view_fit] == true }
       yield result[:observed_pages], source, prepared, note
     end
   end

@@ -344,7 +344,10 @@ class GeometryBuilderStagingTest < Minitest::Test
                  'filled source boundaries must not be replaced by fitted arcs'
     assert_equal 1, result[:faces],
                  'the exact filled source boundary must create a face'
-    assert_equal 1, model.active_entities.faces_created
+    source_fill = builder.fill_only_groups.first[:group].entities.to_a.grep(Group).first
+    assert_equal 1, source_fill.entities.faces_created
+    assert model.active_entities.to_a.grep(Edge).length > 0,
+           'the true source stroke stays outside the separately owned fill'
   ensure
     if singleton
       singleton.class_eval do
@@ -379,7 +382,7 @@ class GeometryBuilderStagingTest < Minitest::Test
     definition = model.definitions.items.first
     assert_equal 2, definition.entities.faces_created,
                  'every exact source fill must remain a physical face'
-    fill_target = model.active_entities.to_a.grep(Group).first.entities
+    fill_target = model.active_entities.to_a.grep(Group).first.entities.to_a.grep(Group).first.entities
     instances = fill_target.to_a.select do |entity|
       entity.is_a?(ComponentInstance)
     end
@@ -396,6 +399,56 @@ class GeometryBuilderStagingTest < Minitest::Test
                     'the second source fill must remain one inch from the first'
     assert definition.entities.to_a.grep(Face).flat_map(&:edges).all?(&:hidden),
            'fill-only source boundaries must not gain visible strokes'
+  end
+
+  def test_equal_coloured_paint_occurrences_keep_separate_fills_and_true_strokes
+    paths = [filled_path, filled_path]
+    paths.each_with_index do |path, index|
+      path.fill_color = [1.0,1.0,252.0/255]
+      path.source_paint_order = [0,10+index]
+      path.source_fill_opacity = 1.0
+    end
+    model = Model.new
+    builder = Builder.new(model,paths,[],[0,0,612,792],
+      :group_per_page=>false,:detect_arcs=>false,:import_fills=>true)
+    result = builder.build
+    assert_equal 2, result[:faces]
+    fills = builder.fill_only_groups
+    assert_equal 2, fills.length
+    assert_equal [[0,10],[0,11]], fills.map { |record| record[:paint_order] }
+    assert_equal 2, fills.map { |record| record[:group].object_id }.uniq.length
+    originals = fills.map { |record| record[:group].entities.to_a.grep(Group).first }
+    faces = originals.flat_map { |group| group.entities.to_a.grep(Face) }
+    assert_equal 2, faces.length
+    assert faces.all? { |face| face.material.color.blue == 252 && face.edges.all?(&:hidden) }
+    strokes = model.active_entities.to_a.grep(Edge)
+    assert_equal 10, strokes.length
+    assert strokes.all? { |edge| edge.material.color.red == 0 && !edge.hidden }
+    assert fills.all? { |record| record[:preserve_source] == true }
+  end
+
+  def test_conflicting_user_fill_material_is_preserved_while_source_gets_exact_owned_style
+    [:wrong_color,:transparent,:texture].each do |conflict|
+      model = Model.new
+      user = model.materials.add('PDF_255_255_252')
+      user.color = Sketchup::Color.new(255,255,252)
+      user.color = Sketchup::Color.new(0,0,0) if conflict == :wrong_color
+      user.alpha = 0.5 if conflict == :transparent
+      user.texture = Object.new if conflict == :texture
+      before = [user.color,user.alpha,user.texture]
+      path = filled_path
+      path.fill_color = [1.0,1.0,252.0/255]
+      builder = Builder.new(model,[path],[],[0,0,612,792],
+        :group_per_page=>false,:detect_arcs=>false,:import_fills=>true)
+      assert_equal 1, builder.build[:faces]
+      original = builder.fill_only_groups.first[:group].entities.to_a.grep(Group).first
+      material = original.entities.to_a.grep(Face).first.material
+      refute_same user, material
+      assert_equal [255,255,252], [material.color.red,material.color.green,material.color.blue]
+      assert_equal 1.0, material.alpha
+      assert_nil material.texture
+      assert_equal before, [user.color,user.alpha,user.texture]
+    end
   end
 
   def test_heavy_page_keeps_micro_fill_batch_outside_exploded_staging_groups
@@ -416,7 +469,7 @@ class GeometryBuilderStagingTest < Minitest::Test
     assert_equal 500, result[:faces]
     groups = model.active_entities.to_a.grep(Group)
     assert_equal 1, groups.length
-    instances = groups.first.entities.to_a.grep(ComponentInstance)
+    instances = groups.first.entities.to_a.grep(Group).first.entities.to_a.grep(ComponentInstance)
     assert_equal 1, instances.length,
                  'one stable destination/style must retain one tiny-fill batch'
     assert_equal 0, groups.first.entities.groups_exploded,

@@ -2210,6 +2210,115 @@ module BlueCollarSystems
         end
         true
       end
+
+      # Physical SVG placements can have proven ink without a semantic span.
+      # Keep their source identity separate: inventing a span/text digest would
+      # corrupt both source accounting and persistence verification.
+      def source_unit_expected_evidence(source_unit_id, mode, values)
+        unit = source_unit_id.to_s.strip
+        normalized_mode = normalize_mode(mode)
+        identity = values.is_a?(Hash) ? values[:source_identity] : nil
+        indices = identity.is_a?(Hash) ? identity[:placement_indices] : nil
+        glyphs = identity.is_a?(Hash) ? identity[:glyph_ids] : nil
+        extent = identity.is_a?(Hash) ? identity[:source_extent] : nil
+        unless unit =~ /\Asvg_glyph_placements:page:[1-9]\d*\z/ && [:text3d, :glyphs, :geometry].include?(normalized_mode) &&
+               identity.is_a?(Hash) &&
+               identity[:svg_sha256].to_s =~ /\A[0-9a-f]{64}\z/ &&
+               indices.is_a?(Array) && !indices.empty? &&
+               indices.all? { |index| index.is_a?(Integer) && index >= 0 } &&
+               indices.uniq.length == indices.length &&
+               glyphs.is_a?(Array) && glyphs.length == indices.length &&
+               glyphs.all? { |glyph| glyph.is_a?(String) && !glyph.strip.empty? } &&
+               extent.is_a?(Array) && extent.length == 4 &&
+               extent.all? { |value| value.is_a?(Numeric) && value.to_f.finite? } &&
+               extent[2] > extent[0] && extent[3] > extent[1]
+          raise ContractError, 'source-unit identity is incomplete'
+        end
+        entities = values[:entities]
+        bounds = values[:expected_bounds]
+        matrix = values[:expected_transformation]
+        low = bounds.is_a?(Hash) ? bounds[:min] : nil
+        high = bounds.is_a?(Hash) ? bounds[:max] : nil
+        width, height, depth = [:expected_width,:expected_height,:expected_depth].map { |key| values[key] }
+        rotation = values[:source_rotation_radians] || 0.0
+        unless entities.is_a?(Array) && entities.length == 1 && !entities[0].nil? &&
+               [low,high].all? { |point| point.is_a?(Array) && point.length == 3 && point.all? { |n| n.is_a?(Numeric) && n.to_f.finite? } } &&
+               [width,height,depth].all? { |n| n.is_a?(Numeric) && n.to_f.finite? } &&
+               width > 0 && height > 0 && depth >= 0 && (normalized_mode != :text3d || depth > 0) &&
+               low.zip(high).all? { |a,b| b >= a } &&
+               [width,height,depth].each_with_index.all? { |n,i| (n-(high[i]-low[i])).abs <= 1.0e-6 } &&
+               matrix.is_a?(Array) && matrix.length == 16 && matrix.all? { |n| n.is_a?(Numeric) && n.to_f.finite? } &&
+               rotation.is_a?(Numeric) && rotation.to_f.finite? &&
+               (values[:source_anchor].nil? || values[:source_anchor] == low)
+          raise ContractError, 'source-unit physical bounds, dimensions, transform or root are incomplete'
+        end
+        physical = physical_evidence(
+          values[:entities], values[:physical_definition_tree_cache],
+          values[:physical_canonical_json_cache],
+          values[:physical_root_style_cache_keys]
+        )
+        evidence = {
+          :schema => 'bcs.source_unit_expected/1.0',
+          :source_kind => 'svg_glyph_placement',
+          :source_unit_id => unit, :representation => normalized_mode,
+          :source_identity => identity,
+          :source_identity_sha256 => canonical_sha256(identity),
+          :source_anchor => values[:source_anchor] || low,
+          :source_rotation_radians => canonical_number(rotation),
+          :expected_width => canonical_number(values[:expected_width]),
+          :expected_height => canonical_number(values[:expected_height]),
+          :expected_depth => canonical_number(values[:expected_depth]),
+          :expected_bounds => values[:expected_bounds],
+          :expected_transformation => values[:expected_transformation],
+          :physical_geometry_sha256 => physical[:physical_geometry_sha256],
+          :physical_style_sha256 => physical[:physical_style_sha256],
+          :physical_entity_count => physical[:physical_entity_count]
+        }
+        evidence[:evidence_sha256] = canonical_sha256(evidence)
+        evidence
+      end
+
+      def attach_source_unit_evidence!(entities, evidence, renderer = nil)
+        unless evidence.is_a?(Hash) &&
+               evidence[:schema] == 'bcs.source_unit_expected/1.0' &&
+               evidence[:evidence_sha256] == canonical_sha256(
+                 evidence.reject { |key, _value| key == :evidence_sha256 }
+               )
+          raise ContractError, 'source-unit expected evidence is incomplete'
+        end
+        unless entities.is_a?(Array) && entities.length == 1 && entities[0] && !renderer.to_s.strip.empty?
+          raise ContractError, 'source-unit claim requires one physical root and renderer'
+        end
+        actual = physical_evidence(entities)
+        unless [:physical_geometry_sha256,:physical_style_sha256,:physical_entity_count].all? do |key|
+          actual[key] == evidence[key]
+        end
+          raise ContractError, 'source-unit physical evidence changed before persistence'
+        end
+        entities.each do |entity|
+          raise ContractError, 'host cannot persist source-unit evidence' unless
+            entity.respond_to?(:set_attribute) && entity.respond_to?(:get_attribute)
+          dictionary = 'BC_PDF_Importer'
+          unless entity.get_attribute(dictionary,'source_span_id',nil).to_s.empty?
+            raise ContractError, 'source-only claim cannot overwrite a semantic source identity'
+          end
+          attributes = {
+            'source_claim_root'=>true, 'source_unit_id'=>evidence[:source_unit_id],
+            'source_kind'=>'svg_glyph_placement', 'representation'=>evidence[:representation].to_s,
+            'renderer'=>renderer.to_s, 'source_evidence_sha256'=>evidence[:evidence_sha256],
+            'physical_geometry_sha256'=>evidence[:physical_geometry_sha256],
+            'physical_style_sha256'=>evidence[:physical_style_sha256],
+            'source_placement_indices'=>evidence[:source_identity][:placement_indices]
+          }
+          attributes.each do |key,value|
+            entity.set_attribute(dictionary,key,value)
+            unless entity.get_attribute(dictionary,key,nil) == value
+              raise ContractError, "host did not retain source-unit #{key}"
+            end
+          end
+        end
+        true
+      end
     end
   end
 end

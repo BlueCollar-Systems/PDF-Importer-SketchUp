@@ -1,4 +1,4 @@
-# Exact planar composition for earlier, opaque white PDF masks and flat text.
+# Exact planar composition for earlier, opaque PDF fills and flat text.
 # The caller owns the import operation and must abort it if this module raises.
 # No text geometry, representation, identity, or depth is changed here.
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
@@ -25,15 +25,16 @@ module BlueCollarSystems
       def self.compose!(fill_only_groups, text_roots, opts = {})
         ink = opts.key?(:ink_faces) ? opts[:ink_faces] : collect_text_faces(text_roots)
         fail_contract('prebound physical ink faces must be an array') unless ink.is_a?(Array)
-        result = { :white_groups => 0, :composed_groups => 0,
+        result = { :white_groups => 0, :opaque_groups => 0, :composed_groups => 0,
                    :ink_faces => ink.length, :removed_area => 0.0,
                    :skipped_unproven_order => 0, :skipped_nonwhite => 0 }
         Array(fill_only_groups).each do |record|
-          unless opaque_white?(record)
+          unless opaque_fill?(record)
             result[:skipped_nonwhite] += 1
             next
           end
-          result[:white_groups] += 1
+          result[:opaque_groups] += 1
+          result[:white_groups] += 1 if opaque_white?(record)
           group = record[:group]
           transform = record[:transformation] || group.transformation
           white = snapshots(group, transform, false)
@@ -50,7 +51,8 @@ module BlueCollarSystems
           candidates = overlaps.select { |face| earlier_mask?(record, face, opts) }
           result[:skipped_unproven_order] += overlaps.length - candidates.length
           next if candidates.empty?
-          result[:removed_area] += compose_group!(group, transform, white, candidates, opts)
+          result[:removed_area] += compose_group!(group, transform, white, candidates,
+            opts.merge(:preserve_source => record[:preserve_source] == true))
           group.erase! if child_entities(group).to_a.empty?
           result[:composed_groups] += 1
         end
@@ -89,12 +91,20 @@ module BlueCollarSystems
       end
 
       def self.opaque_white?(record)
+        opaque_fill?(record) && record[:fill_rgb].all? { |value| (value - 1.0).abs < 1.0e-9 }
+      end
+
+      def self.opaque_fill?(record)
         return false unless record.is_a?(Hash) && record[:group]
-        rgb = Array(record[:fill_rgb])
-        return false unless rgb.length >= 3
-        return false unless rgb.first(3).all? { |value| (value.to_f - 1.0).abs < 1.0e-9 }
-        alpha = record.key?(:opacity) ? record[:opacity].to_f : 1.0
-        (alpha - 1.0).abs < 1.0e-9
+        rgb = record[:fill_rgb]
+        return false unless rgb.is_a?(Array) && rgb.length == 3 && rgb.all? do |value|
+          # Ruby 2.2 only supplies finite? on Float. Keep integer/rational
+          # range checks exact: conversion could round an invalid channel in.
+          real = value.is_a?(Integer) || value.is_a?(Rational) || value.is_a?(Float)
+          real && (!value.is_a?(Float) || value.finite?) && value >= 0 && value <= 1
+        end
+        alpha = record.key?(:opacity) ? record[:opacity] : 1.0
+        alpha.is_a?(Numeric) && alpha == 1.0
       end
 
       def self.collect_text_faces(roots)
@@ -108,7 +118,7 @@ module BlueCollarSystems
                     image = image_snapshot(group, transform)
                     image ? [image] : []
                   else
-                    snapshots(group, transform, true)
+                    snapshots(group, transform, true, record[:verified_source_unit] == true)
                   end
           # A positive-depth text item is already physically in front. Do not
           # punch white masks using its coplanar bottom faces alone.
@@ -134,6 +144,9 @@ module BlueCollarSystems
         result = []
         child_entities(group).to_a.each do |entity|
           next if entity.respond_to?(:valid?) && !entity.valid?
+          next if entity.respond_to?(:hidden?) && entity.hidden? &&
+                  entity.respond_to?(:get_attribute) &&
+                  entity.get_attribute(DICTIONARY, 'source_fill_original', false) == true
           kind = entity.typename.to_s
           if kind == 'Face'
             next if require_owner && !owner
@@ -346,7 +359,7 @@ module BlueCollarSystems
 
       def self.compose_group!(group, transform, white, ink, opts = {})
         # The geometric operation preserves original face materials/alpha.
-        # compose! supplies the default opaque-white eligibility policy; callers
+        # compose! supplies the opaque-source-fill eligibility policy; callers
         # proving another exact source-composite relationship may use this
         # operation directly for colored or translucent source fill groups.
         entities = child_entities(group)
@@ -359,15 +372,8 @@ module BlueCollarSystems
           scale = partition_construction_scale(source_cells)
           stage = entities.add_group
           stage.name = 'PDF planar white composition' if stage.respond_to?(:name=)
-          inverse_scale = 1.0 / scale
-          # SketchUp2017's single-argument overload uses a homogeneous weight,
-          # changing Float rounding after translation. Use the affine overload.
-          page_transform = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
-                           Geom::Transformation.scaling(inverse_scale, inverse_scale, inverse_scale)
-          stage.transformation = transform.inverse * page_transform
-          point_map = partition_construction_points(source_cells, origin, scale)
-          verify_adaptive_page_points!(point_map, origin, scale, page_transform,
-                                       transform, stage.transformation)
+          origin, scale, point_map = partition_construction_frame!(
+            stage, source_cells, origin, scale, transform)
           source_cells.each do |cell|
             # A convex source cell has no holes and cannot cross a source
             # boundary. Keep cells in separate identity groups so legacy host
@@ -407,16 +413,32 @@ module BlueCollarSystems
             end
           end
           clean_partition_edges!(stage.entities)
-          entities.erase_entities(originals)
+          if opts[:preserve_source] == true
+            unless originals.all? do |entity|
+              entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?) &&
+                entity.respond_to?(:get_attribute) &&
+                entity.get_attribute(DICTIONARY, 'source_fill_original', false) == true
+            end
+              fail_contract('opaque mask lacks separately owned editable source fill')
+            end
+            originals.each { |entity| entity.hidden = true }
+            fail_contract('native host did not hide composed source fill') unless originals.all?(&:hidden?)
+          else
+            entities.erase_entities(originals)
+          end
           # The legacy host purges empty groups at commit. Remove our empty
           # construction container now, before the retained-entity certificate.
           if stage.entities.to_a.empty?
             stage.erase!
           else
             stage.set_attribute(DICTIONARY, 'planar_white_knockout', true)
+            stage.set_attribute(DICTIONARY, 'source_fill_composed_visible', true)
           end
           removed.inject(0.0) { |sum, cell| sum + cell[:area] }
         rescue StandardError => error
+          if opts[:preserve_source] == true
+            originals.each { |entity| entity.hidden = false if entity.respond_to?(:hidden=) && entity.valid? }
+          end
           partition_diagnostic(opts, white, ink, origin, error)
           stage.erase! if stage && stage.valid?
           if error.is_a?(RepresentationFidelity::ContractError)
@@ -481,33 +503,54 @@ module BlueCollarSystems
         fail_contract('exact white-mask construction scale budget exceeded')
       end
 
-      # Binary scale steps retain the ordinary 1000x scale selection. Adaptive
-      # points must recover each source coordinate's Float value exactly and
-      # preserve the canonical 1000x composed page frame, not merely its area.
+      # Only exact frame-roundtrip rejection permits the one bounded alternate
+      # frame. Topology, coordinate/scale budgets and host failures stay terminal.
+      ConstructionFrameError = Class.new(RepresentationFidelity::ContractError)
+
+      def self.partition_construction_frame!(stage, cells, origin, scale, transform)
+        begin
+          mapped = partition_construction_points(cells, origin, scale)
+          inverse_scale = 1.0 / scale
+          # The three-axis overload avoids SketchUp2017's homogeneous weight.
+          page = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
+                 Geom::Transformation.scaling(inverse_scale, inverse_scale, inverse_scale)
+          stage.transformation = transform.inverse * page
+          verify_adaptive_page_points!(mapped, origin, scale, page, transform, stage.transformation)
+          return [origin, scale, mapped]
+        rescue ConstructionFrameError
+          # Multiplication/division by a pure power of two needs no decimal
+          # reciprocal or translation addition. Actual host transforms must
+          # still prove exact source coordinates before any face is emitted.
+          binary_scale = 1.0
+          binary_scale *= 2.0 while binary_scale < scale
+          origin, scale = [0.0, 0.0, 0.0], binary_scale
+        end
+        mapped = partition_construction_points(cells, origin, scale)
+        inverse_scale = 1.0 / scale
+        page = Geom::Transformation.scaling(inverse_scale, inverse_scale, inverse_scale)
+        stage.transformation = transform.inverse * page
+        verify_adaptive_page_points!(mapped, origin, scale, page, transform, stage.transformation)
+        [origin, scale, mapped]
+      end
+
+      # Adaptive native and composed-world points must recover the source
+      # Float coordinates exactly. An already-rounded 1000x frame is not source
+      # authority; even a sub-tolerance displacement remains a rejected frame.
       def self.verify_adaptive_page_points!(mapped, origin, scale, page_transform,
                                            transform, stage_transform)
         return if scale == CONSTRUCTION_SCALE
-        inverse_scale = 1.0 / CONSTRUCTION_SCALE
-        baseline_page = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
-                        Geom::Transformation.scaling(inverse_scale, inverse_scale, inverse_scale)
-        baseline_world = transform * (transform.inverse * baseline_page)
         world = transform * stage_transform
         mapped.each do |source, point|
           expected = [source[0].to_f, source[1].to_f, 0.0]
           on_page = point.transform(page_transform)
           unless [on_page.x.to_f, on_page.y.to_f, on_page.z.to_f] == expected &&
                  page_point(point, origin, scale) == expected
-            fail_contract('adaptive white-mask construction cannot restore exact page coordinates')
+            raise ConstructionFrameError, 'adaptive white-mask construction cannot restore exact page coordinates'
           end
-          values = [0, 1].map do |axis|
-            ((source[axis] - origin[axis].to_r) * CONSTRUCTION_SCALE.to_r).to_f
-          end + [0.0]
-          previous = Geom::Point3d.new(*values).transform(baseline_world)
           current = point.transform(world)
-          before = [previous.x.to_f, previous.y.to_f, previous.z.to_f]
           after = [current.x.to_f, current.y.to_f, current.z.to_f]
-          unless before.all?(&:finite?) && after == before
-            fail_contract('adaptive white-mask construction changed the final page transform')
+          unless after == expected
+            raise ConstructionFrameError, 'adaptive white-mask construction changed the final page transform'
           end
         end
       end
