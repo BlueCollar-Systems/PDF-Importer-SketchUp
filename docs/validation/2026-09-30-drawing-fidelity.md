@@ -8,7 +8,9 @@ The final top orthographic view covers every retained page, including a fully re
 
 ## Automated and corpus validation
 
-- 725 regression test runs and 10,851 assertions completed with no failures or errors. One pre-existing test was skipped because its optional `condensed_span.pdf` fixture is absent.
+- The original focused validation completed 725 test runs and 10,851 assertions with no failures or errors. One pre-existing test was skipped because its optional `condensed_span.pdf` fixture is absent.
+- After correcting an obsolete direct-child face assumption in the stroke-color test, all 92 distinct Ruby test files referenced by the CI, release, and exact-source gate lists passed on Windows Ruby 3.4.4 with normal filesystem access: 1,402 test runs, 15,258 assertions, no failures or errors, and two existing skips. Those skips are the absent optional `condensed_span.pdf` fixture and the intentionally pending non-ASCII helper-output-path test; the existing SafeTemp guard tests passed. The test correction verifies both retained fill boundaries and colors, hidden unstyled support edges, and the exact visible source stroke without changing product code.
+- The complete local sweep covers the referenced Ruby test files on one runtime. The hosted CI runtime matrix is still pending; the local result does not replace it.
 - The Ruby 2.2 compatibility scan and whitespace checks passed. Native acceptance ran in SketchUp 2017's Ruby 2.2.4 host.
 - A private corpus of 39 distinct PDFs and 106 pages passed final source conversion and glyph binding: 45,216 physical glyph placements, no binding failures, and no unmatched semantic text runs. Fourteen physical-only placements remain explicitly source-bound without invented semantic identity. Input digests were checked before and after processing each document.
 - All 14 exact partition benchmark cases retained identical ordered Rational output after the loop-bound optimization.
