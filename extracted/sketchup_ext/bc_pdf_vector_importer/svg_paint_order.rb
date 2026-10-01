@@ -15,7 +15,7 @@ module BlueCollarSystems
       # inches; defaults match the existing glyph geometry mapping exactly.
       def self.build(svg, media_box, opts = {})
         source = svg.to_s
-        result = { :white_paths => [], :glyphs => [], :glyphs_by_placement_index => {},
+        result = { :white_paths => [], :opaque_paths => [], :glyphs => [], :glyphs_by_placement_index => {},
                    :excluded => [], :order_space => 'cairo_svg_document_offset' }
         if source =~ /<\s*style\b|<\s*script\b|<!DOCTYPE|<\?xml-stylesheet/i
           result[:excluded] << { :reason => 'unsupported_document_style_or_entities' }
@@ -47,7 +47,7 @@ module BlueCollarSystems
           if frame[:definitions]
             inspect_definition!(definition_validity, frame, name, attrs)
           elsif name == 'path' || name == 'rect'
-            if white?(frame[:fill]) && frame[:alpha] == 1.0
+            if opaque_fill?(frame)
               reason = frame[:reason]
               if reason
                 result[:excluded] << { :kind => :white_path, :svg_document_offset => offset, :reason => reason }
@@ -57,7 +57,8 @@ module BlueCollarSystems
                   record = paint_record(loops, frame, mapping, offset)
                   record[:fill_rule] = frame[:fill_rule]
                   record = resolve_white_clips(record, frame, mapping, clip_definitions, name, attrs)
-                  result[:white_paths] << record
+                  result[:opaque_paths] << record
+                  result[:white_paths] << record if white?(frame[:fill])
                 rescue ArgumentError => error
                   result[:excluded] << { :kind => :white_path, :svg_document_offset => offset, :reason => error.message }
                 end
@@ -79,7 +80,6 @@ module BlueCollarSystems
           id = event[:glyph_id]
           frame = event[:context]
           reason = frame[:reason]
-          reason ||= 'unsupported_clip-path' unless frame[:clips].empty?
           reason ||= 'empty_source_glyph_definition' if definition_validity[id] == :empty
           reason ||= 'unsupported_glyph_definition' unless definition_validity[id] == true && definitions.key?(id)
           reason ||= 'missing_placement_index' unless event[:placement_index].is_a?(Integer)
@@ -95,6 +95,7 @@ module BlueCollarSystems
               strict_number(event[:attrs]['x'] || '0'), strict_number(event[:attrs]['y'] || '0')])
             glyph_frame = frame.merge(:matrix => matrix)
             record = paint_record(local_loops[id], glyph_frame, mapping, event[:offset])
+            record = resolve_glyph_clips(record, frame, mapping, clip_definitions)
             record[:glyph_id] = id
             record[:placement_index] = event[:placement_index]
             record[:placement_indices] = [event[:placement_index]]
@@ -103,7 +104,7 @@ module BlueCollarSystems
             # Keep its first index, but the final identical repaint determines
             # whether that ink covers an intervening white mask. Translucent
             # repaints cannot collapse to one effective opaque paint event.
-            key = [id, matrix, frame[:fill], frame[:alpha], frame[:fill_rule]]
+            key = [id, matrix, frame[:fill], frame[:alpha], frame[:fill_rule], record[:ink_loops_pdf]]
             previous = frame[:alpha] == 1.0 ? by_physical[key] : nil
             if previous
               previous[:placement_indices] << event[:placement_index]
@@ -123,7 +124,7 @@ module BlueCollarSystems
         end
         result
       rescue ArgumentError => error
-        { :white_paths => [], :glyphs => [], :glyphs_by_placement_index => {},
+        { :white_paths => [], :opaque_paths => [], :glyphs => [], :glyphs_by_placement_index => {},
           :excluded => [{ :reason => error.message }], :order_space => 'cairo_svg_document_offset' }
       end
 
@@ -327,6 +328,40 @@ module BlueCollarSystems
         rgb.is_a?(Array) && rgb.length == 3 && rgb.all? { |v| (v - 1.0).abs <= 1.0e-12 }
       end
 
+      def self.opaque_fill?(frame)
+        rgb = frame[:fill]
+        rgb.is_a?(Array) && rgb.length == 3 &&
+          rgb.all? { |value| value.is_a?(Numeric) && value.finite? && value >= 0.0 && value <= 1.0 } &&
+          frame[:alpha] == 1.0
+      end
+
+      # The page/CropBox and explicit rectangular Cairo ancestor clips are
+      # exact source boundaries. Arbitrary clip shapes remain unproven. This
+      # also handles clipped annotation glyphs without borrowing a neighbour's
+      # paint order or certifying the invisible part of an edge glyph.
+      def self.resolve_glyph_clips(record, frame, mapping, definitions)
+        rectangles = [mapping[:page_bounds]]
+        frame[:clips].each do |clip|
+          definition = definitions[clip[:id]]
+          raise ArgumentError, 'unsupported_clip-path' unless definition
+          clip_frame = frame.merge(:matrix => clip[:matrix], :fill_rule => definition[:fill_rule])
+          region = paint_record(definition[:loops], clip_frame, mapping, record[:svg_document_offset])
+          raise ArgumentError, 'unsupported_glyph_clip_shape' unless axis_rectangle?(region)
+          rectangles << region[:ink_bbox_pdf]
+        end
+        bounds = [rectangles.map { |r| r[0] }.max, rectangles.map { |r| r[1] }.max,
+                  rectangles.map { |r| r[2] }.min, rectangles.map { |r| r[3] }.min]
+        raise ArgumentError, 'empty_clipped_glyph' unless bounds[2] > bounds[0] && bounds[3] > bounds[1]
+        return record if bounds_cover?(bounds, record[:ink_bbox_pdf])
+        clipped = record[:ink_loops_pdf].map do |loop|
+          CairoGlyphSource.clip_glyph_contour_to_rectangle(loop, bounds)
+        end.reject(&:empty?)
+        normalized = SvgRegionBoundary.normalize([{:loops => clipped, :fill_rule => record[:fill_rule]}], :svg)
+        raise ArgumentError, 'empty_or_unverified_clipped_glyph' unless normalized && !normalized.empty?
+        mapped_record(normalized, frame, mapping, record[:svg_document_offset]).merge(
+          :clip_proof => 'exact_source_rectangular_glyph_clip', :clip_bounds_pdf => bounds)
+      end
+
       def self.strict_number(value)
         text = value.to_s.strip
         raise ArgumentError, 'invalid_svg_number' unless text =~ /\A#{NUMBER.source}\z/
@@ -407,6 +442,8 @@ module BlueCollarSystems
         scale = strict_number(opts[:scale] || 1.0)
         raise ArgumentError, 'invalid_model_scale' unless scale > 0.0
         { :viewbox => viewbox, :dx => page_box[0] - media_box[0], :dy => page_box[1] - media_box[1],
+          :page_bounds => [page_box[0] - media_box[0], page_box[1] - media_box[1],
+                           page_box[2] - media_box[0], page_box[3] - media_box[1]],
           :unit => scale / 72.0, :x_offset => strict_number(opts[:x_offset] || 0.0),
           :y_offset => strict_number(opts[:y_offset] || 0.0) }
       end

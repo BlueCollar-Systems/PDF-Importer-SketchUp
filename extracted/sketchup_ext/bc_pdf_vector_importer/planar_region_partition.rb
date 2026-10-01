@@ -28,6 +28,8 @@ module BlueCollarSystems
         unless prepared_white && prepared_ink
           raise Error, 'invalid source contours for exact planar partition'
         end
+        prepared_white = with_exact_loop_bounds(prepared_white)
+        prepared_ink = with_exact_loop_bounds(prepared_ink)
         edges = (prepared_white + prepared_ink).flat_map do |region|
           region[:loops].flat_map do |loop|
             loop.each_index.map { |i| [loop[i], loop[(i + 1) % loop.length]] }
@@ -60,8 +62,8 @@ module BlueCollarSystems
               raise Error, 'exact planar partition predicate budget exceeded'
             end
             probe = [middle, (lower + upper) / 2]
-            next unless boundary.filled?(prepared_white, :native_union, probe)
-            region = boundary.filled?(prepared_ink, :native_union, probe) ? :ink : :white
+            next unless filled_with_bounds?(prepared_white, probe)
+            region = filled_with_bounds?(prepared_ink, probe) ? :ink : :white
             low_edge, high_edge = lines[lower], lines[upper]
             points = [[left, y_at(low_edge, left)], [right, y_at(low_edge, right)],
                       [right, y_at(high_edge, right)], [left, y_at(high_edge, left)]]
@@ -80,6 +82,40 @@ module BlueCollarSystems
         cells
       rescue ArgumentError, TypeError, ZeroDivisionError, RangeError => error
         raise Error, 'invalid arithmetic in exact planar partition: ' + error.class.to_s
+      end
+
+      # These contours are fresh Rational copies made by prepare_regions. Keep
+      # their bounds local to this partition and freeze both together, so a
+      # cached box can never describe a subsequently changed loop.
+      def self.with_exact_loop_bounds(regions)
+        regions.each do |region|
+          region[:loop_bounds] = region[:loops].map do |loop|
+            loop.each(&:freeze)
+            loop.freeze
+            [loop.map { |p| p[0] }.min, loop.map { |p| p[1] }.min,
+             loop.map { |p| p[0] }.max, loop.map { |p| p[1] }.max].freeze
+          end.freeze
+          region[:loops].freeze
+          region.freeze
+        end.freeze
+      end
+
+      # A point strictly outside a closed contour's exact bounds has winding
+      # zero. Boundary and interior points retain the original winding test;
+      # no Float box, tolerance, hole shortcut or source edge is substituted.
+      def self.filled_with_bounds?(regions, point)
+        regions.any? do |region|
+          counts = region[:loops].each_with_index.map do |loop, index|
+            box = region[:loop_bounds][index]
+            if point[0] < box[0] || point[0] > box[2] ||
+               point[1] < box[1] || point[1] > box[3]
+              0
+            else
+              SvgRegionBoundary.winding(point, loop)
+            end
+          end
+          !counts.empty? && counts[0] != 0 && counts.drop(1).all? { |count| count == 0 }
+        end
       end
 
       def self.y_at(edge, x)

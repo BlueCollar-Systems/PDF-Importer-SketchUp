@@ -121,7 +121,7 @@ class PlanarWhiteKnockoutTest < Minitest::Test
 
   class Group
     attr_reader :entities, :erased
-    attr_accessor :transformation, :name, :owner, :attributes
+    attr_accessor :transformation, :name, :owner, :attributes, :hidden
     def initialize(entities)
       @entities = entities
       @transformation = Geom::Transformation.new
@@ -130,6 +130,7 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     end
     def typename; 'Group'; end
     def valid?; !@erased; end
+    def hidden?; @hidden == true; end
     def erase!; @erased = true; end
     def get_attribute(_dict, key, default)
       return 'text_span:1:84' if owner && key == 'source_span_id'
@@ -290,20 +291,73 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     assert_empty white.entities.erased
   end
 
-  def test_later_unknown_translucent_and_colored_masks_do_not_change
+  def test_later_unknown_and_translucent_masks_do_not_change
     white, text, original, = fixture
     masks = [
       { :group => white, :fill_rgb => [1, 1, 1], :paint_order => [0, 9] },
       { :group => white, :fill_rgb => [1, 1, 1] },
-      { :group => white, :fill_rgb => [1, 1, 1], :opacity => 0.5, :before_text => true },
-      { :group => white, :fill_rgb => [1, 0.9, 1], :before_text => true }
+      { :group => white, :fill_rgb => [1, 1, 1], :opacity => 0.5, :before_text => true }
     ]
     receipt = Subject.compose!(masks, [{ :group => text, :paint_order => [0, 4] }])
     assert_equal 0, receipt[:composed_groups]
-    assert_equal 2, receipt[:skipped_nonwhite]
+    assert_equal 1, receipt[:skipped_nonwhite]
     assert_equal 2, receipt[:skipped_unproven_order]
     refute original.erased
     assert_nil white.entities.stage
+  end
+
+  def test_coloured_composition_preserves_exact_editable_source_and_ink_in_separate_owners
+    white, text, original, ink = fixture
+    original.material = original.back_material = :pale_source
+    canonical = Group.new(Entities.new([original]))
+    canonical.attributes['source_fill_original'] = true
+    white.entities.items.replace([canonical])
+    before = Marshal.dump([original.raw,ink.raw])
+    receipt = Subject.compose!([{ :group=>white, :fill_rgb=>[1.0,1.0,252.0/255],
+      :opacity=>1.0, :paint_order=>[0,2], :preserve_source=>true }],
+      [{:group=>text,:paint_order=>[0,3]}])
+    assert_equal 1, receipt[:composed_groups]
+    assert_in_delta 3.0, receipt[:removed_area], 1.0e-10
+    assert canonical.hidden?
+    refute canonical.erased
+    refute original.erased
+    refute ink.erased
+    assert_equal before, Marshal.dump([original.raw,ink.raw])
+    visible = Subject.partition_faces(white.entities.stage.entities)
+    assert visible.all? { |face| face.material == :pale_source && face.back_material == :pale_source }
+    assert white.entities.stage.attributes['source_fill_composed_visible']
+    # The source rectangle stays editable, but cannot cover text when the
+    # final displayed mask census is read again after save/reopen.
+    snapshots = Subject.snapshots(white,Geom::Transformation.new,false)
+    assert_in_delta 13.0, Subject.source_area(snapshots), 1.0e-8
+  end
+
+  def test_failed_coloured_partition_preserves_visible_original_and_source_ink
+    white, text, original, ink = fixture
+    canonical = Group.new(Entities.new([original]))
+    canonical.attributes['source_fill_original'] = true
+    white.entities.items.replace([canonical])
+    white.entities.fail_add = true
+    assert_raises(ContractError) do
+      Subject.compose!([{ :group=>white, :fill_rgb=>[1.0,0.8,0.6], :opacity=>1.0,
+        :paint_order=>[0,2], :preserve_source=>true }],[{:group=>text,:paint_order=>[0,3]}])
+    end
+    refute canonical.hidden?
+    refute canonical.erased
+    refute original.erased
+    refute ink.erased
+    assert white.entities.stage.erased
+  end
+
+  def test_only_certified_nonsemantic_source_unit_roots_supply_flat_ink
+    root = Group.new(Entities.new([Face.new([rect(0,0,1,1)])]))
+    root.attributes['source_unit_id'] = 'svg_glyph_placements:page:1'
+    root.attributes['source_placement_indices'] = [0,1,2]
+    assert_empty Subject.collect_text_faces([root])
+    faces = Subject.collect_text_faces([{:group=>root,:verified_source_unit=>true}])
+    assert_equal 1, faces.length
+    assert_nil faces.first[:source_span_id]
+    assert_equal [0,1,2], faces.first[:source_placement_indices]
   end
 
   def test_unowned_and_positive_depth_geometry_is_not_flat_text_ink
@@ -473,6 +527,70 @@ class PlanarWhiteKnockoutTest < Minitest::Test
       Subject.verify_adaptive_page_points!(mapped, origin, scale, changed, identity, page)
     end
     assert_match(/restore exact page coordinates/, error.message)
+  end
+
+  def test_binary_zero_origin_frame_restores_source_when_centered_decimal_frame_rounds
+    cell = exact_cell(rect(0.1, 0.2, 0.7, 0.200003))
+    origin = [0.4, 0.2000015, 0.0]
+    scale = Subject.partition_construction_scale([cell])
+    mapped = Subject.partition_construction_points([cell], origin, scale)
+    page = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
+           Geom::Transformation.scaling(1.0 / scale, 1.0 / scale, 1.0 / scale)
+    identity = Geom::Transformation.new
+    assert_raises(Subject::ConstructionFrameError) do
+      Subject.verify_adaptive_page_points!(mapped, origin, scale, page, identity, page)
+    end
+    stage = Group.new(Entities.new)
+    actual_origin, actual_scale, actual = Subject.partition_construction_frame!(
+      stage, [cell], origin, scale, identity)
+    assert_equal [0.0, 0.0, 0.0], actual_origin
+    assert_operator actual_scale, :>=, scale
+    assert_equal 0.0, Math.log2(actual_scale) % 1
+    actual.each do |source, native|
+      assert_equal source.map(&:to_f), Subject.page_point(native, actual_origin, actual_scale)
+      on_page = native.transform(stage.transformation)
+      assert_equal source.map(&:to_f), [on_page.x, on_page.y, on_page.z]
+    end
+    assert_empty stage.entities.to_a, 'no faces are created while selecting the frame'
+  end
+
+  def test_alternate_frame_cannot_hide_wrong_native_stage_or_retry_topology_errors
+    cell = exact_cell(rect(0.1, 0.2, 0.7, 0.200003))
+    origin, scale = [0.4, 0.2000015, 0.0], Subject.partition_construction_scale([cell])
+    stage = Group.new(Entities.new)
+    assignments = []
+    stage.define_singleton_method(:transformation=) do |value|
+      assignments << value
+      @transformation = Geom::Transformation.new(value.scale, [1.0e-12, 0, 0])
+    end
+    assert_raises(Subject::ConstructionFrameError) do
+      Subject.partition_construction_frame!(stage, [cell], origin, scale, Geom::Transformation.new)
+    end
+    assert_equal 2, assignments.length, 'only the original and bounded binary frames are considered'
+    assert_empty stage.entities.to_a
+    assignments.clear
+    Subject.stub(:partition_construction_points, lambda { |*_args| raise ContractError, 'bad topology' }) do
+      error = assert_raises(ContractError) do
+        Subject.partition_construction_frame!(stage, [cell], origin, scale, Geom::Transformation.new)
+      end
+      assert_equal 'bad topology', error.message
+    end
+    assert_empty assignments, 'a topology error never invokes an alternate frame'
+  end
+
+  def test_binary_alternate_frame_still_enforces_absolute_coordinate_budget
+    far = exact_cell(rect(2**20 + 0.1, 0.2, 2**20 + 0.7, 0.200003))
+    origin = [2**20 + 0.4, 0.2000015, 0.0]
+    stage = Group.new(Entities.new)
+    # Reject only the first roundtrip, as the host may do after normalizing its
+    # native matrix. The zero-origin retry must run the ordinary budget guards.
+    Subject.stub(:verify_adaptive_page_points!, lambda { |*_args| raise Subject::ConstructionFrameError, 'native frame' }) do
+      error = assert_raises(ContractError) do
+        Subject.partition_construction_frame!(stage, [far], origin, 2.0**30, Geom::Transformation.new)
+      end
+      assert_match(/coordinate budget/, error.message)
+    end
+    assert_empty stage.entities.to_a
   end
 
   def test_host_boundary_change_below_aggregate_area_tolerance_is_still_rejected

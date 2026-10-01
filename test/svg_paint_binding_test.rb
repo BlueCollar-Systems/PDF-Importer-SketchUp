@@ -40,6 +40,60 @@ class SvgPaintBindingTest < Minitest::Test
     assert Geometry.earlier_mask?(result[:masks][0], result[:ink_faces][1])
   end
 
+  def test_coloured_mask_requires_matching_source_colour_and_keeps_native_style
+    shape = rectangle(0,0,2,2); glyph = rectangle(0.2,0.2,1,1)
+    rgb = [1.0,1.0,252.0/255]
+    background = mask(100).merge(:fill_rgb=>rgb)
+    painted = source(shape,10).merge(:fill_rgb=>rgb)
+    result = prepare([background], [native(shape,[])], [native(glyph,[1])],
+      {:opaque_paths=>[painted], :glyphs=>[source(glyph,20,1)]})
+    assert_equal [0,10], result[:masks].first[:paint_order]
+    assert_equal rgb, result[:masks].first[:fill_rgb]
+    assert_equal 1, result[:binding][:source_opaque_paths]
+    assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+      prepare([background], [native(shape,[])], [native(glyph,[1])],
+        {:opaque_paths=>[painted.merge(:fill_rgb=>[1.0,1.0,1.0])], :glyphs=>[source(glyph,20,1)]})
+    end
+  end
+
+  def test_same_shape_different_colours_do_not_steal_each_others_occurrence_order
+    shape=rectangle(0,0,2,2); glyph=rectangle(0.2,0.2,1,1)
+    pale=[1.0,1.0,0.9]
+    result=prepare([mask(100),mask(200).merge(:fill_rgb=>pale)], [native(shape,[])], [native(glyph,[1])],
+      {:opaque_paths=>[source(shape,30).merge(:fill_rgb=>[1.0,1.0,1.0]), source(shape,10).merge(:fill_rgb=>pale)],
+       :glyphs=>[source(glyph,20,1)]})
+    assert_equal [[0,30],[0,10]], result[:masks].map { |row| row[:paint_order] }
+  end
+
+  def test_unknown_or_translucent_mask_opacity_cannot_silently_leave_occluded_text
+    shape=rectangle(0,0,2,2); glyph=rectangle(0.2,0.2,1,1)
+    [nil,0.5,'1'].each do |alpha|
+      assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+        prepare([mask(100).merge(:opacity=>alpha)], [native(shape,[])], [native(glyph,[1])],
+          {:opaque_paths=>[source(shape,10).merge(:fill_rgb=>[1.0,1.0,1.0])],
+           :glyphs=>[source(glyph,20,1)]})
+      end
+    end
+  end
+
+  def test_source_colour_precision_binds_only_identical_native_channels
+    target=mask(100).merge(:fill_rgb=>[1.0,1.0,0.988281])
+    assert Binding.source_fill_style?(target,{:fill_rgb=>[1.0,1.0,0.98823547],:fill_opacity=>1.0})
+    refute Binding.source_fill_style?(target,{:fill_rgb=>[1.0,1.0,1.0],:fill_opacity=>1.0})
+    color=Struct.new(:red,:green,:blue).new(255,255,252)
+    material=Struct.new(:color,:alpha,:texture).new(color,1.0,nil)
+    face={:material=>material,:back_material=>material}
+    assert Binding.native_fill_style?(face,target[:fill_rgb])
+    color.blue=251
+    refute Binding.native_fill_style?(face,target[:fill_rgb])
+    color.blue=252
+    material.alpha=0.5
+    refute Binding.native_fill_style?(face,target[:fill_rgb])
+    material.alpha=1.0
+    material.texture=Object.new
+    refute Binding.native_fill_style?(face,target[:fill_rgb])
+  end
+
   def test_duplicate_source_masks_are_bound_by_complete_occurrence_order
     white=rectangle(0,0,2,2); glyph=rectangle(0.2,0.2,1,1)
     result=prepare([mask(200),mask(100)], [native(white,[])], [native(glyph,[1])],
