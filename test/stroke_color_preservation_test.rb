@@ -85,6 +85,13 @@ class StrokeColorPreservationTest < Minitest::Test
     end
   end
 
+  def all_faces(entities)
+    entities.to_a.flat_map do |node|
+      node.respond_to?(:entities) ? all_faces(node.entities) :
+        (node.is_a?(Base::Face) ? [node] : [])
+    end
+  end
+
   def rgb(edge)
     color=edge.material.color
     [color.red,color.green,color.blue]
@@ -114,15 +121,35 @@ class StrokeColorPreservationTest < Minitest::Test
   end
 
   def test_independent_fill_color_and_hidden_fill_only_support_edges
-    model,=build('1 0 0 RG 0 0 1 rg 10 10 10 10 re B 0 1 0 rg 40 40 10 10 re f')
-    face=model.active_entities.to_a.grep(Base::Face).first
-    assert_equal [0,0,255],[face.material.color.red,face.material.color.green,face.material.color.blue]
-    assert all_edges(model.active_entities).all?{|e|rgb(e)==[255,0,0]}
-    fills=model.active_entities.to_a.grep(Base::Group).flat_map{|g|g.entities.to_a.grep(Base::Face)}
-    assert_equal 1,fills.length
-    assert fills.first.edges.all?(&:hidden)
-    assert fills.first.edges.all?{|e|e.material.nil?},'fill supports must not acquire stroke ink'
-    assert_equal [0,255,0],[fills.first.material.color.red,fills.first.material.color.green,fills.first.material.color.blue]
+    [false,true].each do |grouped|
+      model,=build('1 0 0 RG 0 0 1 rg 10 10 10 10 re B 0 1 0 rg 40 40 10 10 re f', :group_by_color=>grouped)
+      # Both paint occurrences retain their editable source fill in owned
+      # groups. Verify physical contents without assuming a wrapper depth.
+      fills=all_faces(model.active_entities)
+      assert_equal 2,fills.length
+      assert_equal [[0,0,255],[0,255,0]],fills.map{|face|rgb(face)}.sort
+      fills.each do |face|
+        origin=rgb(face)==[0,0,255] ? 10 : 40
+        expected=[[origin,origin],[origin+10,origin],
+          [origin+10,origin+10],[origin,origin+10]].map{|x,y|[x/72.0,y/72.0,0.0]}
+        actual=face.points.map{|p|[p.x,p.y,p.z]}.uniq
+        assert_equal expected.sort,actual.sort,'source fill boundary must remain intact'
+        assert_same face.material,face.back_material
+        assert_equal 1.0,face.material.alpha
+        assert_nil face.material.texture
+        assert face.edges.all?(&:hidden),'fill support edges must stay hidden'
+        assert face.edges.all?{|edge|edge.material.nil?},'fill supports must not acquire stroke ink'
+      end
+      strokes=all_edges(model.active_entities)
+      assert strokes.all?{|edge|rgb(edge)==[255,0,0]}
+      assert strokes.none?{|edge|edge.hidden},'true source strokes must remain visible'
+      segments=strokes.map do |edge|
+        [edge.start_point,edge.end_point].map{|p|[p.x,p.y,p.z]}
+      end.reject{|a,b|a==b} # The API double retains a closing zero-length edge.
+      corners=[[10,10],[20,10],[20,20],[10,20]].map{|x,y|[x/72.0,y/72.0,0.0]}
+      expected_strokes=corners.each_with_index.map{|point,index|[point,corners[(index+1)%4]].sort}
+      assert_equal expected_strokes.sort,segments.map{|segment|segment.sort}.sort
+    end
   end
 
   def test_batch_fallback_and_physical_dash_segments_retain_material

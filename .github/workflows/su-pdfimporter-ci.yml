@@ -151,6 +151,8 @@ jobs:
           ruby test/inline_image_delivery_accounting_test.rb
           ruby test/unattended_multipage_import_test.rb
           ruby test/failed_page_outcome_test.rb
+          ruby test/retained_page_view_fit_test.rb
+          ruby test/opaque_mask_source_unit_test.rb
           ruby test/qa_report_test.rb
           ruby test/representation_fidelity_contract_test.rb
           ruby test/batch_host_nonmodal_policy_test.rb
@@ -241,6 +243,8 @@ jobs:
           ruby test/inline_image_delivery_accounting_test.rb
           ruby test/unattended_multipage_import_test.rb
           ruby test/failed_page_outcome_test.rb
+          ruby test/retained_page_view_fit_test.rb
+          ruby test/opaque_mask_source_unit_test.rb
           ruby test/batch_host_nonmodal_policy_test.rb
           ruby test/pdf_color_display_test.rb
       - name: Validate release publication state

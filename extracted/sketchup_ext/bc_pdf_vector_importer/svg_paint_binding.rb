@@ -13,7 +13,7 @@ module BlueCollarSystems
       def self.prepare(masks, roots, inventory, opts = {})
         tolerance = SOURCE_GRID_INCHES * (opts[:scale] || 1.0).to_f.abs
         tolerance = SOURCE_GRID_INCHES if tolerance <= 0.0
-        source_masks = Array(inventory[:white_paths]).map { |r| geometry_record(r) }
+        source_masks = Array(inventory.key?(:opaque_paths) ? inventory[:opaque_paths] : inventory[:white_paths]).map { |r| geometry_record(r) }
         glyphs = Array(inventory[:glyphs]).map { |r| geometry_record(r) }
         glyphs_by_index = {}
         glyphs.each do |record|
@@ -24,18 +24,29 @@ module BlueCollarSystems
           end
         end
         ink = Geometry.collect_text_faces(roots)
-        stats = { :source_white_paths => source_masks.length, :source_glyphs => glyphs.length,
+        stats = { :source_white_paths => Array(inventory[:white_paths]).length,
+                  :source_opaque_paths => source_masks.length, :source_glyphs => glyphs.length,
                   :matched_masks => 0, :unmatched_masks => 0, :bound_ink_faces => 0,
                   :final_page_crops => 0, :unbound_ink_faces => 0 }
         bound_masks = []
         Array(masks).each do |record|
-          next unless Geometry.opaque_white?(record)
           transform = record[:transformation] || record[:group].transformation
           white = Geometry.snapshots(record[:group], transform, false)
           next if white.empty?
           box = Geometry.union_bounds(white)
+          unless Geometry.opaque_fill?(record)
+            if ink.any? { |face| Geometry.boxes_overlap?(box, face[:bounds]) }
+              Geometry.fail_contract('overlapping source fill has unknown or nonopaque style; text is unchanged')
+            end
+            next
+          end
           loops = white.flat_map { |face| face[:loops] }
-          near = source_masks.select { |candidate| same_bounds?(box, candidate[:bounds], tolerance) }
+          if record[:preserve_source] == true && !white.all? { |face| native_fill_style?(face, record[:fill_rgb]) }
+            Geometry.fail_contract('physical opaque fill differs from its source colour or opacity')
+          end
+          near = source_masks.select do |candidate|
+            same_bounds?(box, candidate[:bounds], tolerance) && source_fill_style?(record, candidate)
+          end
           native_boundary = nil
           native_boundary_checked = false
           candidates = near.select do |candidate|
@@ -74,6 +85,7 @@ module BlueCollarSystems
             match = candidates.sort_by { |m| m[:paint_order] }[position]
             mask[:paint_order] = match[:paint_order]
             mask[:svg_document_offset] = match[:svg_document_offset]
+            mask[:source_svg_rgb] = match[:fill_rgb]
             stats[:matched_masks] += 1
           else
             mask[:paint_order] = nil
@@ -130,6 +142,15 @@ module BlueCollarSystems
               unknown[:source_span_id].to_s + ', placement indices=' + unknown[:source_placement_indices].inspect)
           end
         end
+        stats[:mask_bindings] = bound_masks.map do |mask|
+          { :pdf_paint_order=>mask[:pdf_paint_order], :svg_paint_order=>mask[:paint_order],
+            :svg_document_offset=>mask[:svg_document_offset], :pdf_fill_rgb=>mask[:fill_rgb],
+            :svg_fill_rgb=>mask[:source_svg_rgb], :opacity=>mask[:opacity],
+            :editable_source_retained=>mask[:preserve_source] == true }
+        end
+        stats[:glyph_bindings] = ink.map do |face|
+          {:placement_indices=>face[:source_placement_indices], :svg_paint_order=>face[:paint_order]}
+        end.uniq
         { :masks => bound_masks, :ink_faces => ink, :binding => stats }
       end
 
@@ -146,6 +167,33 @@ module BlueCollarSystems
         result[:bounds] = [points.map { |p| p[0] }.min, points.map { |p| p[1] }.min,
                           points.map { |p| p[0] }.max, points.map { |p| p[1] }.max]
         result
+      end
+
+      def self.source_fill_style?(native, source)
+        rgb = source[:fill_rgb]
+        # Old white-only fixtures may omit the fixed colour. New opaque
+        # inventories always carry the actual source RGB and opacity.
+        rgb = [1.0, 1.0, 1.0] if rgb.nil? && Geometry.opaque_white?(native)
+        # PDF normalization and Cairo serialize RGB at different precisions.
+        # Compare the exact three 8-bit channels delivered by SketchUp, not a
+        # near-white threshold. The unrounded source values remain untouched.
+        rgb.is_a?(Array) && rgb.length == 3 && source[:fill_opacity] == 1.0 &&
+          rgb.each_with_index.all? do |value, index|
+            value.is_a?(Numeric) && value.finite? && value >= 0.0 && value <= 1.0 &&
+              (value * 255.0).round == (native[:fill_rgb][index] * 255.0).round
+          end
+      end
+
+      def self.native_fill_style?(face, rgb)
+        expected = rgb.map { |value| (value * 255.0).round }
+        [:material, :back_material].all? do |key|
+          material = face[key]
+          next false unless material && material.respond_to?(:color) &&
+                            material.respond_to?(:alpha) && material.alpha == 1.0 &&
+                            material.respond_to?(:texture) && material.texture.nil?
+          color = material.color
+          color && [:red, :green, :blue].map { |channel| color.send(channel) } == expected
+        end
       end
 
       def self.box_candidates(index, box)

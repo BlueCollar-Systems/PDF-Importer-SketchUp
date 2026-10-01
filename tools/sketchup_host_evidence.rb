@@ -2399,6 +2399,10 @@ module SketchupHostEvidence
     label = "#{collection_name}[#{index}] #{mode}"
     rows.each { |row| verify_live_manifest_row!(row, label) }
     verify_representation_identity!(record, rows, mode, label)
+    if hash_value(record, :source_kind).to_s == 'svg_glyph_placement' ||
+       collection_name.to_s == 'source_glyph_physical_deliveries'
+      verify_source_unit_expected_evidence!(record, rows, mode, label)
+    end
     case mode
     when :labels
       verify_native_labels!(rows, record, label)
@@ -2420,6 +2424,73 @@ module SketchupHostEvidence
     true
   end
   private_class_method :verify_host_representation!
+
+  def self.verify_source_unit_expected_evidence!(record, rows, mode, label)
+    expected = hash_value(record, :expected_evidence)
+    unit = hash_value(record, :source_unit_id).to_s
+    unless expected.is_a?(Hash) &&
+           hash_value(expected, :schema) == 'bcs.source_unit_expected/1.0' &&
+           hash_value(expected, :source_kind).to_s == 'svg_glyph_placement' &&
+           unit =~ /\Asvg_glyph_placements:page:[1-9]\d*\z/ && hash_value(expected, :source_unit_id).to_s == unit &&
+           source_span_ids(record, :span_id => true).empty? &&
+           normalize_mode(hash_value(expected, :representation)) == mode
+      raise EvidenceError, "#{label} physical source-unit expectation is missing or conflicting"
+    end
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    canonical = expected.dup
+    canonical.delete(:evidence_sha256)
+    canonical.delete('evidence_sha256')
+    digest = hash_value(expected, :evidence_sha256).to_s
+    identity = hash_value(expected, :source_identity)
+    indices = hash_value(identity, :placement_indices)
+    glyphs = hash_value(identity, :glyph_ids)
+    extent = hash_value(identity, :source_extent)
+    unless digest =~ /\A[0-9a-f]{64}\z/ &&
+           fidelity.canonical_sha256(canonical) == digest &&
+           identity.is_a?(Hash) &&
+           fidelity.canonical_sha256(identity) == hash_value(expected, :source_identity_sha256) &&
+           hash_value(identity, :svg_sha256).to_s =~ /\A[0-9a-f]{64}\z/ &&
+           indices.is_a?(Array) && !indices.empty? &&
+           indices.all? { |index| index.is_a?(Integer) && index >= 0 } &&
+           indices.uniq.length == indices.length &&
+           glyphs.is_a?(Array) && glyphs.length == indices.length &&
+           glyphs.all? { |glyph| glyph.is_a?(String) && !glyph.strip.empty? } &&
+           extent.is_a?(Array) && extent.length == 4 &&
+           extent.all? { |value| value.is_a?(Numeric) && value.to_f.finite? } &&
+           extent[2] > extent[0] && extent[3] > extent[1]
+      raise EvidenceError, "#{label} physical source-unit digest or placement identity is invalid"
+    end
+    [:placement_indices, :source_placement_indices].each do |key|
+      if hash_key?(record, key) && hash_value(record, key) != indices
+        raise EvidenceError, "#{label} physical source-unit placement indices conflict"
+      end
+    end
+    geometry = manifest_evidence_summary!(rows, :geometry_evidence, label, true)
+    style = manifest_evidence_summary!(rows, :style_evidence, label, false)
+    unless geometry[:sha256] == hash_value(expected, :physical_geometry_sha256) &&
+           style[:sha256] == hash_value(expected, :physical_style_sha256) &&
+           geometry[:physical_entity_count] == hash_value(expected, :physical_entity_count)
+      raise EvidenceError, "#{label} physical source-unit geometry or style differs"
+    end
+    rows.each do |row|
+      attributes = hash_value(row, :representation_evidence)
+      unless hash_value(attributes, :source_claim_root) == true &&
+             hash_value(attributes, :source_unit_id).to_s == unit &&
+             hash_value(attributes, :source_kind).to_s == 'svg_glyph_placement' &&
+             hash_value(attributes, :source_span_id).to_s.empty? &&
+             hash_value(attributes, :source_evidence_sha256).to_s == digest &&
+             hash_value(attributes, :physical_geometry_sha256) == hash_value(expected, :physical_geometry_sha256) &&
+             hash_value(attributes, :physical_style_sha256) == hash_value(expected, :physical_style_sha256) &&
+             normalize_mode(hash_value(attributes, :representation)) == mode &&
+             hash_value(attributes, :source_placement_indices) == indices
+        raise EvidenceError, "#{label} physical source-unit host identity differs"
+      end
+    end
+    verify_record_expected_consistency!(record, expected, label)
+    verify_expected_dimensions!(expected, rows, mode, label)
+    true
+  end
+  private_class_method :verify_source_unit_expected_evidence!
 
   def self.verify_live_manifest_row!(row, label)
     unless hash_value(row, :valid) == true &&

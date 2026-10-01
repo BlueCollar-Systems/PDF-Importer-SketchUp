@@ -85,6 +85,94 @@ class TextModeRoutingTest < Minitest::Test
     )
   end
 
+  def test_actual_vector_page_routes_deliver_unjoined_ink_after_semantic_items
+    [:glyphs, :geometry].each do |mode|
+      result = run_page_delivery_branch(mode)
+      assert_equal [[:semantic, mode], [:unjoined, mode]], result[:deliveries]
+      assert_equal [0, 1, 2], result[:unjoined][:placement_indices]
+      assert_equal true, result[:unjoined][:transformed]
+      assert_equal true, result[:unjoined][:finalized]
+      assert_equal mode, result[:text_mode]
+    end
+  end
+
+  def test_actual_explicit_raster_route_does_not_invoke_vector_source_unit_builder
+    result = run_page_delivery_branch(:raster)
+    assert_equal [[:semantic, :raster]], result[:deliveries]
+    assert_nil result[:unjoined]
+    assert_equal :raster, result[:text_mode]
+  end
+
+  # Execute the shipped branch with native creation stubbed at the boundary.
+  # This catches a helper placed under the wrong mode even when its isolated
+  # renderer tests pass and every semantic text span is accounted for.
+  def run_page_delivery_branch(mode)
+    vector = @main[/        if use_svg_text && builder\.page_group\n.*?(?=        if opts\[:cleanup_geometry\])/m]
+    raster = @main[/        if use_item_raster && !Array\(text_items\)\.empty\?\n.*?(?=        # Exact 3D Text:)/m]
+    refute_nil vector
+    refute_nil raster
+    scope = Module.new
+    scope.module_eval(<<-'RUBY')
+      module Sketchup
+        def self.status_text=(_text); end
+      end
+      module RepresentationFidelity
+        class ContractError < StandardError; end
+        class FallbackController
+          def initialize(*); end
+        end
+        def self.source_span_id(item); item; end
+      end
+      module SvgItemRepresentationRenderer
+        def self.render_unmatched_svg(_parent, svg, _media, items, mode, options)
+          raise 'wrong source scope' unless svg == '<svg/>' && items == ['span:1']
+          raise 'wrong representation' unless [:glyphs, :geometry].include?(mode)
+          raise 'missing shared component cache' unless options[:glyph_component_cache] == {}
+          {:group => Object.new, :mode => mode, :placement_indices => [0, 1, 2]}
+        end
+        def self.finalize_source_unit_evidence!(row, _rotation)
+          raise 'certificate precedes transform' unless row[:transformed]
+          row[:finalized] = true
+        end
+      end
+      def self.create_text_representation_container!(*); Struct.new(:entities).new(Object.new); end
+      def self.prepare_item_page_match_and_peer_boxes(*); [{}, [], [], [], {}]; end
+      def self.report_pipeline_progress(*); end
+      def self.run_control_checkpoint!(*); end
+      def self.svg_source_context(*); {}; end
+      def self.complete_item_representation_ladder!(stats, _model, _parent, _path, _page, _item, mode, *)
+        stats[:deliveries] << [:semantic, mode]
+      end
+      def self.apply_and_verify_page_representation_transform(_group, _media, _scale, _rotation, _offset, row)
+        row[:transformed] = true
+      end
+      def self.record_source_unit_vector_delivery!(stats, _page, row)
+        raise 'uncertified source unit' unless row[:finalized]
+        stats[:unjoined] = row
+        stats[:deliveries] << [:unjoined, row[:mode]]
+      end
+    RUBY
+    setup = <<-'RUBY'
+      def self.run(requested_text_mode)
+        use_svg_text = [:glyphs, :geometry].include?(requested_text_mode)
+        use_item_raster = requested_text_mode == :raster
+        builder = Struct.new(:page_group).new(Struct.new(:entities).new(Object.new))
+        model = Object.new
+        layer_mgr = Struct.new(:text_fallback_layer).new(Object.new)
+        stats = {:pipeline_performance => {}, :deliveries => []}
+        opts = {:scale => 1.0}
+        page_text_opts = opts
+        pct, path, page_num, text_items = '', 'fictional.pdf', 1, ['span:1']
+        media_box = svg_page_box = [0, 0, 612, 792]
+        crop_box = nil
+        page_rotation, page_y_offset = 0, 2.0
+        import_start = Time.now
+        source_svg_document = {:svg => '<svg/>'}
+    RUBY
+    scope.module_eval(setup + raster + vector + "stats\nend\n", __FILE__, __LINE__)
+    scope.run(mode)
+  end
+
   def test_generic_svg_failure_stops_without_substitution
     assert_match(/def self\.enforce_requested_text_delivery!/, @main)
     assert_match(/no representation fallback.*authorized/m, @main)

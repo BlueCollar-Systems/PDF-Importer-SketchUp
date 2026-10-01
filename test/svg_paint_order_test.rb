@@ -34,6 +34,37 @@ class SvgPaintOrderTest < Minitest::Test
     assert_equal 0.0, first[:loops][0][0][2]
   end
 
+  def test_opaque_coloured_fill_and_fill_plus_stroke_keep_exact_style_and_sequence
+    pale = '<path fill="rgb(100%,100%,98.823529%)" stroke="red" d="M 9 19 L 15 19 L 15 27 L 9 27 Z"/>'
+    result = Subject.build(document(pale + use + mask), BOX)
+    assert_equal 2, result[:opaque_paths].length
+    assert_equal 1, result[:white_paths].length
+    background = result[:opaque_paths].first
+    assert_in_delta 0.98823529, background[:fill_rgb][2], 1.0e-8
+    assert_equal 1.0, background[:fill_opacity]
+    assert_equal(-1, background[:paint_order] <=> result[:glyphs].first[:paint_order])
+    assert_equal(-1, result[:glyphs].first[:paint_order] <=> result[:white_paths].first[:paint_order])
+    assert_empty Subject.build(document(pale.sub('stroke="red"','opacity="0.5"')), BOX)[:opaque_paths]
+  end
+
+  def test_rectangular_ancestor_and_page_clips_bind_visible_glyph_ink_only
+    definitions = DEFINITIONS + '<defs><clipPath id="c"><path clip-rule="nonzero" d="M 11 19 L 13 19 L 13 24 L 11 24 Z"/></clipPath></defs>'
+    result = Subject.build(document('<g clip-path="url(#c)">' + use + '</g>' + use(-2,20), definitions), BOX)
+    assert_empty result[:excluded]
+    [[11.0,76.0,13.0,80.0],[0.0,74.0,2.0,80.0]].each_with_index do |bounds, index|
+      bounds.each_with_index { |value, axis| assert_in_delta value, result[:glyphs][index][:ink_bbox_pdf][axis], 1.0e-12 }
+    end
+    assert_equal [0,1], result[:glyphs].map { |g| g[:placement_index] }
+    assert result[:glyphs].all? { |g| g[:clip_proof] == 'exact_source_rectangular_glyph_clip' }
+  end
+
+  def test_arbitrary_ancestor_clip_cannot_certify_unclipped_glyph
+    definitions = DEFINITIONS + '<defs><clipPath id="c"><path clip-rule="nonzero" d="M 10 20 L 14 20 L 10 26 Z"/></clipPath></defs>'
+    result = Subject.build(document('<g clip-path="url(#c)">' + use + '</g>', definitions), BOX)
+    assert_empty result[:glyphs]
+    assert_equal 'unsupported_glyph_clip_shape', result[:excluded].first[:reason]
+  end
+
   def test_nested_affine_style_and_page_offsets_are_explicit
     svg = document('<g transform="translate(5 7)" fill="white"><g transform="scale(2)">' +
       '<rect x="1" y="2" width="3" height="4"/>' + '</g></g>')

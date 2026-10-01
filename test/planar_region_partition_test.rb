@@ -137,4 +137,62 @@ class PlanarRegionPartitionTest < Minitest::Test
     assert_raises(Subject::Error) { Subject.partition([face([[0,0,1], [1,0,1], [0,1,1]])], []) }
     assert_raises(Subject::Error) { Subject.partition([face([[0,0,0], [1,0,0]])], []) }
   end
+
+  def test_exact_bounds_keep_boundary_and_arbitrarily_close_inside_winding_tests
+    epsilon = Rational(1, 10**30)
+    prepared = Subject.with_exact_loop_bounds(Boundary.prepare_regions([face(rect(0, 0, 1, 1))], :native_union))
+    original = Boundary.method(:winding)
+    visited = []
+    Boundary.stub(:winding, lambda { |point, loop| visited << point; original.call(point, loop) }) do
+      [[-epsilon, Rational(1,2)], [1+epsilon, Rational(1,2)],
+       [Rational(1,2), -epsilon], [Rational(1,2), 1+epsilon]].each do |point|
+        refute Subject.filled_with_bounds?(prepared, point)
+      end
+      assert_empty visited
+      [[0,0], [1,1], [0,Rational(1,2)], [1,Rational(1,2)],
+       [epsilon,Rational(1,2)], [1-epsilon,Rational(1,2)]].each do |point|
+        expected = original.call(point, prepared[0][:loops][0]) != 0
+        assert_equal expected, Subject.filled_with_bounds?(prepared, point)
+        assert_equal point, visited.last
+      end
+      assert_equal 6, visited.length
+    end
+  end
+
+  def test_cached_classification_matches_uncached_concave_union_holes_and_touching_edges
+    source = [face([[0,0,0], [5,0,0], [5,1,0], [1,1,0], [1,5,0], [0,5,0]]),
+              face(rect(1, 1, 5, 5), rect(2, 2, 4, 4)), face(rect(5, 5, 6, 6))]
+    baseline = Boundary.prepare_regions(source, :native_union)
+    cached = Subject.with_exact_loop_bounds(Boundary.prepare_regions(source, :native_union))
+    (-1..25).each do |x|
+      (-1..25).each do |y|
+        point = [Rational(x,4), Rational(y,4)]
+        assert_equal Boundary.filled?(baseline, :native_union, point),
+                     Subject.filled_with_bounds?(cached, point)
+      end
+    end
+    refute Subject.filled_with_bounds?(cached, [3,3]), 'the source hole remains empty'
+    assert Subject.filled_with_bounds?(cached, [Rational(3,2),3]), 'the surrounding source face remains filled'
+  end
+
+  def test_cache_is_exact_immutable_and_rebuilt_from_changed_source_on_each_call
+    x = Rational(10**30 + 1, 10**30)
+    source = [face(rect(x, 0, x+1, 1))]
+    prepared = Boundary.prepare_regions(source, :native_union)
+    cached = Subject.with_exact_loop_bounds(prepared)
+    assert_equal [x,0,x+1,1], cached[0][:loop_bounds][0]
+    assert cached.frozen?
+    assert cached[0].frozen?
+    assert cached[0][:loops].frozen?
+    assert cached[0][:loops][0].frozen?
+    assert cached[0][:loops][0][0].frozen?
+    assert cached[0][:loop_bounds].frozen?
+    assert cached[0][:loop_bounds][0].frozen?
+    source[0][:loops][0].each { |point| point[0] += 10 }
+    assert Subject.filled_with_bounds?(cached, [x+Rational(1,2),Rational(1,2)])
+    fresh = Subject.with_exact_loop_bounds(Boundary.prepare_regions(source, :native_union))
+    refute Subject.filled_with_bounds?(fresh, [x+Rational(1,2),Rational(1,2)])
+    assert Subject.filled_with_bounds?(fresh, [x+10+Rational(1,2),Rational(1,2)])
+    assert_equal 1, Subject.partition(source, []).inject(0.to_r) { |sum, cell| sum + cell[:area] }
+  end
 end
