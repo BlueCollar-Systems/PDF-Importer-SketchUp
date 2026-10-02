@@ -118,6 +118,7 @@ jobs:
           ruby test/unit_parser_test.rb
           ruby test/mesh_text_width_fidelity_test.rb
           ruby test/condensed_text_width_regression_test.rb
+          ruby test/negative_font_source_angle_test.rb
           ruby test/all_modes_placement_contract_test.rb
           ruby test/textmode1_invariant_test.rb
           ruby test/rotated_run_merge_test.rb

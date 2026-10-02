@@ -165,6 +165,7 @@ readonly SMOKE_TESTS=(
   test/mesh_text_scaling_test.rb
   test/mesh_text_width_fidelity_test.rb
   test/condensed_text_width_regression_test.rb
+  test/negative_font_source_angle_test.rb
   test/all_modes_placement_contract_test.rb
   test/textmode1_invariant_test.rb
   test/geometry_builder_text_fallback_test.rb
