@@ -2631,7 +2631,10 @@ module BlueCollarSystems
         next nil unless item
         x = item.respond_to?(:x) ? item.x.to_f : nil
         y = item.respond_to?(:y) ? item.y.to_f : nil
-        size = item.respond_to?(:font_size) ? item.font_size.to_f : 0.0
+        # A signed PDF Tf value still has a positive physical glyph height.
+        # Preserve the matrix angle and raw item; rejecting a negative size
+        # discards the only source rotation for joined external text runs.
+        size = item.respond_to?(:font_size) ? item.font_size.to_f.abs : 0.0
         next nil unless x && y && x.finite? && y.finite? &&
           size.finite? && size > 0.05
         angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
@@ -4023,6 +4026,7 @@ module BlueCollarSystems
             ImportRunControl::EscapeCancelProbe.new,
           :status_sink => status_sink
         )
+        controller.begin_request!
         runner = lambda do |page, offset, certifier|
           page_opts = opts.dup
           page_opts[:pages] = [page]

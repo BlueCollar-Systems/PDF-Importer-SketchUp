@@ -117,6 +117,70 @@ class ImportResumeTest < Minitest::Test
     assert_equal 101, journal['pages'][0]['group_persistent_id']
   end
 
+  def test_complete_import_can_start_again_without_reusing_or_erasing_old_groups
+    [:unchanged, :moved, :erased].each do |state|
+      model = Model.new
+      first = controller(model)
+      old = [1, 2, 3].map { |p| add_group(model, p, 100 + p) }
+      old.each_with_index { |g, i| first.certify_page!(g, i + 1, :next_y_offset => 30.0) }
+      old_id = first.journal['journal_id']
+      old.each { |g| g.entities.to_a.first.move_end!(8.0, 9.0, 0.0) } if state == :moved
+      old.each(&:invalidate!) if state == :erased
+      fresh = controller(model)
+      assert_equal :new, fresh.begin_request!
+      assert_empty fresh.resumable_pages
+      assert_equal 0.0, fresh.resume_y_offset
+      refute_equal old_id, fresh.journal['journal_id']
+      # Until a new page certifies, the prior durable journal is untouched.
+      assert_equal old_id, controller(model).journal['journal_id']
+      fresh.certify_page!(add_group(model, 1, 201), 1, :next_y_offset => 10.0)
+      assert_equal 4, model.active_entities.to_a.length
+      assert_equal [old_id], old.map { |g| g.get_attribute(IRC::JOURNAL_DICTIONARY, 'journal_id') }.uniq
+      reopened = controller(model)
+      assert_equal :resume, reopened.begin_request!
+      assert_equal [1], reopened.resumable_pages
+      assert_equal 10.0, reopened.resume_y_offset
+    end
+  end
+
+  def test_incomplete_request_never_discards_missing_or_changed_page_proof
+    [:moved, :erased, :duplicate].each do |state|
+      model = Model.new
+      group = add_group(model, 1, 101)
+      first = controller(model)
+      first.certify_page!(group, 1)
+      journal = first.journal
+      group.entities.to_a.first.move_end!(2.0, 0.0, 0.0) if state == :moved
+      group.invalidate! if state == :erased
+      if state == :duplicate
+        duplicate = add_group(model, 1, 201)
+        duplicate.set_attribute(IRC::JOURNAL_DICTIONARY, 'journal_id', journal['journal_id'])
+        duplicate.set_attribute(IRC::JOURNAL_DICTIONARY, 'page_number', 1)
+      end
+      reopened = controller(model)
+      assert_equal :resume, reopened.begin_request!
+      assert_raises(IRC::ResumeMismatch) { reopened.resumable_pages }
+      assert_equal journal, controller(model).journal
+    end
+  end
+
+  def test_new_generation_rejects_changed_identity_and_generation_binding
+    model = Model.new
+    first = controller(model)
+    [1, 2, 3].each { |p| first.certify_page!(add_group(model, p, 100 + p), p) }
+    fresh = controller(model)
+    fresh.begin_request!
+    fresh.certify_page!(add_group(model, 1, 201), 1)
+    data = fresh.journal
+    data['generation'] = 'f' * 32
+    key = fresh.send(:journal_storage_key)
+    model.set_attribute(IRC::JOURNAL_DICTIONARY, key, JSON.generate(data))
+    assert_raises(IRC::ResumeMismatch) { controller(model).begin_request! }
+    data['generation'] = '../bad'
+    model.set_attribute(IRC::JOURNAL_DICTIONARY, key, JSON.generate(data))
+    assert_raises(IRC::ResumeMismatch) { controller(model).resumable_pages }
+  end
+
   def test_different_identity_dimensions_never_reuse_an_unrelated_journal
     identity.keys.each do |key|
       model = Model.new

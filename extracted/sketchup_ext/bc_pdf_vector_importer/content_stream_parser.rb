@@ -7,12 +7,17 @@
 
 require 'zlib'
 require File.join(File.dirname(__FILE__), 'stroke_clipping')
+require File.join(File.dirname(__FILE__), 'pdf_color_space')
 
 module BlueCollarSystems
   module PDFVectorImporter
     class ContentStreamParser
       MAX_TOKENS_PER_STREAM = 1_000_000
       attr_reader :nonpath_paint_orders, :other_paint_orders
+      # Colour-space names a stream selected whose resource definition could
+      # not be used (malformed or of an unsupported form); their colours keep
+      # the component-count fallback.
+      attr_reader :unsupported_color_spaces
       OTHER_PAINT_OPERATORS = { 'Do' => true, 'sh' => true, 'Tj' => true,
                                 'TJ' => true, "'" => true, '"' => true }.freeze
 
@@ -45,6 +50,10 @@ module BlueCollarSystems
                       :source_miter_limit, :source_stroke_style_proven, :source_stroke_clip
       end
 
+      # :closed records the source fact only. Fill operators close every open
+      # subpath implicitly, but that closing segment belongs to the fill and
+      # not to a stroke painted by the same operator (B, B*), so the flag is
+      # not set for them here; GeometryBuilder fills every subpath as a loop.
       SubPath = Struct.new(
         :segments,     # Array of Segment
         :closed        # Boolean — was 'h' (closepath) used?
@@ -467,12 +476,20 @@ module BlueCollarSystems
           :mask_clear => mask, :blend_normal => blend, :stroke_style_proven => style }
       end
 
-      def initialize(streams, pdf_parser, ocg_map = {}, opacity_effects = {})
+      # resource_scopes is optional. PDFParser#page_data already attaches the
+      # resources in force to every stream it returns (page resources plus
+      # the inlined Forms' own), and that is what is used when nothing is
+      # passed. Pass a resource dictionary (applied to every stream), a
+      # PdfColorSpace::ResourceScope, or an Array of either parallel to
+      # `streams` to state the resources explicitly.
+      def initialize(streams, pdf_parser, ocg_map = {}, opacity_effects = {}, resource_scopes = nil)
         @streams = streams       # Array of decoded stream strings
         @pdf_parser = pdf_parser
         @ocg_map = ocg_map       # { "MC0" => "Layer Name", ... }
         @opacity_effects = opacity_effects.is_a?(Hash) ? opacity_effects : {}
+        @resource_scopes = resource_scopes
         @paths = []
+        @unsupported_color_spaces = []
       end
 
       # ---------------------------------------------------------------
@@ -496,11 +513,21 @@ module BlueCollarSystems
         @mc_layer_stack = []
         @current_ocg_layer = nil
 
+        @color_spaces = PdfColorSpace::Resolver.new(@pdf_parser)
+        @resource_scope = nil
+
         @streams.each_with_index do |stream, stream_index|
           next unless stream && !stream.empty?
           @source_stream_index = stream_index
+          @resource_scope = stream_resource_scope(stream, stream_index)
           tokens = tokenize_content_stream(stream)
           execute_operators(tokens)
+        end
+
+        @unsupported_color_spaces = @color_spaces.unsupported.keys
+        unless @unsupported_color_spaces.empty?
+          log_warning("Colour space(s) #{@unsupported_color_spaces.join(', ')} could not be resolved — " \
+                      'their colours use the component-count fallback')
         end
 
         @paths
@@ -530,6 +557,14 @@ module BlueCollarSystems
         @dash_pattern = nil
         @color_space_stroke = '/DeviceGray'
         @color_space_fill = '/DeviceGray'
+        # Resolved named colour space (PdfColorSpace::Space) of the current
+        # stroking / non-stroking colour, nil for device, Pattern and
+        # unresolved spaces; and whether that colour leaves no mark at all
+        # (Separation /None).
+        @stroke_space = nil
+        @fill_space = nil
+        @stroke_no_paint = false
+        @fill_no_paint = false
         @clip_regions = []
         @pending_clip_rule = nil
         @text_render_mode = 0
@@ -554,6 +589,10 @@ module BlueCollarSystems
           dash_pattern: @dash_pattern,
           color_space_stroke: @color_space_stroke,
           color_space_fill: @color_space_fill,
+          stroke_space: @stroke_space,
+          fill_space: @fill_space,
+          stroke_no_paint: @stroke_no_paint,
+          fill_no_paint: @fill_no_paint,
           clip_regions: @clip_regions.dup,
           text_render_mode: @text_render_mode,
           text_clip_active: @text_clip_active,
@@ -579,6 +618,10 @@ module BlueCollarSystems
         @dash_pattern = gs[:dash_pattern]
         @color_space_stroke = gs[:color_space_stroke]
         @color_space_fill = gs[:color_space_fill]
+        @stroke_space = gs[:stroke_space]
+        @fill_space = gs[:fill_space]
+        @stroke_no_paint = gs[:stroke_no_paint]
+        @fill_no_paint = gs[:fill_no_paint]
         @clip_regions = gs[:clip_regions]
         @text_render_mode = gs[:text_render_mode]
         @text_clip_active = gs[:text_clip_active]
@@ -945,50 +988,84 @@ module BlueCollarSystems
         when 'G'  # Stroke gray
           @stroke_color = nums_to_rgb(nums, '/DeviceGray')
           @color_space_stroke = '/DeviceGray'
+          @stroke_space = nil
+          @stroke_no_paint = false
 
         when 'g'  # Fill gray
           @fill_color = nums_to_rgb(nums, '/DeviceGray')
           @color_space_fill = '/DeviceGray'
+          @fill_space = nil
+          @fill_no_paint = false
 
         when 'RG' # Stroke RGB
           if nums.length >= 3
             @stroke_color = nums_to_rgb(nums, '/DeviceRGB')
             @color_space_stroke = '/DeviceRGB'
+            @stroke_space = nil
+            @stroke_no_paint = false
           end
 
         when 'rg' # Fill RGB
           if nums.length >= 3
             @fill_color = nums_to_rgb(nums, '/DeviceRGB')
             @color_space_fill = '/DeviceRGB'
+            @fill_space = nil
+            @fill_no_paint = false
           end
 
         when 'K'  # Stroke CMYK
           if nums.length >= 4
             @stroke_color = cmyk_to_rgb(nums[0], nums[1], nums[2], nums[3])
             @color_space_stroke = '/DeviceCMYK'
+            @stroke_space = nil
+            @stroke_no_paint = false
           end
 
         when 'k'  # Fill CMYK
           if nums.length >= 4
             @fill_color = cmyk_to_rgb(nums[0], nums[1], nums[2], nums[3])
             @color_space_fill = '/DeviceCMYK'
+            @fill_space = nil
+            @fill_no_paint = false
           end
 
         when 'CS' # Stroke color space
           name_token = operands.find { |t| t[:type] == :name }
-          @color_space_stroke = name_token[:value] if name_token
+          if name_token
+            @color_space_stroke = name_token[:value]
+            @stroke_space = resolve_color_space(@color_space_stroke)
+            @stroke_no_paint = false
+            # A named space starts at its own initial colour (full tint for
+            # Separation / DeviceN); device and Pattern spaces are unchanged.
+            apply_space_color(true, @stroke_space.initial) if @stroke_space
+          end
 
         when 'cs' # Fill color space
           name_token = operands.find { |t| t[:type] == :name }
-          @color_space_fill = name_token[:value] if name_token
+          if name_token
+            @color_space_fill = name_token[:value]
+            @fill_space = resolve_color_space(@color_space_fill)
+            @fill_no_paint = false
+            apply_space_color(false, @fill_space.initial) if @fill_space
+          end
 
         when 'SC', 'SCN' # Stroke color (general)
           # Pattern-only SCN may provide no numeric components.
-          @stroke_color = nums_to_rgb(nums, @color_space_stroke) unless nums.empty?
+          unless nums.empty?
+            unless @stroke_space && apply_space_color(true, nums)
+              @stroke_color = nums_to_rgb(nums, @color_space_stroke)
+              @stroke_no_paint = false
+            end
+          end
 
         when 'sc', 'scn' # Fill color (general)
           # Pattern-only scn may provide no numeric components.
-          @fill_color = nums_to_rgb(nums, @color_space_fill) unless nums.empty?
+          unless nums.empty?
+            unless @fill_space && apply_space_color(false, nums)
+              @fill_color = nums_to_rgb(nums, @color_space_fill)
+              @fill_no_paint = false
+            end
+          end
 
         # --- Path construction ---
         when 'm'  # moveto
@@ -1195,6 +1272,16 @@ module BlueCollarSystems
       def emit_path(stroke, fill)
         return if @current_subpaths.empty?
 
+        # Painting with the /None colorant leaves no mark (PDF 32000-1
+        # 8.6.6.4); the path still ends and a pending clip still applies.
+        stroke = false if stroke && @stroke_no_paint
+        fill = false if fill && @fill_no_paint
+        unless stroke || fill
+          apply_pending_clip!
+          clear_path
+          return
+        end
+
         # Transform all points by current CTM
         transformed_subpaths = transformed_current_subpaths
         clip_fill_rule = nil
@@ -1394,15 +1481,62 @@ module BlueCollarSystems
         ]
       end
 
+      # One CMYK -> RGB conversion for path colours: the K / k operators and
+      # every named space that ends in CMYK use PdfColorSpace.cmyk_to_rgb.
       def cmyk_to_rgb(c, m, y, k)
-        c = clamp01(c)
-        m = clamp01(m)
-        y = clamp01(y)
-        k = clamp01(k)
-        r = (1.0 - c) * (1.0 - k)
-        g = (1.0 - m) * (1.0 - k)
-        b = (1.0 - y) * (1.0 - k)
-        clamp_rgb([r, g, b])
+        clamp_rgb(PdfColorSpace.cmyk_to_rgb(c, m, y, k))
+      end
+
+      # ---------------------------------------------------------------
+      # Named colour spaces (CS / cs + SC / SCN / sc / scn)
+      # ---------------------------------------------------------------
+      # The resources in force for one stream: stated by the caller, or the
+      # scope PDFParser#page_data attached to the stream it returned.
+      def stream_resource_scope(stream, stream_index)
+        given = @resource_scopes
+        given = given[stream_index] if given.is_a?(Array)
+        return given if given.is_a?(PdfColorSpace::ResourceScope)
+        return PdfColorSpace::ResourceScope.new(given) if given.is_a?(Hash)
+        PdfColorSpace::ResourceScope.of(stream)
+      end
+
+      # PdfColorSpace::Space for a CS / cs operand at the current operator,
+      # or nil: device and Pattern spaces, names without a usable resource
+      # definition and streams without known resources all keep nums_to_rgb.
+      def resolve_color_space(name)
+        return nil unless @resource_scope && @color_spaces
+        offset = @source_paint_order ? @source_paint_order[1] : nil
+        @color_spaces.space(name, @resource_scope.chain_at(offset))
+      rescue StandardError
+        nil
+      end
+
+      # Sets the stroking (or non-stroking) colour from operands of its
+      # resolved space. Returns false when the space cannot convert them.
+      def apply_space_color(stroking, operands)
+        space = stroking ? @stroke_space : @fill_space
+        converted = begin
+          space.to_rgb(operands)
+        rescue StandardError
+          nil
+        end
+        no_paint = converted == PdfColorSpace::NO_PAINT
+        return false unless no_paint || converted.is_a?(Array)
+        if stroking
+          @stroke_color = clamp_rgb(converted) unless no_paint
+          @stroke_no_paint = no_paint
+        else
+          @fill_color = clamp_rgb(converted) unless no_paint
+          @fill_no_paint = no_paint
+        end
+        true
+      end
+
+      def log_warning(message)
+        logger = defined?(Logger) ? Logger : nil
+        logger.warn('ContentParser', message) if logger && logger.respond_to?(:warn)
+      rescue StandardError
+        nil
       end
 
       def nums_to_rgb(nums, color_space)
