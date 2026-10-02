@@ -227,6 +227,14 @@ module BlueCollarSystems
           # Keep the source style local to this path, including retained batches.
           stroke_style = should_stroke ? source_stroke_style(path.stroke_color) : nil
           stroke_bounds = effective_stroke_bounds(path) if should_stroke
+          # A PDF fill operator (f, F, f*, B, B*, b, b*) closes every open
+          # subpath before it paints (PDF 32000-1, 8.5.3.1). That implied
+          # closing segment belongs to the FILL only: the face is built from
+          # the subpath's own points whether or not the source wrote `h`,
+          # while the stroke keeps following subpath.closed, so `B` on an open
+          # contour never gains an edge the PDF does not draw. Degenerate
+          # loops (fewer than three distinct points, no area) are rejected
+          # silently by draw_face/build_face_loop exactly as closed ones are.
           path.subpaths.each do |subpath|
             points_list = subpath_to_points(subpath)
             next if points_list.empty?
@@ -257,7 +265,7 @@ module BlueCollarSystems
                 style_stroke_edge(edge, stroke_style)
                 @edge_count += 1
               end
-              draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true) if should_fill && subpath.closed && su_points.length >= 3
+              draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true) if should_fill && su_points.length >= 3
               next
             end
 
@@ -274,7 +282,7 @@ module BlueCollarSystems
               draw_with_arc_detection(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color, stroke_style)
             else
               draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, stroke_style) if should_stroke
-              if should_fill && subpath.closed && su_points.length >= 3
+              if should_fill && su_points.length >= 3
                 draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true)
               end
             end
@@ -417,7 +425,7 @@ module BlueCollarSystems
       end
 
       # Fill-only containers ("PDF Fill") are created before their contours are
-      # drawn (fill_targets in #build). A fill path whose every subpath is open,
+      # drawn (fill_targets in #build). A fill path whose every subpath is
       # degenerate or rejected by the host leaves that container EMPTY. SketchUp
       # purges empty groups at commit_operation, i.e. after the page was
       # certified, so PageOrchestrator's immediate re-validation then reads a

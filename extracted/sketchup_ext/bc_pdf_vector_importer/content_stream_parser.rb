@@ -50,6 +50,10 @@ module BlueCollarSystems
                       :source_miter_limit, :source_stroke_style_proven, :source_stroke_clip
       end
 
+      # :closed records the source fact only. Fill operators close every open
+      # subpath implicitly, but that closing segment belongs to the fill and
+      # not to a stroke painted by the same operator (B, B*), so the flag is
+      # not set for them here; GeometryBuilder fills every subpath as a loop.
       SubPath = Struct.new(
         :segments,     # Array of Segment
         :closed        # Boolean — was 'h' (closepath) used?

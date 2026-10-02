@@ -6,8 +6,10 @@
 # Mechanism under test:
 #   * GeometryBuilder#build creates a "PDF Fill" container for a fill-only path
 #     BEFORE any of its subpaths is drawn (fill_targets). A fill path whose
-#     every subpath is open, degenerate or rejected by the host leaves that
-#     container EMPTY.
+#     every subpath is degenerate or rejected by the host leaves that
+#     container EMPTY. (When this was recorded an OPEN fill subpath did the
+#     same; a PDF fill closes implicitly and is now built as a face, see
+#     implicit_fill_close_test.rb.)
 #   * SketchUp suspends empty-group cleanup between start_operation and
 #     commit_operation (thomthom, api-issue-tracker #797). main.rb certifies
 #     the page group inside the operation (the empty container is still part of
@@ -281,11 +283,16 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     path([[0.0, y], [72.0, y]], true, false, false)
   end
 
-  # A fill-only path whose single subpath is OPEN: the host would fill it (a
-  # PDF "f" closes implicitly) but the builder draws faces only for closed
-  # subpaths, so its "PDF Fill" container receives nothing.
+  # A fill-only path whose single open subpath is a real triangle. A PDF "f"
+  # closes it implicitly, so its "PDF Fill" container receives one face.
   def open_fill(y)
     path([[10.0, y], [40.0, y], [40.0, y + 20.0]], false, true, false)
+  end
+
+  # A fill-only path that can never become a face (three collinear points):
+  # its "PDF Fill" container receives nothing.
+  def degenerate_fill(y)
+    path([[10.0, y], [40.0, y], [70.0, y]], false, true, false)
   end
 
   def build_page(model, paths)
@@ -340,9 +347,22 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     [controller, controller.resumable_pages]
   end
 
-  def test_open_fill_path_no_longer_leaves_an_empty_fill_container
+  def test_open_fill_path_is_filled_and_its_container_survives_the_commit
     model = PurgingHost::Model.new
     builder, result = build_page(model, [stroke_line(10.0), stroke_line(20.0), open_fill(30.0)])
+    assert_equal 2, result[:edges]
+    assert_equal 1, result[:faces]
+    assert_equal 1, builder.fill_only_groups.length
+    assert_equal 0, empty_groups_below(builder.page_group).length
+    _controller, pages = certify_commit_and_revalidate(model, builder)
+    assert_equal [1], pages
+    assert_equal 0, model.purged_groups
+    assert builder.fill_only_groups.first[:group].valid?
+  end
+
+  def test_degenerate_fill_path_no_longer_leaves_an_empty_fill_container
+    model = PurgingHost::Model.new
+    builder, result = build_page(model, [stroke_line(10.0), stroke_line(20.0), degenerate_fill(30.0)])
     assert_equal 2, result[:edges]
     assert_equal 0, result[:faces]
     assert_equal 0, empty_groups_below(builder.page_group).length,
@@ -357,9 +377,10 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
   def test_heavy_page_with_bulk_staging_behaves_the_same
     model = PurgingHost::Model.new
     heavy = Builder::GEOMETRY_STAGING_PATH_THRESHOLD + 50
-    paths = heavy.times.map { |i| stroke_line(10.0 + i) } + [open_fill(5.0), open_fill(6.0)]
+    paths = heavy.times.map { |i| stroke_line(10.0 + i) } + [degenerate_fill(5.0), degenerate_fill(6.0)]
     builder, result = build_page(model, paths)
     assert_equal heavy, result[:edges]
+    assert_equal 0, result[:faces]
     assert_equal 0, empty_groups_below(builder.page_group).length
     _controller, pages = certify_commit_and_revalidate(model, builder)
     assert_equal [1], pages
