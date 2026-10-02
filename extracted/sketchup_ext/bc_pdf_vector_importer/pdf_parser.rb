@@ -1677,21 +1677,69 @@ module BlueCollarSystems
       def parse_array_string(text)
         start = text.index('[')
         return [] unless start
+        close = array_close_index(text, start)
+        return [] unless close
+        tokenize_array(text[start + 1...close])
+      end
+
+      # Index just past the literal string that opens at text[start] == '('.
+      # A backslash escapes the byte after it, so "\(", "\)" and "\\" neither
+      # open nor close anything; unescaped parentheses nest. A string that is
+      # never closed runs to the end of the text. The result is always
+      # greater than start.
+      def literal_string_end(text, start)
+        len = text.length
         depth = 0
-        i = start
-        while i < text.length
-          if text[i] == '['
-            depth += 1
-          elsif text[i] == ']'
-            depth -= 1
-            if depth == 0
-              inner = text[start + 1...i]
-              return tokenize_array(inner)
-            end
+        j = start
+        while j < len
+          ch = text[j]
+          if ch == '\\'
+            j += 2
+            next
           end
-          i += 1
+          depth += 1 if ch == '('
+          if ch == ')'
+            depth -= 1
+            return j + 1 if depth <= 0
+          end
+          j += 1
         end
-        []
+        len
+      end
+
+      # Index of the "]" that closes the array opening at text[start] == '[',
+      # or nil when the array is never closed. Brackets inside literal
+      # strings, hex strings and comments are data, not array delimiters.
+      def array_close_index(text, start)
+        len = text.length
+        depth = 0
+        j = start
+        while j < len
+          ch = text[j]
+          if ch == '('
+            j = literal_string_end(text, j)
+          elsif ch == '<'
+            if text[j + 1] == '<'
+              j += 2
+            else
+              close = text.index('>', j)
+              j = close ? close + 1 : len
+            end
+          elsif ch == '%'
+            eol = text.index(/[\r\n]/, j)
+            j = eol ? eol + 1 : len
+          elsif ch == '['
+            depth += 1
+            j += 1
+          elsif ch == ']'
+            depth -= 1
+            return j if depth <= 0
+            j += 1
+          else
+            j += 1
+          end
+        end
+        nil
       end
 
       def tokenize_array(inner)
@@ -1713,8 +1761,16 @@ module BlueCollarSystems
         tokens = []
         i = 0
         len = text.length
+        last_start = -1
 
         while i < len
+          # Hard stop: every pass starts beyond the previous one. This runs on
+          # SketchUp's UI thread with no timeout, so a branch that fails to
+          # consume input must end as a parse error, never as a frozen host.
+          if i <= last_start
+            raise "PDF tokenizer made no progress at byte #{i}"
+          end
+          last_start = i
           c = text[i]
 
           # Skip whitespace
@@ -1743,16 +1799,7 @@ module BlueCollarSystems
 
           # String
           if c == '('
-            depth = 1
-            j = i + 1
-            while j < len && depth > 0
-              if text[j] == '(' && (j == 0 || text[j-1] != '\\')
-                depth += 1
-              elsif text[j] == ')' && (j == 0 || text[j-1] != '\\')
-                depth -= 1
-              end
-              j += 1
-            end
+            j = literal_string_end(text, i)
             tokens << text[i...j]
             i = j
             next
@@ -1789,13 +1836,8 @@ module BlueCollarSystems
 
           # Array
           if c == '['
-            depth = 1
-            j = i + 1
-            while j < len && depth > 0
-              depth += 1 if text[j] == '['
-              depth -= 1 if text[j] == ']'
-              j += 1
-            end
+            close = array_close_index(text, i)
+            j = close ? close + 1 : len
             tokens << text[i...j]
             i = j
             next
@@ -1816,8 +1858,14 @@ module BlueCollarSystems
           while j < len && text[j] !~ /[\s\[\]<>(){}\/\%]/
             j += 1
           end
-          tokens << text[i...j] if j > i
-          i = j
+          if j > i
+            tokens << text[i...j]
+            i = j
+          else
+            # A delimiter no branch above consumes (a stray ")", "{", "}" or a
+            # lone ">"): drop it, as the stray "]" and ">>" are dropped above.
+            i += 1
+          end
         end
 
         tokens

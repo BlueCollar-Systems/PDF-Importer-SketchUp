@@ -186,6 +186,7 @@ readonly SMOKE_TESTS=(
   test/stroke_color_preservation_test.rb
   test/pdf_color_space_test.rb
   test/implicit_fill_close_test.rb
+  test/pdf_tokenizer_termination_test.rb
   test/labels_empty_text_group_resume_signature_test.rb
   test/pdf_color_display_test.rb
   test/geometry_cleanup_collinear_coverage_test.rb
