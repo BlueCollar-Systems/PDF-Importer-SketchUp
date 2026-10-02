@@ -142,6 +142,7 @@ jobs:
           ruby test/page_paint_bounds_test.rb
           ruby test/stroke_clipping_test.rb
           ruby test/stroke_color_preservation_test.rb
+          ruby test/pdf_color_space_test.rb
           ruby test/labels_empty_text_group_resume_signature_test.rb
           ruby test/empty_fill_group_resume_signature_test.rb
           ruby test/no_mid_import_prompts_test.rb
@@ -234,6 +235,7 @@ jobs:
           ruby test/original_annotation_pipeline_test.rb
           ruby test/stroke_clipping_test.rb
           ruby test/stroke_color_preservation_test.rb
+          ruby test/pdf_color_space_test.rb
           ruby test/labels_empty_text_group_resume_signature_test.rb
           ruby test/empty_fill_group_resume_signature_test.rb
           ruby test/no_mid_import_prompts_test.rb

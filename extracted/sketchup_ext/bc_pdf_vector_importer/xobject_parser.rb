@@ -90,6 +90,14 @@ module BlueCollarSystems
 
           # Get the stream content
           stream_data = @pdf.get_stream_data(obj_num)
+          # parse_xobject_paths parses this stream on its own: colour-space
+          # names resolve in the Form's resources first, then the page's.
+          if defined?(PdfColorSpace)
+            form_resources = xobj_d.key?('/Resources') ? to_dict(@pdf.resolve_object(xobj_d['/Resources'])) : nil
+            PdfColorSpace::ResourceScope.attach(
+              stream_data, PdfColorSpace::ResourceScope.new([form_resources, res_dict])
+            )
+          end
 
           clean_name = name.to_s.gsub(/\A\//, '')
 
