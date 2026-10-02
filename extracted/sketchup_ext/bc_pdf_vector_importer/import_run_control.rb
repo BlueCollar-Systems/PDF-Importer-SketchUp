@@ -4,6 +4,7 @@
 
 require 'digest'
 require 'json'
+require 'securerandom'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -353,6 +354,33 @@ module BlueCollarSystems
           entry
         end
 
+        # Called once at the user-request boundary, never at an internal
+        # checkpoint. A fully certified request has nothing left to resume;
+        # importing it again creates a new instance even if the user moved or
+        # erased the previous one. Incomplete requests keep every strict
+        # physical resume check. Do not overwrite the old model journal until
+        # a new page is certified inside its normal host operation.
+        def begin_request!
+          ensure_journal_ready!
+          data = read_journal
+          return :new unless data
+          validate_journal_identity!(data)
+          completed = data['pages'].map { |entry| entry['page_number'] }.sort
+          return :resume unless !@pages.empty? && completed == @pages.uniq.sort
+
+          @pending_journal = {
+            'schema' => JOURNAL_SCHEMA,
+            'generation' => SecureRandom.hex(16),
+            'identity' => @identity.dup,
+            'pages' => []
+          }
+          @pending_journal['journal_id'] =
+            "bcs-resume-#{identity_digest[0, 24]}-#{@pending_journal['generation']}"
+          @retained_pages = []
+          @certified_census = {}
+          :new
+        end
+
         def resumable_pages
           ensure_journal_ready!
           data = read_journal
@@ -452,6 +480,7 @@ module BlueCollarSystems
         end
 
         def read_journal
+          return @pending_journal if @pending_journal
           raw = if @model.respond_to?(:get_attribute)
                   @model.get_attribute(
                     JOURNAL_DICTIONARY, journal_storage_key, nil
@@ -475,6 +504,7 @@ module BlueCollarSystems
           @model.set_attribute(
             JOURNAL_DICTIONARY, journal_storage_key, canonical_json(data)
           )
+          @pending_journal = nil
           data
         end
 
@@ -483,9 +513,15 @@ module BlueCollarSystems
         end
 
         def validate_journal_identity!(data)
+          generation = data['generation']
+          unless generation.nil? || (generation.is_a?(String) && generation =~ /\A[0-9a-f]{32}\z/)
+            raise ResumeMismatch, 'resume journal generation is invalid'
+          end
+          expected_id = "bcs-resume-#{identity_digest[0, 24]}"
+          expected_id += "-#{generation}" if generation
           unless data['identity'].is_a?(Hash) &&
                  canonical_json(data['identity']) == canonical_json(@identity) &&
-                 data['journal_id'].to_s == "bcs-resume-#{identity_digest[0, 24]}"
+                 data['journal_id'].to_s == expected_id
             raise ResumeMismatch,
                   'resume identity differs from the certified PDF/options/importer/package'
           end

@@ -6,6 +6,7 @@
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
 require 'zlib'
+require File.join(File.dirname(__FILE__), 'pdf_color_space')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -108,7 +109,17 @@ module BlueCollarSystems
         # resource dictionaries, so looking those names up at page scope can
         # silently omit an image or substitute an unrelated page image.
         source_content_streams = streams
-        streams = expand_form_xobjects(streams, dict) unless streams.empty?
+        # Colour-space names are scoped by resource dictionary. Each returned
+        # stream carries the page's resources plus the byte ranges that came
+        # from an inlined Form and that Form's resources (ResourceScope), so
+        # the vector parser resolves "/Cs8 CS" where a viewer would.
+        resources = page_resource_dictionary(dict)
+        form_ranges = []
+        unless streams.empty?
+          streams = expand_form_xobjects(streams, dict, 0, form_ranges, resources ? [resources] : [])
+        end
+        attach_resource_scopes(source_content_streams, resources, nil)
+        attach_resource_scopes(streams, resources, form_ranges) unless streams.equal?(source_content_streams)
 
         { media_box: media_box, crop_box: crop_box, rotation: rotation,
           content_streams: streams, source_content_streams: source_content_streams }
@@ -338,13 +349,40 @@ module BlueCollarSystems
       FORM_EXPANSION_MAX_BYTES = 64_000_000
       FORM_DO_PATTERN = %r{/([^\s\/\[\]()<>{}%]+)\s+Do(?![0-9A-Za-z])}n
 
-      def expand_form_xobjects(streams, owner_dict, depth = 0)
+      # scope_ranges (optional Array) receives, per returned stream, the
+      # [start, stop, resource_chain] byte ranges of the inlined Forms;
+      # resource_chain is the invoking scope's resource dictionaries,
+      # innermost first. Both are bookkeeping only: the expanded bytes are
+      # the same with or without them.
+      def expand_form_xobjects(streams, owner_dict, depth = 0, scope_ranges = nil, resource_chain = nil)
         xmap = xobject_ref_map(owner_dict)
         return streams if xmap.empty?
         budget = [FORM_EXPANSION_MAX_BYTES]
-        streams.map { |s| expand_forms_in_stream(s, xmap, depth, budget) }
+        collected = []
+        expanded = streams.map do |s|
+          ranges = []
+          collected << ranges
+          expand_forms_in_stream(s, xmap, depth, budget, ranges, resource_chain)
+        end
+        scope_ranges.replace(collected) if scope_ranges
+        expanded
       rescue StandardError
         streams
+      end
+
+      def page_resource_dictionary(page_dict)
+        to_dict(resolve_object(find_inherited(page_dict, '/Resources')))
+      rescue StandardError
+        nil
+      end
+
+      def attach_resource_scopes(streams, resources, form_ranges)
+        Array(streams).each_with_index do |stream, index|
+          ranges = form_ranges ? form_ranges[index] : nil
+          PdfColorSpace::ResourceScope.attach(
+            stream, PdfColorSpace::ResourceScope.new(resources, ranges)
+          )
+        end
       end
 
       # XObject resource map: bare name => "N G R" reference string.
@@ -365,21 +403,38 @@ module BlueCollarSystems
         {}
       end
 
-      def expand_forms_in_stream(stream, xmap, depth, budget)
+      def expand_forms_in_stream(stream, xmap, depth, budget, ranges = nil, resource_chain = nil)
         return stream unless stream.is_a?(String)
         return stream if depth >= FORM_EXPANSION_MAX_DEPTH
         bin = stream.dup.force_encoding(Encoding::BINARY)
-        bin.gsub(FORM_DO_PATTERN) do |whole|
-          name = Regexp.last_match(1)
+        found = []
+        shift = 0
+        expanded = bin.gsub(FORM_DO_PATTERN) do |whole|
+          match = Regexp.last_match
+          name = match[1]
+          start = match.begin(0) + shift
           ref = xmap[name]
-          expansion = ref ? form_expansion_for(ref, depth, budget) : nil
-          expansion ? expansion : whole
+          inner = []
+          expansion = ref ? form_expansion_for(ref, depth, budget, inner, resource_chain) : nil
+          if expansion
+            inner.each { |row| found << [row[0] + start, row[1] + start, row[2]] }
+            shift += expansion.bytesize - whole.bytesize
+            expansion
+          else
+            whole
+          end
         end
+        ranges.concat(found) if ranges
+        expanded
       rescue StandardError
         stream
       end
 
-      def form_expansion_for(ref, depth, budget)
+      # ranges (optional Array) receives [start, stop, resource_chain] rows
+      # relative to the returned text: the Form itself, then every Form
+      # inlined inside it. A Form with /Resources is looked up there first
+      # and then in the invoking scope; one without uses the invoking scope.
+      def form_expansion_for(ref, depth, budget, ranges = nil, resource_chain = nil)
         fdict = to_dict(resolve_object(ref))
         return nil unless fdict
         return nil unless fdict['/Subtype'].to_s =~ /Form/
@@ -388,16 +443,25 @@ module BlueCollarSystems
         return nil unless body.is_a?(String) && !body.empty?
         budget[0] -= body.bytesize
         return nil if budget[0] < 0
+        chain = resource_chain.is_a?(Array) ? resource_chain : []
+        own = fdict.key?('/Resources') ? to_dict(resolve_object(fdict['/Resources'])) : nil
+        chain = [own] + chain if own
+        inner = []
         inner_map = xobject_ref_map(fdict)
         unless inner_map.empty?
-          body = expand_forms_in_stream(body, inner_map, depth + 1, budget)
+          body = expand_forms_in_stream(body, inner_map, depth + 1, budget, inner, chain)
         end
         matrix = parse_array_nums(fdict['/Matrix'])
         matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] unless matrix && matrix.length == 6
         mtx = matrix.map { |v| format('%.6g', v.to_f) }.join(' ')
         head = ("q\n" + mtx + " cm\n").dup.force_encoding(Encoding::BINARY)
         tail = "\nQ\n".dup.force_encoding(Encoding::BINARY)
-        head + body.dup.force_encoding(Encoding::BINARY) + tail
+        text = head + body.dup.force_encoding(Encoding::BINARY) + tail
+        if ranges
+          ranges << [0, text.bytesize, chain]
+          inner.each { |row| ranges << [row[0] + head.bytesize, row[1] + head.bytesize, row[2]] }
+        end
+        text
       rescue StandardError
         nil
       end
@@ -1557,21 +1621,8 @@ module BlueCollarSystems
       def extract_dict(text)
         start = text.index('<<')
         return '' unless start
-        depth = 0
-        i = start
-        while i < text.length - 1
-          if text[i, 2] == '<<'
-            depth += 1
-            i += 2
-          elsif text[i, 2] == '>>'
-            depth -= 1
-            i += 2
-            return text[start, i - start] if depth == 0
-          else
-            i += 1
-          end
-        end
-        text[start..-1]
+        stop = pdf_compound_end(text, start) || text.length
+        text[start...stop]
       end
 
       def parse_dict_string(text)
@@ -1613,21 +1664,9 @@ module BlueCollarSystems
       def parse_array_string(text)
         start = text.index('[')
         return [] unless start
-        depth = 0
-        i = start
-        while i < text.length
-          if text[i] == '['
-            depth += 1
-          elsif text[i] == ']'
-            depth -= 1
-            if depth == 0
-              inner = text[start + 1...i]
-              return tokenize_array(inner)
-            end
-          end
-          i += 1
-        end
-        []
+        stop = pdf_compound_end(text, start)
+        return [] unless stop
+        tokenize_array(text[start + 1...stop - 1])
       end
 
       def tokenize_array(inner)
@@ -1677,61 +1716,25 @@ module BlueCollarSystems
             next
           end
 
-          # String
+          # Delimiters inside literal strings, hex strings and comments are
+          # data, not array/dictionary boundaries.
           if c == '('
-            depth = 1
-            j = i + 1
-            while j < len && depth > 0
-              if text[j] == '(' && (j == 0 || text[j-1] != '\\')
-                depth += 1
-              elsif text[j] == ')' && (j == 0 || text[j-1] != '\\')
-                depth -= 1
-              end
-              j += 1
-            end
+            j = pdf_literal_end(text, i)
             tokens << text[i...j]
             i = j
             next
           end
 
-          # Hex string
-          if c == '<' && text[i+1] != '<'
-            j = text.index('>', i) || len
-            tokens << text[i..j]
-            i = j + 1
-            next
-          end
-
-          # Dict start
-          if c == '<' && text[i+1] == '<'
-            # Find matching >>
-            depth = 1
-            j = i + 2
-            while j < len - 1 && depth > 0
-              if text[j, 2] == '<<'
-                depth += 1
-                j += 2
-              elsif text[j, 2] == '>>'
-                depth -= 1
-                j += 2
-              else
-                j += 1
-              end
-            end
+          if c == '<' && text[i + 1] != '<'
+            stop = text.index('>', i + 1)
+            j = stop ? stop + 1 : len
             tokens << text[i...j]
             i = j
             next
           end
 
-          # Array
-          if c == '['
-            depth = 1
-            j = i + 1
-            while j < len && depth > 0
-              depth += 1 if text[j] == '['
-              depth -= 1 if text[j] == ']'
-              j += 1
-            end
+          if c == '[' || (c == '<' && text[i + 1] == '<')
+            j = pdf_compound_end(text, i) || len
             tokens << text[i...j]
             i = j
             next
@@ -1753,10 +1756,65 @@ module BlueCollarSystems
             j += 1
           end
           tokens << text[i...j] if j > i
-          i = j
+          # An unmatched delimiter in malformed input must never leave this
+          # loop at the same position, notably after a truncated literal string.
+          i = j > i ? j : i + 1
         end
 
         tokens
+      end
+
+      # Exclusive end of a PDF literal string. Skipping each escape pair
+      # handles escaped parentheses AND even runs of backslashes correctly.
+      def pdf_literal_end(text, start)
+        depth = 1
+        i = start + 1
+        while i < text.length && depth > 0
+          if text[i] == '\\'
+            i += 2
+            next
+          end
+          depth += 1 if text[i] == '('
+          depth -= 1 if text[i] == ')'
+          i += 1
+        end
+        [i, text.length].min
+      end
+
+      # Iterative matching of arrays/dictionaries, shared by all object-entry
+      # paths. Literal/hex strings and comments are opaque to the delimiter
+      # stack. Nil means an unterminated compound; no scan can stall.
+      def pdf_compound_end(text, start)
+        stack = [text[start] == '[' ? ']' : '>>']
+        i = start + (stack.first == ']' ? 1 : 2)
+        while i < text.length
+          c = text[i]
+          if c == '%'
+            i = text.index(/[\r\n]/, i) || text.length
+          elsif c == '('
+            i = pdf_literal_end(text, i)
+          elsif c == '<' && text[i + 1] != '<'
+            stop = text.index('>', i + 1)
+            i = stop ? stop + 1 : text.length
+          elsif c == '['
+            stack << ']'
+            i += 1
+          elsif text[i, 2] == '<<'
+            stack << '>>'
+            i += 2
+          elsif c == ']' && stack.last == ']'
+            stack.pop
+            i += 1
+            return i if stack.empty?
+          elsif text[i, 2] == '>>' && stack.last == '>>'
+            stack.pop
+            i += 2
+            return i if stack.empty?
+          else
+            i += 1
+          end
+        end
+        nil
       end
 
       def collect_value(tokens, index)

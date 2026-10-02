@@ -1,5 +1,9 @@
 require 'minitest/autorun'
 
+module UI
+  def self.inputbox(*_args); nil; end
+end
+
 module Sketchup
   @defaults = {}
 
@@ -67,6 +71,63 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_equal 'Labels',
                  Sketchup.default_value(PREF_KEY, 'text_mode')
     assert_equal 'Labels', BID.effective_text_mode(prefs)
+  end
+
+  def test_page_range_is_not_reused_as_a_global_preference
+    Sketchup.reset_defaults([PREF_KEY, 'pages'] => '1', [PREF_KEY, 'scale'] => '2.0')
+    BID.send(:save_prefs, :pages => '3-5', :text_mode => 'Glyphs')
+    prefs = BID.send(:load_prefs)
+    refute prefs.key?(:pages)
+    assert_equal '2.0', prefs[:scale]
+    assert_equal 'Glyphs', prefs[:text_mode]
+    assert_equal '1', Sketchup.default_value(PREF_KEY, 'pages')
+  end
+
+  def test_new_basic_inputbox_defaults_to_all_but_honors_explicit_range
+    received = nil
+    UI.stub(:inputbox, lambda { |_prompts, defaults, _lists, _title|
+      received = defaults.dup
+      ['2-4', '1.0', 'Yes', 'Glyphs', 'Yes']
+    }) do
+      options = BID.send(:show_inputbox_basic, 'second.pdf', :pages => '1')
+      assert_equal 'All', received[0]
+      assert_equal [2, 3, 4], options[:pages]
+    end
+  end
+
+  def test_advanced_inputbox_uses_current_request_not_saved_page_range
+    [nil, '2-3'].each do |current|
+      UI.stub(:inputbox, lambda { |_prompts, defaults, _lists, _title|
+        assert_equal(current || 'All', defaults[1])
+        nil
+      }) do
+        BID.send(:show_inputbox_advanced, 'second.pdf', current, nil, nil, :pages => '1')
+      end
+    end
+  end
+
+  class PageRangeDialog
+    attr_reader :html
+    def initialize(*); self.class.last = self; end
+    def set_html(value); @html = value; end
+    def add_action_callback(*); end
+    def show_modal; end
+    class << self; attr_accessor :last; end
+  end
+
+  def test_html_dialogs_default_all_and_preserve_explicit_advanced_range
+    original = UI.const_get(:HtmlDialog) if UI.const_defined?(:HtmlDialog)
+    UI.send(:remove_const, :HtmlDialog) if original
+    UI.const_set(:HtmlDialog, PageRangeDialog)
+    BID.send(:show_html_basic, 'second.pdf', :pages => '1')
+    assert_match(/id="pages" value="All"/, PageRangeDialog.last.html)
+    BID.send(:show_html_advanced, 'second.pdf', '2-3', nil, nil, :pages => '1')
+    assert_match(/id="pages" value="2-3"/, PageRangeDialog.last.html)
+    BID.send(:show_html_advanced, 'second.pdf', nil, nil, nil, :pages => '1')
+    assert_match(/id="pages" value="All"/, PageRangeDialog.last.html)
+  ensure
+    UI.send(:remove_const, :HtmlDialog) if UI.const_defined?(:HtmlDialog)
+    UI.const_set(:HtmlDialog, original) if original
   end
 
   def test_first_run_text_mode_defaults_to_3d_text

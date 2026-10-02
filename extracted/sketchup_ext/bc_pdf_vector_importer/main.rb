@@ -4023,6 +4023,7 @@ module BlueCollarSystems
             ImportRunControl::EscapeCancelProbe.new,
           :status_sink => status_sink
         )
+        controller.begin_request!
         runner = lambda do |page, offset, certifier|
           page_opts = opts.dup
           page_opts[:pages] = [page]

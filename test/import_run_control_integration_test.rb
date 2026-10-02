@@ -167,6 +167,7 @@ class ImportRunControlIntegrationTest < Minitest::Test
           def self.identity_for(*); {}; end
           class Controller
             def initialize(*); end
+            def begin_request!; end
           end
           class PageOrchestrator
             def initialize(options); @options = options; end
