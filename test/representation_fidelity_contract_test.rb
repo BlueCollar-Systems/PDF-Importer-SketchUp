@@ -3799,6 +3799,85 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_match(/semantic_text_evaluated\s*=>\s*true/, main)
   end
 
+  def test_verified_empty_text_source_requires_current_page_and_pdf_bytes
+    stats = {
+      :empty_page_source_inspections => [],
+      :source_input_sha256 => 'a' * 64,
+      :normalized_input_sha256 => 'b' * 64
+    }
+    assert IMP.enforce_extracted_text_presence!(
+      2, :text3d, [], ['0 0 m 10 10 l S'], []
+    )
+    proof = IMP.record_empty_page_source_inspection!(stats, 2, {
+      :semantic_text_extraction_complete => true,
+      :decoded_stream_text_operators => false,
+      :decoded_form_stream_text_operators => false
+    })
+    assert IMP.verified_empty_page_text_source?(stats, 2, [])
+    refute IMP.verified_empty_page_text_source?(stats, 1, [])
+    refute IMP.verified_empty_page_text_source?(stats, 2, [item])
+
+    required = [:page, :source_page_number, :canonical_text_item_count,
+                :semantic_text_extraction_complete,
+                :decoded_stream_text_operators,
+                :decoded_form_stream_text_operators,
+                :immutable_pdf_sha256, :rendered_pdf_sha256]
+    required.each do |key|
+      missing = proof.dup
+      missing.delete(key)
+      refute IMP.verified_empty_page_text_source?(
+        stats.merge(:empty_page_source_inspections => [missing]), 2, []
+      ), "missing #{key} cannot suppress a renderer"
+    end
+    {
+      :page => '2', :source_page_number => 2.0,
+      :canonical_text_item_count => 0.0,
+      :semantic_text_extraction_complete => 'true',
+      :decoded_stream_text_operators => nil,
+      :decoded_form_stream_text_operators => true,
+      :immutable_pdf_sha256 => 'c' * 64,
+      :rendered_pdf_sha256 => 'c' * 64,
+      :source_glyph_placements => 1
+    }.each do |key, value|
+      refute IMP.verified_empty_page_text_source?(stats.merge(
+        :empty_page_source_inspections => [proof.merge(key => value)]
+      ), 2, []), "#{key} must not certify absent source text"
+    end
+    refute IMP.verified_empty_page_text_source?(
+      stats.merge(:source_input_sha256 => 'c' * 64), 2, []
+    )
+    refute IMP.verified_empty_page_text_source?(
+      stats.merge(:normalized_input_sha256 => nil), 2, []
+    )
+    refute IMP.verified_empty_page_text_source?(stats.merge(
+      :empty_page_source_inspections => [proof, proof.dup]
+    ), 2, [])
+  end
+
+  def test_painting_page_or_form_text_cannot_create_renderer_omission_proof
+    [['BT (PAGE TEXT) Tj ET'], []].zip(
+      [[], ['BT (FORM TEXT) Tj ET']]
+    ).each do |page_streams, form_streams|
+      stats = {
+        :empty_page_source_inspections => [],
+        :source_input_sha256 => 'a' * 64,
+        :normalized_input_sha256 => 'b' * 64
+      }
+      assert_raises(IMP::RepresentationFidelity::ContractError) do
+        IMP.enforce_extracted_text_presence!(
+          2, :text3d, [], page_streams, form_streams
+        )
+        IMP.record_empty_page_source_inspection!(stats, 2, {
+          :semantic_text_extraction_complete => true,
+          :decoded_stream_text_operators => false,
+          :decoded_form_stream_text_operators => false
+        })
+      end
+      assert_empty stats[:empty_page_source_inspections]
+      refute IMP.verified_empty_page_text_source?(stats, 2, [])
+    end
+  end
+
   def test_empty_page_source_inspection_is_one_exact_source_bound_record
     stats = {
       :empty_page_source_inspections => [],
