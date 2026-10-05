@@ -97,7 +97,8 @@ TEXT
             {}
           end
 
-          csp = ContentStreamParser.new(streams, parser, ocg_map)
+          color_spaces = parser.respond_to?(:page_color_spaces) ? parser.page_color_spaces(page_num) : {}
+          csp = ContentStreamParser.new(streams, parser, ocg_map, {}, color_spaces)
           total_paths += csp.parse.length
 
           font_maps = parser.page_font_maps(page_num)

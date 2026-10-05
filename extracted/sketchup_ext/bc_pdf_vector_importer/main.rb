@@ -4368,7 +4368,8 @@ module BlueCollarSystems
         content_parse_started = Time.now
         ocg_map = parser.page_ocg_map(page_num)
         opacity_effects = ContentStreamParser.page_fill_opacity_effects(parser, page_num)
-        cs = ContentStreamParser.new(streams, parser, ocg_map, opacity_effects)
+        color_spaces = parser.respond_to?(:page_color_spaces) ? parser.page_color_spaces(page_num) : {}
+        cs = ContentStreamParser.new(streams, parser, ocg_map, opacity_effects, color_spaces)
         paths = cs.parse
         record_pipeline_timing!(
           stats, :content_stream_parse_ms,

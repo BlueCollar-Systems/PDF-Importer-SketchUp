@@ -271,7 +271,8 @@ module BlueCollarSystems
           media_box = raw[:media_box] || [0, 0, 612, 792]
           streams = certified[:streams]
           ocg_map = certified[:ocg_map]
-          cs = ContentStreamParser.new(streams, parser, ocg_map)
+          color_spaces = parser.respond_to?(:page_color_spaces) ? parser.page_color_spaces(page_num) : {}
+          cs = ContentStreamParser.new(streams, parser, ocg_map, {}, color_spaces)
           paths = cs.parse
 
           xobj = XObjectParser.new(parser)

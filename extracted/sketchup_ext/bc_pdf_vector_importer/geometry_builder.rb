@@ -257,7 +257,7 @@ module BlueCollarSystems
                 style_stroke_edge(edge, stroke_style)
                 @edge_count += 1
               end
-              draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true) if should_fill && subpath.closed && su_points.length >= 3
+              draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true) if should_fill && subpath_filled?(subpath) && su_points.length >= 3
               next
             end
 
@@ -274,7 +274,7 @@ module BlueCollarSystems
               draw_with_arc_detection(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color, stroke_style)
             else
               draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, stroke_style) if should_stroke
-              if should_fill && subpath.closed && su_points.length >= 3
+              if should_fill && subpath_filled?(subpath) && su_points.length >= 3
                 draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true)
               end
             end
@@ -931,6 +931,13 @@ module BlueCollarSystems
           Logger.error("GeometryBuilder", "add_line failed", e)
           nil
         end
+      end
+
+      # PDF fill closes the contour even when the stroke operator does not.
+      def subpath_filled?(subpath)
+        return false unless subpath
+        return true if subpath.closed
+        subpath.respond_to?(:fill_closed) && subpath.fill_closed ? true : false
       end
 
       # ---------------------------------------------------------------

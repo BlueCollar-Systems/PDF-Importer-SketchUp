@@ -24,7 +24,8 @@ module BlueCollarSystems
         :stream_data,   # Decoded content stream
         :usage_count,   # How many times this XObject is referenced
         :paths,         # Parsed vector paths (lazy, filled on first use)
-        :instance_xforms # Array of CTM transforms where Do is called
+        :instance_xforms, # Array of CTM transforms where Do is called
+        :color_spaces   # Form /ColorSpace resource map, or nil
       )
 
       attr_reader :form_xobjects  # { name => FormXObject }
@@ -103,6 +104,10 @@ module BlueCollarSystems
             nil,
             []
           )
+          form_resources = to_dict(@pdf.resolve_object(xobj_d['/Resources'])) if xobj_d['/Resources']
+          if form_resources && @pdf.respond_to?(:color_spaces_in)
+            form.color_spaces = @pdf.color_spaces_in(form_resources)
+          end
 
           @form_xobjects[clean_name] = form
         end
@@ -182,7 +187,7 @@ module BlueCollarSystems
         return [] unless form && form.stream_data
 
         # Re-use the content stream parser
-        cs_parser = ContentStreamParser.new([form.stream_data], @pdf)
+        cs_parser = ContentStreamParser.new([form.stream_data], @pdf, {}, {}, form.color_spaces || {})
         paths = cs_parser.parse
         form.paths = paths
         paths
@@ -300,7 +305,9 @@ module BlueCollarSystems
               points = seg.points.map { |pt| transform_point(pt, matrix) }
               ContentStreamParser::Segment.new(seg.type, points)
             end
-            ContentStreamParser::SubPath.new(new_segments, sp.closed)
+            built = ContentStreamParser::SubPath.new(new_segments, sp.closed)
+            built.fill_closed = true if sp.respond_to?(:fill_closed) && sp.fill_closed
+            built
           end
 
           transformed = ContentStreamParser::VectorPath.new(

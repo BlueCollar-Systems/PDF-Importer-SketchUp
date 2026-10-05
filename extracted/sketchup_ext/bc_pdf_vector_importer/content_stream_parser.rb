@@ -48,7 +48,11 @@ module BlueCollarSystems
       SubPath = Struct.new(
         :segments,     # Array of Segment
         :closed        # Boolean — was 'h' (closepath) used?
-      )
+      ) do
+        # PDF fill operators close for the face only. Stroke operators
+        # b/b*/s/h set :closed; B/B* set this and leave the stroke open.
+        attr_accessor :fill_closed
+      end
 
       Segment = Struct.new(
         :type,     # :move, :line, :curve, :rect
@@ -467,11 +471,12 @@ module BlueCollarSystems
           :mask_clear => mask, :blend_normal => blend, :stroke_style_proven => style }
       end
 
-      def initialize(streams, pdf_parser, ocg_map = {}, opacity_effects = {})
+      def initialize(streams, pdf_parser, ocg_map = {}, opacity_effects = {}, color_spaces = nil)
         @streams = streams       # Array of decoded stream strings
         @pdf_parser = pdf_parser
         @ocg_map = ocg_map       # { "MC0" => "Layer Name", ... }
         @opacity_effects = opacity_effects.is_a?(Hash) ? opacity_effects : {}
+        @color_spaces = color_spaces.is_a?(Hash) ? color_spaces : {}
         @paths = []
       end
 
@@ -984,11 +989,11 @@ module BlueCollarSystems
 
         when 'SC', 'SCN' # Stroke color (general)
           # Pattern-only SCN may provide no numeric components.
-          @stroke_color = nums_to_rgb(nums, @color_space_stroke) unless nums.empty?
+          @stroke_color = resolved_rgb(nums, @color_space_stroke) unless nums.empty?
 
         when 'sc', 'scn' # Fill color (general)
           # Pattern-only scn may provide no numeric components.
-          @fill_color = nums_to_rgb(nums, @color_space_fill) unless nums.empty?
+          @fill_color = resolved_rgb(nums, @color_space_fill) unless nums.empty?
 
         # --- Path construction ---
         when 'm'  # moveto
@@ -1077,19 +1082,24 @@ module BlueCollarSystems
           emit_path(true, false)
 
         when 'f', 'F' # Fill (nonzero winding / old-style)
-          finish_subpath
+          # PDF closes an open subpath before filling. There is no stroke,
+          # so the closing segment belongs on the face contour.
+          close_current_subpath
+          finish_subpath(true)
           emit_path(false, true)
 
         when 'f*'  # Fill (even-odd)
-          finish_subpath
+          close_current_subpath
+          finish_subpath(true)
           emit_path(false, true)
 
         when 'B'   # Fill and stroke
-          finish_subpath
+          # The fill is closed. The closing segment is not stroked.
+          finish_subpath(false, true)
           emit_path(true, true)
 
         when 'B*'  # Fill (even-odd) and stroke
-          finish_subpath
+          finish_subpath(false, true)
           emit_path(true, true)
 
         when 'b'   # Close, fill and stroke
@@ -1171,9 +1181,10 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Path management
       # ---------------------------------------------------------------
-      def finish_subpath(closed = false)
+      def finish_subpath(closed = false, fill_closed = closed)
         if @current_segments && @current_segments.length > 0
           sp = SubPath.new(@current_segments, closed)
+          sp.fill_closed = fill_closed ? true : false
           @current_subpaths << sp
         end
         @current_segments = []
@@ -1240,7 +1251,9 @@ module BlueCollarSystems
             new_points = seg.points.map { |pt| transform_point(pt[0], pt[1]) }
             Segment.new(seg.type, new_points)
           end
-          SubPath.new(new_segments, sp.closed)
+          built = SubPath.new(new_segments, sp.closed)
+          built.fill_closed = sp.fill_closed ? true : false
+          built
         end
       end
 
@@ -1403,6 +1416,99 @@ module BlueCollarSystems
         g = (1.0 - m) * (1.0 - k)
         b = (1.0 - y) * (1.0 - k)
         clamp_rgb([r, g, b])
+      end
+
+      def resolved_rgb(nums, color_space)
+        special = separation_rgb(nums, color_space)
+        return special if special
+        nums_to_rgb(nums, color_space)
+      end
+
+      # A named Separation or one-component DeviceN whose tint function is
+      # the common exponential (type 2) into DeviceGray/RGB/CMYK. Tint 1 of
+      # Separation Black is full ink. Treating that single component as
+      # DeviceGray paints the line white, which reads as missing geometry.
+      # Unresolved spaces keep the previous numeric fallback.
+      def separation_rgb(nums, space_name)
+        return nil if @color_spaces.nil? || !@color_spaces.is_a?(Hash) || @color_spaces.empty?
+        entry = lookup_color_space(space_name)
+        return nil unless entry.is_a?(Array) && entry.length >= 4
+        kind = entry[0].to_s
+        if kind == '/Separation'
+          return nil if nums.nil? || nums.length < 1
+          alternate = entry[2]
+          function = entry[3]
+          inputs = [nums[0]]
+        elsif kind == '/DeviceN'
+          names = entry[1]
+          name_count = names.is_a?(Array) ? names.length : 0
+          return nil unless name_count == 1 && nums && nums.length >= 1
+          alternate = entry[2]
+          function = entry[3]
+          inputs = [nums[0]]
+        else
+          return nil
+        end
+        comps = eval_type2_tint(function, inputs)
+        return nil unless comps.is_a?(Array) && !comps.empty?
+        device_components_to_rgb(alternate, comps)
+      end
+
+      def lookup_color_space(name)
+        return nil if name.nil?
+        key = name.to_s
+        space = @color_spaces[key]
+        return space if space
+        bare = key.sub(/\A\//, '')
+        space = @color_spaces[bare]
+        return space if space
+        @color_spaces['/' + bare]
+      end
+
+      def eval_type2_tint(function, inputs)
+        if function.is_a?(Array)
+          return nil unless function.length == 1
+          function = function[0]
+        end
+        return nil unless function.is_a?(Hash)
+        return nil unless function['/FunctionType'].to_i == 2
+        t = clamp01(inputs[0])
+        exponent = function['/N'].to_f
+        exponent = 1.0 if exponent.nan? || exponent.infinite? || exponent <= 0.0
+        c0 = numeric_components(function['/C0'])
+        c1 = numeric_components(function['/C1'])
+        return nil if c0.empty? || c0.length != c1.length
+        power = t ** exponent
+        c0.each_index.map { |i| c0[i] + (c1[i] - c0[i]) * power }
+      end
+
+      def numeric_components(value)
+        list = value.is_a?(Array) ? value : []
+        list.map do |item|
+          begin
+            number = Float(item)
+            number.nan? || number.infinite? ? 0.0 : number
+          rescue StandardError
+            0.0
+          end
+        end
+      end
+
+      def device_components_to_rgb(alternate, comps)
+        space = alternate.is_a?(Array) ? alternate[0].to_s : alternate.to_s
+        case space
+        when '/DeviceGray'
+          v = clamp01(comps[0] || 0.0)
+          [v, v, v]
+        when '/DeviceRGB'
+          return nil if comps.length < 3
+          clamp_rgb(comps)
+        when '/DeviceCMYK'
+          return nil if comps.length < 4
+          cmyk_to_rgb(comps[0], comps[1], comps[2], comps[3])
+        else
+          nil
+        end
       end
 
       def nums_to_rgb(nums, color_space)

@@ -24,6 +24,7 @@ module BlueCollarSystems
         @font_map_cache = {}
         @font_glyph_status_cache = {}
         @ocg_map_cache = {}
+        @color_space_cache = {}
       end
 
       # ---------------------------------------------------------------
@@ -70,6 +71,7 @@ module BlueCollarSystems
         @font_map_cache = {}
         @font_glyph_status_cache = {}
         @ocg_map_cache = {}
+        @color_space_cache = {}
       end
 
       # ---------------------------------------------------------------
@@ -448,6 +450,85 @@ module BlueCollarSystems
         end
 
         @ocg_map_cache[page_num] = result
+      end
+
+      # Named /ColorSpace resources for one page. Form-only names are
+      # included when the page does not define them, because expanded form
+      # streams keep those names. A page definition wins on a clash.
+      def page_color_spaces(page_num)
+        return {} if page_num < 1 || page_num > @page_count
+        return @color_space_cache[page_num] if @color_space_cache.key?(page_num)
+
+        page_dict = to_dict(resolve_object(@pages[page_num - 1]))
+        spaces = {}
+        if page_dict
+          resources = find_inherited(page_dict, '/Resources')
+          res_dict = to_dict(resolve_object(resources))
+          spaces = color_spaces_in(res_dict)
+          merge_form_color_spaces(res_dict, spaces)
+        end
+        @color_space_cache[page_num] = spaces
+      rescue StandardError
+        @color_space_cache[page_num] = {}
+      end
+
+      def color_spaces_in(res_dict)
+        return {} unless res_dict.is_a?(Hash)
+        spaces = to_dict(resolve_object(res_dict['/ColorSpace']))
+        return {} unless spaces.is_a?(Hash)
+        result = {}
+        spaces.each do |name, entry|
+          next if name.nil?
+          result[name.to_s] = normalize_color_space_entry(resolve_object(entry))
+        end
+        result
+      rescue StandardError
+        {}
+      end
+
+      def merge_form_color_spaces(res_dict, spaces, depth = 0)
+        return unless res_dict.is_a?(Hash) && spaces.is_a?(Hash)
+        return if depth > 4
+        xobjects = to_dict(resolve_object(res_dict['/XObject']))
+        return unless xobjects.is_a?(Hash)
+        xobjects.each do |_name, ref|
+          next unless ref.is_a?(String) && ref =~ /\A\d+\s+\d+\s+R\z/
+          form = to_dict(resolve_object(ref))
+          next unless form.is_a?(Hash) && form['/Subtype'].to_s =~ /Form/
+          form_resources = to_dict(resolve_object(form['/Resources']))
+          next unless form_resources.is_a?(Hash)
+          color_spaces_in(form_resources).each do |key, value|
+            spaces[key] = value unless spaces.key?(key)
+          end
+          merge_form_color_spaces(form_resources, spaces, depth + 1)
+        end
+      rescue StandardError
+        nil
+      end
+
+      def normalize_color_space_entry(value, depth = 0)
+        return value if depth > 6
+        if value.is_a?(String) && value =~ /\A\d+\s+\d+\s+R\z/
+          value = resolve_object(value)
+        end
+        if value.is_a?(String)
+          stripped = value.strip
+          if stripped.start_with?('[')
+            parsed = parse_array_string(stripped)
+            value = parsed if parsed.is_a?(Array) && !parsed.empty?
+          elsif stripped.start_with?('<<')
+            value = parse_dict_string(stripped)
+          end
+        end
+        if value.is_a?(Array)
+          return value.map { |item| normalize_color_space_entry(item, depth + 1) }
+        end
+        if value.is_a?(Hash)
+          out = {}
+          value.each { |key, item| out[key] = normalize_color_space_entry(item, depth + 1) }
+          return out
+        end
+        value
       end
 
       # ---------------------------------------------------------------
@@ -1616,6 +1697,15 @@ module BlueCollarSystems
         depth = 0
         i = start
         while i < text.length
+          # A literal, comment, or hex string can contain "]" without
+          # ending the array. Ghostscript writes /ID that way.
+          if i != start
+            skipped = skip_pdf_delimited_atom(text, i)
+            if skipped
+              i = skipped
+              next
+            end
+          end
           if text[i] == '['
             depth += 1
           elsif text[i] == ']'
@@ -1640,6 +1730,47 @@ module BlueCollarSystems
           i = val[:next_index]
         end
         result
+      end
+
+      # Index just past a literal string, comment, or hex string that
+      # starts at j. nil when j is ordinary PDF syntax. The scan always
+      # moves forward so a delimiter loop cannot spin.
+      def skip_pdf_delimited_atom(text, j)
+        len = text.length
+        return nil if j.nil? || j >= len
+        char = text[j]
+        if char == '('
+          return end_of_pdf_literal(text, j)
+        end
+        if char == '%'
+          eol = text.index(/[\r\n]/, j) || len
+          nxt = eol + 1
+          return nxt > j ? nxt : nil
+        end
+        if char == '<' && (j + 1 >= len || text[j + 1] != '<')
+          end_hex = text.index('>', j)
+          return end_hex ? end_hex + 1 : len
+        end
+        nil
+      end
+
+      def end_of_pdf_literal(text, start)
+        len = text.length
+        depth = 1
+        j = start + 1
+        while j < len && depth > 0
+          if text[j] == '\\'
+            j += 2
+            next
+          end
+          if text[j] == '('
+            depth += 1
+          elsif text[j] == ')'
+            depth -= 1
+          end
+          j += 1
+        end
+        j > start ? j : start + 1
       end
 
       # ---------------------------------------------------------------
@@ -1704,10 +1835,15 @@ module BlueCollarSystems
 
           # Dict start
           if c == '<' && text[i+1] == '<'
-            # Find matching >>
+            # Find matching >>. Strings and comments are not dictionary syntax.
             depth = 1
             j = i + 2
             while j < len - 1 && depth > 0
+              skipped = skip_pdf_delimited_atom(text, j)
+              if skipped
+                j = skipped
+                next
+              end
               if text[j, 2] == '<<'
                 depth += 1
                 j += 2
@@ -1728,6 +1864,11 @@ module BlueCollarSystems
             depth = 1
             j = i + 1
             while j < len && depth > 0
+              skipped = skip_pdf_delimited_atom(text, j)
+              if skipped
+                j = skipped
+                next
+              end
               depth += 1 if text[j] == '['
               depth -= 1 if text[j] == ']'
               j += 1

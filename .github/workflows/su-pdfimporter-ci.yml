@@ -140,6 +140,7 @@ jobs:
           ruby test/annotation_microstroke_geometry_test.rb
           ruby test/original_annotation_pipeline_test.rb
           ruby test/page_paint_bounds_test.rb
+          ruby test/separation_fill_fidelity_test.rb
           ruby test/stroke_clipping_test.rb
           ruby test/stroke_color_preservation_test.rb
           ruby test/labels_empty_text_group_resume_signature_test.rb
