@@ -3358,10 +3358,6 @@ module BlueCollarSystems
       end
       camera.set(eye, target, up)
       view.invalidate if view.respond_to?(:invalidate)
-      begin
-        view.refresh if view.respond_to?(:refresh)
-      rescue StandardError
-      end
       framed
     rescue StandardError
       false
