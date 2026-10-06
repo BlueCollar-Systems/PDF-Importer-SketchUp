@@ -7,6 +7,8 @@ require 'json'
 require 'fileutils'
 require 'time'
 
+require File.join(File.dirname(__FILE__), 'page_selection')
+
 module BlueCollarSystems
   module PDFVectorImporter
     module BatchPipeline
@@ -39,21 +41,7 @@ TEXT
       end
 
       def parse_pages(raw)
-        return nil if raw.nil? || raw.to_s.strip.empty?
-        return (1..999_999).to_a if raw.to_s.strip.downcase == 'all'
-
-        pages = []
-        raw.to_s.split(',').each do |part|
-          part = part.strip
-          next if part.empty?
-          if part.include?('-')
-            lo, hi = part.split('-', 2)
-            pages.concat((lo.to_i..hi.to_i).to_a)
-          else
-            pages << part.to_i
-          end
-        end
-        pages.uniq.sort
+        PageSelection.parse(raw)
       end
 
       def analyze_pdf(pdf_path, opts = {})
@@ -233,12 +221,7 @@ TEXT
       end
 
       def resolve_page_numbers(parser, pages_opt)
-        if pages_opt.nil? || pages_opt == 'all'
-          return (1..parser.page_count).to_a
-        end
-        nums = pages_opt.is_a?(Array) ? pages_opt : parse_pages(pages_opt)
-        nums = (1..parser.page_count).to_a if nums.nil? || nums.empty?
-        nums.select { |n| n >= 1 && n <= parser.page_count }
+        PageSelection.resolve(pages_opt, parser.page_count)
       end
 
     end

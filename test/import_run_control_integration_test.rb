@@ -3,6 +3,7 @@
 require 'minitest/autorun'
 require 'tmpdir'
 require 'digest'
+require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/page_selection'
 
 class ImportRunControlIntegrationTest < Minitest::Test
   MAIN = File.read(File.expand_path(
@@ -142,6 +143,7 @@ class ImportRunControlIntegrationTest < Minitest::Test
       File.binwrite(prepared, '%PDF-fictional-normalized') if normalized
       note = normalized ? 'visible annotation appearances normalized as vector page content' : nil
       scope = Module.new
+      scope.const_set(:PageSelection, BlueCollarSystems::PDFVectorImporter::PageSelection)
       scope.module_eval(<<-'RUBY')
         module Logger
           def self.reset; end
@@ -203,7 +205,9 @@ class ImportRunControlIntegrationTest < Minitest::Test
       refute_nil preparation
       refute_nil guard
       refute_nil terminal_guard
-      scope.module_eval(outer + lineage + guard + terminal_guard, __FILE__, __LINE__)
+      page_selection = MAIN[/    def self\.normalized_requested_pages.*?(?=    def self\.normalize_page_gap_ratio)/m]
+      refute_nil page_selection
+      scope.module_eval(outer + lineage + guard + terminal_guard + page_selection, __FILE__, __LINE__)
       scope.module_eval("def self.run_pipeline(model, path, opts)\n" \
         "source_path = path\n" + preparation +
         "stats = {}\nrecord_source_lineage!(stats, source_path, path, salvage_note, opts)\n" \

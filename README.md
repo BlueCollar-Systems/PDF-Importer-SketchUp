@@ -13,6 +13,15 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > Import Health has the full summary.
 
+### Page selection
+
+Use `All`, a page number, or ascending ranges such as `1,3-5`. Invalid
+selections name the problem instead of importing the entire PDF or silently
+omitting requested pages. Ranges remain compact until the PDF page count is
+known, so an accidental range such as `1-1000000000` stops before allocating
+millions of page entries. Dialog, headless CLI, batch analysis, and host import
+use the same validation.
+
 ### Recent fixes (v3.7.162)
 
 - Pages that paint a pasted picture as one-pixel-tall inline image strips (BI/ID/EI), such as the AG&E title-block logo, keep their vectors and text editable and get that picture back as one placed native image at the source position and scale.
