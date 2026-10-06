@@ -38,7 +38,7 @@ class PlanarWhiteKnockoutTest < Minitest::Test
 
   class Mesh
     def initialize(points); @points = points; end
-    def polygons; [[1, 2, 3], [1, 3, 4]]; end
+    def polygons; (2...@points.length).map { |i| [1, i, i + 1] }; end
     def point_at(i); @points[i - 1]; end
   end
 
@@ -74,19 +74,29 @@ class PlanarWhiteKnockoutTest < Minitest::Test
 
   class Entities
     attr_reader :items, :erased, :added_points, :stage, :intersections
-    attr_accessor :fail_add, :stage_faces
+    attr_accessor :fail_add, :stage_faces, :alter_points
     def initialize(items = []); @items, @erased, @added_points = items, [], []; end
     def to_a; items.reject { |e| e.respond_to?(:valid?) && !e.valid? }; end
     def add_group
-      @stage = Group.new(Entities.new(stage_faces || []))
+      @stage = Group.new(Entities.new)
       @stage.entities.fail_add = fail_add
+      @stage.entities.stage_faces = stage_faces
+      @stage.entities.alter_points = alter_points
       items << @stage
       @stage
     end
     def add_face(points)
       raise 'host construction failed' if fail_add
       added_points << points
-      items.first
+      if stage_faces
+        items.concat(stage_faces)
+        stage_faces.first
+      else
+        actual = alter_points ? alter_points.call(points) : points
+        face = Face.new([actual.map { |p| [p.x, p.y, p.z] }])
+        items << face
+        face
+      end
     end
     def erase_entities(list)
       @erased.concat(list)
@@ -201,17 +211,8 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     white = Group.new(Entities.new([white_face]))
     text = Group.new(Entities.new([ink_face]))
     text.owner = true
-    # The mock supplies a pre-partitioned grid. This tests the composition,
-    # ownership, area and classification contracts, not SketchUp subdivision.
-    # Real add_face topology must also pass the native host acceptance gate.
-    cells = []
-    8.times do |x|
-      8.times do |y|
-        cells << Face.new([rect((x * 0.5 - 2) * 1000, (y * 0.5 - 2) * 1000,
-                               ((x + 1) * 0.5 - 2) * 1000, ((y + 1) * 0.5 - 2) * 1000)])
-      end
-    end
-    white.entities.stage_faces = cells
+    # add_face consumes the actual emitted source cells; no prebuilt partition
+    # is supplied. Native tolerance/face behavior still requires host acceptance.
     [white, text, white_face, ink_face]
   end
 
@@ -228,12 +229,11 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     stage = white.entities.stage
     assert_in_delta 0.001, stage.transformation.scale, 1.0e-12
     assert_equal [2.0, 2.0, 0.0], stage.transformation.offset
-    assert_in_delta 13_000_000.0, stage.entities.to_a.inject(0.0) { |sum, f| sum + f.area }, 1.0e-6
-    assert stage.entities.added_points.flatten.all? { |p| p.z == 0.0 }
-    assert_equal false, stage.entities.intersections[0]
-    assert_same stage.entities, stage.entities.intersections[2]
-    assert_equal true, stage.entities.intersections[4]
-    assert_in_delta 1.0, stage.entities.intersections[1].scale, 1.0e-12
+    faces = Subject.partition_faces(stage.entities)
+    assert_in_delta 13_000_000.0, faces.inject(0.0) { |sum, f| sum + f.area }, 1.0e-6
+    assert faces.flat_map(&:raw).flatten(1).all? { |p| p[2] == 0.0 }
+    assert_nil stage.entities.intersections, 'source cells need no native intersection'
+    assert stage.entities.to_a.all? { |g| g.typename == 'Group' && g.transformation.scale == 1.0 }
   end
 
   def test_fully_covered_white_removes_only_its_generated_containers
@@ -307,6 +307,77 @@ class PlanarWhiteKnockoutTest < Minitest::Test
     end
     refute original.erased
     assert white.entities.stage.erased
+  end
+
+  def test_crossing_source_regions_build_physical_triangles_without_host_intersection
+    original = Face.new([rect(0, 0, 4, 4)])
+    white = Group.new(Entities.new([original]))
+    left = Face.new([[[0,0,0], [4,0,0], [0,4,0]]])
+    right = Face.new([[[0,0,0], [4,0,0], [4,4,0]]])
+    text = Group.new(Entities.new([left, right]))
+    text.owner = true
+    before = Marshal.dump([left.raw, right.raw])
+    receipt = Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }], [text])
+    assert_in_delta 12.0, receipt[:removed_area], 1.0e-10
+    faces = Subject.partition_faces(white.entities.stage.entities)
+    assert_in_delta 4_000_000.0, faces.inject(0.0) { |sum, face| sum + face.area }, 1.0e-8
+    assert_equal before, Marshal.dump([left.raw, right.raw])
+    assert original.erased
+    assert_nil white.entities.stage.entities.intersections
+  end
+
+  def test_distinct_exact_vertices_that_collapse_as_host_floats_are_rejected
+    x = 10**30
+    cell = { :loop => [[x.to_r, 0.to_r, 0.to_r], [(x+1).to_r, 0.to_r, 0.to_r],
+                       [(x+1).to_r, 1.to_r, 0.to_r], [x.to_r, 1.to_r, 0.to_r]] }
+    error = assert_raises(ContractError) { Subject.partition_construction_points([cell], [0,0,0]) }
+    assert_match(/collapse/, error.message)
+  end
+
+  def test_host_boundary_change_below_aggregate_area_tolerance_is_still_rejected
+    white, text, original, ink = fixture
+    white.entities.alter_points = lambda do |points|
+      points.each_with_index.map do |p, i|
+        Geom::Point3d.new(p.x + (i == 0 ? 1.0e-8 : 0), p.y, p.z)
+      end
+    end
+    error = assert_raises(ContractError) do
+      Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }], [text])
+    end
+    assert_match(/changed source boundary vertices/, error.message)
+    refute original.erased
+    refute ink.erased
+    assert white.entities.stage.erased
+  end
+
+  def test_host_face_may_reverse_or_rotate_but_may_not_drop_a_corner_or_add_a_hole
+    points = rect(0,0,4,4).map { |p| Geom::Point3d.new(*p) }
+    Subject.verify_partition_face!(Face.new([rect(0,0,4,4).reverse.rotate(2)]), points)
+    assert_raises(ContractError) { Subject.verify_partition_face!(Face.new([rect(0,0,4,4).first(3)]), points) }
+    assert_raises(ContractError) do
+      Subject.verify_partition_face!(Face.new([rect(0,0,4,4), rect(1,1,2,2)]), points)
+    end
+  end
+
+  def test_opt_in_failure_diagnostic_copies_source_without_replacing_original_error
+    white, text, original, ink = fixture
+    white.entities.fail_add = true
+    captured = []
+    callback = lambda do |value|
+      captured << value
+      value[:white].first[:loops].first.first[0] = 999
+      raise 'diagnostic writer failed'
+    end
+    error = assert_raises(ContractError) do
+      Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }],
+                       [text], :partition_diagnostic => callback)
+    end
+    assert_match(/host construction failed/, error.message)
+    assert_equal 1, captured.length
+    assert_equal 'bcs.planar_partition_diagnostic/1', captured.first[:schema]
+    assert_equal [0.0,0.0,0.0], original.raw.first.first
+    refute original.erased
+    refute ink.erased
   end
 
   def image_fixture
@@ -450,15 +521,9 @@ class PlanarWhiteKnockoutTest < Minitest::Test
   end
 
   def test_orphan_cleanup_ignores_only_snapshot_edges_invalidated_by_an_earlier_erase
-    white, text, original, ink = fixture
-    before = Marshal.dump(ink.raw)
     first, second, retained = CascadingEdge.new, CascadingEdge.new, CascadingEdge.new(true)
     first.on_erase = lambda { second.invalidate! }
-    white.entities.stage_faces.concat([first, second, retained])
-    receipt = Subject.compose!([{ :group => white, :fill_rgb => [1, 1, 1], :before_text => true }], [text])
-    assert_in_delta 3.0, receipt[:removed_area], 1.0e-10
-    assert original.erased
-    assert_equal before, Marshal.dump(ink.raw)
+    Subject.clean_partition_edges!(Entities.new([first, second, retained]))
     refute first.valid?
     refute second.valid?
     assert retained.valid?

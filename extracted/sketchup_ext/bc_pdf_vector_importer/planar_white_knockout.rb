@@ -3,6 +3,7 @@
 # No text geometry, representation, identity, or depth is changed here.
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'svg_region_boundary')
+require File.join(File.dirname(__FILE__), 'planar_region_partition')
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -45,7 +46,7 @@ module BlueCollarSystems
           candidates = overlaps.select { |face| earlier_mask?(record, face, opts) }
           result[:skipped_unproven_order] += overlaps.length - candidates.length
           next if candidates.empty?
-          result[:removed_area] += compose_group!(group, transform, white, candidates)
+          result[:removed_area] += compose_group!(group, transform, white, candidates, opts)
           group.erase! if child_entities(group).to_a.empty?
           result[:composed_groups] += 1
         end
@@ -339,7 +340,7 @@ module BlueCollarSystems
         end
       end
 
-      def self.compose_group!(group, transform, white, ink)
+      def self.compose_group!(group, transform, white, ink, opts = {})
         # The geometric operation preserves original face materials/alpha.
         # compose! supplies the default opaque-white eligibility policy; callers
         # proving another exact source-composite relationship may use this
@@ -355,20 +356,18 @@ module BlueCollarSystems
           page_transform = Geom::Transformation.translation(Geom::Point3d.new(*origin)) *
                            Geom::Transformation.scaling(1.0 / CONSTRUCTION_SCALE)
           stage.transformation = transform.inverse * page_transform
-          construction_loops = white.flat_map { |record| record[:loops] } +
-                               construction_ink_loops(ink)
-          construction_loops.each do |loop|
-            points = distinct_loop_points(loop.map { |point| construction_point(point, origin) })
-            # A source loop that collapses below three distinct points has no
-            # area to compose; the partition/coverage checks below still
-            # measure the white area it belonged to.
-            next if points.length < 3
-            # A previously inserted coincident boundary may return nil. The
-            # physical partition/coverage checks below decide success.
-            stage.entities.add_face(points)
+          source_cells = PlanarRegionPartition.partition(white, ink)
+          point_map = partition_construction_points(source_cells, origin)
+          source_cells.each do |cell|
+            # A convex source cell has no holes and cannot cross a source
+            # boundary. Keep cells in separate identity groups so legacy host
+            # face discovery cannot merge adjacent regions across that boundary.
+            container = stage.entities.add_group
+            points = cell[:loop].map { |point| point_map.fetch(point) }
+            face = container.entities.add_face(points)
+            fail_contract('native exact white-mask cell construction failed') unless face
+            verify_partition_face!(face, points)
           end
-          subdivide_native_boundaries!(stage.entities)
-          repair_native_hole_topology!(stage.entities)
           cells = partition_faces(stage.entities)
           fail_contract('native white-mask subdivision produced no faces') if cells.empty?
           white_index = spatial_index(white)
@@ -408,6 +407,7 @@ module BlueCollarSystems
           end
           removed.inject(0.0) { |sum, cell| sum + cell[:area] }
         rescue StandardError => error
+          partition_diagnostic(opts, white, ink, origin, error)
           stage.erase! if stage && stage.valid?
           if error.is_a?(RepresentationFidelity::ContractError)
             bounds = union_bounds(white).map { |value| format('%.8g', value) }.join(',')
@@ -417,6 +417,69 @@ module BlueCollarSystems
           end
           raise
         end
+      end
+
+      def self.verify_partition_face!(face, points)
+        unless face.typename.to_s == 'Face' && face.valid? && face.loops.to_a.length == 1
+          fail_contract('native exact white-mask cell changed face topology')
+        end
+        expected = points.map { |point| [point.x.to_f, point.y.to_f, point.z.to_f] }
+        actual = face.outer_loop.vertices.map do |vertex|
+          point = vertex.position
+          [point.x.to_f, point.y.to_f, point.z.to_f]
+        end
+        unless canonical_loop(actual) == canonical_loop(expected)
+          fail_contract('native exact white-mask cell changed source boundary vertices')
+        end
+      end
+
+      def self.partition_construction_points(cells, origin)
+        mapped, owners = {}, {}
+        cells.each do |cell|
+          cell[:loop].each do |point|
+            next if mapped.key?(point)
+            values = [0, 1].map do |axis|
+              ((point[axis] - origin[axis].to_r) * CONSTRUCTION_SCALE.to_r).to_f
+            end + [0.0]
+            fail_contract('exact white-mask cell has nonfinite host coordinates') unless values.all?(&:finite?)
+            if owners.key?(values) && owners[values] != point
+              fail_contract('exact white-mask vertices collapse in host coordinates')
+            end
+            owners[values] = point
+            mapped[point] = Geom::Point3d.new(*values)
+          end
+          native = cell[:loop].map { |point| p = mapped.fetch(point); [p.x.to_r, p.y.to_r] }
+          unless SvgRegionBoundary.signed_area2(native) > 0
+            fail_contract('exact white-mask cell collapses or reverses in host coordinates')
+          end
+          native.each_index do |i|
+            a, b, c = native[i], native[(i + 1) % native.length], native[(i + 2) % native.length]
+            turn = SvgRegionBoundary.cross(SvgRegionBoundary.minus(b, a), SvgRegionBoundary.minus(c, b))
+            unless turn > 0
+              fail_contract('exact white-mask cell loses a convex corner in host coordinates')
+            end
+          end
+        end
+        mapped
+      end
+
+      # An explicit harness callback may save private source contours outside
+      # the repository. Normal imports never log or write those coordinates.
+      def self.partition_diagnostic(opts, white, ink, origin, error)
+        callback = opts[:partition_diagnostic]
+        return unless callback.respond_to?(:call)
+        copy = lambda do |records|
+          records.map do |record|
+            { :loops => record[:loops].map { |loop| loop.map(&:dup) },
+              :source_span_id => record[:source_span_id] }
+          end
+        end
+        callback.call(:schema => 'bcs.planar_partition_diagnostic/1',
+                      :white => copy.call(white), :ink => copy.call(ink),
+                      :origin => origin && origin.dup, :error => error.message.to_s)
+      rescue StandardError
+        # Failure to collect optional evidence cannot replace the import error.
+        nil
       end
 
       def self.construction_ink_loops(ink)
