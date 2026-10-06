@@ -1853,8 +1853,10 @@ class RepresentationFidelityContractTest < Minitest::Test
 
   def test_requested_page_selection_is_bounded_ordered_and_duplicate_free
     assert_equal [1, 2, 3], IMP.normalized_requested_pages(:all, 3)
-    assert_equal [3, 1, 2], IMP.normalized_requested_pages([3, 1, 3, 0, 9, 2], 3)
-    assert_equal [], IMP.normalized_requested_pages(nil, 3)
+    assert_equal [1, 2, 3], IMP.normalized_requested_pages([3, 1, 3, 2], 3)
+    assert_raises(ArgumentError) { IMP.normalized_requested_pages([1, 9], 3) }
+    assert_raises(ArgumentError) { IMP.normalized_requested_pages([0], 3) }
+    assert_equal [1, 2, 3], IMP.normalized_requested_pages(nil, 3)
     assert_equal [], IMP.normalized_requested_pages(:all, 0)
   end
 

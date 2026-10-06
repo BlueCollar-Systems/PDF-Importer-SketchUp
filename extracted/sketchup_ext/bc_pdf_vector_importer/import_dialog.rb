@@ -14,6 +14,8 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
+require File.join(File.dirname(__FILE__), 'page_selection')
+
 module BlueCollarSystems
   module PDFVectorImporter
     module ImportDialog
@@ -157,24 +159,29 @@ module BlueCollarSystems
         dlg.set_html(basic_html(filename, mode_val, pages_val, scale_val, text_val, itext_val, match_val))
 
         dlg.add_action_callback('on_import') do |_ctx, p|
-          pages_str   = p['pages']       || 'All'
-          scale_str   = p['scale']       || '1.0'
-          text_mode   = p['text_mode']   || text_val
-          import_text = p['import_text'] || 'Yes'
-          match_pdf_layers = p['match_pdf_layers'] || match_val
-          save_prefs(last_mode: 'Auto', pages: pages_str,
-                     scale: scale_str, text_mode: text_mode,
-                     import_text: import_text,
-                     match_pdf_layers: match_pdf_layers)
-          mode_raw = MODES['Auto']
-          mode_sym = {}
-          mode_raw.each { |k, v| mode_sym[k.to_sym] = v }
-          result = build_opts(mode_sym.merge(pages: pages_str,
-                                             scale: scale_str,
-                                             text_mode: text_mode,
-                                             import_text: import_text,
-                                             match_pdf_layers: match_pdf_layers))
-          dlg.close
+          begin
+            pages_str   = p['pages']       || 'All'
+            scale_str   = p['scale']       || '1.0'
+            text_mode   = p['text_mode']   || text_val
+            import_text = p['import_text'] || 'Yes'
+            match_pdf_layers = p['match_pdf_layers'] || match_val
+            PageSelection.parse(pages_str)
+            save_prefs(last_mode: 'Auto', pages: pages_str,
+                       scale: scale_str, text_mode: text_mode,
+                       import_text: import_text,
+                       match_pdf_layers: match_pdf_layers)
+            mode_raw = MODES['Auto']
+            mode_sym = {}
+            mode_raw.each { |k, v| mode_sym[k.to_sym] = v }
+            result = build_opts(mode_sym.merge(pages: pages_str,
+                                               scale: scale_str,
+                                               text_mode: text_mode,
+                                               import_text: import_text,
+                                               match_pdf_layers: match_pdf_layers))
+            dlg.close
+          rescue ArgumentError => error
+            UI.messagebox(error.message)
+          end
         end
 
         dlg.add_action_callback('on_cancel') { |_ctx, _p| dlg.close }
@@ -220,32 +227,37 @@ module BlueCollarSystems
         dlg.set_html(advanced_html(filename, d))
 
         dlg.add_action_callback('on_import') do |_ctx, p|
-          save_prefs(
-            last_mode: p['mode'],
-            pages: p['pages'], scale: p['scale'],
-            text_mode: p['text_mode'], import_text: p['import_text'],
-            match_pdf_layers: p['match_pdf_layers'],
-            grouping_mode: p['grouping_mode'],
-            page_arrangement: p['page_arrangement'],
-            extrude_to_3d: p['extrude_to_3d'],
-            extrude_depth_mm: p['extrude_depth_mm']
-          )
-          mode_raw = MODES[p['mode'] || 'Auto'] || MODES['Auto']
-          result = build_opts(
-            import_mode: mode_raw['import_mode'],
-            pages: p['pages'], scale: p['scale'],
-            layer_name: 'PDF Import',
-            group_per_page: 'Yes',
-            group_by_color: 'Yes',
-            text_mode: p['text_mode'],
-            import_text: p['import_text'],
-            match_pdf_layers: p['match_pdf_layers'],
-            grouping_mode: p['grouping_mode'],
-            page_arrangement: p['page_arrangement'],
-            extrude_to_3d: p['extrude_to_3d'],
-            extrude_depth_mm: p['extrude_depth_mm']
-          )
-          dlg.close
+          begin
+            PageSelection.parse(p['pages'])
+            save_prefs(
+              last_mode: p['mode'],
+              pages: p['pages'], scale: p['scale'],
+              text_mode: p['text_mode'], import_text: p['import_text'],
+              match_pdf_layers: p['match_pdf_layers'],
+              grouping_mode: p['grouping_mode'],
+              page_arrangement: p['page_arrangement'],
+              extrude_to_3d: p['extrude_to_3d'],
+              extrude_depth_mm: p['extrude_depth_mm']
+            )
+            mode_raw = MODES[p['mode'] || 'Auto'] || MODES['Auto']
+            result = build_opts(
+              import_mode: mode_raw['import_mode'],
+              pages: p['pages'], scale: p['scale'],
+              layer_name: 'PDF Import',
+              group_per_page: 'Yes',
+              group_by_color: 'Yes',
+              text_mode: p['text_mode'],
+              import_text: p['import_text'],
+              match_pdf_layers: p['match_pdf_layers'],
+              grouping_mode: p['grouping_mode'],
+              page_arrangement: p['page_arrangement'],
+              extrude_to_3d: p['extrude_to_3d'],
+              extrude_depth_mm: p['extrude_depth_mm']
+            )
+            dlg.close
+          rescue ArgumentError => error
+            UI.messagebox(error.message)
+          end
         end
 
         dlg.add_action_callback('on_cancel') { |_ctx, _p| dlg.close }
@@ -446,6 +458,7 @@ module BlueCollarSystems
         result = UI.inputbox(prompts, defaults, dropdowns, "Import PDF \u2014 #{filename}")
         return nil unless result
         pages_str, scale_str, import_text_str, text_mode_str, match_layers_str = result
+        return nil unless valid_page_input?(pages_str)
         save_prefs(last_mode: 'Auto', pages: pages_str,
                    scale: scale_str, import_text: import_text_str,
                    text_mode: text_mode_str, match_pdf_layers: match_layers_str)
@@ -478,6 +491,7 @@ module BlueCollarSystems
         return nil unless result
         p_mode,p_pages,p_scale,p_import_text,p_text_mode,
         p_match_layers,p_grouping_mode,p_page_arrangement = result
+        return nil unless valid_page_input?(p_pages)
         save_prefs(last_mode:p_mode,pages:p_pages,scale:p_scale,
                    import_text:p_import_text,text_mode:p_text_mode,
                    match_pdf_layers:p_match_layers,
@@ -495,6 +509,14 @@ module BlueCollarSystems
                    page_arrangement:p_page_arrangement)
       end
 
+      def self.valid_page_input?(value)
+        PageSelection.parse(value)
+        true
+      rescue ArgumentError => error
+        UI.messagebox(error.message)
+        false
+      end
+
       private
 
       def self.build_opts(raw)
@@ -505,21 +527,7 @@ module BlueCollarSystems
         when /Points/i then scale /= 72.0
         end
 
-        pages_str = (raw[:pages] || 'All').strip
-        if pages_str.downcase == 'all' || pages_str.empty?
-          pages = :all
-        else
-          pages = []
-          pages_str.split(/[,;\s]+/).each do |part|
-            if part =~ /\A(\d+)\s*-\s*(\d+)\z/
-              ($1.to_i..$2.to_i).each { |p| pages << p }
-            else
-              p = part.to_i; pages << p if p > 0
-            end
-          end
-          pages = pages.uniq.sort
-          pages = :all if pages.empty?
-        end
+        pages = PageSelection.parse(raw[:pages])
 
         # Requested text representation identities remain distinct end to end.
         # Import Text checkbox is the orthogonal on/off control.

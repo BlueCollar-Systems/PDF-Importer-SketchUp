@@ -3142,16 +3142,7 @@ module BlueCollarSystems
     end
 
     def self.normalized_requested_pages(requested, page_count)
-      total = page_count.to_i
-      return [] if total <= 0
-      values = requested == :all ? (1..total).to_a : Array(requested)
-      seen = {}
-      values.each_with_object([]) do |value, pages|
-        page = value.to_i
-        next if page < 1 || page > total || seen[page]
-        seen[page] = true
-        pages << page
-      end
+      PageSelection.resolve(requested, page_count)
     end
 
     def self.normalize_page_gap_ratio(raw)
@@ -3784,6 +3775,7 @@ module BlueCollarSystems
       end
 
       pages = normalized_requested_pages(opts[:pages], parser.page_count)
+      opts = opts.merge(:pages => pages)
       if pages.empty?
         raise RepresentationFidelity::ContractError,
               'No valid selected PDF pages remain for Raster delivery.'
@@ -3979,12 +3971,8 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError,
                 'PDF parser returned zero pages; requested representation was not changed.'
         end
-        pages = opts[:pages]
-        pages = (1..parser.page_count).to_a if pages == :all
-        pages = Array(pages).select do |page|
-          page.to_i >= 1 && page.to_i <= parser.page_count
-        end.map { |page| page.to_i }.uniq.sort
-        return nil if pages.empty?
+        pages = normalized_requested_pages(opts[:pages], parser.page_count)
+        opts = opts.merge(:pages => pages)
 
         # The import plan, stated once. Nothing below asks the operator
         # anything; heavy pages are logged and built, Esc stops after the
@@ -4231,10 +4219,8 @@ module BlueCollarSystems
       ocg = OCGParser.new(parser)
       ocg.parse
 
-      pages = opts[:pages]
-      pages = (1..parser.page_count).to_a if pages == :all
-      pages = pages.select { |p| p >= 1 && p <= parser.page_count }
-      return nil if pages.empty?
+      pages = normalized_requested_pages(opts[:pages], parser.page_count)
+      opts = opts.merge(:pages => pages)
 
       # Track new entities in the currently active editing context.
       # Using model.entities misses imports done while editing groups/components.

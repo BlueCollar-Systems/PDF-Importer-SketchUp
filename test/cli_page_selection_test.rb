@@ -35,11 +35,25 @@ class CliPageSelectionTest < Minitest::Test
     assert_equal [1, 2, 3], normalize([1, 2, 3], 3)
   end
 
-  def test_array_spec_drops_out_of_range_pages_and_falls_back_like_text
-    assert_equal [3], normalize([3, 40], 27)
-    # Consistent with the text-spec contract: nothing valid => every page.
-    assert_equal [1, 2, 3], normalize([99], 3)
-    assert_equal [1, 2, 3], normalize([], 3)
+  def test_explicit_out_of_range_or_empty_selections_are_rejected
+    [[3, 40], [99], []].each do |spec|
+      assert_raises(ArgumentError) { normalize(spec, 27) }
+    end
+  end
+
+  def test_bad_page_tokens_never_mean_all_pages
+    ['typo', '0', '-1', '4-2', '1,,2', '1; ;2', '1oops', '2.5'].each do |spec|
+      assert_raises(ArgumentError) { DIALOG.send(:build_opts, :pages => spec) }
+      assert_raises(ArgumentError) { normalize(spec, 27) }
+    end
+  end
+
+  def test_ranges_remain_compact_until_the_pdf_count_is_known
+    built = DIALOG.send(:build_opts, :pages => '1-1000000000')
+    assert_equal [1..1000000000], built[:pages]
+    error = assert_raises(ArgumentError) { normalize(built[:pages], 3) }
+    assert_match(/outside this 3-page PDF/, error.message)
+    assert_equal [1, 2, 3, 5], normalize('1 - 3; 5 2', 5)
   end
 
   def test_symbol_and_text_specs_are_unchanged
@@ -56,6 +70,24 @@ class CliPageSelectionTest < Minitest::Test
     built = DIALOG.send(:build_opts, { pages: cli_opts[:pages], import_mode: 'auto' })
     assert_equal [1], built[:pages], 'build_opts yields an Array page list'
     assert_equal [1], normalize(built[:pages], 27)
+  end
+
+  def test_headless_cli_rejects_bad_ranges_before_writing_output
+    Dir.mktmpdir('cli_bad_pages_') do |tmp|
+      pdf = File.join(tmp, 'three_pages.pdf')
+      SyntheticPdfBuilder.write_pages(pdf, ["0 0 m 10 10 l S\n"] * 3)
+      output = File.join(tmp, 'out')
+      tool = File.join(REPO_ROOT, 'tools', 'su_pdf_cli.rb')
+      ['one', '1-1000000000', '1,4'].each do |selection|
+        out, err, status = Open3.capture3(
+          RbConfig.ruby, tool, pdf, '--pages', selection, '--no-text',
+          '--output-dir', output
+        )
+        refute status.success?, "bad selection succeeded: #{out}"
+        assert_match(/page/i, err)
+        refute File.exist?(output), 'invalid request wrote an output directory'
+      end
+    end
   end
 
   def test_headless_cli_reports_only_the_requested_page
