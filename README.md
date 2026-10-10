@@ -77,7 +77,7 @@ use the same validation.
 - Very short, source-proven round-cap Ink annotations retain their original centerline and editable semicircular arcs even below SketchUp's normal edge tolerance. Their native fill uses 48 segments per semicircle, with its polygon area reported separately from the analytic source area. Where an unrotated original-page crop proves no glyph ink or unrelated annotation overlap, a bounded 600-DPI RGB display patch preserves the original blend appearance above that geometry. The report binds the original source, pixel lattice, saved image pixels and native arcs; unsupported composite scope is reported while retaining the qualified geometry. Text modes are unchanged.
 - Encrypted PDFs that open without a password and repaired PDFs use the same screen-visible annotation handling. Temporary normalized files are checked against both source and output bytes; repeating an import after cleanup or repairing a missing helper works within the same session.
 - Simultaneous imports keep their reports, parts data and source provenance in separate run folders, preventing one importer from replacing another importer's verification evidence.
-- Each import retains its own diagnostic log, and saved compatibility reports remain available for later review.
+- Each import retains its own diagnostic log, and every Compatibility Report is saved as its own file. On SketchUp 2023.1 and newer the report is also copied to the clipboard; on SketchUp 2017 through 2023.0, which have no clipboard access, the saved report opens in Notepad instead. The report box itself shows the helper status and lists any other PDF extension that is loaded.
 - Default report names handle long and non-ASCII drawing names. Explicit CLI report destinations retain their chosen paths.
 
 ### Earlier notes (v3.7.151)
@@ -297,7 +297,7 @@ Install the latest `.rbz` from Releases via Extension Manager (overwrites the pr
 
 ## Enterprise / multi-user installs
 
-Install the RBZ **per Windows user** on each PC where SketchUp runs. Avoid roaming only the `Plugins` folder across PCs with different SketchUp years. **Compatibility Report** records extension/helper capability status while redacting local extension and executable paths, so the copied report is safe to share in IT support tickets.
+Install the RBZ **per Windows user** on each PC where SketchUp runs. Avoid roaming only the `Plugins` folder across PCs with different SketchUp years. **Compatibility Report** records extension/helper capability status and any other loaded PDF extension while redacting local extension and executable paths, so the report is safe to share in IT support tickets. SketchUp 2023.1 and newer copy it to the clipboard; on SketchUp 2017 through 2023.0 it opens in Notepad.
 
 ## External Helpers / Any-PC Behavior
 
