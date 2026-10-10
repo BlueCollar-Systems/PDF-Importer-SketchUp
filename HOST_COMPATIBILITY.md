@@ -124,3 +124,10 @@ Ruby **2.7 / 3.2** and runs smoke tests on **2.7 / 3.0 / 3.2**. These runtime
 lanes do not replace named SketchUp host evidence. Graceful degradation paths
 exist for SU 2017 (line_styles absent, zoom extents fallback, UI.inputbox dialog
 fallback).
+
+
+## Verified r4 Make 2017 checks — 2026-10-10
+
+The exact local r4 package passed eleven native mode/image/lineweight rows and independent external verification, including three injected native cancellation rollbacks. Fresh separate-process Text (2 Images), item Raster (5 Images) and zero-text page Raster (1 Image) reopened with fixture PDF/cache files unavailable, actual TextureWriter pixels and strict geometry/style/IDs preserved, and every fixture file restored. The frozen-package regression results are 179 files, 2,345 runs, 21,027 assertions, zero failures/errors and eight skips; four copied-environment test files were retested after restoring shared reference/guidance files and the owned Git test context. The package source remained unchanged.
+
+Native render measurements show the corrected flat display substantially reduces the old brightness shift. Native Image boundaries, antialiasing and quantization still differ; pixel equality is not claimed. Current Pro, physical keyboard/GUI interaction, additional hosts and broader corpus/hardware checks remain pending. See `docs/validation/2026-10-10-sketchup-persistence.md` and the local test guide. The later repository extrusion menu is preserved outside r4; a safe repair is staged under `C:\TMP\su17-packaged-20261010\extrusion-upgrade` and needs native acceptance before packaging.

@@ -116,3 +116,10 @@ All Ruby code in this extension **must** run on Ruby 2.2.4, which ships with Ske
 1. CI runs `ruby22_syntax_check.rb` on every shipped `.rb` file.
 2. Default: do not use features listed above without a version guard (or a Ruby-2.2-safe polyfill). This is a host floor, not a freeze on dropping Make 2017 support — raising the floor is an explicit product decision that updates this doc + CI matrix together.
 3. When in doubt: `docker run --rm ruby:2.2 ruby -c yourfile.rb`.
+
+
+## Verified r4 Make 2017 checks — 2026-10-10
+
+The exact local r4 package passed eleven native mode/image/lineweight rows and independent external verification, including three injected native cancellation rollbacks. Fresh separate-process Text (2 Images), item Raster (5 Images) and zero-text page Raster (1 Image) reopened with fixture PDF/cache files unavailable, actual TextureWriter pixels and strict geometry/style/IDs preserved, and every fixture file restored. The frozen-package regression results are 179 files, 2,345 runs, 21,027 assertions, zero failures/errors and eight skips; four copied-environment test files were retested after restoring shared reference/guidance files and the owned Git test context. The package source remained unchanged.
+
+Native render measurements show the corrected flat display substantially reduces the old brightness shift. Native Image boundaries, antialiasing and quantization still differ; pixel equality is not claimed. Current Pro, physical keyboard/GUI interaction, additional hosts and broader corpus/hardware checks remain pending. See `docs/validation/2026-10-10-sketchup-persistence.md` and the local test guide. The later repository extrusion menu is preserved outside r4; a safe repair is staged under `C:\TMP\su17-packaged-20261010\extrusion-upgrade` and needs native acceptance before packaging.

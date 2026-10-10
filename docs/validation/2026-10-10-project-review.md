@@ -142,3 +142,19 @@ performed. Private inputs and credentials are excluded from distributable
 archives. Detailed SketchUp/LibreCAD packaging evidence is in
 [the packaging record](2026-10-10-test-packaging.md); the other projects have
 their own dated package validation records.
+
+
+## Final r4 follow-up — 2026-10-10
+
+This later record supersedes earlier pending r3 statements for the listed neutral checks only. The r4 RBZ SHA-256 is `f372b69840f02c28fb7a7abf09a5cc2d276a2a74a1ae0e12a052cdc57c7edfa9` (27,623,794 bytes), with tree `fbf8e332fd1f9af8ddbe82979c48f175acce0ac6a86a55520a03192bc3264b9b`. Full exact Ruby 2.2.4-p230 suite on the owned frozen r4 source clone: **179 files, 2,345 tests, 21,027 assertions, zero failures/errors, 8 skips**; captured clone source/tests/tools remained unchanged. A prior mutable-repository suite had zero failures/errors but failed its unchanged-source gate because an unrelated actor added Extrude UI/menu code. That working-repository change is preserved and excluded from r4; the final suite is bound to the exact frozen package instead. Original native harness tools retain their native-proof byte bindings. All eleven actual Make 2017 native matrix rows and independent external checks passed, including three native cancellation cases. Fresh source/cache-unavailable scopes: **text page(s) 1, 2 Images; raster page(s) 1, 5 Images; raster page(s) 2, 1 Images**. Every scoped Image has physical TextureWriter pixel proof and all fixture files/preferences were restored. Native render PNGs support inspection; no rendered pixel equality is claimed.
+
+Editable bounded source-width footprints, source-point lineweight groups/tags, protected original centerlines, honest approximation warnings and flat-color display are included. Requested text modes and finite item-scoped fallback contracts remain intact. The corrected fictional sample PDF SHA-256 is `3dcb8e4ab9e91bfc456e33157111bc1486fcba3f335bf061a14ab56b2defce7e`. Neutral original proof JSON, SKPs, available render PNGs and an original/copied-byte ledger are under `C:\BlueCollar-Test-Builds\2026-10-10\SketchUp\Validation-r4`. Earlier r3 records/trees remain historical evidence; the exact r3 installer is archived under Superseded. Other project validation stages are unchanged.
+
+- Physical Escape-key presses and GUI button interaction are not certified by injected cancellation probes.
+- Current SketchUp Pro, other SketchUp versions/platforms and broader PDF/hardware coverage remain pending.
+- Requested Labels uses the certified item-bound source-outline 3D visual equivalent on Make 2017; it is not an editable screen annotation.
+- Bounded editable source-width footprints cover proven solid opaque undashed eligible paths; unsupported cases retain editable approximate native centerlines and report review warnings.
+- Curve footprints use explicitly bounded polygonal sampling; no analytic-curve or universal page fidelity claim is made.
+- Native Image boundaries and viewport rendering can differ from the PDF. Genuine Images are preserved; no rendered pixel equality is claimed.
+- Fresh source-unavailable proof covers only the listed neutral modes/pages, not every PDF or mode.
+- This unsigned local test snapshot does not install itself, change production extensions, deploy a website or publish a store release.
