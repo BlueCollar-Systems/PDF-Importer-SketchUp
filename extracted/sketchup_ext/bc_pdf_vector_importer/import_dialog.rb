@@ -523,13 +523,15 @@ module BlueCollarSystems
           "Page Arrangement:"
         ]
         defaults = [
-          dialog_mode_name(saved[:last_mode]),
+          valid_mode_name(saved[:last_mode]),
           pages_str||saved[:pages]||'All', scale_str||saved[:scale]||'1.0',
           saved[:import_text]||'Yes',
           text_mode_str||effective_text_mode(saved),
           effective_match_pdf_layers(saved),
           saved[:page_arrangement]||'Spread (20% gap)'
         ]
+        # A saved 'Hybrid' is the same as Auto, which is what the list offers.
+        defaults[0] = dialog_mode_name(defaults[0])
         dropdowns = [MODE_CHOICES,'','',YES_NO,TEXT_MODES,YES_NO,PAGE_ARRANGEMENT_CHOICES]
         result = UI.inputbox(prompts, defaults, dropdowns, "Advanced Import \u2014 #{filename}")
         return nil unless result
