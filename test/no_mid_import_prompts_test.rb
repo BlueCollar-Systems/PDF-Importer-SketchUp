@@ -33,11 +33,18 @@ class NoMidImportPromptsTest < Minitest::Test
     assert_includes src, 'continuing without a per-page confirmation'
   end
 
+  # Owner ruling 2026-10-05 (deliver, step down, report): a missing text
+  # helper no longer stops the import. The page keeps its lines, fills and
+  # pictures, its text is listed as not delivered, and the remedy rides in
+  # the listed reason and the log line - still without any dialog.
   def test_missing_renderer_stop_never_opens_a_dialog
     src = method_source('enforce_svg_renderer_available!')
     refute_includes src, 'UI.messagebox'
-    assert_includes src, 'raise RepresentationFidelity::ContractError'
-    assert_includes src, 'BC_PDFTOCAIRO_PATH', 'the single failure message must carry the remedy'
+    refute_includes src, 'raise RepresentationFidelity::ContractError'
+    assert_includes src, 'SVG_RENDERER_REMEDY'
+    remedy = MAIN[/SVG_RENDERER_REMEDY =.*?\.freeze/m]
+    refute_nil remedy
+    assert_includes remedy, 'BC_PDFTOCAIRO_PATH', 'the listed reason must carry the remedy'
   end
 
   def test_large_pdf_question_is_asked_once_before_page_one
