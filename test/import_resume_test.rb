@@ -275,4 +275,92 @@ class ImportResumeTest < Minitest::Test
       refute_equal first[:importer_sha256], changed_source[:importer_sha256]
     end
   end
+
+  # SU-1010-16: after each new page the importer used to re-check EVERY
+  # finished page (a full tree walk each) and re-parse the JSON journal once
+  # per loose top-level entity, so each page took longer than the last.
+  # Now each new page is checked once after it is built; a real resume still
+  # checks every kept page once at the start of the run.
+  class CountingModel < Model
+    attr_reader :journal_reads
+
+    def initialize
+      super
+      @journal_reads = 0
+    end
+
+    def get_attribute(dict, key, default = nil)
+      @journal_reads += 1 if dict == IRC::JOURNAL_DICTIONARY
+      super
+    end
+  end
+
+  def counted_run(page_count, loose_count)
+    model = CountingModel.new
+    loose_count.times { |index| model.active_entities.add(Leaf.new(50_000 + index)) }
+    walks = Hash.new(0)
+    pages = (1..page_count).to_a
+    ctrl = IRC::Controller.new(
+      :model => model, :pages => pages, :requested_mode => :text3d,
+      :identity => identity, :clock => lambda { 0.0 },
+      :entity_signature => lambda do |group|
+        walks[group.persistent_id] += 1
+        "sig-#{group.persistent_id}"
+      end
+    )
+    runner = lambda do |page, offset, certify|
+      group = add_group(model, page, 100 + page)
+      certify.call(group, offset + 10.0, :pages => 1)
+      { :stats => { :pages => 1 }, :next_y_offset => offset + 10.0 }
+    end
+    result = IRC::PageOrchestrator.new(
+      :model => model, :controller => ctrl, :pages => pages,
+      :runner => runner, :continue_on_page_error => true
+    ).run
+    [result, walks, model.journal_reads]
+  end
+
+  def test_each_new_page_is_checked_once_not_every_finished_page_again
+    result, walks, = counted_run(6, 50)
+    assert_equal 'success', result[:result_status]
+    assert_equal (1..6).to_a, result[:retained_pages]
+    assert_equal 12, walks.values.inject(0, :+),
+                 '2 walks per page: certify plus the after-page check'
+    assert walks.values.all? { |count| count == 2 }, walks.inspect
+  end
+
+  def test_journal_reads_do_not_grow_with_loose_model_entities
+    _, _, few = counted_run(6, 0)
+    _, _, many = counted_run(6, 50)
+    assert_operator many, :<=, 3 * 6 + 3,
+                    "journal reads #{many} must stay near 3 per page"
+    assert_equal few, many, 'loose top-level entities must not add journal reads'
+  end
+
+  def test_page_certified_checks_only_that_page
+    model = Model.new
+    ctrl = controller(model)
+    assert_equal false, ctrl.page_certified?(1), 'no journal yet'
+    ctrl.certify_page!(add_group(model, 1, 101), 1)
+    assert_equal true, ctrl.page_certified?(1)
+    assert_equal false, ctrl.page_certified?(2), 'page 2 has no entry'
+    model.active_entities.to_a.first.entities.to_a.first.move_end!(9.0, 9.0, 0.0)
+    assert_raises(IRC::ResumeMismatch) { ctrl.page_certified?(1) }
+  end
+
+  def test_resume_still_checks_every_kept_page_at_start
+    model = Model.new
+    first = controller(model)
+    first.certify_page!(add_group(model, 1, 101), 1)
+    first.certify_page!(add_group(model, 2, 102), 2)
+    model.active_entities.to_a[1].entities.to_a.first.move_end!(5.0, 5.0, 0.0)
+    resumed = controller(model)
+    runner = lambda { |_page, _offset, _certify| raise 'must not run' }
+    assert_raises(IRC::ResumeMismatch) do
+      IRC::PageOrchestrator.new(
+        :model => model, :controller => resumed, :pages => [1, 2, 3],
+        :runner => runner, :continue_on_page_error => true
+      ).run
+    end
+  end
 end
