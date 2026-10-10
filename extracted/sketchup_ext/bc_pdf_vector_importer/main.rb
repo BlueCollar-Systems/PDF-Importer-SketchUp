@@ -364,6 +364,18 @@ module BlueCollarSystems
       !Array(text_items).empty? || source_inspection_required == true
     end
 
+    SVG_RENDERER_REMEDY =
+      'The free PDF text helper (Poppler or MuPDF) could not run, so this ' \
+      "page's text was left out; lines, fills and pictures were kept. " \
+      'Install Poppler or MuPDF and expose it on PATH, or configure ' \
+      'BC_PDFTOCAIRO_PATH / BC_MUTOOL_PATH, then open Extensions > PDF ' \
+      'Vector Importer > Compatibility Report to verify detection.'.freeze
+
+    # Owner ruling 2026-10-05 (deliver, step down, report): a missing text
+    # helper no longer costs the page. Returns false and flags the stats;
+    # the caller turns this page's helper-based text off, keeps its lines,
+    # fills and pictures, and lists every text item as not delivered with
+    # reason 'renderer_missing'. No modal here: this runs per page.
     def self.enforce_svg_renderer_available!(model, stats, requested_text_mode)
       return true if SvgTextRenderer.svg_renderer_available?
 
@@ -375,19 +387,10 @@ module BlueCollarSystems
                         end
       Logger.warn(
         'Pipeline',
-        "#{requested_label} text was requested, but a free Poppler/MuPDF SVG " \
-        'renderer is unavailable. The requested representation will not be substituted.'
+        "#{requested_label} text was requested, but the free Poppler/MuPDF " \
+        "SVG renderer is unavailable. #{SVG_RENDERER_REMEDY}"
       )
-      # No modal here: this runs per page and can fire after earlier pages
-      # were already imported. The import stops with ONE failure message
-      # (import_pdf shows it) that carries the remedy.
-      # The pipeline owns the open operation and performs its single rollback.
-      raise RepresentationFidelity::ContractError,
-            "requested #{requested_label} renderer is unavailable; no " \
-            'representation fallback is authorized. Install Poppler or ' \
-            'MuPDF and expose it on PATH, or configure BC_PDFTOCAIRO_PATH / ' \
-            'BC_MUTOOL_PATH, then open Extensions > PDF Vector Importer > ' \
-            'Compatibility Report to verify detection.'
+      false
     end
 
     def self.record_text_renderer(stats, page_num, attrs)
@@ -514,7 +517,8 @@ module BlueCollarSystems
       end
     end
 
-    def self.record_uncertified_text_spans!(stats, page_num, failures)
+    def self.record_uncertified_text_spans!(stats, page_num, failures,
+                                            log_each = true)
       return true unless stats.is_a?(Hash)
       stats[:text_delivery_failures] ||= []
       map_text_renderer_failures(failures).each do |mapped|
@@ -530,6 +534,7 @@ module BlueCollarSystems
           :detail => detail,
           :certified => false
         }
+        next unless log_each
         Logger.warn(
           'Pipeline',
           "Page #{page_num} #{source_id}: requested text was not certified " \
@@ -538,6 +543,263 @@ module BlueCollarSystems
         )
       end
       true
+    end
+
+    # ── Owner ruling 2026-10-05: deliver, step down, report ──────────────
+    # A text problem never costs the page. When a text stage fails, the
+    # page's lines, fills and pictures stay; whatever that stage created is
+    # erased; and every text item it was delivering is listed as not
+    # delivered, with the reason, in the report, Import Health and the
+    # end-of-import status line. Stops that must end the import still
+    # propagate (Esc, an uncertain rollback, a changed resume journal, a
+    # batch-policy stop), and a cleanup that cannot be verified still rolls
+    # the page back exactly as before. Geometry-builder and host failures
+    # are not wrapped: the page rescue in run_pipeline still rolls them back.
+    def self.terminal_import_error?(error)
+      return true if error.is_a?(ImportRunControl::ImportCancelled)
+      return true if error.is_a?(ImportRunControl::ResumeMismatch)
+      error.class.name.to_s =~ /NoninteractiveError\z/ ? true : false
+    end
+
+    def self.text_stage_entity_list(entities)
+      entities.respond_to?(:to_a) ? entities.to_a : []
+    end
+
+    def self.text_stage_entity_count(entities)
+      return entities.length if entities.respond_to?(:length)
+      text_stage_entity_list(entities).length
+    end
+
+    # Array lengths and counters only: a failed stage appends rows and adds
+    # to counters, and both are put back so the report never claims an
+    # entity the step-down erased. Arrays the failed stage created are
+    # dropped; hashes (timings) are left as they are.
+    def self.text_stage_stats_snapshot(stats)
+      return nil unless stats.is_a?(Hash)
+      snapshot = {}
+      stats.each do |key, value|
+        snapshot[key] = if value.is_a?(Array)
+                          [:array, value.length]
+                        elsif value.is_a?(Numeric)
+                          [:number, value]
+                        else
+                          [:other]
+                        end
+      end
+      snapshot
+    end
+
+    def self.restore_text_stage_stats!(stats, snapshot)
+      return stats unless stats.is_a?(Hash) && snapshot.is_a?(Hash)
+      stats.keys.each do |key|
+        saved = snapshot[key]
+        if saved.nil?
+          stats.delete(key) if stats[key].is_a?(Array)
+          next
+        end
+        case saved[0]
+        when :array
+          value = stats[key]
+          if value.is_a?(Array) && value.length > saved[1]
+            value.slice!(saved[1], value.length - saved[1])
+          end
+        when :number
+          stats[key] = saved[1]
+        end
+      end
+      stats
+    end
+
+    def self.safe_text_source_id(item)
+      RepresentationFidelity.source_span_id(item)
+    rescue StandardError
+      nil
+    end
+
+    TEXT_STEP_DOWN_REASON_TEXT = {
+      'renderer_missing' => 'the free PDF text helper could not run',
+      'text_not_read' => 'the text in this PDF could not be read',
+      'text_stage_failed' => 'a text step failed',
+      'text_item_failed' => 'a text item failed'
+    }.freeze
+
+    def self.text_step_down_reason_text(reason_code)
+      TEXT_STEP_DOWN_REASON_TEXT[reason_code.to_s] ||
+        reason_code.to_s.tr('_', ' ')
+    end
+
+    # Lists every item the failed stage was delivering (one row per item; a
+    # page-scoped row when the items are not known) and one summary row.
+    def self.record_text_step_down!(stats, page_num, mode, items, reason_code,
+                                    detail)
+      return true unless stats.is_a?(Hash)
+      detail = detail.to_s.gsub(/\s+/, ' ').strip[0, 400]
+      rows = Array(items).map do |item|
+        { :source_span_id => safe_text_source_id(item),
+          :reason => reason_code.to_s, :detail => detail }
+      end
+      if rows.empty?
+        rows << { :source_span_id => nil, :reason => reason_code.to_s,
+                  :detail => detail }
+      end
+      record_text_step_down_rows!(stats, page_num, mode, rows, reason_code,
+                                  detail)
+    end
+
+    # Failure rows that already carry their own reason (for example the
+    # builder's per-item failures) plus the one summary row.
+    def self.record_text_step_down_rows!(stats, page_num, mode, rows,
+                                         reason_code, detail)
+      return true unless stats.is_a?(Hash)
+      rows = Array(rows)
+      detail = detail.to_s.gsub(/\s+/, ' ').strip[0, 400]
+      record_uncertified_text_spans!(stats, page_num, rows, rows.length <= 20)
+      stats[:text_step_downs] ||= []
+      stats[:text_step_downs] << {
+        :page => page_num.to_i,
+        :requested_mode => normalize_text_renderer_mode(mode) || mode,
+        :reason_code => reason_code.to_s,
+        :item_count => rows.length,
+        :detail => detail,
+        :page_kept => true
+      }
+      Logger.warn(
+        'Pipeline',
+        "Page #{page_num}: #{rows.length} text item(s) could not be " \
+        "delivered (#{text_step_down_reason_text(reason_code)}" \
+        "#{detail.empty? ? '' : ': ' + detail}). The rest of the page " \
+        'was kept; the items are listed in the import report.'
+      )
+      true
+    end
+
+    # A page item delivered in a lesser form (or left out) while the page
+    # itself was kept. Listed in the report and the status line.
+    def self.record_page_step_down!(stats, page_num, item, reason_code, detail)
+      return true unless stats.is_a?(Hash)
+      detail = detail.to_s.gsub(/\s+/, ' ').strip[0, 400]
+      stats[:page_step_downs] ||= []
+      stats[:page_step_downs] << {
+        :page => page_num.to_i,
+        :item => item.to_s,
+        :reason_code => reason_code.to_s,
+        :detail => detail,
+        :page_kept => true
+      }
+      Logger.warn(
+        'Pipeline',
+        "Page #{page_num}: #{item.to_s.tr('_', ' ')} stepped down " \
+        "(#{reason_code}): #{detail}. The rest of the page was kept."
+      )
+      true
+    end
+
+    # A page with nothing left in it after its text stepped down is not
+    # kept: the host would purge the empty group at commit and break the
+    # resume journal. It fails like before (rolled back, listed, resumable).
+    def self.ensure_kept_page_has_content!(page_group, page_num, stats,
+                                           failures_before)
+      return true unless page_group && page_group.respond_to?(:entities)
+      return true unless Array(stats[:text_delivery_failures]).length >
+                         failures_before.to_i
+      return true unless text_stage_entity_count(page_group.entities) == 0
+      raise RepresentationFidelity::ContractError,
+            "Page #{page_num}: nothing on this page could be delivered " \
+            '(its text was not delivered and it has no lines, fills or ' \
+            'pictures).'
+    end
+
+    TEXT_STAGE_OWNER_KEYS = %w[
+      source_span_id decorative_source_span_id source_unit_id
+    ].freeze
+    TEXT_STAGE_CONTAINER_KEYS = %w[
+      representation_container decorative_text_container source_claim_root
+    ].freeze
+
+    # Whether an entity was made by a text stage for this owner: one source
+    # item id, a list of ids, or :any_text (every text-owned entity; used
+    # only where the page held no text before the stage ran).
+    def self.text_stage_owned_by?(entity, owner)
+      return false unless entity.respond_to?(:get_attribute)
+      dictionary = 'BC_PDF_Importer'
+      if owner == :source_unit
+        return !entity.get_attribute(dictionary, 'source_unit_id', nil).to_s.empty?
+      end
+      if owner == :any_text
+        return true if TEXT_STAGE_CONTAINER_KEYS.any? do |key|
+          entity.get_attribute(dictionary, key, nil) == true
+        end
+        return TEXT_STAGE_OWNER_KEYS.any? do |key|
+          !entity.get_attribute(dictionary, key, nil).to_s.empty?
+        end
+      end
+      ids = Array(owner).map { |value| value.to_s }.reject(&:empty?)
+      return false if ids.empty?
+      %w[source_span_id decorative_source_span_id].any? do |key|
+        ids.include?(entity.get_attribute(dictionary, key, nil).to_s)
+      end
+    rescue StandardError
+      false
+    end
+
+    # Runs one text stage. Returns true when it delivered, false when it
+    # stepped down (page kept, items listed).
+    #   :parent      - the entity collection the stage builds in.
+    #   :owner       - who owns what the stage builds there: a source item id,
+    #                  a list of ids, :source_unit (the unclaimed source
+    #                  glyphs), or :any_text. Only a count is taken up
+    #                  front; on failure the owned entities are erased and the
+    #                  count must come back exactly, or the page rolls back.
+    #   :items       - the text items to list when the stage fails.
+    #   :reason_code - why, for the report.
+    def self.keep_page_on_text_failure(stats, page_num, mode, options = {})
+      parent = options[:parent]
+      owner = options[:owner]
+      before_count = parent ? text_stage_entity_count(parent) : nil
+      snapshot = text_stage_stats_snapshot(stats)
+      yield
+      true
+    rescue StandardError => error
+      raise if terminal_import_error?(error)
+      begin
+        if parent && text_stage_entity_count(parent) != before_count
+          owned = text_stage_entity_list(parent).select do |entity|
+            text_stage_owned_by?(entity, owner)
+          end
+          RepresentationFidelity.erase_owned!(parent, owned) unless owned.empty?
+          unless text_stage_entity_count(parent) == before_count
+            raise RepresentationFidelity::ContractError,
+                  'the failed text step left entities it could not identify'
+          end
+        end
+      rescue StandardError => cleanup_error
+        raise RepresentationFidelity::ContractError,
+              "Page #{page_num}: #{error.message}; the partial text could " \
+              "not be removed (#{cleanup_error.message})"
+      end
+      restore_text_stage_stats!(stats, snapshot)
+      record_text_step_down!(
+        stats, page_num, mode, options[:items],
+        options[:reason_code] || 'text_stage_failed', error.message
+      )
+      false
+    end
+
+    # True when any page kept text items it could not deliver.
+    def self.text_step_down_present?(stats)
+      return false unless stats.is_a?(Hash)
+      !Array(stats[:text_delivery_failures] ||
+             stats['text_delivery_failures']).empty?
+    end
+
+    # An import whose pages all arrived, but with some text items listed as
+    # not delivered, reports 'incomplete' (the list is in Import Health) and
+    # still counts as an imported file: nothing was lost to a text problem.
+    def self.pages_kept_with_step_downs?(stats)
+      return false unless stats.is_a?(Hash)
+      return false if stats[:cancelled] == true
+      return false unless Array(stats[:failed_pages]).empty?
+      text_step_down_present?(stats)
     end
 
     def self.failed_item_rung_from_transition(proof)
@@ -2555,8 +2817,8 @@ module BlueCollarSystems
     rescue StandardError => e
       raise RepresentationFidelity::ContractError,
             "Page #{page_num}: no-text proof failed for requested " \
-            "#{requested_mode} (#{e.message}); import stopped instead of " \
-            'silently omitting possible text.'
+            "#{requested_mode} (#{e.message}); possible text is listed as " \
+            'not read instead of being silently omitted.'
     end
 
     # Round 20: accumulate faithful mesh-text target heights (inches) for
@@ -4045,6 +4307,12 @@ module BlueCollarSystems
         stats[:requested_pages] = Array(result[:requested_pages]).dup
         stats[:selected_pages] = stats[:requested_pages].dup
         stats[:result_status] = result[:result_status]
+        # Every page arrived, but some text items are listed as not
+        # delivered: the import is incomplete, never failed.
+        if stats[:result_status].to_s == 'success' &&
+           !Array(stats[:text_delivery_failures]).empty?
+          stats[:result_status] = 'incomplete'
+        end
         stats[:failed_pages] = Array(result[:failed_pages])
         stats[:failed_pages].each do |failure|
           Logger.warn(
@@ -4304,6 +4572,7 @@ module BlueCollarSystems
       pages.each_with_index do |page_num, idx|
        begin
         page_started = Time.now
+        page_text_failures_before = Array(stats[:text_delivery_failures]).length
         pct = pages.length > 1 ? " (#{((idx.to_f / pages.length) * 100).round}%)" : ""
         elapsed = (Time.now - import_start).round(1)
 
@@ -4744,23 +5013,42 @@ module BlueCollarSystems
           end.map do |form|
             form.respond_to?(:stream_data) ? form.stream_data : nil
           end.compact
-          enforce_extracted_text_presence!(
-            page_num, requested_text_mode, text_items, streams,
-            referenced_form_streams
-          )
-          record_empty_page_source_inspection!(stats, page_num, {
-            :semantic_text_extraction_complete => true,
-            :decoded_stream_text_operators => false,
-            :decoded_form_stream_text_operators => false,
-            :embedded_image_asset_count => Array(embedded_assets).length,
-            :embedded_image_placed_count => 0
-          })
+          # Text the PDF draws but no extractor could read is listed as not
+          # delivered; the page's lines, fills and pictures still import.
+          text_presence_proved = keep_page_on_text_failure(
+            stats, page_num, requested_text_mode,
+            :reason_code => 'text_not_read'
+          ) do
+            enforce_extracted_text_presence!(
+              page_num, requested_text_mode, text_items, streams,
+              referenced_form_streams
+            )
+          end
+          if text_presence_proved
+            record_empty_page_source_inspection!(stats, page_num, {
+              :semantic_text_extraction_complete => true,
+              :decoded_stream_text_operators => false,
+              :decoded_form_stream_text_operators => false,
+              :embedded_image_asset_count => Array(embedded_assets).length,
+              :embedded_image_placed_count => 0
+            })
+          end
         end
 
+        # A missing text helper turns off this page's helper-based text only.
+        # Lines, fills and pictures still build; every text item is listed.
+        text_renderer_missing = false
         if svg_renderer_required_for_page?(
           requested_text_mode, opts[:import_text], text_items, false
         )
-          enforce_svg_renderer_available!(model, stats, requested_text_mode)
+          text_renderer_missing =
+            !enforce_svg_renderer_available!(model, stats, requested_text_mode)
+          if text_renderer_missing
+            record_text_step_down!(
+              stats, page_num, requested_text_mode, text_items,
+              'renderer_missing', SVG_RENDERER_REMEDY
+            )
+          end
         end
 
         explicit_zero_canonical_page_raster =
@@ -5026,13 +5314,20 @@ module BlueCollarSystems
            [:text, :labels].include?(requested_text_mode)
           use_svg_text = false
         end
+        # Helper missing on this page: its text was already listed as not
+        # delivered (renderer_missing). Build the page without it.
+        if text_renderer_missing
+          use_svg_text = false
+          use_svg_3d_text = false
+        end
         # Native add_3d_text cannot certify embedded PDF font identity. Exact
         # 3D text therefore uses the renderer's own glyph outlines; native 3D
         # text remains available only behind GeometryBuilder's explicit font
         # identity proof gate.
         builder_use_3d_text = false
         builder_text_items =
-          (use_svg_text || use_svg_3d_text || use_item_raster) ? [] : text_items
+          (use_svg_text || use_svg_3d_text || use_item_raster ||
+           text_renderer_missing) ? [] : text_items
         representation_renderer = if use_svg_3d_text
                                     :svg_3d_text
                                   elsif use_svg_text
@@ -5076,8 +5371,8 @@ module BlueCollarSystems
           flatten_to_2d: true, merge_tolerance: opts[:merge_tolerance],
           import_fills: (opts[:import_fills] || force_import_fills_for_page), group_by_color: opts[:group_by_color],
           detect_arcs: opts[:detect_arcs], map_dashes: opts[:map_dashes],
-          import_text: (use_svg_text || use_svg_3d_text || use_item_raster) ?
-            false : opts[:import_text],
+          import_text: (use_svg_text || use_svg_3d_text || use_item_raster ||
+                        text_renderer_missing) ? false : opts[:import_text],
           use_3d_text: builder_use_3d_text,
           strict_text_fidelity: opts[:strict_text_fidelity],
           requested_text_mode: requested_text_mode,
@@ -5131,9 +5426,18 @@ module BlueCollarSystems
           end
         end
         hard_builder_failures = builder_failures - label_fallback_failures
+        hard_failure_source_ids = hard_builder_failures.map do |failure|
+          failure[:source_span_id].to_s
+        end
         unless hard_builder_failures.empty?
-          enforce_requested_text_delivery!(
-            page_num, requested_text_mode, hard_builder_failures
+          # Each item the builder could not deliver is listed; the page and
+          # the text it did deliver stay (owner ruling: deliver, step down,
+          # report). The builder already erased each failed item's artifacts.
+          record_text_step_down_rows!(
+            stats, page_num, requested_text_mode, hard_builder_failures,
+            'text_item_failed',
+            "#{hard_builder_failures.length} text item(s) could not be " \
+              'placed in the requested mode'
           )
         end
 
@@ -5141,7 +5445,8 @@ module BlueCollarSystems
           failure[:source_span_id].to_s
         end
         completed_builder_attempts = Array(result[:text_attempts]).reject do |attempt|
-          fallback_source_ids.include?(attempt[:source_span_id].to_s)
+          fallback_source_ids.include?(attempt[:source_span_id].to_s) ||
+            hard_failure_source_ids.include?(attempt[:source_span_id].to_s)
         end
         merge_text_attempts!(stats, completed_builder_attempts)
         if requested_text_mode == :text
@@ -5171,7 +5476,22 @@ module BlueCollarSystems
             count: result[:text_objects].to_i)
         end
 
+        # Assigned inside the step-down wrappers below and read after them.
+        svg_document = nil
         unless label_fallback_failures.empty?
+          fallback_items = text_items.select do |item|
+            fallback_source_ids.include?(
+              RepresentationFidelity.source_span_id(item)
+            )
+          end
+          fallback_parent = builder.page_group ?
+            builder.page_group.entities : model.active_entities
+          # Delivered Labels stay; only these items' outlines are undone.
+          keep_page_on_text_failure(
+            stats, page_num, requested_text_mode,
+            :parent => fallback_parent, :owner => fallback_source_ids,
+            :items => fallback_items, :reason_code => 'text_stage_failed'
+          ) do
           label_svg_failure = {}
           use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
             (a.to_f - b.to_f).abs > 0.01
@@ -5194,13 +5514,6 @@ module BlueCollarSystems
                   "Page #{page_num}: Labels fallback source inspection failed: " \
                   "#{label_svg_failure[:reason]}"
           end
-          fallback_items = text_items.select do |item|
-            fallback_source_ids.include?(
-              RepresentationFidelity.source_span_id(item)
-            )
-          end
-          fallback_parent = builder.page_group ?
-            builder.page_group.entities : model.active_entities
           complete_label_item_fallbacks!(
             stats, model, fallback_parent, path, page_num, fallback_items,
             media_box, svg_page_box, page_rotation, page_text_opts, import_start,
@@ -5208,6 +5521,7 @@ module BlueCollarSystems
             result[:text_attempts], layer_mgr.text_fallback_layer, text_items,
             requested_text_mode, flat_text_fallbacks
           )
+          end
         end
 
 
@@ -5227,12 +5541,20 @@ module BlueCollarSystems
             controller = RepresentationFidelity::FallbackController.new(
               :raster, source_id
             )
+            # One item that cannot be pictured is listed; its peers and the
+            # page stay.
+            keep_page_on_text_failure(
+              stats, page_num, :raster, :parent => raster_parent,
+              :owner => source_id, :items => [source_item],
+              :reason_code => 'text_item_failed'
+            ) do
             complete_item_representation_ladder!(
               stats, model, raster_parent, path, page_num, source_item,
               :raster, controller, [], media_box, svg_page_box,
               page_rotation, opts, import_start, page_y_offset, {},
               layer_mgr.text_fallback_layer, text_items
             )
+            end
             completed_items = item_index + 1
             if completed_items == Array(text_items).length ||
                (completed_items % 50).zero?
@@ -5264,6 +5586,15 @@ module BlueCollarSystems
           text_delivery_started = Time.now
           exact_3d_requested_mode =
             requested_text_mode == :text ? :text : :text3d
+          # A failure anywhere in this stage undoes this stage's text only and
+          # lists the page's text items; the page's lines and fills stay. The
+          # builder put no text in the page group, so every text-owned entity
+          # in it belongs to this stage.
+          keep_page_on_text_failure(
+            stats, page_num, exact_3d_requested_mode,
+            :parent => builder.page_group.entities, :owner => :any_text,
+            :items => text_items, :reason_code => 'text_stage_failed'
+          ) do
           svg_failure = {}
           use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
             (a.to_f - b.to_f).abs > 0.01
@@ -5429,6 +5760,19 @@ module BlueCollarSystems
               sum + row[:face_count].to_i
             end
             unless transition_proofs.empty?
+              # Items stepping down from 3D Text: if that step fails, only
+              # those items are listed; the delivered 3D Text stays.
+              proof_ids = transition_proofs.map do |proof|
+                RepresentationFidelity.source_span_id(proof[:source_span_id])
+              end
+              keep_page_on_text_failure(
+                stats, page_num, exact_3d_requested_mode,
+                :parent => representation_parent, :owner => proof_ids,
+                :items => Array(text_items).select { |item|
+                  proof_ids.include?(safe_text_source_id(item))
+                },
+                :reason_code => 'text_stage_failed'
+              ) do
               complete_text3d_item_fallbacks!(
                 stats, model, representation_parent, path, page_num,
                 text_items, media_box, svg_page_box, page_rotation, page_text_opts,
@@ -5437,7 +5781,9 @@ module BlueCollarSystems
                 (exact_3d_requested_mode == :text ?
                   flat_text_fallbacks : nil)
               )
+              end
             end
+          end
           end
           end
           stats[:pipeline_performance][:text_delivery_ms] =
@@ -5481,6 +5827,15 @@ module BlueCollarSystems
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
           text_layer = layer_mgr.text_fallback_layer
 
+          # A failure in this stage undoes this stage's text only and lists
+          # the page's text items; lines and fills stay. Glyphs/Geometry put
+          # no builder text in the page group, so every text-owned entity in
+          # it belongs to this stage.
+          keep_page_on_text_failure(
+            stats, page_num, requested_text_mode,
+            :parent => builder.page_group.entities, :owner => :any_text,
+            :items => text_items, :reason_code => 'text_stage_failed'
+          ) do
           # A page container cannot prove which physical descendants belong to
           # which source span. Render and certify every source item independently.
           # This also keeps same-text spans distinct by their deterministic span
@@ -5557,6 +5912,12 @@ module BlueCollarSystems
             controller = RepresentationFidelity::FallbackController.new(
               requested_text_mode, source_id
             )
+            # One item that fails is listed; its peers and the page stay.
+            keep_page_on_text_failure(
+              stats, page_num, requested_text_mode,
+              :parent => representation_parent, :owner => source_id,
+              :items => [source_item], :reason_code => 'text_item_failed'
+            ) do
             complete_item_representation_ladder!(
               stats, model, representation_parent, path, page_num,
               source_item, requested_text_mode, controller, [], media_box,
@@ -5566,6 +5927,7 @@ module BlueCollarSystems
               precomputed_placed, precomputed_pens, glyph_component_cache,
               precomputed_peer_owners
             )
+            end
             completed_items = item_index + 1
             run_control_checkpoint!(
               opts, :text_item,
@@ -5592,6 +5954,13 @@ module BlueCollarSystems
               )
             end
           end
+          # Drawn letters no text item claimed: if they fail, one page row
+          # is listed and every delivered item stays.
+          keep_page_on_text_failure(
+            stats, page_num, requested_text_mode,
+            :parent => representation_parent, :owner => :source_unit,
+            :items => [], :reason_code => 'text_stage_failed'
+          ) do
           source_unit = SvgItemRepresentationRenderer.render_unmatched_svg(
             representation_parent, svg_document[:svg], media_box, text_items,
             requested_text_mode, :scale => opts[:scale], :svg_page_box => svg_page_box,
@@ -5605,6 +5974,7 @@ module BlueCollarSystems
             SvgItemRepresentationRenderer.finalize_source_unit_evidence!(source_unit,page_rotation)
             record_source_unit_vector_delivery!(stats,page_num,source_unit)
           end
+          end
           stats[:pipeline_performance][:item_delivery_ms] =
             ((Time.now - delivery_started) * 1000.0).round(3)
           stats[:pipeline_performance][:glyph_component_definition_count] =
@@ -5615,6 +5985,7 @@ module BlueCollarSystems
               "items=#{Array(text_items).length}; mode=#{requested_text_mode}"
           )
           stats[:text_mode] = requested_text_mode
+          end
         end
 
         if opts[:cleanup_geometry] && builder.page_group
@@ -5666,9 +6037,22 @@ module BlueCollarSystems
 
         # ── Closed-shape extrusion (disabled; independent of 3D text) ───
         unless late_overlays.empty?
-          unless composition && builder.page_group
+          unless builder.page_group
             raise RepresentationFidelity::ContractError,
-              'final vector annotations require the complete page text inventory'
+              'final vector annotations require the page group'
+          end
+          overlay_top = composition ? composition[:highest_text_z] : nil
+          overlay_crops = composition ? composition[:final_page_crops] : []
+          if overlay_top.nil?
+            # Step down: draw the final marks just above the page instead of
+            # dropping the page; they may sit under raised 3D text.
+            overlay_top = 0.0
+            record_page_step_down!(
+              stats, page_num, 'final_vector_annotations',
+              'text_inventory_unavailable',
+              'Marks drawn last in the PDF were placed without the text ' \
+                'height check'
+            )
           end
           factor = opts[:scale].to_f / 72.0
           mapper = lambda do |pdf_x, pdf_y|
@@ -5677,9 +6061,9 @@ module BlueCollarSystems
           end
           built_overlays = LatePdfOverlays.build!(builder.page_group.entities, late_overlays,
             :point_mapper => mapper, :materials => model.materials,
-            :highest_text_z => composition[:highest_text_z], :page_number => page_num,
+            :highest_text_z => overlay_top, :page_number => page_num,
             :source_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
-            :final_page_crops => composition[:final_page_crops])
+            :final_page_crops => overlay_crops)
           stats[:late_pdf_overlays] ||= []
           stats[:late_pdf_overlays] << {
             :page => page_num, :count => built_overlays.length,
@@ -5787,6 +6171,9 @@ module BlueCollarSystems
             "#{pruned_groups.uniq.first(8).inspect}"
           )
         end
+        ensure_kept_page_has_content!(
+          builder.page_group, page_num, stats, page_text_failures_before
+        )
         add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
 
         # Advance the running page stack only after a successful import.
@@ -5939,6 +6326,10 @@ module BlueCollarSystems
 
       stats[:next_y_offset] = running_y_offset
       stats[:log_path] = Logger.log_path
+      if !opts[:resumable_page_call] && stats[:result_status].to_s.empty? &&
+         text_step_down_present?(stats)
+        stats[:result_status] = 'incomplete'
+      end
       unless opts[:defer_final_diagnostics]
         report_pipeline_progress(opts, 'diagnostics_started')
         diagnostics_started = Time.now
@@ -6235,8 +6626,14 @@ module BlueCollarSystems
     def self.prepare_embedded_image_display_plans(page_group, records, document, media_box, opts)
       return { :qualified_plans => [], :unqualified => [] } if records.empty?
       unless document && document[:svg].is_a?(String) && !document[:svg].empty?
-        raise RepresentationFidelity::ContractError,
-          'embedded image source paint-order SVG is unavailable'
+        # Owner ruling 2026-10-05: the pictures are already placed; without
+        # the page drawing (for example when the free text helper cannot
+        # run) they keep their plain placement instead of costing the page.
+        return { :qualified_plans => [], :unqualified => records.map do |record|
+          { :image_id => RepresentationFidelity.stable_entity_id(record[:image_entity]),
+            :reason => 'embedded image source paint-order SVG is unavailable; ' \
+                       'the picture keeps its plain placement' }
+        end }
       end
       svg = document[:svg]
       page_box = opts[:svg_page_box] || media_box
@@ -7481,13 +7878,17 @@ module BlueCollarSystems
             fail_c += 1
             next
           end
-          outcome = import_result_status(run_pipeline(model, pdf, opts))
+          stats = run_pipeline(model, pdf, opts)
+          outcome = import_result_status(stats)
           if outcome == 'success'
             ok += 1
           elsif outcome == 'cancelled'
             cancel_c += 1
             stop_reason = 'Import cancelled; remaining PDFs were not started.'
             break
+          elsif pages_kept_with_step_downs?(stats)
+            # Every page arrived; some text is listed in Import Health.
+            ok += 1
           else
             fail_c += 1
           end
@@ -7613,7 +8014,11 @@ module BlueCollarSystems
         if outcome == 'cancelled'
           return Sketchup::Importer::ImportCanceled
         end
-        outcome == 'success' ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
+        # Pages kept with text listed as not delivered are an import, not a
+        # failure; the list is in Import Health.
+        delivered = outcome == 'success' ||
+          BlueCollarSystems::PDFVectorImporter.pages_kept_with_step_downs?(stats)
+        delivered ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
       rescue BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled
         Sketchup::Importer::ImportCanceled
       rescue StandardError => e

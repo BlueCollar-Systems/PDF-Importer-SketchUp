@@ -7,27 +7,39 @@ alwaysApply: true
 
 **Requested mode wins.** Text / Labels / 3D Text / Glyphs / Geometry / Raster means that distinct representation. Alignment, rotation, and scale bugs are **transform bugs inside that mode** — especially when they worked in past versions.
 
+## Owner ruling (2026-10-05): deliver, step down, report
+
+One failing item never costs the page or the file. Deliver the page; step the
+failing item down; list every step-down and every item left out, with its reason,
+in the import report (`fallback.used`, `extra.human_summary`,
+`extra.text_delivery_failures`), Import Health and the status line. Proofs belong
+in the optional Audit setting (`BC_PDF_AUDIT=1`, "Audit import (slow
+self-checks)", default off) or in CI and are never a reason to stop the import or
+to drop a page or a file.
+
 ## MUST
 
 1. **Stay in the requested mode** and fix transforms / placement / height there.
-2. Treat fallback as unauthorized unless affirmative evidence proves the requested representation impossible for the exact source item and the alternative has its own certified type-and-visual attempt.
-3. After affirmative item-scoped impossibility, advance exactly one rung in the requested-specific finite closest ladder and certify that attempt: Text → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; Geometry → item Raster. Without that proof, erase partial artifacts, identify the exact source span, and stop.
+2. **Deliver the page.** When one item fails in the requested mode (a missing or blocked helper, a host/API limit, an exception, an empty artifact), step that item down instead of stopping, and list it. Only Esc, an uncertain rollback, a changed resume journal, or a failed geometry build of the page itself may stop a page.
+3. Step down one rung at a time on the finite closest ladder and check what each rung actually built: Text → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; Geometry → item Raster. When no rung can deliver the item yet, erase only that item's partial artifacts, list the exact source span and reason, and keep the rest of the page.
 4. **Free only** — bundled / host-native. No paid-only path.
 5. Prove Raster from actual saved/reopened host pixels. A real SketchUp `TextureWriter` export, successful output file, decoded RGB/RGBA visual digest, and dimensions must match; importer attributes are not physical evidence. Item crops retain RGBA provenance and visible pixels, but a valid opaque crop need not contain an `alpha < 255` pixel.
 
 Raster has no next rung. Requested Raster uses a verified item crop for each
 canonical source span or a verified page image for a selected zero-canonical-text
 page; fallback Raster is item-scoped. Terminal Raster can still fail verification.
-Report that failure and stop—never relabel it as successful delivery.
+List that item as not delivered with the failure—never relabel it as successful
+delivery—and keep the rest of the page.
 
 ## MUST NOT (instant reject)
 
 - Switch Text / Labels / 3D Text / Glyphs / Geometry / Raster to “fix” alignment, rotation, or scale.
-- Treat a missing/skipped helper, generic host/API limit, exception, empty artifact, or currently broken implementation as proof of item-specific impossibility.
-- Record a “proven unavailable” placeholder or advance to a peer/next rung without a real attempt and type-and-visual certificate.
+- Stop the import, roll back a page, or drop a file because one item, one helper, or one proof failed.
+- Record a step-down as delivered without actually building and checking the new rung.
+- Leave a step-down or a left-out item off the report, Import Health, or the status line.
 - Treat SIZE-1 or R20-2 as permission to change representation (they are **in-mode** height contracts).
 - Jump rotated Labels directly to mesh/geometry. Try Labels first; a proven host rotation impossibility advances only to verified 3D Text.
-- Silent empty text, or “helpful” mode change for prettier results.
+- Silent empty text (every left-out item is listed), or “helpful” mode change for prettier results.
 
 ## Agent trap
 
@@ -36,12 +48,12 @@ If the bug report is “wrong position / angle / size,” fix and certify that r
 ## Done only when
 
 - Delivered representation matches the requested mode and its source item, type,
-  placement, rotation, and scale evidence is certified; **or**
-- Each necessary adjacent fallback has affirmative item proof and the terminal
-  attempt is independently certified; **or**
-- A generic/unproven failure stops without leaving partial artifacts and reports
-  the exact requested-mode/source-item certification failure.
+  placement, rotation, and scale evidence is checked; **or**
+- Each failed item stepped down one rung at a time and the rung that delivered it
+  was actually built and checked, and the step-down is listed; **or**
+- An item no rung could deliver is left out without partial artifacts, listed with
+  the exact source item and reason, and the rest of the page was delivered.
 
-Fallback is eligible only after affirmative item-scoped impossibility evidence
-exists and the next adjacent attempt independently certifies its actual type and
-visual result. Generic failure telemetry is never enough; the ladder never cycles.
+Heavy proofs (impossibility proofs, certification digests, full-file re-hashes)
+run in the optional Audit setting or in CI, never as a gate that stops an import.
+The ladder never cycles.

@@ -4,9 +4,25 @@
 
 **Cursor rule (authoritative, always-on):** [`.cursor/rules/text-mode-fidelity.mdc`](.cursor/rules/text-mode-fidelity.mdc)
 
-**Hard contract:** requested text mode (Text / Labels / 3D Text / Glyphs / Geometry / Raster) is the deliverable. Alignment, rotation, and scale are fixed **in that mode** — never by switching representation, especially when those transforms worked before. A different representation is unauthorized unless affirmative, item-scoped evidence proves the requested representation impossible **and** the alternative has its own certified type-and-visual attempt. Visually accurate, host-native/bundled, **no paid path**.
+**Owner ruling (2026-10-05): deliver, step down, report.** One failing item never
+costs the page or the file. Deliver the page. When one item cannot be delivered in
+the requested mode, step that item down (text → glyphs → outlines → picture), and
+when no rung can deliver it yet, leave that item out, erase only that item's partial
+artifacts, and keep everything else on the page. List every step-down and every
+item left out, with its reason, in the import report (`fallback.used`,
+`extra.human_summary`, `extra.text_delivery_failures`, `extra.text_step_downs`,
+`extra.page_step_downs`), in Import Health, and in the end-of-import status line.
+Proofs (impossibility proofs, certification digests, full-file re-hashes) belong in
+the optional Audit setting (`BC_PDF_AUDIT=1`, "Audit import (slow self-checks)",
+default off) or in CI. A missing proof, a missing or blocked helper, a host/API
+limit, or an exception is **never** a reason to stop the import or to drop a page
+or a file. Esc, an uncertain host rollback, and a changed resume journal still stop
+the run, and a page whose own geometry build fails (or whose partial artifacts
+cannot be removed) is still rolled back and listed as a failed page.
 
-**Agent trap:** “text looks wrong” ≠ “change the mode.” Wrong position/angle/size → transform fix. Mode change without proven impossibility = reject.
+**Hard contract:** requested text mode (Text / Labels / 3D Text / Glyphs / Geometry / Raster) is the deliverable. Alignment, rotation, and scale are fixed **in that mode** — never by switching representation, especially when those transforms worked before. A step-down is for an item that actually failed in the requested mode, never a fix for a transform bug, and it is always listed. Visually accurate, host-native/bundled, **no paid path**.
+
+**Agent trap:** “text looks wrong” ≠ “change the mode.” Wrong position/angle/size → transform fix. Mode change to hide a transform bug = reject.
 
 ### Current SketchUp text-mode execution rule
 
@@ -25,8 +41,9 @@ The exact ladders are Text → 3D Text → Glyphs → Geometry → item Raster;
 Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry
 → item Raster; Glyphs → Geometry → item Raster; and Geometry → item Raster.
 Raster has no next rung. Terminal Raster can still fail verification; a failed
-render, crop, ownership, placement, or visual check reports the exact failure and
-stops rather than recording a successful delivery.
+render, crop, ownership, placement, or visual check lists that item as not
+delivered with the exact failure (never recorded as a successful delivery), and
+the rest of the page stays.
 
 Do not merge the two page-Raster evidence states. Explicit full-page Raster means
 semantic text not evaluated; it is not affirmative no-text proof. Text-rendering
@@ -45,12 +62,14 @@ canonical visual-pixel digest and dimensions. Importer-written attributes and PN
 headers describe a claim; they are not physical host-image proof.
 
 Missing/skipped helpers, generic host/API limits, exceptions, empty artifacts,
-or currently broken code do **not** prove item-specific impossibility and do not
-authorize another rung. If an affirmative item-specific impossibility proof is
-available, advance exactly one rung, verify the new entity type and visual
-result, and repeat finitely. Otherwise erase partial artifacts, report the exact
-source-span failure, and stop the operation. Never silently omit text or erase
-successful peer spans/page geometry to make a fallback easier.
+or currently broken code are reasons to **step that item down and list it**, never
+reasons to stop the import or drop the page or file (owner ruling 2026-10-05).
+Advance one rung at a time, check what the new rung actually built, and repeat
+finitely. When no rung can deliver the item (or the next rung is not built yet),
+erase only that item's partial artifacts, list the exact source span and reason,
+and keep going: the page's lines, fills, pictures and other text stay. Never
+silently omit text, and never erase successful peer spans or page geometry to
+make a step-down easier. Heavy proofs run only with Audit on or in CI.
 
 For helper semantic gates, absence is failure—not an empty success collection.
 Every required source-match, language-pack, skipped-placement, and
@@ -67,12 +86,14 @@ rotation uses the rotation proof and a horizontal item uses the source-size/run-
 width proof. Both advance exactly one rung to verified source-outline 3D Text.
 The fallback must retain the exact semantic text hash, source span, placement,
 and provenance. It must never silently skip to Raster. Missing or invalid source
-dimensions cannot support this proof and stop delivery without creating an
-entity.
+dimensions cannot support this proof; that item is listed as not delivered,
+without creating an entity, and the rest of the page stays.
 
 An empty extractor result is a no-text proof only when decoded page streams and
 referenced Form XObjects contain no nonempty painting text-show operands. Ignore
-inline-image bytes and `Tr 3` non-painting OCR text; otherwise stop explicitly.
+inline-image bytes and `Tr 3` non-painting OCR text; otherwise list the page's text
+as not read (`text_not_read`) and still deliver the page's lines, fills and
+pictures.
 
 ### Do not misread these as “change the mode”
 

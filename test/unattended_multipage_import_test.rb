@@ -442,6 +442,9 @@ class UnattendedMultipageImportTest < Minitest::Test
     scope.const_set(:IDYES, 6)
     scope.define_singleton_method(:handle_open_gate) { |*_| false }
     scope.define_singleton_method(:import_result_status) { |stats| IMP.import_result_status(stats) }
+    scope.define_singleton_method(:pages_kept_with_step_downs?) do |stats|
+      IMP.pages_kept_with_step_downs?(stats)
+    end
     scope.define_singleton_method(:safe_abort_operation) { |*args| aborts << args }
     scope.define_singleton_method(:run_pipeline) do |_model, path, _opts|
       calls << path
@@ -467,6 +470,26 @@ class UnattendedMultipageImportTest < Minitest::Test
     importer = scope.const_get(:NativeImporter).new
     results = 8.times.map { importer.load_file('fixture.pdf', nil) }
     assert_equal [1, 2, 2, 1, 0, 0, 1, 2], results
+  end
+
+  # Owner ruling 2026-10-05: pages kept with text listed as not delivered
+  # are an import (incomplete, listed in Import Health), never a failure.
+  def test_native_importer_counts_kept_pages_with_listed_text_as_imported
+    kept = { :result_status => 'incomplete', :failed_pages => [],
+             :text_delivery_failures => [{ :page => 1, :reason => 'renderer_missing' }] }
+    lost = kept.merge(:failed_pages => [{ :page => 2 }])
+    scope, = entrypoint_scope([kept, lost])
+    importer = scope.const_get(:NativeImporter).new
+    assert_equal [0, 1], 2.times.map { importer.load_file('fixture.pdf', nil) }
+  end
+
+  def test_folder_batch_counts_kept_pages_with_listed_text_as_imported
+    kept = { :result_status => 'incomplete',
+             :text_delivery_failures => [{ :page => 1, :reason => 'renderer_missing' }] }
+    with_batch_fixture([kept, {:result_status => 'incomplete'}, {:pages => 1}]) do |calls, summary, _|
+      assert_equal 3, calls.length
+      assert_includes summary, '2 imported, 1 failed, 0 cancelled'
+    end
   end
 
   def test_native_importer_does_not_retry_failed_rollback

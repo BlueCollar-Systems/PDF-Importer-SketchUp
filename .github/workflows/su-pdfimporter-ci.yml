@@ -151,6 +151,7 @@ jobs:
           ruby test/inline_image_composite_test.rb
           ruby test/inline_image_delivery_accounting_test.rb
           ruby test/unattended_multipage_import_test.rb
+          ruby test/keep_page_on_text_failure_test.rb
           ruby test/failed_page_outcome_test.rb
           ruby test/retained_page_view_fit_test.rb
           ruby test/opaque_mask_source_unit_test.rb

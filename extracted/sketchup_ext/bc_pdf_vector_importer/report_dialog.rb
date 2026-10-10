@@ -30,7 +30,9 @@ module BlueCollarSystems
         elapsed = stats[:elapsed_seconds]
         time_str = elapsed ? " — #{elapsed}s" : ""
         failed = failed_page_records(stats)
-        head = failed.empty? ? 'PDF import complete' : 'PDF import finished with problems'
+        undelivered = undelivered_text_summary(stats)
+        problems = !failed.empty? || undelivered[:count] > 0
+        head = problems ? 'PDF import finished with problems' : 'PDF import complete'
         line = "#{head} — #{pg} page#{pg == 1 ? '' : 's'}, " \
                "#{edges} edges, #{text} text#{time_str}."
         raster = raster_fallback_pages(stats)
@@ -54,7 +56,53 @@ module BlueCollarSystems
           line += " Failed page#{failed.length == 1 ? '' : 's'} skipped: " +
                   format_page_list(failed.map { |f| f[:page] }) + '.'
         end
-        line + ' See Extensions > Import Health for details.'
+        if undelivered[:count] > 0
+          count = undelivered[:count]
+          pages = undelivered[:pages]
+          line += " #{count} text item#{count == 1 ? '' : 's'} could not be " \
+                  "delivered on page#{pages.length == 1 ? '' : 's'} " \
+                  "#{format_page_list(pages)} (#{undelivered[:reasons].join('; ')}); " \
+                  'the rest of each page was kept.'
+        end
+        stepped = page_step_down_pages(stats)
+        unless stepped.empty?
+          line += " Simplified on page#{stepped.length == 1 ? '' : 's'} " \
+                  "#{format_page_list(stepped)} (see the report)."
+        end
+        line + ' See Extensions > PDF Vector Importer > Import Health for details.'
+      end
+
+      UNDELIVERED_TEXT_REASON = {
+        'renderer_missing' => 'the free PDF text helper could not run',
+        'text_not_read' => 'the text could not be read',
+        'text_stage_failed' => 'a text step failed',
+        'text_item_failed' => 'some items failed'
+      }.freeze
+
+      # Text items a kept page could not deliver (owner ruling: deliver,
+      # step down, report). Counts each listed item once.
+      def self.undelivered_text_summary(stats)
+        rows = Array(stat_value(stats, :text_delivery_failures))
+        pages = []
+        reasons = []
+        rows.each do |row|
+          page = stat_value(row, :page).to_i
+          pages << page if page > 0
+          code = stat_value(row, :reason).to_s
+          reasons << (UNDELIVERED_TEXT_REASON[code] || 'some items failed')
+        end
+        { :count => rows.length, :pages => pages.uniq.sort,
+          :reasons => reasons.uniq.first(3) }
+      rescue StandardError
+        { :count => 0, :pages => [], :reasons => [] }
+      end
+
+      def self.page_step_down_pages(stats)
+        Array(stat_value(stats, :page_step_downs)).map do |row|
+          stat_value(row, :page).to_i
+        end.select { |page| page > 0 }.uniq.sort
+      rescue StandardError
+        []
       end
 
       RASTER_REASON_TEXT = {
@@ -222,8 +270,14 @@ module BlueCollarSystems
         failures = Array(stats[:text_delivery_failures])
         unless failures.empty?
           lines << ""
-          lines << "#{failures.length} text span(s) were not certified; " \
-                   'geometry and certified text were kept.'
+          lines << "#{failures.length} text item(s) could not be delivered; " \
+                   'the rest of each page (lines, fills, pictures and the ' \
+                   'other text) was kept.'
+          if failures.any? { |failure| stat_value(failure, :reason).to_s == 'renderer_missing' }
+            lines << '  The free PDF text helper (Poppler or MuPDF) could not ' \
+                     'run. Open Extensions > PDF Vector Importer > ' \
+                     'Compatibility Report to check it.'
+          end
           failures.first(8).each do |failure|
             source_id = (failure[:source_span_id] ||
                          failure['source_span_id']).to_s
