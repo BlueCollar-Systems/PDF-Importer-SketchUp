@@ -20,7 +20,10 @@ module BlueCollarSystems
         :page_certifier, :resumable_page_call, :initial_y_offset,
         :defer_final_diagnostics, :complexity_confirm, :prepared_parser,
         :prepared_pdf_path, :preserve_prepared_parser, :preserve_logger,
-        :stop_on_page_error
+        :stop_on_page_error,
+        # Audit (slow self-checks) changes how much the importer re-proves,
+        # never what it builds, so it does not change resume identity.
+        :audit, :import_digest_memo
       ].freeze
       # Per-span evidence trees are restored from the live page groups on resume.
       # Cloning them into the model attribute dictionary is a multi-second JSON
@@ -185,6 +188,9 @@ module BlueCollarSystems
           @model = options[:model]
           @identity = stringify_hash(options[:identity] || {})
           @entity_signature_proc = options[:entity_signature]
+          # Audit import (slow self-checks): the per-page entity census below
+          # only feeds mismatch messages, so it is taken only when asked for.
+          @audit = options[:audit] == true
           # Per page, the group/typename census taken when the page was
           # certified in THIS process. It is never persisted; it only lets a
           # same-run signature mismatch name what changed instead of failing
@@ -337,7 +343,9 @@ module BlueCollarSystems
           set_entity_attribute(group, 'identity_sha256', identity_digest)
           set_entity_attribute(group, 'certified', true)
           signature = entity_signature(group)
-          @certified_census[page_number] = entity_census(group)
+          # The key marks "certified in this run" (needed by the post-commit
+          # re-seal); the census itself is only taken with Audit on.
+          @certified_census[page_number] = @audit ? entity_census(group) : nil
           entry = {
             'page_number' => page_number,
             'group_persistent_id' => group_id,
@@ -432,11 +440,14 @@ module BlueCollarSystems
             row['page_number'].to_i == page_number
           end
           detail = signature_change_details(page_number, group)
+          detail = 'turn on Audit import for a detailed list' if detail.empty?
           message = "page #{page_number} retained tree changed between certification " \
                     "and host commit (#{detail}); journal re-sealed to the durable tree"
           log_resume_diagnostic(message)
           entry['entity_signature_sha256'] = durable
-          @certified_census[page_number] = entity_census(group)
+          # The key marks "certified in this run" (needed by the post-commit
+          # re-seal); the census itself is only taken with Audit on.
+          @certified_census[page_number] = @audit ? entity_census(group) : nil
           write_journal(data)
           message
         end

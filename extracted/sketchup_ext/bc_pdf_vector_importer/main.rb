@@ -3793,8 +3793,8 @@ module BlueCollarSystems
 
       immutable_path = File.expand_path(source_path.to_s)
       normalized = File.expand_path(normalized_path.to_s)
-      immutable_sha256 = Digest::SHA256.file(immutable_path).hexdigest
-      normalized_sha256 = Digest::SHA256.file(normalized).hexdigest
+      immutable_sha256 = import_file_sha256(opts, immutable_path)
+      normalized_sha256 = import_file_sha256(opts, normalized)
       declared_immutable_sha256 = lineage[:immutable_pdf_sha256].to_s
       unless declared_immutable_sha256.empty? ||
              declared_immutable_sha256 == immutable_sha256
@@ -3816,6 +3816,35 @@ module BlueCollarSystems
       stats[:normalized_input_sha256] = normalized_sha256
       stats[:salvage_note] = salvage_note
       lineage
+    end
+
+    # Audit import (slow self-checks), default off. On: every per-page proof
+    # re-reads the whole PDF as before. Off: the PDF is hashed once per
+    # import and "it did not change" is trusted from its size and times.
+    def self.audit_mode?(opts)
+      return true if opts.is_a?(Hash) && opts[:audit] == true
+      ENV['BC_PDF_AUDIT'].to_s.strip =~ /\A(?:1|true|yes|on)\z/i ? true : false
+    end
+
+    # Full-file SHA-256, at most once per file per import with Audit off
+    # (keyed by path, size and times). Audit on, or no import memo: hash.
+    def self.import_file_sha256(opts, path)
+      source_path = File.expand_path(path.to_s)
+      memo = opts.is_a?(Hash) ? opts[:import_digest_memo] : nil
+      unless memo.is_a?(Hash) && !audit_mode?(opts)
+        return Digest::SHA256.file(source_path).hexdigest
+      end
+      stat = File.stat(source_path)
+      identity = [stat.size.to_i, stat.mtime.to_f, stat.ctime.to_f]
+      key = source_path.downcase
+      entry = memo[key]
+      if entry.is_a?(Hash) && entry[:file_identity] == identity &&
+         entry[:sha256].to_s =~ /\A[0-9a-f]{64}\z/
+        return entry[:sha256]
+      end
+      sha256 = Digest::SHA256.file(source_path).hexdigest
+      memo[key] = { :file_identity => identity, :sha256 => sha256 }
+      sha256
     end
 
     # Resource names ("/TT1") of the fonts whose codes carry no meaning.
@@ -4214,6 +4243,14 @@ module BlueCollarSystems
         return cancelled_before_start(source_path, 'very large PDF declined')
       end
       opts = opts.merge(:large_pdf_confirmed => true)
+      # Audit import (slow self-checks), default off: BC_PDF_AUDIT=1 or the
+      # saved setting. Resolved once; one digest memo serves every page.
+      opts = opts.merge(
+        :audit => (opts[:audit] == true ||
+                   ENV['BC_PDF_AUDIT'].to_s.strip =~ /\A(?:1|true|yes|on)\z/i ?
+                   true : false),
+        :import_digest_memo => opts[:import_digest_memo] || {}
+      )
       unless resumable_import?(opts)
         inner_opts = opts.dup
         inner_opts[:resumable_page_call] = true
@@ -4271,7 +4308,8 @@ module BlueCollarSystems
           :identity => identity,
           :cancel_probe => opts[:cancel_probe] ||
             ImportRunControl::EscapeCancelProbe.new,
-          :status_sink => status_sink
+          :status_sink => status_sink,
+          :audit => opts[:audit] == true
         )
         runner = lambda do |page, offset, certifier|
           page_opts = opts.dup
@@ -4330,6 +4368,10 @@ module BlueCollarSystems
         stats[:resume_message] = result[:message]
         stats[:resume_schema] = ImportRunControl::JOURNAL_SCHEMA
         stats[:resume_supported] = true
+        stats[:audit_mode] = opts[:audit] == true
+        stats[:pipeline_performance] = {} unless
+          stats[:pipeline_performance].is_a?(Hash)
+        stats[:pipeline_performance][:audit] = stats[:audit_mode]
         stats[:log_path] = Logger.log_path
         fit_retained_pages(model, parser, controller, stats, opts)
         report_pipeline_progress(
@@ -4521,7 +4563,8 @@ module BlueCollarSystems
                 selected_pages: pages.dup,
                 match_pdf_layers: match_pdf_layers,
                 text_renderers: [], geometry_staging: [],
-                pipeline_performance: {},
+                pipeline_performance: { :audit => audit_mode?(opts) },
+                audit_mode: audit_mode?(opts),
                 page_text_sources: {}, peak_mb: 0.0,
                 model_3d_texts: [], page_text_map: {},
                 recognition_skipped_pages: [],
@@ -7082,7 +7125,7 @@ module BlueCollarSystems
         end
         return entry[:sha256]
       end
-      sha256 = Digest::SHA256.file(source_path).hexdigest
+      sha256 = import_file_sha256(opts, source_path)
       cache[key] = {
         :source_pdf_path => source_path,
         :file_identity => identity,
@@ -7090,6 +7133,7 @@ module BlueCollarSystems
       }
       sha256
     end
+
 
     def self.source_pdf_file_identity!(pdf_path)
       source_path = File.expand_path(pdf_path.to_s)
@@ -7166,9 +7210,16 @@ module BlueCollarSystems
         end
         path = File.expand_path(entry[:source_pdf_path].to_s)
         identity = source_pdf_file_identity!(path)
-        # Commit gate must re-hash: identity alone cannot prove content.
+        unless identity == entry[:file_identity]
+          raise RepresentationFidelity::ContractError,
+                'source PDF changed before the SketchUp operation committed'
+        end
+        # Audit on: re-hash, because identity alone cannot prove content (a
+        # same-size, same-time rewrite). Audit off: size and times are
+        # trusted, and the whole PDF is not re-read for every page.
+        next unless audit_mode?(opts)
         sha256 = Digest::SHA256.file(path).hexdigest
-        unless identity == entry[:file_identity] && sha256 == entry[:sha256].to_s
+        unless sha256 == entry[:sha256].to_s
           raise RepresentationFidelity::ContractError,
                 'source PDF changed before the SketchUp operation committed'
         end

@@ -684,6 +684,9 @@ module BlueCollarSystems
             lineage.is_a?(Hash) ? normalize_json(lineage) : nil
           end,
           svg_renderer_missing: !!stats[:svg_renderer_missing],
+          # Audit import (slow self-checks): true only when the heavy per-page
+          # proofs ran (BC_PDF_AUDIT=1, --audit, or the saved setting).
+          audit_mode: (stats[:audit_mode] || stats['audit_mode']) == true,
           font_substitution_note: stats[:font_substitution_note],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,
           recognition_skipped_pages: Array(stats[:recognition_skipped_pages]).map { |entry| normalize_json(entry) },

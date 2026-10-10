@@ -52,8 +52,11 @@ to the exact PDF bytes and page. Item Raster starts from one transparent RGBA pa
 render and every crop must retain that alpha-channel provenance and at least one
 visible pixel. A crop may legitimately be fully covered by opaque source ink; never
 require an `alpha < 255` pixel inside every crop. Keep one cached reference digest per
-import, but verify the full PDF digest immediately before and after every renderer
-command and again before commit. Do not launch Poppler or hash the PDF per text item;
+import, and verify the full PDF digest immediately before and after every renderer
+command. The full re-hash before each page commit (and every other per-page re-read
+of the whole PDF) runs only with Audit import on (`BC_PDF_AUDIT=1`, `--audit`, or the
+saved setting); with Audit off the PDF is hashed once per import and the commit gate
+trusts its size and times. Do not launch Poppler or hash the PDF per text item;
 stream item crops in Ruby 2.2-safe code.
 
 Raster acceptance must export the saved/reopened `Sketchup::Image` through the real
