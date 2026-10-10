@@ -20,7 +20,10 @@ module BlueCollarSystems
         :page_certifier, :resumable_page_call, :initial_y_offset,
         :defer_final_diagnostics, :complexity_confirm, :prepared_parser,
         :prepared_pdf_path, :preserve_prepared_parser, :preserve_logger,
-        :stop_on_page_error
+        :stop_on_page_error,
+        # Audit (slow self-checks) changes how much the importer re-proves,
+        # never what it builds, so it does not change resume identity.
+        :audit, :import_digest_memo
       ].freeze
       # Per-span evidence trees are restored from the live page groups on resume.
       # Cloning them into the model attribute dictionary is a multi-second JSON
@@ -250,6 +253,9 @@ module BlueCollarSystems
           @model = options[:model]
           @identity = stringify_hash(options[:identity] || {})
           @entity_signature_proc = options[:entity_signature]
+          # Audit import (slow self-checks): the per-page entity census below
+          # only feeds mismatch messages, so it is taken only when asked for.
+          @audit = options[:audit] == true
           # Per page, the group/typename census taken when the page was
           # certified in THIS process. It is never persisted; it only lets a
           # same-run signature mismatch name what changed instead of failing
@@ -382,7 +388,7 @@ module BlueCollarSystems
             row['page_number'].to_i == page_number
           end
           if existing
-            validate_page_entry!(existing)
+            validate_page_entry!(existing, data)
             unless existing['group_persistent_id'].to_i == group_id
               raise ResumeMismatch, "page #{page_number} already has another certified group"
             end
@@ -402,7 +408,9 @@ module BlueCollarSystems
           set_entity_attribute(group, 'identity_sha256', identity_digest)
           set_entity_attribute(group, 'certified', true)
           signature = entity_signature(group)
-          @certified_census[page_number] = entity_census(group)
+          # The key marks "certified in this run" (needed by the post-commit
+          # re-seal); the census itself is only taken with Audit on.
+          @certified_census[page_number] = @audit ? entity_census(group) : nil
           entry = {
             'page_number' => page_number,
             'group_persistent_id' => group_id,
@@ -424,11 +432,29 @@ module BlueCollarSystems
           return [] unless data
           validate_journal_identity!(data)
           pages = Array(data['pages']).map do |entry|
-            validate_page_entry!(entry)
+            validate_page_entry!(entry, data)
             entry['page_number'].to_i
           end.sort
           pages.each { |page| retain_page!(page) }
           pages
+        end
+
+        # The check after each new page: that page's journal entry and its
+        # retained group only. Every kept page is still checked once at the
+        # start of a run (resumable_pages); re-checking all finished pages
+        # after every new page made each page slower than the last.
+        def page_certified?(page)
+          ensure_journal_ready!
+          data = read_journal
+          return false unless data
+          validate_journal_identity!(data)
+          entry = Array(data['pages']).find do |row|
+            row['page_number'].to_i == page.to_i
+          end
+          return false unless entry
+          validate_page_entry!(entry, data)
+          retain_page!(entry['page_number'].to_i)
+          true
         end
 
         def resume_y_offset
@@ -479,11 +505,14 @@ module BlueCollarSystems
             row['page_number'].to_i == page_number
           end
           detail = signature_change_details(page_number, group)
+          detail = 'turn on Audit import for a detailed list' if detail.empty?
           message = "page #{page_number} retained tree changed between certification " \
                     "and host commit (#{detail}); journal re-sealed to the durable tree"
           log_resume_diagnostic(message)
           entry['entity_signature_sha256'] = durable
-          @certified_census[page_number] = entity_census(group)
+          # The key marks "certified in this run" (needed by the post-commit
+          # re-seal); the census itself is only taken with Audit on.
+          @certified_census[page_number] = @audit ? entity_census(group) : nil
           write_journal(data)
           message
         end
@@ -557,12 +586,15 @@ module BlueCollarSystems
           true
         end
 
-        def validate_page_entry!(entry)
+        # data: the journal the caller already parsed. The journal id is read
+        # once here; it used to be re-parsed from JSON for every top-level
+        # entity in the model.
+        def validate_page_entry!(entry, data = nil)
           page = entry['page_number'].to_i
+          journal_id = (data || journal)['journal_id'].to_s
           candidates = active_entities.select do |entity|
             live_entity?(entity) &&
-              entity_attribute(entity, 'journal_id').to_s ==
-                journal['journal_id'].to_s &&
+              entity_attribute(entity, 'journal_id').to_s == journal_id &&
               entity_attribute(entity, 'page_number').to_i == page
           end
           unless candidates.length == 1
@@ -1052,7 +1084,9 @@ module BlueCollarSystems
               @first_page_error ||= error
               next
             end
-            unless certified && @controller.resumable_pages.include?(page)
+            # Check only the page just built; finished pages were checked
+            # when they were built and once more at the start of the run.
+            unless certified && page_still_certified?(page)
               raise ResumeMismatch,
                     "page #{page} runner returned without a certified page group"
             end
@@ -1101,6 +1135,14 @@ module BlueCollarSystems
         end
 
         private
+
+        # Controllers that predate page_certified? keep the full re-check.
+        def page_still_certified?(page)
+          if @controller.respond_to?(:page_certified?)
+            return @controller.page_certified?(page)
+          end
+          @controller.resumable_pages.include?(page)
+        end
 
         # Individual certified page stats stay page-local in the journal.
         # The final aggregate describes the entire request, including pages

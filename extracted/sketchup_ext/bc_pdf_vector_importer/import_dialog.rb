@@ -655,8 +655,30 @@ module BlueCollarSystems
           import_mode:      mode_str,
           match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes',
           extrude_to_3d: SHAPE_EXTRUSION_UI_ENABLED && (raw[:extrude_to_3d] || 'No') == 'Yes',
-          extrude_depth_mm: SHAPE_EXTRUSION_UI_ENABLED ? parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth]) : nil
+          extrude_depth_mm: SHAPE_EXTRUSION_UI_ENABLED ? parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth]) : nil,
+          # Audit import (slow self-checks), default off. It changes how much
+          # the importer re-proves, never what it builds.
+          audit:            audit_requested?(raw)
         }
+      end
+
+      AUDIT_LABEL = 'Audit import (slow self-checks)'.freeze
+      AUDIT_ENV = 'BC_PDF_AUDIT'.freeze
+
+      # On when BC_PDF_AUDIT=1 (CI, host harness), when the caller passes
+      # audit: 'Yes'/true (dialog, --audit), or when the saved setting says
+      # Yes. Anything else is off.
+      def self.audit_requested?(raw)
+        return true if ENV[AUDIT_ENV].to_s.strip =~ /\A(?:1|true|yes|on)\z/i
+        value = raw.is_a?(Hash) && raw.key?(:audit) ? raw[:audit] : saved_audit_setting
+        value == true || value.to_s.strip =~ /\A(?:yes|true|1|on)\z/i ? true : false
+      end
+
+      def self.saved_audit_setting
+        return nil unless defined?(Sketchup) && Sketchup.respond_to?(:read_default)
+        Sketchup.read_default(PREF_KEY, 'audit', nil)
+      rescue StandardError
+        nil
       end
 
       def self.parse_extrude_depth_mm(value)
@@ -694,6 +716,7 @@ module BlueCollarSystems
              import_text text_mode match_pdf_layers
              grouping_mode
              page_arrangement import_mode extrude_to_3d extrude_depth_mm
+             audit
           ].each do |key|
             val = Sketchup.read_default(PREF_KEY, key, nil)
             prefs[key.to_sym] = val if val

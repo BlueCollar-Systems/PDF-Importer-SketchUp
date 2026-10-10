@@ -533,6 +533,22 @@ module BlueCollarSystems
             block[:reason] = "text_mode_fallback: #{text[:requested]} -> #{text[:delivered]} (#{text[:reason]})"
           end
         end
+        # Owner ruling 2026-10-05 (deliver, step down, report): a kept page
+        # whose text items were left out, or whose items were delivered in a
+        # lesser form, is a step-down. "Was a fallback used?" must not answer
+        # no (the FreeCAD host reports the same as text_items_degraded).
+        undelivered = Array(stats[:text_delivery_failures] ||
+                            stats['text_delivery_failures'])
+        stepped = Array(stats[:page_step_downs] || stats['page_step_downs'])
+        unless undelivered.empty? && stepped.empty?
+          block[:used] = true
+          if block[:reason].nil? || block[:reason].to_s.empty?
+            block[:reason] = undelivered.empty? ? 'page_items_stepped_down' :
+              'text_items_not_delivered'
+          end
+          block[:text_items_not_delivered] = undelivered.length
+          block[:page_step_downs] = stepped.length
+        end
         block
       end
 
@@ -637,6 +653,12 @@ module BlueCollarSystems
           text_delivery_failures: Array(
             stats[:text_delivery_failures] || stats['text_delivery_failures']
           ).map { |entry| normalize_json(entry) },
+          text_step_downs: Array(
+            stats[:text_step_downs] || stats['text_step_downs']
+          ).map { |entry| normalize_json(entry) },
+          page_step_downs: Array(
+            stats[:page_step_downs] || stats['page_step_downs']
+          ).map { |entry| normalize_json(entry) },
           execution_scope: (stats[:execution_scope] ||
                             stats['execution_scope'] || :host_import).to_s,
           extracted_text_items: (stats[:extracted_text_items] ||
@@ -662,6 +684,9 @@ module BlueCollarSystems
             lineage.is_a?(Hash) ? normalize_json(lineage) : nil
           end,
           svg_renderer_missing: !!stats[:svg_renderer_missing],
+          # Audit import (slow self-checks): true only when the heavy per-page
+          # proofs ran (BC_PDF_AUDIT=1, --audit, or the saved setting).
+          audit_mode: (stats[:audit_mode] || stats['audit_mode']) == true,
           font_substitution_note: stats[:font_substitution_note],
           resolved_scale: stats[:resolved_scale] ? normalize_json(stats[:resolved_scale]) : nil,
           recognition_skipped_pages: Array(stats[:recognition_skipped_pages]).map { |entry| normalize_json(entry) },
@@ -2755,11 +2780,40 @@ module BlueCollarSystems
           parts << scale_bit
         end
 
-        if fallback['used']
+        step_down_only = %w[text_items_not_delivered page_items_stepped_down].
+          include?(fallback['reason'].to_s)
+        if fallback['used'] && !step_down_only
           reason = fallback['reason'].to_s.tr('_', ' ')
           parts << "Raster or degraded fallback was used (#{reason})"
-        elsif primitives > 0
+        elsif primitives > 0 && !fallback['used']
           parts << 'Vector extraction completed without raster fallback'
+        end
+
+        # Owner ruling 2026-10-05 (deliver, step down, report): say plainly
+        # what a kept page is missing or shows in a lesser form.
+        undelivered = Array(extra['text_delivery_failures'])
+        unless undelivered.empty?
+          pages = undelivered.map { |row| telemetry_value(row, :page).to_i }.
+            select { |page| page > 0 }.uniq.sort
+          where = pages.empty? ? '' :
+            " on page#{'s' if pages.length != 1} #{pages.join(', ')}"
+          helper = undelivered.any? do |row|
+            telemetry_value(row, :reason).to_s == 'renderer_missing'
+          end
+          sentence = "#{undelivered.length} text item" \
+            "#{'s' if undelivered.length != 1} could not be delivered#{where}; " \
+            'the rest of each page was kept'
+          sentence += ' (the free PDF text helper could not run)' if helper
+          parts << sentence
+        end
+        stepped = Array(extra['page_step_downs'])
+        unless stepped.empty?
+          pages = stepped.map { |row| telemetry_value(row, :page).to_i }.
+            select { |page| page > 0 }.uniq.sort
+          detail = telemetry_value(stepped.first, :detail).to_s
+          bit = "Simplified on page#{'s' if pages.length != 1} #{pages.join(', ')}"
+          bit += ": #{detail}" unless detail.empty?
+          parts << bit
         end
 
         quality = diagnostics['quality_level'].to_s
