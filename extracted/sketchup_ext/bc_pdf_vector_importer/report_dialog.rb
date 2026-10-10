@@ -12,7 +12,8 @@ module BlueCollarSystems
       # Non-blocking completion notice (default on every import).
       # Owner rule: NO gratuitous every-import modal. A concise result
       # goes to the status bar; the full plain-English summary lives in
-      # import_report.json and Extensions > Import Health (on demand).
+      # import_report.json and Extensions > PDF Vector Importer > Import
+      # Health (on demand).
       # ---------------------------------------------------------------
       def self.announce(stats)
         return unless defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
@@ -54,7 +55,7 @@ module BlueCollarSystems
           line += " Failed page#{failed.length == 1 ? '' : 's'} skipped: " +
                   format_page_list(failed.map { |f| f[:page] }) + '.'
         end
-        line + ' See Extensions > Import Health for details.'
+        line + ' See Extensions > PDF Vector Importer > Import Health for details.'
       end
 
       RASTER_REASON_TEXT = {
@@ -138,7 +139,10 @@ module BlueCollarSystems
 
       def self.cancelled_status(stats)
         retained = Array(stats[:retained_pages]).map { |page| page.to_i }.sort
-        kept = if retained.empty?
+        reason = stats[:cancel_reason].to_s
+        kept = if retained.empty? && !reason.empty?
+                 reason
+               elsif retained.empty?
                  'no completed pages kept'
                elsif retained.length == 1
                  "page #{retained.first} kept"

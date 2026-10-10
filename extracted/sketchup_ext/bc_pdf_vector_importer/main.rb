@@ -219,19 +219,26 @@ module BlueCollarSystems
     # is built: a very large file. Returns true to continue, false when the
     # operator declined. Noninteractive batch runs keep raising
     # BatchHostPolicy::NoninteractiveError (policy unchanged). An unreadable
-    # size is logged and never blocks the import.
-    def self.confirm_large_pdf_once!(path, file_size_bytes = nil)
+    # size is logged and never blocks the import. Only a resumable import
+    # keeps completed pages when Esc is pressed; the others roll back.
+    def self.confirm_large_pdf_once!(path, file_size_bytes = nil, resumable = true)
       file_size_bytes ||= File.size(path)
       return true unless file_size_bytes.to_i > BatchHostPolicy::LARGE_PDF_BYTES
       size_mb = (file_size_bytes / (1024.0 * 1024.0)).round(1)
+      esc_text = if resumable
+                   'press Esc during the import to stop after the current ' \
+                     'page; completed pages are kept and can be resumed.'
+                 else
+                   'press Esc during the import to stop; nothing is kept ' \
+                     'and the model is left unchanged.'
+                 end
       choice = BatchHostPolicy.confirm_large_pdf!(file_size_bytes) do
         if defined?(UI) && UI.respond_to?(:messagebox)
           UI.messagebox(
             "This PDF is very large (#{size_mb} MB). Import may take a " \
             'significant amount of time and use considerable memory. This ' \
-            'is the only question this import will ask: press Esc during ' \
-            'the import to stop after the current page; completed pages ' \
-            "are kept and can be resumed.\n\nContinue?",
+            "is the only question this import will ask: #{esc_text}" \
+            "\n\nContinue?",
             MB_OKCANCEL
           )
         else
@@ -268,6 +275,54 @@ module BlueCollarSystems
                     "started (#{reason}). The model was not changed.",
         :resume_message => 'Nothing was imported; run the import again to start.'
       }
+    end
+
+    # Result of a non-resumable import stopped with Esc: the open SketchUp
+    # operation was rolled back, so nothing was kept.
+    def self.stopped_without_changes(source_path, reason)
+      result = cancelled_before_start(source_path, reason)
+      result[:cancelled_before_start] = false
+      result[:message] = "Import of #{File.basename(source_path.to_s)} was " \
+                         'stopped with Esc. The model was not changed.'
+      result[:resume_message] = 'Nothing was kept; run the import again to start over.'
+      result
+    end
+
+    # Progress on SketchUp's status bar ("... Esc to cancel"). Batch/host
+    # jobs stream progress JSON instead and never touch the status bar.
+    def self.import_status_sink(opts)
+      return opts[:status_sink] if opts[:status_sink]
+      if defined?(BatchHostPolicy) &&
+         BatchHostPolicy.respond_to?(:noninteractive?) &&
+         BatchHostPolicy.noninteractive?
+        return lambda { |_snapshot| true }
+      end
+      lambda do |snapshot|
+        if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+          Sketchup.status_text = ImportDialog.progress_status(snapshot)
+        end
+      end
+    end
+
+    # Imports that cannot resume (Import Text = No, Raster, pages not
+    # grouped) still stop with Esc: the run controller checks the key at
+    # every safe checkpoint and the pipeline rolls its open operation back,
+    # so the model is left unchanged.
+    def self.run_non_resumable_pipeline(model, source_path, opts)
+      inner_opts = opts.dup
+      inner_opts[:resumable_page_call] = true
+      inner_opts[:run_controller] ||= ImportRunControl::Controller.new(
+        :model => model,
+        :pages => [],
+        :requested_mode => opts[:text_mode],
+        :cancel_probe => opts[:cancel_probe] ||
+          ImportRunControl::EscapeCancelProbe.new,
+        :status_sink => import_status_sink(opts)
+      )
+      run_pipeline(model, source_path, inner_opts)
+    rescue ImportRunControl::ImportCancelled
+      Logger.info('Pipeline', 'Import stopped with Esc; the open operation was rolled back.')
+      stopped_without_changes(source_path, 'stopped with Esc; model unchanged')
     end
 
     def self.confirm_page_complexity!(opts, page_num, path_count, text_count)
@@ -3155,6 +3210,107 @@ module BlueCollarSystems
       [[val, 0.0].max, 1.0].min
     end
 
+    PAGE_GROUP_DICTIONARY = 'BC_PDF_Importer'.freeze
+    PAGE_GROUP_KEY = 'page_group'.freeze
+    LEGACY_PAGE_GROUP_NAME = /\APDF Page \d+\z/
+
+    def self.mark_pdf_page_group!(group)
+      return group unless group && group.respond_to?(:set_attribute)
+      group.set_attribute(PAGE_GROUP_DICTIONARY, PAGE_GROUP_KEY, true)
+      group
+    rescue StandardError => e
+      Logger.warn('Placement', "page group mark failed: #{e.message}")
+      group
+    end
+
+    # Top-level PDF pages already in the model: marked page groups, resume
+    # journal groups, explicit Raster page images and older "PDF Page N"
+    # groups. Anything else (a template's person figure, the user's own
+    # geometry) is ignored.
+    def self.pdf_page_entities(model)
+      return [] unless model && model.respond_to?(:active_entities)
+      entities = model.active_entities
+      return [] unless entities && entities.respond_to?(:to_a)
+      entities.to_a.select { |entity| pdf_page_entity?(entity) }
+    rescue StandardError => e
+      Logger.warn('Placement', "earlier PDF page lookup failed: #{e.message}")
+      []
+    end
+
+    def self.pdf_page_entity?(entity)
+      return false if entity.respond_to?(:valid?) && !entity.valid?
+      typename = entity.respond_to?(:typename) ? entity.typename.to_s : ''
+      return false unless %w[Group Image].include?(typename)
+      if entity.respond_to?(:get_attribute)
+        return true if entity.get_attribute(PAGE_GROUP_DICTIONARY, PAGE_GROUP_KEY, nil) == true
+        journal = entity.get_attribute(ImportRunControl::JOURNAL_DICTIONARY, 'journal_id', nil)
+        return true unless journal.to_s.empty?
+        kind = entity.get_attribute(PAGE_GROUP_DICTIONARY, 'source_kind', nil)
+        return true if kind.to_s == 'page_raster'
+      end
+      name = entity.respond_to?(:name) ? entity.name.to_s : ''
+      !(name =~ LEGACY_PAGE_GROUP_NAME).nil?
+    rescue StandardError
+      false
+    end
+
+    # Where a new import's first page starts. 0.0 when the model holds no
+    # earlier PDF pages, so a first import lands at the origin exactly as
+    # before. Otherwise just above the highest earlier page, with the same
+    # 20% gap that Spread leaves between pages. first_page_height_in may be
+    # a number or a callable; it is only read when earlier pages exist.
+    def self.import_base_y_offset(model, first_page_height_in)
+      tops = pdf_page_entities(model).map { |entity| entity_top_y(entity) }.compact
+      return 0.0 if tops.empty?
+      height = first_page_height_in.respond_to?(:call) ? first_page_height_in.call : first_page_height_in
+      height = height.to_f
+      height = 11.0 unless height.finite? && height > 0.0
+      offset = tops.max + height * 0.20
+      Logger.info('Placement', "Earlier PDF pages found; this import starts at y=#{offset.round(3)} in.")
+      offset
+    rescue StandardError => e
+      Logger.warn('Placement', "start offset failed, using the origin: #{e.message}")
+      0.0
+    end
+
+    def self.entity_top_y(entity)
+      return nil unless entity.respond_to?(:bounds)
+      bounds = entity.bounds
+      return nil unless bounds && bounds.respond_to?(:max)
+      return nil if bounds.respond_to?(:empty?) && bounds.empty?
+      top = bounds.max.y.to_f
+      top.finite? ? top : nil
+    rescue StandardError
+      nil
+    end
+
+    # Start of a fresh (not resumed) import: above earlier PDF pages, or the
+    # origin in an empty model. The gap uses the first requested page's
+    # height, which is read only when earlier pages exist.
+    def self.fresh_import_start_offset(model, parser, requested_pages, opts)
+      first_requested = Array(requested_pages).first
+      import_base_y_offset(model, lambda {
+        requested_page_height_in(parser, first_requested, opts[:scale])
+      })
+    end
+
+    # Height in model inches of the first requested page (crop box when
+    # present, rotation-aware, times the import scale).
+    def self.requested_page_height_in(parser, page_num, scale)
+      raw = parser.page_data(page_num)
+      raw = {} unless raw.is_a?(Hash)
+      box = raw[:crop_box]
+      box = raw[:media_box] unless box.is_a?(Array) && box.length >= 4
+      box = [0, 0, 612, 792] unless box.is_a?(Array) && box.length >= 4
+      rotation = PageTransform.normalize_rotation(raw[:rotation])
+      factor = scale.to_f
+      factor = 1.0 unless factor > 0.0
+      PageTransform.effective_height(box, rotation).to_f / 72.0 * factor
+    rescue StandardError => e
+      Logger.warn('Placement', "page height lookup failed: #{e.message}")
+      11.0
+    end
+
     def self.page_stack_step(page_height_in, arrangement, gap_ratio)
       h = page_height_in.to_f
       h = 11.0 if h <= 0.0
@@ -3786,7 +3942,11 @@ module BlueCollarSystems
       page_fit_bounds = Geom::BoundingBox.new
       arrangement = normalize_page_arrangement(opts[:page_arrangement])
       gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
-      running_y_offset = 0.0
+      running_y_offset = if opts[:initial_y_offset].nil?
+                           fresh_import_start_offset(model, parser, pages, opts)
+                         else
+                           opts[:initial_y_offset].to_f
+                         end
       operation_open = false
       stats = {
         :pages => 0, :primitives => 0, :edges => 0, :faces => 0,
@@ -3821,6 +3981,12 @@ module BlueCollarSystems
       start_import_operation!(model, 'Import PDF Raster')
       operation_open = true
       pages.each_with_index do |page_num, index|
+        run_control_checkpoint!(
+          opts, :page,
+          :page => page_num, :page_index => index + 1,
+          :page_total => pages.length,
+          :completed => index, :total => pages.length
+        )
         raw = parser.page_data(page_num)
         unless raw.is_a?(Hash)
           raise RepresentationFidelity::ContractError,
@@ -3948,14 +4114,13 @@ module BlueCollarSystems
       # Decide once, before anything is built. Every page call below carries
       # :large_pdf_confirmed, so no page can put a question in front of the
       # operator mid-import; Esc (run controller) and resume are the safety net.
-      unless confirm_large_pdf_once!(source_path)
+      unless opts[:large_pdf_confirmed] ||
+             confirm_large_pdf_once!(source_path, nil, resumable_import?(opts))
         return cancelled_before_start(source_path, 'very large PDF declined')
       end
       opts = opts.merge(:large_pdf_confirmed => true)
       unless resumable_import?(opts)
-        inner_opts = opts.dup
-        inner_opts[:resumable_page_call] = true
-        return run_pipeline(model, source_path, inner_opts)
+        return run_non_resumable_pipeline(model, source_path, opts)
       end
 
       Logger.reset
@@ -4037,6 +4202,9 @@ module BlueCollarSystems
           :model => model,
           :controller => controller,
           :pages => pages,
+          :base_y_offset => lambda {
+            fresh_import_start_offset(model, parser, pages, opts)
+          },
           :runner => runner,
           :group_per_page => opts[:group_per_page],
           :continue_on_page_error => opts[:stop_on_page_error] != true
@@ -4157,7 +4325,7 @@ module BlueCollarSystems
       end
       group = model.active_entities.add_group
       group.name = "PDF Page #{page_num}" if group.respond_to?(:name=)
-      group
+      mark_pdf_page_group!(group)
     end
 
     def self.run_pipeline(model, path, opts)
@@ -4181,7 +4349,7 @@ module BlueCollarSystems
       # per-page call never asks again. Direct (non-resumable) callers still
       # get the single question here.
       unless opts[:large_pdf_confirmed]
-        return nil unless confirm_large_pdf_once!(path)
+        return nil unless confirm_large_pdf_once!(path, nil, false)
       end
 
       # Round 18: encrypted (empty-password) and damaged-xref files are
@@ -4298,7 +4466,11 @@ module BlueCollarSystems
       reset_ownership_bookkeeping!
       page_arrangement = normalize_page_arrangement(opts[:page_arrangement])
       page_gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
-      running_y_offset = opts[:initial_y_offset].to_f
+      running_y_offset = if opts[:initial_y_offset].nil?
+                           fresh_import_start_offset(model, parser, pages, opts)
+                         else
+                           opts[:initial_y_offset].to_f
+                         end
       page_group_for_certification = nil
 
       pages.each_with_index do |page_num, idx|
@@ -7401,28 +7573,45 @@ module BlueCollarSystems
       return UI.messagebox("No active model.") unless model
       path = UI.openpanel("Select PDF File", "", "PDF Files|*.pdf||")
       return unless path && File.exist?(path)
-      return if handle_open_gate(path)
-      begin
-        opts = ImportDialog.show(path)
-        return unless opts
-        stats = run_resumable_pipeline(model, path, opts)
-        if stats
-          # No blocking every-import modal (owner rule). Concise result on
-          # the status bar; full summary in import_report.json + Import Health.
-          if stats[:cancelled]
-            ReportDialog.announce_cancelled(stats)
-          else
-            ReportDialog.announce(stats)
-          end
-        else
-          UI.messagebox("No vector content found in PDF.")
-        end
-      rescue StandardError => e
-        safe_abort_operation(model, "Import") unless e.is_a?(ImportRunControl::RollbackFailure)
-        Logger.error("Import", "Import failed", e)
-        log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
-        UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
+      import_pdf_path(model, path)
+    end
+
+    # One import of one chosen file, shared by Extensions > Import PDF...,
+    # File > Import PDF Vectors... and SketchUp's own File > Import: the
+    # open check, the options dialog, the import, then one status-bar line
+    # or one "PDF import failed" box with the reason. Returns :success,
+    # :cancelled or :failed.
+    def self.import_pdf_path(model, path)
+      return :cancelled if handle_open_gate(path)
+      opts = ImportDialog.show(path)
+      return :cancelled unless opts
+      stats = run_resumable_pipeline(model, path, opts)
+      unless stats
+        UI.messagebox("No vector content found in PDF.")
+        return :failed
       end
+      # No blocking every-import modal (owner rule). Concise result on
+      # the status bar; full summary in import_report.json + Import Health.
+      outcome = import_result_status(stats)
+      if outcome == 'cancelled'
+        ReportDialog.announce_cancelled(stats)
+        return :cancelled
+      end
+      ReportDialog.announce(stats)
+      outcome == 'success' ? :success : :failed
+    rescue ImportRunControl::ImportCancelled
+      :cancelled
+    rescue StandardError => e
+      safe_abort_operation(model, "Import") unless e.is_a?(ImportRunControl::RollbackFailure)
+      Logger.error("Import", "Import failed", e)
+      log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
+      UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
+      :failed
+    end
+
+    # True once SketchUp's File > Import lists this importer.
+    def self.importer_registered?
+      @importer_registered == true
     end
 
     def self.import_pdf_safe
@@ -7465,8 +7654,16 @@ module BlueCollarSystems
       return unless folder && File.directory?(folder)
       pdfs = (Dir.glob(File.join(folder, "*.pdf")) + Dir.glob(File.join(folder, "*.PDF"))).uniq
       return UI.messagebox("No PDF files found.") if pdfs.empty?
-      return unless UI.messagebox("Import #{pdfs.length} PDF(s) with Auto mode?", MB_YESNO) == IDYES
-      ok = 0; fail_c = 0; cancel_c = 0
+      return unless UI.messagebox(
+        "Import #{pdfs.length} PDF(s): all pages, 3D Text, scale 1.0 (Auto)?",
+        MB_YESNO
+      ) == IDYES
+      # The very-large-PDF question is asked once, for the whole folder,
+      # before anything is built. Yes imports them; No skips them and the
+      # rest still import. No file asks again mid-batch.
+      large = batch_large_pdfs(pdfs)
+      import_large = large.empty? || batch_confirm_large_pdfs(large)
+      ok = 0; fail_c = 0; cancel_c = 0; skip_c = 0
       stop_reason = nil
       # BCS-ARCH-001: batch import uses Auto mode — per-page strategy selection.
       mode_raw = ImportDialog::MODES['Auto']
@@ -7474,8 +7671,13 @@ module BlueCollarSystems
       mode_raw.each { |k, v| sym_attrs[k.to_sym] = v }
       pdfs.sort.each_with_index do |pdf, idx|
         Sketchup.status_text = "Batch: #{idx+1}/#{pdfs.length} #{File.basename(pdf)}"
+        if large.include?(pdf) && !import_large
+          skip_c += 1
+          next
+        end
         begin
           opts = ImportDialog.send(:build_opts, sym_attrs.merge(pages: 'All'))
+          opts[:large_pdf_confirmed] = true if large.include?(pdf)
           # Refuse bad PDFs quietly here; the summary box reports the count.
           if handle_open_gate(pdf, opts, show_ui: false)
             fail_c += 1
@@ -7495,19 +7697,57 @@ module BlueCollarSystems
           cancel_c += 1
           stop_reason = 'Import cancelled; remaining PDFs were not started.'
           break
-        rescue ImportRunControl::ResumeMismatch => e
+        rescue ImportRunControl::RollbackFailure => e
+          # SketchUp could not confirm the undo: the model may be changed,
+          # so nothing more is imported on top of it.
           fail_c += 1
           Logger.error('Batch', File.basename(pdf), e)
           stop_reason = e.message
           break
+        rescue ImportRunControl::ResumeMismatch => e
+          # This file's earlier import record does not match the model; the
+          # file is counted as failed and the batch moves on.
+          fail_c += 1
+          Logger.error('Batch', File.basename(pdf), e)
         rescue StandardError => e
           fail_c += 1; Logger.error("Batch", File.basename(pdf), e)
         end
       end
       summary = "Batch: #{ok} imported, #{fail_c} failed, " \
-                "#{cancel_c} cancelled, #{pdfs.length} total."
+                "#{cancel_c} cancelled, #{skip_c} skipped, #{pdfs.length} total."
       summary += " Stopped: #{stop_reason}" if stop_reason
       UI.messagebox(summary)
+    end
+
+    def self.batch_large_pdfs(pdfs)
+      pdfs.select do |pdf|
+        size = begin
+          File.size(pdf)
+        rescue StandardError
+          0
+        end
+        size.to_i > BatchHostPolicy::LARGE_PDF_BYTES
+      end
+    end
+
+    # One question for every very large file in the folder. True imports
+    # them, false skips them.
+    def self.batch_confirm_large_pdfs(large)
+      names = large.map { |pdf| File.basename(pdf) }
+      shown = names.first(5).join(', ')
+      shown += ", and #{names.length - 5} more" if names.length > 5
+      limit_mb = (BatchHostPolicy::LARGE_PDF_BYTES / (1024.0 * 1024.0)).round
+      largest = large.map { |pdf| File.size(pdf) rescue 0 }.max.to_i
+      choice = BatchHostPolicy.confirm_large_pdf!(largest) do
+        UI.messagebox(
+          "#{names.length} PDF(s) in this folder are very large (over " \
+          "#{limit_mb} MB): #{shown}. They may take a long time and use a lot " \
+          "of memory.\n\nImport them too? Yes imports them; No skips them " \
+          'and the rest still import.',
+          MB_YESNO
+        )
+      end
+      choice == true || (defined?(IDYES) && choice == IDYES)
     end
 
     def self.scale_by_reference; ScaleTool.activate; end
@@ -7543,16 +7783,66 @@ module BlueCollarSystems
       nil
     end
 
+    # What an import built, page by page (or for the selected groups):
+    # edges, faces, groups, components, pictures and labels.
     def self.feature_inventory
       model = Sketchup.active_model; return unless model
-      t = model.selection.grep(Sketchup::Group).first
-      UI.messagebox(Metadata.report(t ? t.entities : model.active_entities))
+      picked = model.selection.to_a.select do |entity|
+        entity.respond_to?(:typename) && entity.typename == 'Group'
+      end
+      targets = picked.empty? ? pdf_page_entities(model) : picked
+      if targets.empty?
+        return UI.messagebox('No imported PDF pages found. Import a PDF, ' \
+                             'or select a group, then try again.')
+      end
+      lines = ['PDF Feature Inventory', '']
+      targets.each do |entity|
+        counts = Hash.new(0)
+        if entity.respond_to?(:typename) && entity.typename == 'Image'
+          counts[:pictures] += 1
+        else
+          count_inventory(entity, counts, 0)
+        end
+        label = entity.respond_to?(:name) ? entity.name.to_s : ''
+        label = entity.typename.to_s if label.empty? && entity.respond_to?(:typename)
+        lines << "#{label}: #{inventory_text(counts)}"
+      end
+      UI.messagebox(lines.join("\n"))
+    end
+
+    INVENTORY_KINDS = [
+      ['Edge', :edges, 'edge'], ['Face', :faces, 'face'],
+      ['Group', :groups, 'group'],
+      ['ComponentInstance', :components, 'component'],
+      ['Image', :pictures, 'picture'], ['Text', :labels, 'label']
+    ].freeze
+
+    def self.count_inventory(entity, counts, depth)
+      return if depth > 32 || !entity.respond_to?(:entities)
+      entity.entities.to_a.each do |child|
+        typename = child.respond_to?(:typename) ? child.typename.to_s : ''
+        kind = INVENTORY_KINDS.find { |row| row[0] == typename }
+        counts[kind[1]] += 1 if kind
+        # Groups are unique and counted inside; a component's shared
+        # definition (one letter used many times) is counted once per use
+        # as a component, not opened again.
+        count_inventory(child, counts, depth + 1) if typename == 'Group'
+      end
+    end
+
+    def self.inventory_text(counts)
+      parts = INVENTORY_KINDS.map do |_typename, key, word|
+        value = counts[key].to_i
+        next nil unless value > 0
+        "#{ImportDialog.format_integer(value)} #{word}#{value == 1 ? '' : 's'}"
+      end.compact
+      parts.empty? ? 'nothing inside' : parts.join(', ')
     end
 
     def self.visibility_toggles; ReportDialog.show_visibility_menu; end
 
     # ================================================================
-    # MENU & TOOLBAR
+    # MENUS (File > Import PDF Vectors... and Extensions submenu)
     # ================================================================
     if !@loaded && defined?(UI) && UI.respond_to?(:menu)
       UI.menu('File').add_item('Import PDF Vectors...') { self.import_pdf }
@@ -7564,6 +7854,10 @@ module BlueCollarSystems
       sub.add_separator
       sub.add_item('Scale to Real Dimensions...') { self.scale_by_reference }
       sub.add_item('Quick Scale...') { self.quick_scale }
+      sub.add_separator
+      sub.add_item('Clean Up Selected Groups') { self.cleanup_selected }
+      sub.add_item('Feature Inventory...') { self.feature_inventory }
+      sub.add_item('Show/Hide PDF Tags...') { self.visibility_toggles }
       sub.add_separator
       sub.add_item('Compatibility Report...') { CompatibilityReport.show }
       sub.add_item('Import Health...') { ImportHealth.show }
@@ -7596,32 +7890,34 @@ module BlueCollarSystems
       def description; "PDF Vector Drawings (*.pdf)"; end
       def file_extension; "pdf"; end
       def id; "com.bluecollar.pdfvectorimporter"; end
-      def supports_options?; true; end
+      # There are no importer options; the import's own dialog opens.
+      def supports_options?; false; end
 
       def load_file(file_path, status)
-        # Open-time gate: a clear message was already shown for bad files,
-        # so report Canceled to suppress SketchUp's generic failure dialog.
-        if BlueCollarSystems::PDFVectorImporter.handle_open_gate(file_path)
-          return Sketchup::Importer::ImportCanceled
-        end
-        opts = ImportDialog.show(file_path)
-        return Sketchup::Importer::ImportCanceled unless opts
         model = Sketchup.active_model
         return Sketchup::Importer::ImportFail unless model
-        stats = BlueCollarSystems::PDFVectorImporter.run_pipeline(model, file_path, opts)
-        outcome = BlueCollarSystems::PDFVectorImporter.import_result_status(stats)
-        if outcome == 'cancelled'
-          return Sketchup::Importer::ImportCanceled
+        outcome = BlueCollarSystems::PDFVectorImporter.import_pdf_path(model, file_path)
+        case outcome
+        when :success then Sketchup::Importer::ImportSuccess
+        when :cancelled then Sketchup::Importer::ImportCanceled
+        else Sketchup::Importer::ImportFail
         end
-        outcome == 'success' ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
-      rescue BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled
-        Sketchup::Importer::ImportCanceled
       rescue StandardError => e
-        unless e.is_a?(BlueCollarSystems::PDFVectorImporter::ImportRunControl::RollbackFailure)
-          BlueCollarSystems::PDFVectorImporter.safe_abort_operation(model, "PDFFileImporter")
-        end
         Logger.error("PDFFileImporter", "load_file failed", e)
         Sketchup::Importer::ImportFail
+      end
+    end
+
+    # Register once per SketchUp session (main.rb can be loaded again).
+    unless @importer_registered
+      begin
+        if defined?(Sketchup) && Sketchup.respond_to?(:register_importer)
+          Sketchup.register_importer(PDFFileImporter.new)
+          @importer_registered = true
+        end
+      rescue StandardError => e
+        @importer_registered = :failed
+        Logger.error('PDFFileImporter', 'File > Import registration failed', e)
       end
     end
     end # if defined?(Sketchup::Importer)
