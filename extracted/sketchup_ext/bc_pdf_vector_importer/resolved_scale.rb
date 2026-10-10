@@ -10,8 +10,53 @@ module BlueCollarSystems
       SCALE_LABEL = /\b(SCALE|SC\.?|SCL\.?)\b/i.freeze
       ARCH_SCALE = /(\d+(?:\.\d+)?(?:\s*\/\s*\d+)?)\s*["\u2033]?\s*=\s*(.+)/i.freeze
       RATIO_SCALE = /\b(\d+)\s*:\s*(\d+)\b/.freeze
+      TYPED_NUMBER = /\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)\z/.freeze
+      TYPED_RATIO = /\A(\d+(?:\.\d+)?|\.\d+)\s*:\s*(\d+(?:\.\d+)?|\.\d+)\z/.freeze
+      TYPED_FRACTION = /\A(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\z/.freeze
+      # 1-1/2"=1'-0" (a whole number plus a fraction of an inch on paper)
+      TYPED_MIXED_ARCH = /\A(\d+)\s*[- ]\s*(\d+)\s*\/\s*(\d+)\s*["\u2033]?\s*=\s*(.+)\z/.freeze
 
       module_function
+
+      # The paper-to-real multiplier for a scale typed the way drawings print
+      # it, or nil when the text cannot be read as a positive scale:
+      #   '48' -> 48, '0.5' -> 0.5 (a plain number is the multiplier itself)
+      #   '1:48' -> 48, '1/48' -> 48 (paper : real)
+      #   1/4"=1'-0" -> 48, 3/8"=1' -> 32, 1"=10' -> 120
+      def enlargement_from_text(text)
+        typed = text.to_s.strip
+        return nil if typed.empty?
+        return positive_factor(typed.to_f) if typed =~ TYPED_NUMBER
+
+        ratio = typed.match(TYPED_RATIO) || typed.match(TYPED_FRACTION)
+        if ratio
+          paper = ratio[1].to_f
+          return nil unless paper > 0.0
+          return positive_factor(ratio[2].to_f / paper)
+        end
+
+        mixed = typed.match(TYPED_MIXED_ARCH)
+        if mixed
+          return nil unless mixed[3].to_f > 0.0
+          paper = mixed[1].to_f + mixed[2].to_f / mixed[3].to_f
+          real = parse_feet_inches_token(mixed[4].to_s) ||
+                 DimensionParser.parse_length_token(mixed[4].to_s)
+          return nil unless real && paper > 0.0
+          return positive_factor(real.to_f / paper)
+        end
+
+        factor_conf = factor_from_parsed(DimensionParser.parse(typed))
+        factor_conf ||= factor_from_arch_match(typed)
+        positive_factor(factor_conf ? factor_conf[0] : nil)
+      rescue StandardError
+        nil
+      end
+
+      def positive_factor(value)
+        return nil if value.nil?
+        number = value.to_f
+        number.finite? && number > 0.0 ? number : nil
+      end
 
       def resolve(page_data)
         best = nil

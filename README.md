@@ -258,8 +258,8 @@ assets, checksums, license, and notes.
 - **PDF layer matching by default** — PDF layers become same-named SketchUp Tags when the PDF contains layer data
 - **Color-based tag grouping** with dash pattern mapping
 - **Scale by Reference** tool — select an edge, type the real-world dimension
-- **Quick Scale** with 15 architectural/engineering ratio preferences
-  (`1/4"=1'-0"`, `3/8"=1'`, etc.)
+- **Quick Scale** — type the drawing scale the way it is printed (`48`,
+  `1:48`, `1/4"=1'-0"`, `3/8"=1'`) and a paper-size import grows to real size
 - **Architectural scale notation parsing**
 - **Import quality assessment** with warnings and performance metrics
 - **Post-import action workflow** (geometry only, scale, cleanup, feature inventory)
@@ -330,29 +330,32 @@ Environment overrides are supported for managed PCs: `BC_PDFTOCAIRO_PATH`,
 
 The Scale by Reference tool lets you correct imported geometry to real-world dimensions. Select any edge, type the known real dimension, and all imported geometry scales proportionally.
 
-### Quick Scale Presets
+### Quick Scale
 
-The Quick Scale dialog provides 15 architectural and engineering presets:
+Imports arrive at paper size. **Quick Scale** takes the drawing's scale typed
+the way it is printed and multiplies the drawing up to real size. A plain
+number is used as the multiplier itself (`0.5` halves the drawing). Before
+anything moves, a box says which way the drawing changes, for example
+"This makes the drawing 48x LARGER", and Undo puts it back.
 
-| Preset | Scale Ratio | Factor | Common Use |
-|--------|-------------|--------|------------|
-| 1:1 | Full size | 1.0 | Detail drawings |
-| 1:2 | Half size | 0.5 | Large details |
-| 1:4 | Quarter size | 0.25 | Construction details |
-| 1:5 | 1/5 size | 0.2 | Detail drawings (metric) |
-| 1:8 | 1/8 size | 0.125 | Room plans |
-| 1:10 | 1/10 size | 0.1 | Detailed plans (metric) |
-| 1:16 | 1/16 size | 0.0625 | Section drawings |
-| 1:20 | 1/20 size | 0.05 | Building plans (metric) |
-| 1:24 | 1/24 size | 0.04167 | 1/2"=1'-0" plans |
-| 1:48 | 1/48 size | 0.02083 | 1/4"=1'-0" plans |
-| 1:50 | 1/50 size | 0.02 | General plans (metric) |
-| 1:96 | 1/96 size | 0.01042 | 1/8"=1'-0" plans |
-| 1:100 | 1/100 size | 0.01 | Site plans (metric) |
-| 1:192 | 1/192 size | 0.00521 | 1/16"=1'-0" plans |
-| 1:200 | 1/200 size | 0.005 | Site plans (metric) |
+| You type | Multiplier | Common use |
+|----------|------------|------------|
+| `1:1` | 1 | Full-size details |
+| `1:2` | 2 | Large details |
+| `1:4` or `3"=1'-0"` | 4 | Construction details |
+| `1:8` or `1-1/2"=1'-0"` | 8 | Details |
+| `1:10` | 10 | Detailed plans (metric) |
+| `1:16` or `3/4"=1'-0"` | 16 | Section drawings |
+| `1:24` or `1/2"=1'-0"` | 24 | Plans |
+| `1:32` or `3/8"=1'-0"` | 32 | Plans |
+| `1:48` or `1/4"=1'-0"` | 48 | Plans |
+| `1:50` | 50 | General plans (metric) |
+| `1:96` or `1/8"=1'-0"` | 96 | Plans |
+| `1:100` | 100 | Site plans (metric) |
+| `1"=10'` | 120 | Civil and site plans |
+| `1:192` or `1/16"=1'-0"` | 192 | Site plans |
 
-The tool also accepts freeform architectural notation such as `1/4"=1'-0"`, `3/8"=1'`, `1"=10'`, and similar formats.
+`1/48` is read the same as `1:48`.
 
 ---
 

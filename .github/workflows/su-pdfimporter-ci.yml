@@ -113,6 +113,7 @@ jobs:
           ruby test/corpus_harness_test.rb
           ruby test/arc_fitter_test.rb
           ruby test/unit_parser_test.rb
+          ruby test/quick_scale_parse_test.rb
           ruby test/mesh_text_width_fidelity_test.rb
           ruby test/condensed_text_width_regression_test.rb
           ruby test/all_modes_placement_contract_test.rb
