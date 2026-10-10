@@ -380,6 +380,60 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_equal 'Single group', opts[:grouping_mode]
   end
 
+  # The Audit setting (item 17) gets its Advanced-window control once the
+  # window rework (item 08) is in: default No, the saved choice shows next
+  # time, and the choice reaches the import options and the saved setting.
+  def test_advanced_window_offers_the_audit_setting_default_off
+    html = BID.send(:advanced_html, 'sample.pdf', advanced_defaults)
+
+    assert_includes html, "<label>#{BID::AUDIT_LABEL}</label>"
+    assert_includes html, '<select id="audit"><option value="No" selected>No (recommended)</option>' \
+                          '<option value="Yes">Yes</option></select>'
+    assert_includes html, BID::AUDIT_HINT
+    assert_includes html, "audit:document.getElementById('audit').value"
+
+    saved_yes = BID.send(:advanced_html, 'sample.pdf', advanced_defaults(audit: 'Yes'))
+    assert_includes saved_yes, '<option value="Yes" selected>Yes</option>'
+    refute_includes saved_yes, '<option value="No" selected>'
+  end
+
+  def test_advanced_audit_choice_reaches_options_and_saved_setting
+    saved_env = ENV.delete('BC_PDF_AUDIT')
+    choice = nil
+    UI::HtmlDialog.on_show = lambda do |dlg|
+      dlg.callbacks['on_import'].call(nil, 'pages' => 'All', 'scale' => '1.0',
+                                      'text_mode' => '3D Text', 'import_text' => 'Yes',
+                                      'match_pdf_layers' => 'Yes', 'mode' => 'Auto',
+                                      'page_arrangement' => 'Spread (20% gap)',
+                                      'audit' => choice)
+    end
+
+    choice = 'Yes'
+    opts = BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
+    assert_equal true, opts[:audit]
+    assert_equal 'Yes', Sketchup.default_value(PREF_KEY, 'audit')
+    shown = BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', BID.load_prefs)
+    assert_equal true, shown[:audit]
+    assert_includes UI::HtmlDialog.instances.last.html, '<option value="Yes" selected>Yes</option>'
+
+    choice = 'No'
+    opts = BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', BID.load_prefs)
+    assert_equal false, opts[:audit]
+    assert_equal 'No', Sketchup.default_value(PREF_KEY, 'audit')
+
+    # A window that sends no Audit value saves and builds 'No', never ''.
+    choice = nil
+    opts = BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
+    assert_equal false, opts[:audit]
+    assert_equal 'No', Sketchup.default_value(PREF_KEY, 'audit')
+  ensure
+    if saved_env.nil?
+      ENV.delete('BC_PDF_AUDIT')
+    else
+      ENV['BC_PDF_AUDIT'] = saved_env
+    end
+  end
+
   def test_inputbox_fallback_has_no_dead_grouping_prompt
     BID.show_inputbox_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
     prompts, _defaults, dropdowns, _title = UI.inputbox_calls.last

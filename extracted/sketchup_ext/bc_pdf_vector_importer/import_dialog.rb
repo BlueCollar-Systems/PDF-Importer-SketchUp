@@ -252,7 +252,8 @@ module BlueCollarSystems
           grouping_mode:    saved[:grouping_mode]                      || 'Group per page',
           page_arrangement: saved[:page_arrangement]                   || 'Spread (20% gap)',
           extrude_to_3d:    saved[:extrude_to_3d]                      || 'No',
-          extrude_depth_mm: saved[:extrude_depth_mm]                   || ''
+          extrude_depth_mm: saved[:extrude_depth_mm]                   || '',
+          audit:            audit_choice(saved[:audit])
         }
 
         dlg.set_html(advanced_html(filename, d))
@@ -267,7 +268,8 @@ module BlueCollarSystems
               match_pdf_layers: p['match_pdf_layers'],
               page_arrangement: p['page_arrangement'],
               extrude_to_3d: p['extrude_to_3d'],
-              extrude_depth_mm: p['extrude_depth_mm']
+              extrude_depth_mm: p['extrude_depth_mm'],
+              audit: audit_choice(p['audit'])
             )
             mode_raw = MODES[p['mode'] || 'Auto'] || MODES['Auto']
             result = build_opts(
@@ -281,7 +283,8 @@ module BlueCollarSystems
               match_pdf_layers: p['match_pdf_layers'],
               page_arrangement: p['page_arrangement'],
               extrude_to_3d: p['extrude_to_3d'],
-              extrude_depth_mm: p['extrude_depth_mm']
+              extrude_depth_mm: p['extrude_depth_mm'],
+              audit: audit_choice(p['audit'])
             )
             dlg.close
           rescue ArgumentError => error
@@ -429,6 +432,10 @@ module BlueCollarSystems
           "<option value=\"#{esc(v)}\"#{sel}>#{esc(v)}</option>"
         }.join
 
+        audit_on = audit_choice(d[:audit]) == 'Yes'
+        audit_opts = "<option value=\"No\"#{audit_on ? '' : ' selected'}>No (recommended)</option>" \
+                     "<option value=\"Yes\"#{audit_on ? ' selected' : ''}>Yes</option>"
+
         <<-HTML
           <!DOCTYPE html><html><head><meta charset="utf-8">
           <style>#{DIALOG_CSS}</style></head><body>
@@ -444,7 +451,10 @@ module BlueCollarSystems
           <div class="row2">
             <div><label>Scale Factor</label>
               <input type="text" id="scale" value="#{esc(d[:scale])}" placeholder="1.0"></div>
+            <div><label>#{esc(AUDIT_LABEL)}</label>
+              <select id="audit">#{audit_opts}</select></div>
           </div>
+          <p class="hint hint-block">#{esc(AUDIT_HINT)}</p>
           <div class="section">Text</div>
           <div class="row2">
             <div><label>Import Text</label>
@@ -480,6 +490,7 @@ module BlueCollarSystems
             text_mode:document.getElementById('text_mode').value,
             match_pdf_layers:document.getElementById('match_pdf_layers').value,
             page_arrangement:document.getElementById('page_arrangement').value,
+            audit:document.getElementById('audit').value,
             extrude_to_3d:'No',
             extrude_depth_mm:''});}
           function cancel(){sketchup.on_cancel({});}
@@ -663,7 +674,15 @@ module BlueCollarSystems
       end
 
       AUDIT_LABEL = 'Audit import (slow self-checks)'.freeze
+      AUDIT_HINT = 'Audit: Yes double-checks every page as it is built. It is slower; ' \
+                   'turn it on only when asked for a detailed report.'.freeze
       AUDIT_ENV = 'BC_PDF_AUDIT'.freeze
+
+      # The Advanced window's Audit choice ('Yes' or 'No') from a saved
+      # setting or the window's own value. Anything not clearly on is 'No'.
+      def self.audit_choice(value)
+        value == true || value.to_s.strip =~ /\A(?:yes|true|1|on)\z/i ? 'Yes' : 'No'
+      end
 
       # On when BC_PDF_AUDIT=1 (CI, host harness), when the caller passes
       # audit: 'Yes'/true (dialog, --audit), or when the saved setting says
