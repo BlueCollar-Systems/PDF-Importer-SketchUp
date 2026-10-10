@@ -179,7 +179,7 @@ module BlueCollarSystems
         # near-white threshold. The unrounded source values remain untouched.
         rgb.is_a?(Array) && rgb.length == 3 && source[:fill_opacity] == 1.0 &&
           rgb.each_with_index.all? do |value, index|
-            value.is_a?(Numeric) && value.finite? && value >= 0.0 && value <= 1.0 &&
+            value.is_a?(Numeric) && value.to_f.finite? && value >= 0.0 && value <= 1.0 &&
               (value * 255.0).round == (native[:fill_rgb][index] * 255.0).round
           end
       end

@@ -1343,7 +1343,7 @@ module BlueCollarSystems
         end
         points.pop if points.length > 1 && points[-1] == points[0]
         return nil unless points.length >= 3 && points.all? do |point|
-          point.length == 2 && point.all? { |value| value.is_a?(Numeric) && value.finite? }
+          point.length == 2 && point.all? { |value| value.is_a?(Numeric) && value.to_f.finite? }
         end
         points
       end
