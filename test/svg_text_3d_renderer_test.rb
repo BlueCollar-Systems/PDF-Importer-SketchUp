@@ -1720,4 +1720,88 @@ class SvgText3DRendererTest < Minitest::Test
                  'the partial exact-glyph definition must not survive cancellation'
   end
 
+  # ---- SU-1010-14: keep the words with imported text ----------------------
+  # A fitter must be able to type a piece mark (EX101) into the Outliner and
+  # read a note in Entity Info; groups used to be named only by internal ids.
+
+  def worded_span(text, id = 'text_span:1:0')
+    Svg3DSpan.new(text, 'pdftotext', id, 8.0, 18.0, 25.0, 35.0)
+  end
+
+  def test_delivered_3d_text_group_is_named_by_its_words
+    entities = Svg3DEntities.new
+    original = "EX101  \n NOTE"
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, [worded_span(original)],
+      :depth => 0.05, :source_context => complete_source_context
+    )
+    assert result[:ok], result[:failures].inspect
+    group = result[:span_results][0][:group]
+    assert_equal 'PDF Text: EX101 NOTE', group.name
+    assert_equal original, group.attributes[['BC_PDF_Importer', 'source_text']]
+    assert_equal 'text_span:1:0',
+                 group.attributes[['BC_PDF_Importer', 'source_span_id']]
+  end
+
+  def test_page_with_raw_glyph_codes_keeps_the_id_name
+    entities = Svg3DEntities.new
+    result = RENDERER.render_svg(
+      entities, square_svg, MEDIA_BOX, [worded_span('06-3')],
+      :depth => 0.05, :keep_id_names => true,
+      :source_context => complete_source_context
+    )
+    assert result[:ok], result[:failures].inspect
+    group = result[:span_results][0][:group]
+    assert_equal 'PDF 3D Text text_span:1:0', group.name
+    assert_nil group.attributes[['BC_PDF_Importer', 'source_text']]
+  end
+
+  def test_whitespace_only_text_keeps_the_id_name
+    group = Svg3DGroup.new(Svg3DEntities.new, 7, {})
+    RENDERER.assign_group_identity(
+      group, 'text_span:2:4', :text_span, nil, [0], worded_span(" \t\n ")
+    )
+    assert_equal 'PDF 3D Text text_span:2:4', group.name
+    assert_nil group.attributes[['BC_PDF_Importer', 'source_text']]
+  end
+
+  def test_long_text_is_shortened_in_the_name_but_kept_whole
+    group = Svg3DGroup.new(Svg3DEntities.new, 8, {})
+    long = 'GENERAL NOTE: ' + ('ALL WELDS E70XX UNLESS NOTED ' * 4)
+    RENDERER.assign_group_identity(
+      group, 'text_span:2:5', :text_span, nil, [0], worded_span(long)
+    )
+    assert group.name.start_with?('PDF Text: GENERAL NOTE: ALL WELDS')
+    assert group.name.end_with?('...')
+    assert_operator group.name.length, :<=, 'PDF Text: '.length + 63
+    assert_equal long, group.attributes[['BC_PDF_Importer', 'source_text']]
+  end
+
+  def test_invalid_bytes_never_break_the_name
+    group = Svg3DGroup.new(Svg3DEntities.new, 9, {})
+    raw = "EX\xFF101".dup.force_encoding('ASCII-8BIT')
+    RENDERER.assign_group_identity(
+      group, 'text_span:2:6', :text_span, nil, [0], worded_span(raw)
+    )
+    assert group.name.valid_encoding?
+    assert_equal Encoding::UTF_8, group.name.encoding
+    assert group.attributes[['BC_PDF_Importer', 'source_text']].valid_encoding?
+  end
+
+  def test_glyphs_and_geometry_groups_are_named_by_their_words
+    require 'bc_pdf_vector_importer/svg_item_representation_renderer'
+    items = BlueCollarSystems::PDFVectorImporter::SvgItemRepresentationRenderer
+    entities = Svg3DEntities.new
+    group = items.create_owned_group!(
+      entities, 'text_span:3:17', :glyphs, nil, [0], worded_span('EX101')
+    )
+    assert_equal 'PDF Text: EX101', group.name
+    assert_equal 'EX101', group.attributes[['BC_PDF_Importer', 'source_text']]
+    assert_equal 'text_span:3:17',
+                 group.attributes[['BC_PDF_Importer', 'source_span_id']]
+    plain = items.create_owned_group!(
+      entities, 'text_span:3:18', :geometry, nil, [0]
+    )
+    assert_equal 'PDF Geometry text_span:3:18', plain.name
+  end
 end

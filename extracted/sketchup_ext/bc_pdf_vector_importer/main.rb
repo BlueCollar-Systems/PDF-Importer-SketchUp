@@ -1323,7 +1323,8 @@ module BlueCollarSystems
            :precomputed_peer_owners => precomputed_peer_owners,
            :model => model,
            :glyph_component_cache => glyph_component_cache,
-           :progress_callback => opts[:progress_callback]
+           :progress_callback => opts[:progress_callback],
+           :keep_id_names => opts[:keep_id_names] == true
         )
         unless result.is_a?(Hash) && Array(result[:failures]).empty?
           raise RepresentationFidelity::ContractError,
@@ -1602,7 +1603,8 @@ module BlueCollarSystems
         :preserve_unmatched_source_placements => false,
         :decorative_text_containers => opts[:decorative_text_containers] == true,
         :source_context => svg_source_context(svg_document, page_num, {}),
-        :run_controller => opts[:run_controller]
+        :run_controller => opts[:run_controller],
+        :keep_id_names => opts[:keep_id_names] == true
       )
       unless Array(result[:failures]).empty?
         details = result[:failures].map do |failure|
@@ -4910,6 +4912,11 @@ module BlueCollarSystems
           # the delivered text: the dangerous spans are the ones that read as
           # ordinary text.
           glyph_code_font_rows = parser.page_font_glyph_code_status(page_num)
+          # Text groups are named by their words ("PDF Text: EX101") except on
+          # a page whose fonts carry raw glyph codes: garbled characters must
+          # never become a name, so that page keeps the id names.
+          opts[:keep_id_names] =
+            !unmapped_font_resources(glyph_code_font_rows).empty?
           glyph_code_text_parser = nil
           if prefer_internal_text
             font_maps = parser.page_font_maps(page_num)
@@ -5701,6 +5708,7 @@ module BlueCollarSystems
             :run_controller => opts[:run_controller],
             :preserve_unmatched_source_placements => true,
             :decorative_text_containers => page_text_opts[:decorative_text_containers],
+            :keep_id_names => page_text_opts[:keep_id_names] == true,
             :source_context => svg_source_context(
               svg_document, page_num, svg_failure
             )
@@ -7427,6 +7435,14 @@ module BlueCollarSystems
           image.set_attribute(dictionary, 'source_claim_root', true)
           image.set_attribute(dictionary, 'source_span_id', source_id)
           image.set_attribute(dictionary, 'source_kind', 'text_span')
+          # The words this picture shows, so they can be found and read.
+          unless opts[:keep_id_names] == true ||
+                 Svg3DTextRenderer.display_text(item).nil?
+            image.set_attribute(
+              dictionary, 'source_text',
+              Svg3DTextRenderer.utf8_text(CairoGlyphSource.item_text(item))
+            )
+          end
           image.set_attribute(dictionary, 'representation', 'raster')
           image.set_attribute(
             dictionary, 'renderer', page_render[:renderer]
