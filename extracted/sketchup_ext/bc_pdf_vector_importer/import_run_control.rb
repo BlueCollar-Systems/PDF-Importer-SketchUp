@@ -998,11 +998,23 @@ module BlueCollarSystems
           # nothing partial is kept; it is never certified and a later resume
           # retries it. Callers opt in; the bare orchestrator stays strict.
           @continue_on_page_error = options[:continue_on_page_error] == true
+          # Where a fresh import's first page starts (above earlier PDF
+          # pages in the model). A number, or a callable evaluated only when
+          # nothing is resumed. A resume keeps its journal offsets.
+          @base_y_offset = options[:base_y_offset]
           @failed_pages = []
           @first_page_error = nil
         end
 
         attr_reader :failed_pages
+
+        def fresh_start_offset
+          value = @base_y_offset.respond_to?(:call) ? @base_y_offset.call : @base_y_offset
+          number = value.to_f
+          number.finite? ? number : 0.0
+        rescue StandardError
+          0.0
+        end
 
         def run
           unless @group_per_page
@@ -1016,7 +1028,7 @@ module BlueCollarSystems
           resumed.each do |page|
             merge_stats!(aggregate, @controller.page_stats(page))
           end
-          offset = @controller.resume_y_offset
+          offset = resumed.empty? ? fresh_start_offset : @controller.resume_y_offset
           new_pages = []
           pending = @pages.reject { |page| resumed.include?(page) }
 

@@ -3210,6 +3210,97 @@ module BlueCollarSystems
       [[val, 0.0].max, 1.0].min
     end
 
+    PAGE_GROUP_DICTIONARY = 'BC_PDF_Importer'.freeze
+    PAGE_GROUP_KEY = 'page_group'.freeze
+    LEGACY_PAGE_GROUP_NAME = /\APDF Page \d+\z/
+
+    def self.mark_pdf_page_group!(group)
+      return group unless group && group.respond_to?(:set_attribute)
+      group.set_attribute(PAGE_GROUP_DICTIONARY, PAGE_GROUP_KEY, true)
+      group
+    rescue StandardError => e
+      Logger.warn('Placement', "page group mark failed: #{e.message}")
+      group
+    end
+
+    # Top-level PDF pages already in the model: marked page groups, resume
+    # journal groups, explicit Raster page images and older "PDF Page N"
+    # groups. Anything else (a template's person figure, the user's own
+    # geometry) is ignored.
+    def self.pdf_page_entities(model)
+      return [] unless model && model.respond_to?(:active_entities)
+      entities = model.active_entities
+      return [] unless entities && entities.respond_to?(:to_a)
+      entities.to_a.select { |entity| pdf_page_entity?(entity) }
+    rescue StandardError => e
+      Logger.warn('Placement', "earlier PDF page lookup failed: #{e.message}")
+      []
+    end
+
+    def self.pdf_page_entity?(entity)
+      return false if entity.respond_to?(:valid?) && !entity.valid?
+      typename = entity.respond_to?(:typename) ? entity.typename.to_s : ''
+      return false unless %w[Group Image].include?(typename)
+      if entity.respond_to?(:get_attribute)
+        return true if entity.get_attribute(PAGE_GROUP_DICTIONARY, PAGE_GROUP_KEY, nil) == true
+        journal = entity.get_attribute(ImportRunControl::JOURNAL_DICTIONARY, 'journal_id', nil)
+        return true unless journal.to_s.empty?
+        kind = entity.get_attribute(PAGE_GROUP_DICTIONARY, 'source_kind', nil)
+        return true if kind.to_s == 'page_raster'
+      end
+      name = entity.respond_to?(:name) ? entity.name.to_s : ''
+      !(name =~ LEGACY_PAGE_GROUP_NAME).nil?
+    rescue StandardError
+      false
+    end
+
+    # Where a new import's first page starts. 0.0 when the model holds no
+    # earlier PDF pages, so a first import lands at the origin exactly as
+    # before. Otherwise just above the highest earlier page, with the same
+    # 20% gap that Spread leaves between pages. first_page_height_in may be
+    # a number or a callable; it is only read when earlier pages exist.
+    def self.import_base_y_offset(model, first_page_height_in)
+      tops = pdf_page_entities(model).map { |entity| entity_top_y(entity) }.compact
+      return 0.0 if tops.empty?
+      height = first_page_height_in.respond_to?(:call) ? first_page_height_in.call : first_page_height_in
+      height = height.to_f
+      height = 11.0 unless height.finite? && height > 0.0
+      offset = tops.max + height * 0.20
+      Logger.info('Placement', "Earlier PDF pages found; this import starts at y=#{offset.round(3)} in.")
+      offset
+    rescue StandardError => e
+      Logger.warn('Placement', "start offset failed, using the origin: #{e.message}")
+      0.0
+    end
+
+    def self.entity_top_y(entity)
+      return nil unless entity.respond_to?(:bounds)
+      bounds = entity.bounds
+      return nil unless bounds && bounds.respond_to?(:max)
+      return nil if bounds.respond_to?(:empty?) && bounds.empty?
+      top = bounds.max.y.to_f
+      top.finite? ? top : nil
+    rescue StandardError
+      nil
+    end
+
+    # Height in model inches of the first requested page (crop box when
+    # present, rotation-aware, times the import scale).
+    def self.requested_page_height_in(parser, page_num, scale)
+      raw = parser.page_data(page_num)
+      raw = {} unless raw.is_a?(Hash)
+      box = raw[:crop_box]
+      box = raw[:media_box] unless box.is_a?(Array) && box.length >= 4
+      box = [0, 0, 612, 792] unless box.is_a?(Array) && box.length >= 4
+      rotation = PageTransform.normalize_rotation(raw[:rotation])
+      factor = scale.to_f
+      factor = 1.0 unless factor > 0.0
+      PageTransform.effective_height(box, rotation).to_f / 72.0 * factor
+    rescue StandardError => e
+      Logger.warn('Placement', "page height lookup failed: #{e.message}")
+      11.0
+    end
+
     def self.page_stack_step(page_height_in, arrangement, gap_ratio)
       h = page_height_in.to_f
       h = 11.0 if h <= 0.0
@@ -3841,7 +3932,13 @@ module BlueCollarSystems
       page_fit_bounds = Geom::BoundingBox.new
       arrangement = normalize_page_arrangement(opts[:page_arrangement])
       gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
-      running_y_offset = 0.0
+      running_y_offset = if opts[:initial_y_offset].nil?
+                           import_base_y_offset(model, lambda {
+                             requested_page_height_in(parser, pages.first, opts[:scale])
+                           })
+                         else
+                           opts[:initial_y_offset].to_f
+                         end
       operation_open = false
       stats = {
         :pages => 0, :primitives => 0, :edges => 0, :faces => 0,
@@ -4009,7 +4106,8 @@ module BlueCollarSystems
       # Decide once, before anything is built. Every page call below carries
       # :large_pdf_confirmed, so no page can put a question in front of the
       # operator mid-import; Esc (run controller) and resume are the safety net.
-      unless confirm_large_pdf_once!(source_path, nil, resumable_import?(opts))
+      unless opts[:large_pdf_confirmed] ||
+             confirm_large_pdf_once!(source_path, nil, resumable_import?(opts))
         return cancelled_before_start(source_path, 'very large PDF declined')
       end
       opts = opts.merge(:large_pdf_confirmed => true)
@@ -4096,6 +4194,11 @@ module BlueCollarSystems
           :model => model,
           :controller => controller,
           :pages => pages,
+          :base_y_offset => lambda {
+            import_base_y_offset(model, lambda {
+              requested_page_height_in(parser, pages.first, opts[:scale])
+            })
+          },
           :runner => runner,
           :group_per_page => opts[:group_per_page],
           :continue_on_page_error => opts[:stop_on_page_error] != true
@@ -4216,7 +4319,7 @@ module BlueCollarSystems
       end
       group = model.active_entities.add_group
       group.name = "PDF Page #{page_num}" if group.respond_to?(:name=)
-      group
+      mark_pdf_page_group!(group)
     end
 
     def self.run_pipeline(model, path, opts)
@@ -4357,7 +4460,13 @@ module BlueCollarSystems
       reset_ownership_bookkeeping!
       page_arrangement = normalize_page_arrangement(opts[:page_arrangement])
       page_gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
-      running_y_offset = opts[:initial_y_offset].to_f
+      running_y_offset = if opts[:initial_y_offset].nil?
+                           import_base_y_offset(model, lambda {
+                             requested_page_height_in(parser, pages.first, opts[:scale])
+                           })
+                         else
+                           opts[:initial_y_offset].to_f
+                         end
       page_group_for_certification = nil
 
       pages.each_with_index do |page_num, idx|
@@ -7524,8 +7633,16 @@ module BlueCollarSystems
       return unless folder && File.directory?(folder)
       pdfs = (Dir.glob(File.join(folder, "*.pdf")) + Dir.glob(File.join(folder, "*.PDF"))).uniq
       return UI.messagebox("No PDF files found.") if pdfs.empty?
-      return unless UI.messagebox("Import #{pdfs.length} PDF(s) with Auto mode?", MB_YESNO) == IDYES
-      ok = 0; fail_c = 0; cancel_c = 0
+      return unless UI.messagebox(
+        "Import #{pdfs.length} PDF(s): all pages, 3D Text, scale 1.0 (Auto)?",
+        MB_YESNO
+      ) == IDYES
+      # The very-large-PDF question is asked once, for the whole folder,
+      # before anything is built. Yes imports them; No skips them and the
+      # rest still import. No file asks again mid-batch.
+      large = batch_large_pdfs(pdfs)
+      import_large = large.empty? || batch_confirm_large_pdfs(large)
+      ok = 0; fail_c = 0; cancel_c = 0; skip_c = 0
       stop_reason = nil
       # BCS-ARCH-001: batch import uses Auto mode — per-page strategy selection.
       mode_raw = ImportDialog::MODES['Auto']
@@ -7533,8 +7650,13 @@ module BlueCollarSystems
       mode_raw.each { |k, v| sym_attrs[k.to_sym] = v }
       pdfs.sort.each_with_index do |pdf, idx|
         Sketchup.status_text = "Batch: #{idx+1}/#{pdfs.length} #{File.basename(pdf)}"
+        if large.include?(pdf) && !import_large
+          skip_c += 1
+          next
+        end
         begin
           opts = ImportDialog.send(:build_opts, sym_attrs.merge(pages: 'All'))
+          opts[:large_pdf_confirmed] = true if large.include?(pdf)
           # Refuse bad PDFs quietly here; the summary box reports the count.
           if handle_open_gate(pdf, opts, show_ui: false)
             fail_c += 1
@@ -7554,19 +7676,57 @@ module BlueCollarSystems
           cancel_c += 1
           stop_reason = 'Import cancelled; remaining PDFs were not started.'
           break
-        rescue ImportRunControl::ResumeMismatch => e
+        rescue ImportRunControl::RollbackFailure => e
+          # SketchUp could not confirm the undo: the model may be changed,
+          # so nothing more is imported on top of it.
           fail_c += 1
           Logger.error('Batch', File.basename(pdf), e)
           stop_reason = e.message
           break
+        rescue ImportRunControl::ResumeMismatch => e
+          # This file's earlier import record does not match the model; the
+          # file is counted as failed and the batch moves on.
+          fail_c += 1
+          Logger.error('Batch', File.basename(pdf), e)
         rescue StandardError => e
           fail_c += 1; Logger.error("Batch", File.basename(pdf), e)
         end
       end
       summary = "Batch: #{ok} imported, #{fail_c} failed, " \
-                "#{cancel_c} cancelled, #{pdfs.length} total."
+                "#{cancel_c} cancelled, #{skip_c} skipped, #{pdfs.length} total."
       summary += " Stopped: #{stop_reason}" if stop_reason
       UI.messagebox(summary)
+    end
+
+    def self.batch_large_pdfs(pdfs)
+      pdfs.select do |pdf|
+        size = begin
+          File.size(pdf)
+        rescue StandardError
+          0
+        end
+        size.to_i > BatchHostPolicy::LARGE_PDF_BYTES
+      end
+    end
+
+    # One question for every very large file in the folder. True imports
+    # them, false skips them.
+    def self.batch_confirm_large_pdfs(large)
+      names = large.map { |pdf| File.basename(pdf) }
+      shown = names.first(5).join(', ')
+      shown += ", and #{names.length - 5} more" if names.length > 5
+      limit_mb = (BatchHostPolicy::LARGE_PDF_BYTES / (1024.0 * 1024.0)).round
+      largest = large.map { |pdf| File.size(pdf) rescue 0 }.max.to_i
+      choice = BatchHostPolicy.confirm_large_pdf!(largest) do
+        UI.messagebox(
+          "#{names.length} PDF(s) in this folder are very large (over " \
+          "#{limit_mb} MB): #{shown}. They may take a long time and use a lot " \
+          "of memory.\n\nImport them too? Yes imports them; No skips them " \
+          'and the rest still import.',
+          MB_YESNO
+        )
+      end
+      choice == true || (defined?(IDYES) && choice == IDYES)
     end
 
     def self.scale_by_reference; ScaleTool.activate; end

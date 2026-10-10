@@ -16,14 +16,22 @@ unless defined?(UI) && UI.respond_to?(:messagebox)
     def self.messagebox(*_args); 0; end
   end
 end
+unless UI.respond_to?(:inputbox)
+  module UI
+    def self.inputbox(*_args); nil; end
+  end
+end
 MB_OKCANCEL = 1 unless defined?(MB_OKCANCEL)
 IDOK = 1 unless defined?(IDOK)
+MB_YESNO = 4 unless defined?(MB_YESNO)
+IDYES = 6 unless defined?(IDYES)
 
 # Minimal host stand-ins for driving the real non-resumable and Raster
 # pipelines up to an Esc checkpoint.
 unless defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
   module Sketchup
     def self.status_text=(_text); end
+    def self.active_model; nil; end
   end
 end
 unless defined?(Geom::BoundingBox)
@@ -426,8 +434,9 @@ class UnattendedMultipageImportTest < Minitest::Test
 
   # Execute the real native-import and folder-batch entrypoints with only
   # their host/UI/pipeline boundaries replaced; no SketchUp process is needed.
-  def entrypoint_scope(outcomes, folder = nil)
-    calls, messages, aborts = [], [], []
+  def entrypoint_scope(outcomes, folder = nil, answers = [],
+                       policy = IMP::BatchHostPolicy)
+    calls, messages, aborts, seen_opts, events = [], [], [], [], []
     scope = Module.new
     host = Module.new
     importer = Class.new
@@ -439,7 +448,11 @@ class UnattendedMultipageImportTest < Minitest::Test
     host.define_singleton_method(:status_text=) { |_| }
     ui = Module.new
     ui.define_singleton_method(:inputbox) { |*_| [folder] }
-    ui.define_singleton_method(:messagebox) { |message, *_| messages << message; 6 }
+    ui.define_singleton_method(:messagebox) do |message, *_|
+      messages << message
+      events << [:ask, message]
+      answers.empty? ? 6 : answers.shift
+    end
     dialog = Module.new
     dialog.const_set(:MODES, {'Auto' => {}})
     dialog.define_singleton_method(:show) { |_| {} }
@@ -456,11 +469,14 @@ class UnattendedMultipageImportTest < Minitest::Test
     scope.const_set(:Logger, logger)
     scope.const_set(:MB_YESNO, 4)
     scope.const_set(:IDYES, 6)
+    scope.const_set(:BatchHostPolicy, policy)
     scope.define_singleton_method(:handle_open_gate) { |*_| false }
     scope.define_singleton_method(:import_result_status) { |stats| IMP.import_result_status(stats) }
     scope.define_singleton_method(:safe_abort_operation) { |*args| aborts << args }
-    scope.define_singleton_method(:run_pipeline) do |_model, path, _opts|
+    scope.define_singleton_method(:run_pipeline) do |_model, path, opts|
       calls << path
+      seen_opts << opts
+      events << [:import, File.basename(path)]
       outcome = outcomes.shift
       raise outcome if outcome.is_a?(Exception)
       outcome
@@ -468,10 +484,15 @@ class UnattendedMultipageImportTest < Minitest::Test
     source = File.read(MAIN_RB)
     load_file = source[/^      def load_file\(.*?^      end\n/m]
     batch = source[/^    def self\.batch_import\n.*?^    end\n/m]
+    helpers = %w[batch_large_pdfs batch_confirm_large_pdfs].map do |name|
+      source[/^    def self\.#{name}\(.*?^    end\n/m]
+    end
     refute_nil load_file
     refute_nil batch
-    scope.module_eval("class NativeImporter\n" + load_file + "end\n" + batch, MAIN_RB)
-    [scope, calls, messages, aborts]
+    helpers.each { |helper| refute_nil helper }
+    scope.module_eval("class NativeImporter\n" + load_file + "end\n" + batch +
+                      helpers.join, MAIN_RB)
+    [scope, calls, messages, aborts, seen_opts, events]
   end
 
   def test_native_importer_reports_explicit_outcomes_and_preserves_legacy_success
@@ -498,6 +519,201 @@ class UnattendedMultipageImportTest < Minitest::Test
       scope.batch_import
       yield calls, messages.last, aborts
     end
+  end
+
+  # Treats any file over 20 bytes as "very large" so a fixture can be one.
+  module SmallLargePolicy
+    LARGE_PDF_BYTES = 20
+
+    def self.confirm_large_pdf!(file_size_bytes)
+      return true unless file_size_bytes.to_i > LARGE_PDF_BYTES
+      block_given? ? yield : false
+    end
+  end
+
+  def with_large_file_batch(answers, outcomes)
+    Dir.mktmpdir('batch-large') do |folder|
+      File.binwrite(File.join(folder, '0.pdf'), '%PDF-test')
+      File.binwrite(File.join(folder, '1.pdf'), '%PDF-test' + ('x' * 60))
+      File.binwrite(File.join(folder, '2.pdf'), '%PDF-test')
+      scope, calls, messages, _aborts, seen_opts, events =
+        entrypoint_scope(outcomes, folder, answers, SmallLargePolicy)
+      scope.batch_import
+      yield calls.map { |path| File.basename(path) }, messages, seen_opts, events
+    end
+  end
+
+  def test_folder_batch_confirm_says_what_every_file_gets
+    with_batch_fixture([{:pages => 1}, {:pages => 1}, {:pages => 1}]) do |_calls, summary, _|
+      assert_includes summary, '3 imported, 0 failed, 0 cancelled, 0 skipped, 3 total'
+    end
+    Dir.mktmpdir('batch-confirm') do |folder|
+      File.binwrite(File.join(folder, '0.pdf'), '%PDF-test')
+      scope, _calls, messages = entrypoint_scope([{:pages => 1}], folder)
+      scope.batch_import
+      assert_equal 'Import 1 PDF(s): all pages, 3D Text, scale 1.0 (Auto)?', messages.first
+    end
+  end
+
+  # One stuck file (its earlier import record no longer matches the model)
+  # is counted as failed; the rest of the folder still imports.
+  def test_folder_batch_continues_past_a_file_whose_resume_record_does_not_match
+    mismatch = IRC::ResumeMismatch.new('page 1 has 0 retained groups; expected exactly one')
+    with_batch_fixture([mismatch, {:pages => 1}, {:pages => 1}]) do |calls, summary, _|
+      assert_equal 3, calls.length
+      assert_includes summary, '2 imported, 1 failed, 0 cancelled'
+      refute_includes summary, 'Stopped'
+    end
+  end
+
+  def test_folder_batch_asks_about_large_files_once_up_front_and_skips_on_no
+    with_large_file_batch([6, 7], [{:pages => 1}, {:pages => 1}]) do |calls, messages, _opts, events|
+      assert_equal %w[0.pdf 2.pdf], calls
+      assert_equal 3, messages.length, 'confirm, one large-file question, summary'
+      assert_match(/1 PDF\(s\) in this folder are very large/, messages[1])
+      assert_includes messages[1], '1.pdf'
+      assert_equal [:ask, :ask], events.first(2).map(&:first),
+                   'the large-file question comes before any import'
+      assert_includes messages.last, '2 imported, 0 failed, 0 cancelled, 1 skipped, 3 total'
+    end
+  end
+
+  def test_folder_batch_imports_confirmed_large_files_without_asking_again
+    with_large_file_batch([6, 6], [{:pages => 1}, {:pages => 1}, {:pages => 1}]) do |calls, messages, seen_opts, _|
+      assert_equal %w[0.pdf 1.pdf 2.pdf], calls
+      assert_equal 3, messages.length
+      assert_equal true, seen_opts[1][:large_pdf_confirmed]
+      assert_nil seen_opts[0][:large_pdf_confirmed]
+      assert_includes messages.last, '3 imported, 0 failed, 0 cancelled, 0 skipped'
+    end
+  end
+
+  # ---- new imports land beside earlier ones ------------------------------
+
+  class BoundedGroup < Group
+    Box = Struct.new(:min, :max)
+
+    def initialize(id, page, bottom, top)
+      super(id, page)
+      @box = Box.new(Leaf::Point.new(0.0, bottom, 0.0),
+                     Leaf::Point.new(8.5, top, 0.0))
+    end
+
+    def bounds; @box; end
+  end
+
+  def test_empty_model_starts_at_the_origin_and_ignores_non_pdf_geometry
+    model = Model.new
+    assert_equal 0.0, IMP.import_base_y_offset(model, 11.0)
+    person = model.active_entities.add(BoundedGroup.new(5, 1, 0.0, 70.0))
+    person.name = 'Template person'
+    assert_equal 0.0, IMP.import_base_y_offset(model, 11.0),
+                 "a template's person figure must not move the drawing"
+  end
+
+  def test_model_with_an_earlier_pdf_page_starts_above_it
+    model = Model.new
+    group = model.active_entities.add(BoundedGroup.new(7, 1, 0.0, 13.2))
+    group.name = 'Renamed by the user'
+    IMP.mark_pdf_page_group!(group)
+    offset = IMP.import_base_y_offset(model, 11.0)
+    assert_operator offset, :>, 13.2
+    assert_in_delta 13.2 + 11.0 * 0.2, offset, 1e-9
+    # Older imports are found by their "PDF Page N" name.
+    legacy = Model.new
+    legacy.active_entities.add(BoundedGroup.new(8, 3, 0.0, 30.0))
+    assert_in_delta 30.0 + 2.2, IMP.import_base_y_offset(legacy, 11.0), 1e-9
+  end
+
+  def placement_page_runner(model, log, cancel_at, id_base)
+    lambda do |_model, path, page_opts|
+      unless page_opts[:resumable_page_call]
+        # The real run_pipeline hands a resumable request to
+        # run_resumable_pipeline.
+        next IMP.run_resumable_pipeline(model, path, page_opts)
+      end
+      page = page_opts[:pages].first
+      offset = page_opts[:initial_y_offset]
+      log << [File.basename(path), page, offset]
+      raise IRC::ImportCancelled.new([], page, {}) if cancel_at == [File.basename(path), page]
+      group = model.active_entities.add(
+        BoundedGroup.new(id_base[0] += 1, page, offset, offset + 11.0)
+      )
+      IMP.mark_pdf_page_group!(group)
+      following = offset + IMP.page_stack_step(11.0, :spread, 0.2)
+      stats = { :pages => 1, :next_y_offset => following }
+      page_opts[:page_certifier].call(group, following, stats)
+      stats
+    end
+  end
+
+  def with_placement_host(model, log, cancel_at = nil, &block)
+    id_base = [100]
+    with_stubs([[IMP::PdfSalvage, :prepare_if_needed, lambda { |path| [path, nil] }],
+                [IMP::PdfSalvage, :cleanup, nil],
+                [IMP::PDFParser, :new, FakeParser.new(2)],
+                [IMP, :run_pipeline, placement_page_runner(model, log, cancel_at, id_base)],
+                [IMP, :fit_retained_pages, nil],
+                [IMP, :finalize_import_diagnostics!, nil],
+                [IMP, :handle_open_gate, false]], &block)
+  end
+
+  def placement_opts
+    dialog_opts('Auto').merge(:cancel_probe => lambda { false },
+                              :status_sink => lambda { |_snapshot| true })
+  end
+
+  def write_pdf(dir, name)
+    path = File.join(dir, name)
+    File.binwrite(path, "%PDF-1.4\n% #{name}\n%%EOF\n")
+    path
+  end
+
+  def test_second_pdf_lands_above_the_first_and_a_resume_keeps_its_journal_offsets
+    model = Model.new
+    log = []
+    Dir.mktmpdir('placement') do |dir|
+      first = write_pdf(dir, 'D042-a.pdf')
+      second = write_pdf(dir, 'D042-b.pdf')
+      with_placement_host(model, log, ['D042-a.pdf', 2]) do
+        partial = IMP.run_resumable_pipeline(model, first, placement_opts)
+        assert_equal true, partial[:cancelled]
+      end
+      assert_equal [['D042-a.pdf', 1, 0.0], ['D042-a.pdf', 2, 13.2]], log
+      with_placement_host(model, log) do
+        IMP.run_resumable_pipeline(model, second, placement_opts)
+      end
+      b_first = log.find { |row| row[0] == 'D042-b.pdf' && row[1] == 1 }
+      assert_in_delta 11.0 + 2.2, b_first[2], 1e-9, 'second PDF starts above the first'
+      with_placement_host(model, log) do
+        resumed = IMP.run_resumable_pipeline(model, first, placement_opts)
+        assert_equal [1], resumed[:resumed_pages]
+      end
+      a_page2 = log.select { |row| row[0] == 'D042-a.pdf' && row[1] == 2 }.last
+      assert_in_delta 13.2, a_page2[2], 1e-9,
+                      'a resume continues from the journal offset, not from the bounds'
+    end
+  end
+
+  def test_folder_batch_gives_each_pdf_its_own_stack
+    model = Model.new
+    log = []
+    Dir.mktmpdir('placement-batch') do |dir|
+      %w[D100-1.pdf D100-2.pdf D100-3.pdf].each { |name| write_pdf(dir, name) }
+      with_placement_host(model, log) do
+        with_stubs([[Sketchup, :active_model, model],
+                    [UI, :inputbox, [dir]],
+                    [UI, :messagebox, IDYES]]) do
+          IMP.batch_import
+        end
+      end
+    end
+    starts = log.select { |row| row[1] == 1 }.map { |row| row[2] }
+    tops = log.select { |row| row[1] == 2 }.map { |row| row[2] + 11.0 }
+    assert_equal 3, starts.length
+    assert_equal 0.0, starts[0]
+    assert_operator starts[1], :>, tops[0]
+    assert_operator starts[2], :>, tops[1]
   end
 
   def test_folder_batch_does_not_count_incomplete_or_nil_results_as_success
