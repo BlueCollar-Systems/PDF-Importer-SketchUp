@@ -3284,6 +3284,16 @@ module BlueCollarSystems
       nil
     end
 
+    # Start of a fresh (not resumed) import: above earlier PDF pages, or the
+    # origin in an empty model. The gap uses the first requested page's
+    # height, which is read only when earlier pages exist.
+    def self.fresh_import_start_offset(model, parser, requested_pages, opts)
+      first_requested = Array(requested_pages).first
+      import_base_y_offset(model, lambda {
+        requested_page_height_in(parser, first_requested, opts[:scale])
+      })
+    end
+
     # Height in model inches of the first requested page (crop box when
     # present, rotation-aware, times the import scale).
     def self.requested_page_height_in(parser, page_num, scale)
@@ -3933,9 +3943,7 @@ module BlueCollarSystems
       arrangement = normalize_page_arrangement(opts[:page_arrangement])
       gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
       running_y_offset = if opts[:initial_y_offset].nil?
-                           import_base_y_offset(model, lambda {
-                             requested_page_height_in(parser, pages.first, opts[:scale])
-                           })
+                           fresh_import_start_offset(model, parser, pages, opts)
                          else
                            opts[:initial_y_offset].to_f
                          end
@@ -4195,9 +4203,7 @@ module BlueCollarSystems
           :controller => controller,
           :pages => pages,
           :base_y_offset => lambda {
-            import_base_y_offset(model, lambda {
-              requested_page_height_in(parser, pages.first, opts[:scale])
-            })
+            fresh_import_start_offset(model, parser, pages, opts)
           },
           :runner => runner,
           :group_per_page => opts[:group_per_page],
@@ -4461,9 +4467,7 @@ module BlueCollarSystems
       page_arrangement = normalize_page_arrangement(opts[:page_arrangement])
       page_gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
       running_y_offset = if opts[:initial_y_offset].nil?
-                           import_base_y_offset(model, lambda {
-                             requested_page_height_in(parser, pages.first, opts[:scale])
-                           })
+                           fresh_import_start_offset(model, parser, pages, opts)
                          else
                            opts[:initial_y_offset].to_f
                          end

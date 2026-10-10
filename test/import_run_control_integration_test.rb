@@ -74,7 +74,7 @@ class ImportRunControlIntegrationTest < Minitest::Test
       /running_y_offset = if opts\[:initial_y_offset\]\.nil\?.*?pages\.each_with_index/m
     ]
     refute_nil loop_setup
-    assert_includes loop_setup, 'import_base_y_offset(model'
+    assert_includes loop_setup, 'fresh_import_start_offset(model'
     assert_includes loop_setup, 'opts[:initial_y_offset].to_f'
     assert_includes loop_setup, 'page_group_for_certification = nil'
     page_end = pipeline[/running_y_offset \+= page_stack_step.*?model\.commit_operation/m]
