@@ -15,13 +15,20 @@ require File.join(
 class LabelsVisualEquivalentGuidanceContractTest < Minitest::Test
   IMPORTER = BlueCollarSystems::PDFVectorImporter
 
+  # The dialog hint is plain shop English: it tells the user that on
+  # SketchUp 2017 Text and Labels arrive as 3D letters, and it never promises
+  # an editable native annotation or a picture in their place.
   def test_import_dialog_explains_finite_bbox_labels_visual_equivalent
     hint = IMPORTER::ImportDialog::TEXT_MODE_HINT
+    labels = IMPORTER::ImportDialog::TEXT_MODE_HINT_LINES.find do |line|
+      line =~ /Labels/
+    end
 
-    assert_match(/finite[- ]bbox Labels/i, hint)
-    assert_match(/source-outline 3D visual-equivalent/i, hint)
-    assert_match(/not (?:a )?native editable annotation/i, hint)
-    assert_match(/no silent Raster/i, hint)
+    refute_nil labels
+    assert_match(/SketchUp 2017/, labels)
+    assert_match(/3D letters/i, labels)
+    refute_match(/editable/i, hint)
+    refute_match(/Labels[^\n]*(?:picture|raster)/i, hint)
   end
 
   def test_qa_report_never_recommends_labels_as_editable_native_text

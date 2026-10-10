@@ -20,9 +20,67 @@ module Sketchup
   end
 end
 
+# Recording stand-in for SketchUp's HtmlDialog / inputbox. Only the window
+# size, the registered callbacks and the inputbox prompts matter here.
+module UI
+  class HtmlDialog
+    class << self
+      attr_accessor :instances, :on_show
+    end
+    self.instances = []
+
+    attr_reader :options, :sizes, :callbacks, :html, :closed
+
+    def initialize(options)
+      @options = options
+      @sizes = []
+      @callbacks = {}
+      @closed = false
+      self.class.instances << self
+    end
+
+    def set_size(width, height)
+      @sizes << [width, height]
+    end
+
+    def set_html(html)
+      @html = html
+    end
+
+    def add_action_callback(name, &block)
+      @callbacks[name] = block
+    end
+
+    def show_modal
+      hook = self.class.on_show
+      hook.call(self) if hook
+    end
+
+    def close
+      @closed = true
+    end
+  end
+
+  class << self
+    attr_accessor :inputbox_calls, :messages
+  end
+  self.inputbox_calls = []
+  self.messages = []
+
+  def self.inputbox(prompts, defaults, dropdowns, title)
+    inputbox_calls << [prompts, defaults, dropdowns, title]
+    nil
+  end
+
+  def self.messagebox(message, *_rest)
+    messages << message
+  end
+end
+
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/logger'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/import_dialog'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/import_config'
+require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/main'
 
 class ImportDialogDefaultsTest < Minitest::Test
   BID = BlueCollarSystems::PDFVectorImporter::ImportDialog
@@ -43,6 +101,19 @@ class ImportDialogDefaultsTest < Minitest::Test
     Sketchup.reset_defaults(
       [PREF_KEY, 'text_mode'] => 'Labels'
     )
+    UI::HtmlDialog.instances = []
+    UI::HtmlDialog.on_show = nil
+    UI.inputbox_calls = []
+    UI.messages = []
+  end
+
+  def advanced_defaults(extra = {})
+    {
+      mode: 'Auto', pages: 'All', scale: '1.0', text_mode: 'Geometry',
+      import_text: 'Yes', match_pdf_layers: 'Yes',
+      grouping_mode: 'Group per page',
+      page_arrangement: 'Spread (20% gap)'
+    }.merge(extra)
   end
 
   def test_vector_quality_modes_default_to_3d_text
@@ -205,22 +276,133 @@ class ImportDialogDefaultsTest < Minitest::Test
     expected.each { |mode| assert_includes basic, ">#{mode}<" }
   end
 
-  def test_labels_hint_does_not_promise_native_annotation_editability
-    hint = BID::TEXT_MODE_HINT
+  # One short plain line per text choice. Labels must never be promised as
+  # editable SketchUp annotations: on SketchUp 2017 they arrive as 3D letters.
+  def test_text_mode_hint_is_one_plain_line_per_choice
+    lines = BID::TEXT_MODE_HINT_LINES
+    prefixes = ['3D Text:', 'Text / Labels:', 'Glyphs:', 'Geometry:', 'Raster:']
 
-    assert_match(/finite[- ]bbox Labels/i, hint)
-    assert_match(/source-outline 3D visual-equivalent/i, hint)
-    assert_match(/not (?:a )?native editable annotation/i, hint)
-    assert_match(/no silent Raster/i, hint)
+    assert_equal prefixes.length, lines.length
+    prefixes.zip(lines).each do |prefix, line|
+      assert line.start_with?(prefix), "#{line.inspect} should start with #{prefix}"
+      assert_operator line.length, :<=, 70, line
+    end
+    labels = lines.find { |line| line.start_with?('Text / Labels:') }
+    assert_match(/SketchUp 2017/, labels)
+    assert_match(/3D letters/, labels)
+    refute_match(/editable/i, BID::TEXT_MODE_HINT)
+    refute_match(/bbox|semantic|provenance|visual-equivalent|annotation/i,
+                 BID::TEXT_MODE_HINT)
   end
 
   def test_basic_html_professional_flow
     html = BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', 'Geometry', 'Yes', 'Yes')
 
-    assert_includes html, 'Professional import'
+    assert_includes html, BID::AUTO_MODE_HINT
+    refute_includes html, 'picks vector, raster, or hybrid'
     refute_includes html, 'id="mode"'
     assert_includes html, '>Labels<'
-    assert_includes html, BID::TEXT_MODE_HINT
+    BID::TEXT_MODE_HINT_LINES.each { |line| assert_includes html, line }
+  end
+
+  def test_dialog_windows_are_tall_enough_for_their_buttons
+    BID.show_html_basic('sample.pdf', {})
+    BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
+    basic, advanced = UI::HtmlDialog.instances
+
+    refute_empty basic.sizes, 'Basic window must set_size (SketchUp 2017 ignores width/height once a preferences_key is saved)'
+    refute_empty advanced.sizes, 'Advanced window must set_size'
+    assert_operator basic.sizes.last[1], :>=, 600
+    assert_operator advanced.sizes.last[1], :>=, 760
+    assert_operator basic.options[:height], :>=, 600
+    assert_operator advanced.options[:height], :>=, 760
+    assert_equal false, basic.options[:resizable]
+    assert_equal false, advanced.options[:resizable]
+  end
+
+  # Chromium 52 (SketchUp 2017) has no CSS grid and no flex gap; the buttons
+  # stay pinned to the bottom of the window either way.
+  def test_dialog_css_works_without_grid_or_gap
+    css = BID::DIALOG_CSS
+
+    refute_match(/display:\s*grid/, css)
+    refute_match(/(?:^|[;{\s])gap\s*:/, css)
+    assert_match(/\.actions\{[^}]*position:fixed/, css)
+    assert_match(/\.actions\{[^}]*bottom:0/, css)
+    assert_match(/body\{[^}]*padding-bottom:64px/, css)
+    assert_includes css, '.btn+.btn{margin-left:8px}'
+  end
+
+  def test_enter_on_a_button_does_not_start_the_import
+    html = BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', 'Geometry', 'Yes', 'Yes')
+
+    assert_includes html, "e.key==='Enter' && e.target && e.target.tagName!=='BUTTON'"
+    assert_includes html, 'e.preventDefault();doImport();'
+    refute_includes html, "if(e.key==='Enter')doImport();"
+  end
+
+  def test_cancel_never_returns_import_options
+    UI::HtmlDialog.on_show = lambda do |dlg|
+      dlg.callbacks['on_import'].call(nil, 'pages' => 'All', 'scale' => '1.0',
+                                      'text_mode' => '3D Text',
+                                      'import_text' => 'Yes',
+                                      'match_pdf_layers' => 'Yes',
+                                      'mode' => 'Auto')
+      dlg.callbacks['on_cancel'].call(nil, {})
+    end
+
+    assert_nil BID.show_html_basic('sample.pdf', {})
+    assert_nil BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
+  end
+
+  def test_advanced_html_drops_dead_grouping_and_duplicate_hybrid_choices
+    html = BID.send(:advanced_html, 'sample.pdf', advanced_defaults)
+
+    refute_includes html, 'id="grouping_mode"'
+    refute_includes html, 'Grouping Mode'
+    refute_includes html, 'Hybrid'
+    assert_includes html, BID::GROUPING_HINT
+    assert_includes html, '<option value="Auto" selected>Auto (recommended)</option>'
+    assert_includes html, '<option value="Vector">Lines and text only (skips pictures)</option>'
+    assert_includes html, '<option value="Raster">Picture of each page</option>'
+
+    saved_hybrid = BID.send(:advanced_html, 'sample.pdf', advanced_defaults(mode: 'Hybrid'))
+    assert_includes saved_hybrid, '<option value="Auto" selected>Auto (recommended)</option>'
+  end
+
+  def test_saved_hybrid_mode_still_loads_and_builds
+    assert_equal 'Hybrid', BID.valid_mode_name('Hybrid')
+    assert BID::MODES.key?('Hybrid')
+    opts = BID.send(:build_opts, import_mode: 'hybrid', import_text: 'Yes',
+                                 text_mode: '3D Text',
+                                 grouping_mode: 'Single group')
+    assert_equal 'hybrid', opts[:import_mode]
+    assert_equal 'Single group', opts[:grouping_mode]
+  end
+
+  def test_inputbox_fallback_has_no_dead_grouping_prompt
+    BID.show_inputbox_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
+    prompts, _defaults, dropdowns, _title = UI.inputbox_calls.last
+
+    refute prompts.any? { |prompt| prompt =~ /Grouping/i }, prompts.inspect
+    refute_includes dropdowns, BID::GROUPING_CHOICES
+    assert_equal prompts.length, dropdowns.length
+    refute_includes dropdowns.first.split('|'), 'Hybrid'
+  end
+
+  def test_compact_gap_is_tighter_than_spread
+    compact = BID.send(:build_opts, import_mode: 'auto', page_arrangement: 'Compact gap')
+    spread = BID.send(:build_opts, import_mode: 'auto', page_arrangement: 'Spread (20% gap)')
+    imp = BlueCollarSystems::PDFVectorImporter
+
+    assert_operator compact[:page_gap_ratio], :<, 0.20
+    assert_in_delta 0.20, spread[:page_gap_ratio], 1e-9
+    assert_in_delta 11.55,
+                    imp.page_stack_step(11.0, imp.normalize_page_arrangement(compact[:page_arrangement]),
+                                        compact[:page_gap_ratio]), 1e-6
+    assert_in_delta 13.2,
+                    imp.page_stack_step(11.0, imp.normalize_page_arrangement(spread[:page_arrangement]),
+                                        spread[:page_gap_ratio]), 1e-6
   end
 
   def test_basic_html_selects_last_used_text_mode
@@ -231,16 +413,10 @@ class ImportDialogDefaultsTest < Minitest::Test
   end
 
   def test_advanced_html_keeps_mode_selector
-    d = {
-      mode: 'Auto', pages: 'All', scale: '1.0', text_mode: 'Geometry',
-      import_text: 'Yes', match_pdf_layers: 'Yes',
-      grouping_mode: 'Group per page',
-      page_arrangement: 'Spread (20% gap)'
-    }
-    html = BID.send(:advanced_html, 'sample.pdf', d)
+    html = BID.send(:advanced_html, 'sample.pdf', advanced_defaults)
 
     assert_includes html, 'id="mode"'
-    %w[Auto Vector Raster Hybrid].each { |m| assert_includes html, m }
+    %w[Auto Vector Raster].each { |m| assert_includes html, "<option value=\"#{m}\"" }
   end
 
   def test_advanced_html_closed_shape_extrusion_disabled_independently

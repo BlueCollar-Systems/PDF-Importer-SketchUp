@@ -2,7 +2,7 @@
 
 Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality tiers.
 
-**GUI:** Single **professional import** dialog — **Auto** per page by default. **Advanced** exposes explicit Vector/Raster/Hybrid and layout options.
+**GUI:** Single **professional import** dialog — **Auto** per page by default. **Advanced** exposes explicit Vector (lines and text only) / Raster (picture of each page) and page layout options; `Hybrid` is still accepted from saved settings and the CLI as another name for Auto.
 
 ## SketchUp
 
