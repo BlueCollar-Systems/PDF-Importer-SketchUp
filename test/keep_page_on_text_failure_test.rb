@@ -404,6 +404,60 @@ class KeepPageOnTextFailureTest < Minitest::Test
                  pipeline, 'the page rescue still aborts and re-raises')
   end
 
+  # ---- EXTRA: one failing white-area check no longer empties the sheet ----
+
+  def test_failed_white_area_check_keeps_the_page_and_lists_it
+    stats = {}
+    composition = :untouched
+    done = IMP.keep_page_on_page_stage_failure(
+      stats, 6, 'white_areas', 'white_area_check_failed',
+      'Some white areas were left as plain white shapes'
+    ) do
+      composition = nil
+      raise CE, 'source-unit physical roots are missing or duplicated before mask composition'
+    end
+    assert_equal false, done
+    assert_nil composition
+    row = stats[:page_step_downs].first
+    assert_equal 6, row[:page]
+    assert_equal 'white_areas', row[:item]
+    assert_equal 'white_area_check_failed', row[:reason_code]
+    assert_match(/plain white shapes/, row[:detail])
+    assert_match(/source-unit physical roots/, row[:detail])
+    assert_equal true, row[:page_kept]
+    line = IMP::ReportDialog.completion_status(
+      :pages => 6, :edges => 10, :text => 2, :page_step_downs => stats[:page_step_downs]
+    )
+    assert_includes line, 'Simplified on page 6 (see the report).'
+    report = IMP::QAReport.build_from_stats('fictional.pdf', { import_mode: 'auto' },
+                                            :pages => 6, :edges => 10, :primitives => 10,
+                                            :page_step_downs => stats[:page_step_downs])
+    json = JSON.parse(JSON.generate(report))
+    assert_equal true, json['fallback']['used']
+    assert_equal 'page_items_stepped_down', json['fallback']['reason']
+    assert_includes json['extra']['human_summary'], 'Simplified on page 6'
+  end
+
+  def test_white_area_stage_still_propagates_terminal_stops
+    error = IRC::ImportCancelled.new([1], 2, {})
+    raised = assert_raises(IRC::ImportCancelled) do
+      IMP.keep_page_on_page_stage_failure({}, 2, 'white_areas', 'x', 'y') { raise error }
+    end
+    assert_same error, raised
+  end
+
+  def test_white_area_stage_and_late_marks_are_wrapped_in_run_pipeline
+    pipeline = pipeline_source
+    compose = pipeline.index('composition = compose_page_white_masks!(')
+    refute_nil compose
+    opener = pipeline.rindex('keep_page_on_page_stage_failure(', compose)
+    refute_nil opener, 'the white-area stage steps down instead of failing the page'
+    assert_operator compose - opener, :<, 400
+    refute_match(/raise RepresentationFidelity::ContractError,\s*'final vector annotations require the complete page text inventory'/,
+                 pipeline)
+    assert_match(/overlay_top = 0\.0\s*\n\s*record_page_step_down!/, pipeline)
+  end
+
   # ---- report: fallback_used and human_summary ---------------------------
 
   def test_report_marks_fallback_used_and_says_what_was_not_delivered

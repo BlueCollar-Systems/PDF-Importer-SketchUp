@@ -694,6 +694,24 @@ module BlueCollarSystems
       true
     end
 
+    # A page stage that only refines what is already built (it changes each
+    # item completely or leaves it untouched, and undoes an item it cannot
+    # finish) steps down instead of costing the page: the page keeps its
+    # items in their plainer form and the step-down is listed. Returns true
+    # when the stage completed. Terminal stops still propagate.
+    def self.keep_page_on_page_stage_failure(stats, page_num, item,
+                                             reason_code, detail)
+      yield
+      true
+    rescue StandardError => error
+      raise if terminal_import_error?(error)
+      record_page_step_down!(
+        stats, page_num, item, reason_code,
+        "#{detail} (#{error.message.to_s.gsub(/\s+/, ' ')[0, 200]})"
+      )
+      false
+    end
+
     # A page with nothing left in it after its text stepped down is not
     # kept: the host would purge the empty group at commit and break the
     # resume journal. It fails like before (rolled back, listed, resumable).
@@ -6076,11 +6094,24 @@ module BlueCollarSystems
           source_svg_document || svg_document || CairoGlyphSource.render_page_svg(
             path, page_num, :use_cropbox => use_cropbox == true)
         end
+        # White areas are cut around the text drawn on them. If that check
+        # fails, the remaining white areas stay as plain white shapes and the
+        # page is kept and listed (owner ruling: deliver, step down, report).
+        # Areas already cut stay cut; an area whose check fails before its
+        # final swap is restored by PlanarWhiteKnockout (its unfinished work
+        # is erased), and the areas after it are left untouched.
+        composition = nil
+        keep_page_on_page_stage_failure(
+          stats, page_num, 'white_areas', 'white_area_check_failed',
+          'Some white areas were left as plain white shapes; text drawn ' \
+            'over them may be hidden'
+        ) do
         composition = compose_page_white_masks!(builder, text_items, media_box,
           :scale => opts[:scale], :svg_page_box => svg_page_box,
           :page_rotation => page_rotation, :y_offset => page_y_offset,
           :svg_provider => paint_svg_provider,
           :source_units => Array(stats[:source_glyph_physical_deliveries]).select { |row| row[:page] == page_num })
+        end
         if composition
           stats[:planar_white_knockout] ||= []
           stats[:planar_white_knockout] << composition[:report].merge(:page => page_num)
