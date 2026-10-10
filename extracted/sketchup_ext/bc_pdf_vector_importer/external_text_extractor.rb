@@ -194,13 +194,20 @@ module BlueCollarSystems
             anchor = nil
             anchors = opts[:nominal_anchors]
             if anchors && !anchors.empty?
-              ax = x_min
-              ay = page_h - y_max # pdftotext top-down -> PDF y-up (box bottom)
+              ax = x_min + offset_x
+              ay = page_h - y_max + offset_y
+              if rotated
+                ax, ay = PageTransform.inverse_transform_point(ax, ay, media_box, rotation)
+              end
               max_d = [bbox_w, bbox_h, 12.0].max
               anchor = NominalTextScanner.nearest(anchors, ax, ay, max_d)
               if anchor.nil?
-                ay2 = page_h - y_min
-                anchor = NominalTextScanner.nearest(anchors, ax, ay2, max_d)
+                ax2 = x_min + offset_x
+                ay2 = page_h - y_min + offset_y
+                if rotated
+                  ax2, ay2 = PageTransform.inverse_transform_point(ax2, ay2, media_box, rotation)
+                end
+                anchor = NominalTextScanner.nearest(anchors, ax2, ay2, max_d)
               end
             end
 
@@ -225,12 +232,12 @@ module BlueCollarSystems
             # Resolve its nominal glyph height to the short side here so every
             # renderer can continue trusting TextItem#font_size (SIZE-1). Keep
             # the scanner value as raw evidence for vertical-run inference.
-            if angle.to_f.abs < 12.0 && bbox_h > bbox_w * 1.5 &&
+            if anchor.nil? && angle.to_f.abs < 12.0 && bbox_h > bbox_w * 1.5 &&
                font_size.to_f > bbox_w * 1.5
               raw_font_size = font_size.to_f
               font_size = [bbox_w, bbox_h].min
             end
-            font_size = [font_size, 1.0].max
+            font_size = [font_size, 1.0].max unless anchor && anchor.size_pt > 0.05
 
             x_pdf = x_min + offset_x
             y_pdf = (page_h - y_max) + offset_y

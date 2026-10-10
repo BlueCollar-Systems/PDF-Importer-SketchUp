@@ -166,6 +166,7 @@ module BlueCollarSystems
             import_text = p['import_text'] || 'Yes'
             match_pdf_layers = p['match_pdf_layers'] || match_val
             PageSelection.parse(pages_str)
+            parse_import_scale(scale_str)
             save_prefs(last_mode: 'Auto', pages: pages_str,
                        scale: scale_str, text_mode: text_mode,
                        import_text: import_text,
@@ -186,17 +187,23 @@ module BlueCollarSystems
 
         dlg.add_action_callback('on_cancel') { |_ctx, _p| dlg.close }
         dlg.add_action_callback('on_advanced') do |_ctx, p|
-          save_prefs(last_mode: 'Auto',
-                     pages: p['pages']     || 'All',
-                     scale: p['scale']     || '1.0',
-                     text_mode: p['text_mode'] || text_val,
-                     import_text: p['import_text'] || 'Yes',
-                     match_pdf_layers: p['match_pdf_layers'] || match_val)
-          dlg.close
-          result = show_html_advanced(filename, p['pages'] || 'All',
-                                      p['scale'] || '1.0',
-                                      p['text_mode'] || text_val,
-                                      load_prefs)
+          begin
+            PageSelection.parse(p['pages'] || 'All')
+            parse_import_scale(p['scale'] || '1.0')
+            save_prefs(last_mode: 'Auto',
+                       pages: p['pages']     || 'All',
+                       scale: p['scale']     || '1.0',
+                       text_mode: p['text_mode'] || text_val,
+                       import_text: p['import_text'] || 'Yes',
+                       match_pdf_layers: p['match_pdf_layers'] || match_val)
+            dlg.close
+            result = show_html_advanced(filename, p['pages'] || 'All',
+                                        p['scale'] || '1.0',
+                                        p['text_mode'] || text_val,
+                                        load_prefs)
+          rescue ArgumentError => error
+            UI.messagebox(error.message)
+          end
         end
         dlg.show_modal
         result
@@ -229,6 +236,7 @@ module BlueCollarSystems
         dlg.add_action_callback('on_import') do |_ctx, p|
           begin
             PageSelection.parse(p['pages'])
+            parse_import_scale(p['scale'] || '1.0')
             save_prefs(
               last_mode: p['mode'],
               pages: p['pages'], scale: p['scale'],
@@ -459,6 +467,7 @@ module BlueCollarSystems
         return nil unless result
         pages_str, scale_str, import_text_str, text_mode_str, match_layers_str = result
         return nil unless valid_page_input?(pages_str)
+        return nil unless valid_scale_input?(scale_str)
         save_prefs(last_mode: 'Auto', pages: pages_str,
                    scale: scale_str, import_text: import_text_str,
                    text_mode: text_mode_str, match_pdf_layers: match_layers_str)
@@ -492,6 +501,7 @@ module BlueCollarSystems
         p_mode,p_pages,p_scale,p_import_text,p_text_mode,
         p_match_layers,p_grouping_mode,p_page_arrangement = result
         return nil unless valid_page_input?(p_pages)
+        return nil unless valid_scale_input?(p_scale)
         save_prefs(last_mode:p_mode,pages:p_pages,scale:p_scale,
                    import_text:p_import_text,text_mode:p_text_mode,
                    match_pdf_layers:p_match_layers,
@@ -517,15 +527,23 @@ module BlueCollarSystems
         false
       end
 
+      def self.valid_scale_input?(value)
+        parse_import_scale(value)
+        true
+      rescue ArgumentError => error
+        UI.messagebox(error.message)
+        false
+      end
+
       private
 
       def self.build_opts(raw)
-        scale = (raw[:scale] || '1.0').to_f
-        scale = 1.0 if scale <= 0
+        scale = parse_import_scale(raw[:scale] || '1.0')
         case (raw[:units] || '')
         when /Feet/i   then scale *= 12.0
         when /Points/i then scale /= 72.0
         end
+        scale = parse_import_scale(scale)
 
         pages = PageSelection.parse(raw[:pages])
 
@@ -613,6 +631,14 @@ module BlueCollarSystems
           extrude_to_3d: SHAPE_EXTRUSION_UI_ENABLED && (raw[:extrude_to_3d] || 'No') == 'Yes',
           extrude_depth_mm: SHAPE_EXTRUSION_UI_ENABLED ? parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth]) : nil
         }
+      end
+
+      def self.parse_import_scale(value)
+        scale = Float(value)
+        raise ArgumentError unless scale.finite? && scale > 0.0
+        scale
+      rescue ArgumentError, TypeError
+        raise ArgumentError, 'Scale must be a positive, finite number, such as 1.0 or 0.5.'
       end
 
       def self.parse_extrude_depth_mm(value)

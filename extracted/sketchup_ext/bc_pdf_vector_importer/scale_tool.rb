@@ -35,7 +35,7 @@ module BlueCollarSystems
 
         if edge
           # Measure the selected edge
-          measured_length = edge.length  # inches
+          measured_length = selected_edge_length(model, edge)
           measured_str = format_length(measured_length)
 
           prompts = [
@@ -185,6 +185,11 @@ module BlueCollarSystems
       # Apply the scale transformation
       # ---------------------------------------------------------------
       def self.apply_scale(model, factor, target_mode, measured, real, dim_str)
+        operation_open = false
+        unless factor.is_a?(Numeric) && factor.to_f.finite? && factor > 0.0
+          UI.messagebox('Scale must be a positive, finite number.')
+          return
+        end
         # Confirmation
         factor_display = "%.6f" % factor
         msg = "Scale Factor: #{factor_display}×\n"
@@ -199,6 +204,7 @@ module BlueCollarSystems
         return unless choice == IDYES
 
         model.start_operation("Scale by Reference", true)
+        operation_open = true
 
         # Compute bounding box center of target geometry for anchored scaling.
         # Scaling around the geometry center keeps shapes in place instead of
@@ -214,19 +220,26 @@ module BlueCollarSystems
           model.entities.each { |e| bb.add(e.bounds) if e.respond_to?(:bounds) && e.valid? }
         end
         anchor = bb.valid? ? bb.center : ORIGIN
+        if target_mode == 'Selection Only' && model.respond_to?(:edit_transform)
+          # Active-context transform_entities uses model coordinates, while
+          # selected entity bounds belong to the current editing context.
+          anchor = anchor.transform(model.edit_transform)
+        end
 
         xform = Geom::Transformation.scaling(anchor, factor)
         scaled_count = 0
 
         case target_mode
         when "Selection Only"
-          # Scale each selected entity (skip locked)
-          model.selection.each do |ent|
-            next if ent.respond_to?(:locked?) && ent.locked?
-            if ent.respond_to?(:transform!)
-              ent.transform!(xform)
-              scaled_count += 1
-            end
+          # Edges and faces have no transform! method. Transform the selection
+          # together so shared vertices move exactly once in its editing context.
+          targets = model.selection.to_a.select do |ent|
+            ent.respond_to?(:bounds) && (!ent.respond_to?(:valid?) || ent.valid?) &&
+              (!ent.respond_to?(:locked?) || !ent.locked?)
+          end
+          unless targets.empty?
+            model.active_entities.transform_entities(xform, targets)
+            scaled_count = targets.length
           end
 
         when "Active Group"
@@ -264,17 +277,19 @@ module BlueCollarSystems
           end
           # If no groups found, scale all edges/faces
           if scaled_count == 0
-            model.entities.each do |ent|
-              next if ent.respond_to?(:locked?) && ent.locked?
-              if ent.respond_to?(:transform!)
-                ent.transform!(xform)
-                scaled_count += 1
-              end
+            targets = model.entities.to_a.select do |ent|
+              ent.respond_to?(:bounds) && (!ent.respond_to?(:valid?) || ent.valid?) &&
+                (!ent.respond_to?(:locked?) || !ent.locked?)
+            end
+            unless targets.empty?
+              model.entities.transform_entities(xform, targets)
+              scaled_count = targets.length
             end
           end
         end
 
         model.commit_operation
+        operation_open = false
 
         UI.messagebox("Scaled #{scaled_count} object(s) by #{factor_display}×")
 
@@ -294,6 +309,17 @@ module BlueCollarSystems
           end
         rescue StandardError => e
           Logger.warn("ScaleTool", "zoom_top_view failed: #{e.message}")
+        end
+      rescue StandardError => error
+        model.abort_operation if operation_open
+        UI.messagebox("Scaling could not be completed: #{error.message}")
+      end
+
+      def self.selected_edge_length(model, edge)
+        if model.respond_to?(:edit_transform)
+          edge.length(model.edit_transform)
+        else
+          edge.length
         end
       end
 
