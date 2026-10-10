@@ -97,3 +97,48 @@ Other workspace activity created commits during verification. This review did
 not make commits or push; concurrent work was preserved. Later focused checks
 were run against settled source, and suite results are identified by stage
 rather than combined into a misleading final-suite total.
+
+## Local packaging and compatibility follow-up
+
+The later packaging request produced usable dated Windows test packages for
+all seven projects, a debug-signed Steel Logic Android TEST APK, and the
+desktop shortcut `BlueCollar Test Tools - 2026-10-10`. The consolidated guide
+and current archive hashes are in `C:\BlueCollar-Test-Builds\2026-10-10`.
+The earlier remaining-work list describes the first pass; several of those
+items have now been resolved by the follow-up below.
+
+- SketchUp's actual Ruby 2.2.4-p230 language suite passed 176 test files after
+  fixing legacy Integer numeric validation. Extracted helpers passed. Native
+  Make 2017 import/save/reopen and current Pro acceptance remain pending
+  because window activation failed after one recovery.
+- Blender's final r5 extracted importer accepted all six modes and selected
+  fixtures in native 3.1.2 and 5.2.2. Temporary TextCurve ownership and empty
+  mesh material handling were corrected; 131 targeted regressions passed.
+- FreeCAD's final r4 extracted importer accepted all six modes and selected
+  fixtures in native 0.21.2 and 1.1.4. The legacy bounding API defect now uses
+  an owned analytic copy, and content-bound checkpoint validation rejects
+  code changes while preserving completed geometry.
+- LibreCAD's frozen package/source/plugin gates passed. A large-file page
+  converted without degraded text, reopened with no DXF audit errors, and
+  its menu plugin loaded against the installed Qt5.15.2 runtime with the
+  expected interface/menu entries. Native GUI interaction remains pending.
+- Steel Logic's isolated Windows TEST app passed packaged offline workflow
+  checks with the exact Tag QC register/CSV identities and two part timers.
+  Calendar-day corrections now preserve adjacent days and overnight hours;
+  23/25-hour daylight-saving regressions passed. Android package metadata,
+  three ABI runtimes, integrity and debug signature were verified. Physical
+  mobile installation/camera/OS dispatch and iOS signing remain pending.
+- Extracted Tag QC/website packages passed scanner recovery, namespace and
+  atomic per-piece accounting checks plus restart/move/ownership controls.
+  The existing portable document implementation remains a separately tested
+  workflow; it passed 299 self-checks and retains independent job backups.
+
+The final consolidated `VALIDATION.html` records suite completion and precise
+platform limits. Native CAD probes exercised actual package code and callback
+controls on selected fixtures, with no universal GUI pixel/fidelity claim.
+No automatic 2D-to-3D reconstruction, worldwide shop-policy certification,
+public deployment, store publication, or user extension replacement was
+performed. Private inputs and credentials are excluded from distributable
+archives. Detailed SketchUp/LibreCAD packaging evidence is in
+[the packaging record](2026-10-10-test-packaging.md); the other projects have
+their own dated package validation records.

@@ -9,6 +9,7 @@ require File.join(File.dirname(__FILE__), 'page_transform')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'import_run_control')
 require File.join(File.dirname(__FILE__), 'stroke_clipping')
+require File.join(File.dirname(__FILE__), 'vector_stroke_footprint')
 require 'digest'
 
 module BlueCollarSystems
@@ -57,6 +58,10 @@ module BlueCollarSystems
         @group_by_color  = opts[:group_by_color] || false
         @detect_arcs     = opts[:detect_arcs] != false
         @map_dashes      = opts[:map_dashes] || false
+        @lineweight_mode = (opts[:lineweight_mode] || 'Ignore').to_s
+        unless ['Ignore','Preserve visually','Group by lineweight','Map to tags'].include?(@lineweight_mode)
+          raise ArgumentError, 'Unknown lineweight mode: ' + @lineweight_mode
+        end
         @import_text     = opts[:import_text] || false
         @use_3d_text     = opts[:use_3d_text] || false
         @requested_text_mode = normalize_text_mode_symbol(opts[:requested_text_mode]) ||
@@ -92,6 +97,15 @@ module BlueCollarSystems
         @geometry_staging = disabled_geometry_staging
         @deferred_small_face_batches = {}
         @stroke_clipping = { :clipped_subpaths => 0, :unresolved_subpaths => 0, :unresolved_reasons => {} }
+        @stroke_footprints = { :requested_mode => @lineweight_mode,
+          :stroke_path_count => 0, :represented_path_count => 0,
+          :represented_subpath_count => 0, :unresolved_path_count => 0,
+          :unresolved_reasons => {}, :records => [] }
+        @lineweight_groups = {}
+        @lineweight_organization = { :requested_mode=>@lineweight_mode,
+          :organized_path_count=>0,:group_count=>0,:tag_names=>[],
+          :width_metric=>'declared PDF user-space points; CTM may make world width directional',
+          :physical_width_preservation_claimed=>false }
       end
 
       def build
@@ -173,6 +187,9 @@ module BlueCollarSystems
 
           # Determine the layer for this path — OCG layer takes priority when enabled
           path_layer = resolve_layer(path.layer_name)
+          if should_stroke
+            dest,path_layer = organize_lineweight!(dest,path,path_layer)
+          end
 
           # Determine dash rendering info
           dash_spec = nil
@@ -180,6 +197,9 @@ module BlueCollarSystems
           if @map_dashes && path.dash_pattern
             dash_spec = normalize_dash_pattern(path.dash_pattern, path.ctm)
             dash_layer = classify_dash(path.dash_pattern)
+            # Explicit width-tag organization takes priority over automatic
+            # dash-class tags; baked dash geometry and source color remain.
+            dash_layer = nil if @lineweight_mode == 'Map to tags'
           end
 
           # A paint occurrence owns its fill independently of its true stroke.
@@ -227,6 +247,13 @@ module BlueCollarSystems
           # Keep the source style local to this path, including retained batches.
           stroke_style = should_stroke ? source_stroke_style(path.stroke_color) : nil
           stroke_bounds = effective_stroke_bounds(path) if should_stroke
+          @stroke_footprints[:stroke_path_count] += 1 if should_stroke
+          if should_stroke && build_source_width_stroke!(dest,path,path_idx,path_layer,
+               stroke_style,stroke_bounds,page_origin_x,page_origin_y)
+            # Source fill/stroke combinations currently remain on the existing
+            # route with a counted limitation, so this branch owns stroke only.
+            next
+          end
           path.subpaths.each do |subpath|
             points_list = subpath_to_points(subpath)
             next if points_list.empty?
@@ -388,7 +415,12 @@ module BlueCollarSystems
           text_delivery_failures: Array(@text_delivery_failures),
           text_attempts: Array(@text_attempts),
           source_provenance_objects: Array(@provenance_bucket),
-          geometry_staging: geometry_staging_metrics.merge(:stroke_clipping => @stroke_clipping)
+          geometry_staging: geometry_staging_metrics.merge(:stroke_clipping => @stroke_clipping,
+            :lineweight_organization=>@lineweight_organization,
+            :stroke_footprints => @stroke_footprints.merge(
+              :all_source_widths_represented => @lineweight_mode == 'Preserve visually' &&
+                @stroke_footprints[:unresolved_path_count] == 0 &&
+                @stroke_footprints[:represented_path_count] == @stroke_footprints[:stroke_path_count]))
         }
       end
 
@@ -3304,6 +3336,95 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Stroke colors belong to the real edges, independent of optional grouping,
       # face materials, or the active viewport's edge-color display setting.
+      def build_source_width_stroke!(entities,path,path_index,layer,style,bounds,origin_x,origin_y)
+        return false unless @lineweight_mode == 'Preserve visually'
+        begin
+          plans=path.subpaths.map do |subpath|
+            sampled=VectorStrokeFootprint.flatten_subpath(path,subpath)
+            VectorStrokeFootprint.plan(path,sampled[:points],subpath.closed,bounds).merge(
+              :curve_sampled=>sampled[:curve_sampled],
+              :source_curve_tolerance_pdf_points=>sampled[:source_curve_tolerance_pdf_points],
+              :source_page=>@page_number,:source_path_index=>path_index,
+              :source_paint_order=>path.source_paint_order)
+          end
+        rescue VectorStrokeFootprint::Unsupported => error
+          return unresolved_source_width_stroke(path_index,error.message,path)
+        end
+        mapper=lambda { |x,y| pdf_to_su(x,y,origin_x,origin_y) }
+        # A native failure after eligibility is terminal. Never hide source
+        # centerlines or downgrade an entity on a host construction exception.
+        plans.each_with_index do |plan,index|
+          run_checkpoint!(:stroke_footprint,:path=>path_index,:subpath=>index)
+          built=VectorStrokeFootprint.build!(entities,plan,mapper,style[:material],layer)
+          @face_count += built[:face_count]
+          @edge_count += built[:edge_count]
+          @stroke_footprints[:records] << {
+            :path_index=>path_index,:subpath_index=>index,
+            :source_page=>@page_number,:source_paint_order=>path.source_paint_order,
+            :source_width_pdf_points=>plan[:source_width_pdf_points],
+            :source_ctm=>plan[:source_ctm],:source_line_cap=>plan[:source_line_cap],
+            :source_line_join=>plan[:source_line_join],:source_miter_limit=>plan[:source_miter_limit],
+            :source_curve_sampled=>plan[:curve_sampled],
+            :source_curve_tolerance_pdf_points=>plan[:source_curve_tolerance_pdf_points],
+            :round_segments_per_semicircle=>plan[:round_segments_per_semicircle],
+            :native_face_count=>built[:face_count],:construction_scale=>built[:construction_scale],
+            :footprint_clipped_empty=>built[:clipped_empty] == true,
+            :source_width_geometry_verified=>built[:group] ? true : false,
+            :whole_page_visual_fidelity_claimed=>false
+          }
+        end
+        @stroke_footprints[:represented_path_count] += 1
+        @stroke_footprints[:represented_subpath_count] += plans.length
+        true
+      end
+
+      def unresolved_source_width_stroke(path_index,reason,path=nil)
+        reasons=@stroke_footprints[:unresolved_reasons]
+        Logger.warn('GeometryBuilder',"Source-width path #{path_index}: #{reason}; retaining editable centerlines with approximate native line width.") unless reasons[reason]
+        reasons[reason]=(reasons[reason] || 0)+1
+        @stroke_footprints[:unresolved_path_count] += 1
+        @stroke_footprints[:records] << {:path_index=>path_index,:source_page=>@page_number,
+          :source_paint_order=>path && path.source_paint_order,
+          :source_width_pdf_points=>path && path.line_width,:source_width_geometry_verified=>false,
+          :reason=>reason,:whole_page_visual_fidelity_claimed=>false}
+        false
+      end
+
+      def organize_lineweight!(entities,path,layer)
+        return [entities,layer] unless ['Group by lineweight','Map to tags'].include?(@lineweight_mode)
+        width=path.line_width
+        raise StrokeStyleFailure, 'lineweight organization requires a finite nonnegative source width' unless
+          width.is_a?(Numeric) && width.to_f.finite? && width >= 0
+        # Float#to_s is roundtrip-safe in Ruby2.2. Avoid merging different
+        # declared widths through a short display formatter or tolerance.
+        declared=width.to_f.to_s
+        name="PDF lineweight #{declared} pt"
+        if @lineweight_mode == 'Group by lineweight'
+          key=[entities.object_id,declared]
+          group=@lineweight_groups[key]
+          unless group
+            group=entities.add_group
+            group.name=name
+            group.layer=layer if layer
+            raise StrokeStyleFailure, 'native lineweight group name/layer readback differs' unless
+              group.name == name && (!layer || group.layer == layer)
+            group.set_attribute('BC_PDF_Importer','declared_source_lineweight_pt',width.to_f)
+            raise StrokeStyleFailure, 'native lineweight group width readback differs' unless
+              group.get_attribute('BC_PDF_Importer','declared_source_lineweight_pt',nil) == width.to_f
+            @lineweight_groups[key]=group
+            @lineweight_organization[:group_count] += 1
+          end
+          entities=group.entities
+        else
+          name="#{@layer_name}: Lineweight #{declared} pt"
+          layer=@model.layers[name] || @model.layers.add(name)
+          raise StrokeStyleFailure, 'native lineweight tag creation/readback differs' unless layer && layer.name == name
+          @lineweight_organization[:tag_names] << name unless @lineweight_organization[:tag_names].include?(name)
+        end
+        @lineweight_organization[:organized_path_count] += 1
+        [entities,layer]
+      end
+
       def source_stroke_style(rgb)
         values = rgb.nil? ? [0.0, 0.0, 0.0] : rgb
         unless values.is_a?(Array) && values.length >= 3 &&

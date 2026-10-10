@@ -79,6 +79,12 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_equal true, opts[:import_text]
   end
 
+  def test_explicit_lineweight_choice_survives_config_and_dialog_translation
+    assert_equal 'Ignore', BIC.new(:lineweight_mode=>'Ignore').to_opts[:lineweight_mode]
+    assert_equal 'Preserve visually', BID.send(:build_opts,{})[:lineweight_mode]
+    assert_equal 'Ignore', BID.send(:build_opts,:import_mode=>'Raster',:lineweight_mode=>'Preserve visually')[:lineweight_mode]
+  end
+
   def test_saved_labels_preference_is_preserved
     prefs = BID.send(:load_prefs)
 

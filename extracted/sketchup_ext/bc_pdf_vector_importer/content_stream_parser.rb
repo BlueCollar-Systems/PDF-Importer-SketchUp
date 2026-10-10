@@ -42,7 +42,8 @@ module BlueCollarSystems
       VectorPath.class_eval do
         attr_accessor :source_paint_order, :source_fill_opacity,
                       :source_stroke_opacity, :source_clip_clear,
-                      :source_miter_limit, :source_stroke_style_proven, :source_stroke_clip
+                      :source_miter_limit, :source_stroke_style_proven, :source_stroke_clip,
+                      :source_stroke_ctm_proven, :source_stroke_solid_color_proven
       end
 
       SubPath = Struct.new(
@@ -493,6 +494,7 @@ module BlueCollarSystems
         reset_graphics_state
 
         # Current path being constructed
+        @current_path_ctm_proven = true
         @current_subpaths = []
         @current_segments = []
         @current_point = nil
@@ -519,6 +521,7 @@ module BlueCollarSystems
       def reset_graphics_state
         @ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]  # Identity matrix
         @stroke_color = [0.0, 0.0, 0.0]
+        @stroke_solid_color_proven = true
         @fill_color = [0.0, 0.0, 0.0]
         # Evidence for planar white-mask composition only. The renderer's
         # existing material behavior is unchanged. PDF's initial nonstroking
@@ -546,6 +549,7 @@ module BlueCollarSystems
         @gs_stack.push({
           ctm: @ctm.dup,
           stroke_color: @stroke_color.dup,
+          stroke_solid_color_proven: @stroke_solid_color_proven,
           fill_color: @fill_color.dup,
           fill_opacity: @fill_opacity,
           stroke_opacity: @stroke_opacity,
@@ -569,8 +573,10 @@ module BlueCollarSystems
       def restore_graphics_state
         gs = @gs_stack.pop
         return unless gs
+        @current_path_ctm_proven = false if stroke_path_under_construction? && @ctm != gs[:ctm]
         @ctm = gs[:ctm]
         @stroke_color = gs[:stroke_color]
+        @stroke_solid_color_proven = gs[:stroke_solid_color_proven]
         @fill_color = gs[:fill_color]
         @fill_opacity = gs[:fill_opacity]
         @stroke_opacity = gs[:stroke_opacity]
@@ -604,6 +610,15 @@ module BlueCollarSystems
           e * m[0] + f * m[2] + m[4],
           e * m[1] + f * m[3] + m[5]
         ]
+        @current_path_ctm_proven = false if stroke_path_under_construction? && @ctm != m
+      end
+
+      # Provenance only: existing emit-time coordinates remain unchanged. A
+      # path constructed under changing CTMs cannot certify a single-metric
+      # source-width footprint until construction-time transforms are supported.
+      def stroke_path_under_construction?
+        (@current_segments && !@current_segments.empty?) ||
+          (@current_subpaths && !@current_subpaths.empty?)
       end
 
       def transform_point(x, y)
@@ -950,12 +965,14 @@ module BlueCollarSystems
         when 'G'  # Stroke gray
           @stroke_color = nums_to_rgb(nums, '/DeviceGray')
           @color_space_stroke = '/DeviceGray'
+          @stroke_solid_color_proven = operands.all? { |t| t[:type] == :number } && known_solid_stroke_components?(nums, '/DeviceGray')
 
         when 'g'  # Fill gray
           @fill_color = nums_to_rgb(nums, '/DeviceGray')
           @color_space_fill = '/DeviceGray'
 
         when 'RG' # Stroke RGB
+          @stroke_solid_color_proven = operands.all? { |t| t[:type] == :number } && known_solid_stroke_components?(nums, '/DeviceRGB')
           if nums.length >= 3
             @stroke_color = nums_to_rgb(nums, '/DeviceRGB')
             @color_space_stroke = '/DeviceRGB'
@@ -968,6 +985,7 @@ module BlueCollarSystems
           end
 
         when 'K'  # Stroke CMYK
+          @stroke_solid_color_proven = operands.all? { |t| t[:type] == :number } && known_solid_stroke_components?(nums, '/DeviceCMYK')
           if nums.length >= 4
             @stroke_color = cmyk_to_rgb(nums[0], nums[1], nums[2], nums[3])
             @color_space_stroke = '/DeviceCMYK'
@@ -982,6 +1000,9 @@ module BlueCollarSystems
         when 'CS' # Stroke color space
           name_token = operands.find { |t| t[:type] == :name }
           @color_space_stroke = name_token[:value] if name_token
+          # Existing conversions/fallbacks stay unchanged. Only a subsequent
+          # supported solid color can certify a source-width face's color.
+          @stroke_solid_color_proven = false
 
         when 'cs' # Fill color space
           name_token = operands.find { |t| t[:type] == :name }
@@ -990,6 +1011,7 @@ module BlueCollarSystems
         when 'SC', 'SCN' # Stroke color (general)
           # Pattern-only SCN may provide no numeric components.
           @stroke_color = resolved_rgb(nums, @color_space_stroke) unless nums.empty?
+          @stroke_solid_color_proven = operands.all? { |t| t[:type] == :number } && known_solid_stroke_components?(nums, @color_space_stroke)
 
         when 'sc', 'scn' # Fill color (general)
           # Pattern-only scn may provide no numeric components.
@@ -1240,6 +1262,8 @@ module BlueCollarSystems
         path.source_clip_clear = @clip_regions.empty? && !@text_clip_active && !@text_clip_pending
         path.source_miter_limit = @miter_limit
         path.source_stroke_style_proven = @stroke_style_proven
+        path.source_stroke_ctm_proven = @current_path_ctm_proven == true
+        path.source_stroke_solid_color_proven = @stroke_solid_color_proven == true
         path.source_stroke_clip = StrokeClipping.snapshot(@clip_regions, @text_clip_active || @text_clip_pending) if stroke
         apply_pending_clip!
         clear_path
@@ -1378,6 +1402,7 @@ module BlueCollarSystems
       end
 
       def clear_path
+        @current_path_ctm_proven = true
         @current_subpaths = []
         @current_segments = []
         # PDF spec: after painting or ending a path, the current point is undefined.
@@ -1388,6 +1413,12 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Color helpers
       # ---------------------------------------------------------------
+      def known_solid_stroke_components?(nums, color_space)
+        count={'/DeviceGray'=>1,'/DeviceRGB'=>3,'/DeviceCMYK'=>4}[color_space]
+        count && nums.is_a?(Array) && nums.length == count &&
+          nums.all? { |value| value.is_a?(Numeric) && value.to_f.finite? && value >= 0 && value <= 1 }
+      end
+
       def clamp01(v)
         n = begin
           Float(v)

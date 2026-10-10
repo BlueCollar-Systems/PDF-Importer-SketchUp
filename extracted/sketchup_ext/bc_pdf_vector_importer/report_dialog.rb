@@ -54,6 +54,10 @@ module BlueCollarSystems
           line += " Failed page#{failed.length == 1 ? '' : 's'} skipped: " +
                   format_page_list(failed.map { |f| f[:page] }) + '.'
         end
+        approximations=lineweight_approximations(stats)
+        if approximations[:count] > 0
+          line += " Approximate line widths: #{approximations[:count]} vector path#{approximations[:count] == 1 ? '' : 's'}."
+        end
         line + ' See Extensions > Import Health for details.'
       end
 
@@ -73,6 +77,22 @@ module BlueCollarSystems
       def self.stat_value(entry, key)
         return nil unless entry.is_a?(Hash)
         entry.key?(key) ? entry[key] : entry[key.to_s]
+      end
+
+      def self.lineweight_approximations(stats)
+        count=0; pages=[]; reasons={}
+        Array(stat_value(stats,:geometry_staging)).each do |page|
+          proof=stat_value(page,:stroke_footprints)
+          next unless proof.is_a?(Hash) && stat_value(proof,:requested_mode).to_s == 'Preserve visually'
+          paths=stat_value(proof,:unresolved_path_count).to_i
+          next unless paths > 0
+          count += paths
+          number=stat_value(page,:page).to_i
+          pages << number if number > 0
+          values=stat_value(proof,:unresolved_reasons)
+          values.each { |reason,n| reasons[reason.to_s]=(reasons[reason.to_s] || 0)+n.to_i } if values.is_a?(Hash)
+        end
+        {:count=>count,:pages=>pages.uniq.sort,:reasons=>reasons}
       end
 
       # [[page, reason_code], ...] for pages the importer delivered as a raster
@@ -218,6 +238,14 @@ module BlueCollarSystems
         end
 
         append_text_renderer_lines(lines, stats)
+        approximations=lineweight_approximations(stats)
+        if approximations[:count] > 0
+          lines << ''
+          line="Line widths remain approximate for #{approximations[:count]} vector path#{approximations[:count] == 1 ? '' : 's'}"
+          line += " on page#{approximations[:pages].length == 1 ? '' : 's'} #{format_page_list(approximations[:pages])}" unless approximations[:pages].empty?
+          lines << line + '. Source centerlines remain editable.'
+          approximations[:reasons].first(5).each { |reason,count| lines << "  #{count}: #{reason}." }
+        end
 
         failures = Array(stats[:text_delivery_failures])
         unless failures.empty?
@@ -288,7 +316,7 @@ module BlueCollarSystems
           cleaned = stats[:cleanup].select { |_, v| v > 0 }
           if cleaned.any?
             lines << ""
-            lines << "Cleanup: " + cleaned.map { |k, v| "#{v} #{k}" }.join(", ")
+            lines << "Cleanup: " + cleaned.map { |k, v| "#{v} #{k.to_s == 'preserved_source_strokes' ? 'source stroke groups kept intact' : k}" }.join(", ")
           end
         end
 
@@ -301,7 +329,9 @@ module BlueCollarSystems
         # Quality confidence
         lines << ""
         total = (edges + faces + arcs)
-        if total > 50
+        if approximations[:count] > 0
+          lines << 'Import quality: Review needed — some source line widths remain approximate.'
+        elsif total > 50
           lines << "Import quality: High — good vector content."
         elsif total > 10
           lines << "Import quality: Moderate — some geometry imported."

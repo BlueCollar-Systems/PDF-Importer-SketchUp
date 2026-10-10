@@ -8,6 +8,7 @@
 #   - tiny gaps preventing face creation
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
+require 'json'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -15,6 +16,47 @@ module BlueCollarSystems
       # Callers own the model operation and must abort on this error. A failed
       # destructive join cannot be downgraded to a warning and committed.
       class CleanupFailure < StandardError; end
+
+      def self.source_width_owned?(group)
+        return false unless group.respond_to?(:get_attribute) &&
+          group.get_attribute('BC_PDF_Importer','source_width_footprint',false) == true
+        begin
+          style=JSON.parse(group.get_attribute('BC_PDF_Importer','source_width_style',''))
+          width=style['source_width_pdf_points']
+          matrix=style['source_ctm']
+          rgb=style['source_rgb']
+          valid=width.is_a?(Numeric) && width.to_f.finite? && width > 0 &&
+            matrix.is_a?(Array) && matrix.length == 6 && matrix.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } &&
+            rgb.is_a?(Array) && rgb.length == 3 && rgb.all? { |v| v.is_a?(Integer) && v >= 0 && v <= 255 } &&
+            [0,1,2].include?(style['source_line_cap']) && [0,1,2].include?(style['source_line_join']) &&
+            style['native_curve_representation'] == 'source_sampled_polygonal_footprint'
+          raise 'invalid source width/style binding' unless valid
+        rescue StandardError => error
+          raise CleanupFailure, 'Claimed source-width stroke ownership is incomplete: ' + error.message
+        end
+        true
+      end
+
+      # A selected footprint or one of its child groups reaches cleanup through
+      # Entities rather than its owning Group. Follow normal definition/instance
+      # ancestry without modifying any native object or image definition.
+      def self.source_width_ancestor?(entities)
+        return false unless entities.respond_to?(:parent)
+        pending=[entities.parent]; visited={}
+        until pending.empty?
+          owner=pending.pop
+          next if owner.nil? || visited[owner.object_id]
+          visited[owner.object_id]=true
+          raise CleanupFailure, 'Source-stroke cleanup ancestry budget exceeded' if visited.length > 4096
+          return true if source_width_owned?(owner)
+          if owner.respond_to?(:instances)
+            pending.concat(owner.instances.to_a)
+          elsif owner.respond_to?(:parent)
+            pending << owner.parent
+          end
+        end
+        false
+      end
 
       # ---------------------------------------------------------------
       # Run the full cleanup pipeline on a group's entities.
@@ -34,13 +76,21 @@ module BlueCollarSystems
         micro_len     = opts[:min_edge_length] || 0.002   # inches
 
         stats = { merged_verts: 0, removed_dupes: 0, removed_micro: 0,
-                  joined_collinear: 0, closed_gaps: 0 }
+                  joined_collinear: 0, closed_gaps: 0, preserved_source_strokes: 0 }
+        if source_width_ancestor?(entities)
+          stats[:preserved_source_strokes]=1
+          return stats
+        end
 
         # Nested color/page Groups often hold the real edges. Top-level-only
         # cleanup left them dirty so SketchUp 2017 save/reopen could heal
         # them differently and break host continuity digests.
         entities.grep(Sketchup::Group).each do |group|
           next unless group.respond_to?(:valid?) && group.valid?
+          if source_width_owned?(group)
+            stats[:preserved_source_strokes] += 1
+            next
+          end
           begin
             nested = cleanup(group.entities, opts)
             nested.each do |key, value|

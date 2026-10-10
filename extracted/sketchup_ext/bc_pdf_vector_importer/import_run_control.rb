@@ -146,26 +146,112 @@ module BlueCollarSystems
 
       class EscapeCancelProbe
         ESCAPE_VIRTUAL_KEY = 0x1B
+        attr_reader :backend, :unavailable_reason
 
         def initialize(adapter = nil)
+          @backend = adapter ? :injected : nil
+          @unavailable_reason = nil
+          @diagnostic_reported = false
           @adapter = adapter || windows_key_adapter
         end
 
+        def available?
+          @backend != :unavailable
+        end
+
         def call
+          unless available?
+            report_unavailable!
+            return false
+          end
           value = @adapter.call(ESCAPE_VIRTUAL_KEY).to_i
           (value & 0x8000) != 0
-        rescue StandardError
+        rescue StandardError => error
+          @backend = :unavailable
+          @unavailable_reason = "keyboard read failed: #{error.class}: #{error.message}"
+          report_unavailable!
           false
         end
 
         private
 
         def windows_key_adapter
-          require 'Win32API'
-          api = Win32API.new('user32', 'GetAsyncKeyState', ['I'], 'I')
-          lambda { |key| api.call(key) }
-        rescue LoadError, StandardError
+          unless windows_platform?
+            @backend = :unavailable
+            @unavailable_reason = 'no Windows keyboard reader on this platform'
+            return lambda { |_key| 0 }
+          end
+          failures = []
+          begin
+            load_key_library('Win32API')
+            api = win32api_class.new('user32', 'GetAsyncKeyState', ['I'], 'I')
+            @backend = :win32api
+            return lambda { |key| api.call(key) }
+          rescue LoadError, StandardError => error
+            failures << "Win32API: #{error.class}: #{error.message}"
+          end
+          begin
+            load_key_library('fiddle')
+            fiddle = fiddle_module
+            raise LoadError, 'Fiddle signed SHORT return type is unavailable' unless fiddle.const_defined?(:TYPE_SHORT)
+            function_class = fiddle.const_get(:Function)
+            # WINAPI is stdcall on 32-bit Windows. Windows x64 uses its unified
+            # platform ABI, exposed by Fiddle::Function::DEFAULT.
+            abi = if function_class.const_defined?(:STDCALL)
+                    function_class.const_get(:STDCALL)
+                  elsif fiddle.const_get(:SIZEOF_VOIDP) == 8
+                    function_class.const_get(:DEFAULT)
+                  else
+                    raise LoadError, 'Fiddle Windows stdcall ABI is unavailable'
+                  end
+            system_root = ENV['SystemRoot'].to_s
+            system_root = 'C:/Windows' if system_root.empty?
+            @keyboard_library = fiddle.dlopen(File.join(system_root, 'System32', 'user32.dll'))
+            @keyboard_function = function_class.new(
+              @keyboard_library['GetAsyncKeyState'],
+              [fiddle.const_get(:TYPE_INT)], fiddle.const_get(:TYPE_SHORT), abi
+            )
+            @backend = :fiddle
+            # Keep both the DLL handle and function alive for every checkpoint.
+            return lambda { |key| @keyboard_function.call(key) }
+          rescue LoadError, StandardError => error
+            failures << "Fiddle: #{error.class}: #{error.message}"
+            @keyboard_function = nil
+            @keyboard_library = nil
+          end
+          @backend = :unavailable
+          @unavailable_reason = failures.join('; ')
           lambda { |_key| 0 }
+        end
+
+        def windows_platform?
+          RUBY_PLATFORM =~ /mswin|mingw|cygwin/i
+        end
+
+        def load_key_library(name)
+          require name
+        end
+
+        def win32api_class
+          Win32API
+        end
+
+        def fiddle_module
+          Fiddle
+        end
+
+        def report_unavailable!
+          return if @diagnostic_reported
+          @diagnostic_reported = true
+          message = "Escape-key cancellation is unavailable: #{@unavailable_reason}"
+          if defined?(Logger) && Logger.respond_to?(:warn)
+            Logger.warn('ImportRunControl', message)
+          else
+            warn(message)
+          end
+        rescue StandardError
+          # Keyboard diagnostics must not change import/fidelity outcomes.
+          nil
         end
       end
 

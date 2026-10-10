@@ -7,6 +7,32 @@ require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/qa_report'
 QAReportTextItem = Struct.new(:text, :page_number, :bbox_x0, :bbox_y0, :id)
 
 class QAReportTest < Minitest::Test
+  def test_unresolved_source_lineweights_count_as_warnings_and_require_review_in_human_summary
+    q=BlueCollarSystems::PDFVectorImporter::QAReport
+    stage={:page=>2,:stroke_footprints=>{:requested_mode=>'Preserve visually',:unresolved_path_count=>2,
+      :unresolved_reasons=>{'dashed stroke footprint is not yet represented'=>2},:all_source_widths_represented=>false}}
+    [{:geometry_staging=>[stage]},JSON.parse(JSON.generate(:geometry_staging=>[stage]))].each do |data|
+      stats={:pages=>2,:primitives=>100,:edges=>100,:text=>0,:layers=>[]}.merge(data)
+      report=q.build_from_stats('fictional-source.pdf',{:import_mode=>'auto'},stats)
+      assert_equal 2,report[:result][:warnings]
+      assert_equal 'review',report[:extra][:diagnostics][:quality_level]
+      assert_includes report[:extra][:diagnostics][:signals],'approximate_source_lineweights'
+      assert_equal [2],report[:extra][:lineweight_approximations][:pages]
+      assert_equal false,report[:extra][:lineweight_approximations][:whole_page_visual_fidelity_claimed]
+      summary=q.build_human_summary(report)
+      assert_includes summary,'Line widths remain approximate for 2 vector paths on page 2'
+      refute_includes summary,'Overall fidelity:'
+    end
+  end
+  def test_width_organization_or_successful_footprints_do_not_add_approximation_warnings
+    q=BlueCollarSystems::PDFVectorImporter::QAReport
+    ['Ignore','Group by lineweight','Map to tags','Preserve visually'].each do |mode|
+      stage={:page=>1,:stroke_footprints=>{:requested_mode=>mode,:unresolved_path_count=>0}}
+      report=q.build_from_stats('fictional-source.pdf',{:import_mode=>'auto'},:geometry_staging=>[stage])
+      assert_equal 0,report[:result][:warnings]
+      assert_equal 0,report[:extra][:lineweight_approximations][:unresolved_path_count]
+    end
+  end
   def test_ordinary_report_retains_source_qualified_display_policy_and_unqualified_scope
     qualification = [{ page: 1, source_svg_sha256: 'a' * 64,
       qualified_count: 1, unqualified: [{ image_id: 'persistent_id:9', reason: 'unproven source mask' }] }]

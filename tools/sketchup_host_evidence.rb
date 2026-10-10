@@ -834,11 +834,11 @@ module SketchupHostEvidence
   end
   private_class_method :normalize_texture_proof_for_lightweight
 
-  # SketchUp 2017 can normalize a compact solid-text geometry partition on
-  # its first save/load. Accept only that digest normalization: every
-  # persistent identity, bound, transform, source/content claim, style,
-  # parent/child relationship, entity count, and topology must remain exact.
-  # A second strict reopen check then proves the normalized bytes are stable.
+  # The first save/load preserves the same coordinate and ordered-boundary
+  # certificates as the final reopen. Persistent identities, bounds,
+  # transforms, source/content claims, styles, parent/child relationships,
+  # entity counts and topology must also remain exact; topology alone never
+  # authorizes normalization of a changed geometry digest.
   def self.verify_host_heal_preservation!(source_manifest, healed_manifest)
     source = persistent_rows(source_manifest)
     healed = persistent_rows(healed_manifest)
@@ -991,23 +991,14 @@ module SketchupHostEvidence
   private_class_method :direct_child_persistent_ids
 
   def self.host_heal_geometry_equivalent?(source_row, healed_row)
-    source = hash_value(source_row, :geometry_evidence)
-    healed = hash_value(healed_row, :geometry_evidence)
-    return true if evidence_payload_equal?(source, healed)
-
-    # A first SketchUp 2017 save/load may rewrite the canonical bytes of a
-    # nested solid-text partition. The exception is deliberately limited to
-    # independently valid compact rows whose complete non-digest geometry
-    # evidence (including physical count and topology) remains exact.
-    return false unless compact_physical_partition_row?(source_row) &&
-                        compact_physical_partition_row?(healed_row)
-    source_without_digest = source.dup
-    healed_without_digest = healed.dup
-    source_without_digest.delete('sha256')
-    source_without_digest.delete(:sha256)
-    healed_without_digest.delete('sha256')
-    healed_without_digest.delete(:sha256)
-    evidence_payload_equal?(source_without_digest, healed_without_digest)
+    # Bounds and entity/type counts cannot prove preservation of a glyph's
+    # contours. Keep the coordinate-bearing physical digest across the first
+    # save/load too; no measured native normalization currently justifies an
+    # exception. The final reopen must compare against this same geometry.
+    evidence_payload_equal?(
+      hash_value(source_row, :geometry_evidence),
+      hash_value(healed_row, :geometry_evidence)
+    )
   end
   private_class_method :host_heal_geometry_equivalent?
 
@@ -1575,6 +1566,10 @@ module SketchupHostEvidence
     physical_tree = fidelity.physical_entity_tree(
       entity, child_trees, shared_payloads
     )
+    context[:boundary_leaf_digests] ||= {}
+    physical_tree[:boundary_sha256] = host_boundary_sha256(
+      entity, child_trees, context[:boundary_leaf_digests]
+    )
     decorative_image = entity.respond_to?(:get_attribute) &&
       entity.get_attribute('BC_PDF_Importer', 'decorative_source_image', false) == true
     decorative_wrapper = entity.respond_to?(:get_attribute) &&
@@ -1586,7 +1581,7 @@ module SketchupHostEvidence
     inline_composite = image_typename?(typename) &&
       context[:inline_composite_ids].is_a?(Hash) &&
       context[:inline_composite_ids][host_positive_id(entity, :persistent_id, 'persistent_id')] == true
-    include_row = !compact || top_level || inline_composite || decorative_image || decorative_wrapper || annotation_capsule || annotation_image || source_claim_root?(representation) ||
+    include_row = !compact || top_level || image_typename?(typename) || inline_composite || decorative_image || decorative_wrapper || annotation_capsule || annotation_image || source_claim_root?(representation) ||
       !child_rows.empty?
     return [nil, physical_tree] unless include_row
 
@@ -1699,7 +1694,8 @@ module SketchupHostEvidence
     )
     style_root = Array(evidence[:style_payload]).first || {}
     geometry = {
-      'sha256' => evidence[:physical_geometry_sha256]
+      'sha256' => evidence[:physical_geometry_sha256],
+      'boundary_sha256' => tree[:boundary_sha256]
     }
     style = {
       'sha256' => evidence[:physical_style_sha256],
@@ -1726,6 +1722,85 @@ module SketchupHostEvidence
     raise EvidenceError, "host physical evidence failed: #{error.message}"
   end
   private_class_method :physical_tree_evidence
+
+  # The production physical hash includes sorted Face vertex sets. That is
+  # useful for stable coordinates but cannot distinguish different polygon
+  # adjacency using the same points. Retain a separate exact ordered-boundary
+  # certificate without changing the importer's source-expected hash format.
+  def self.host_boundary_sha256(entity, child_trees, leaf_cache)
+    fidelity = BlueCollarSystems::PDFVectorImporter::RepresentationFidelity
+    type = host_typename(entity)
+    plain_leaf = type != 'Face' && child_trees.empty?
+    return leaf_cache[type] if plain_leaf && leaf_cache.key?(type)
+    loops = []
+    if type == 'Face' && entity.respond_to?(:loops)
+      native_loops = Array(entity.loops)
+      if native_loops.empty?
+        raise EvidenceError, 'host Face has no boundary loops'
+      end
+      loops = native_loops.map do |loop|
+        unless loop.respond_to?(:vertices)
+          raise EvidenceError, 'host Face boundary vertices are unavailable'
+        end
+        points = Array(loop.vertices).map do |vertex|
+          point = fidelity.vertex_position(vertex)
+          unless point.is_a?(Array) && point.length == 3
+            raise EvidenceError, 'host Face boundary has an invalid vertex'
+          end
+          point.map { |number| fidelity.canonical_number(number) }
+        end
+        if points.length < 3
+          raise EvidenceError, 'host Face boundary has fewer than three vertices'
+        end
+        forward = canonical_cyclic_boundary(points)
+        reverse = canonical_cyclic_boundary(points.reverse)
+        outer = loop.respond_to?(:outer?) ? loop.outer? : nil
+        if loop.respond_to?(:outer?) && outer != true && outer != false
+          raise EvidenceError, 'host Face boundary role is unavailable'
+        end
+        { :outer => outer, :points => ((forward <=> reverse) <= 0 ? forward : reverse) }
+      end.sort_by { |boundary| fidelity.canonical_json(boundary) }
+    end
+    children = Array(child_trees).map do |tree|
+      digest = tree[:boundary_sha256].to_s
+      unless digest =~ /\A[0-9a-f]{64}\z/
+        raise EvidenceError, 'host child boundary certificate is unavailable'
+      end
+      digest
+    end.sort
+    digest = Digest::SHA256.hexdigest(fidelity.canonical_json(
+      :type => type, :loops => loops, :children => children
+    ))
+    leaf_cache[type] = digest if plain_leaf
+    digest
+  end
+  private_class_method :host_boundary_sha256
+
+  # Minimal cyclic rotation in linear time; loop enumeration may begin at
+  # any vertex and may reverse after native save/load, without moving ink.
+  def self.canonical_cyclic_boundary(points)
+    count = points.length
+    first, second, offset = 0, 1, 0
+    while first < count && second < count && offset < count
+      comparison = points[(first + offset) % count] <=>
+                   points[(second + offset) % count]
+      if comparison == 0
+        offset += 1
+      else
+        if comparison > 0
+          first += offset + 1
+          first = second + 1 if first <= second
+        else
+          second += offset + 1
+          second = first + 1 if second <= first
+        end
+        offset = 0
+      end
+    end
+    start = [first, second].min
+    points[start, count - start] + points[0, start]
+  end
+  private_class_method :canonical_cyclic_boundary
 
   def self.physical_style_visual_readback(root)
     unless root.is_a?(Hash)
@@ -2012,25 +2087,57 @@ module SketchupHostEvidence
         attributes['raster_page_render_sha256'],
       'source_span_id' => attributes['source_span_id']
     }
-    claimed_visual_sha = attributes['raster_visual_pixel_sha256'].to_s.strip
-    decorative_image = entity.respond_to?(:get_attribute) &&
-      entity.get_attribute('BC_PDF_Importer', 'decorative_source_image', false) == true
-    annotation_image = entity.respond_to?(:get_attribute) &&
-      entity.get_attribute('BC_PDF_Importer', 'annotation_composite_image', false) == true
-    unless claimed_visual_sha.empty? && !decorative_image && !annotation_image && !inline_composite
-      if texture_proof
-        evidence.merge!(
-          texture_pixel_evidence(entity, performance_telemetry)
-        )
-      else
-        evidence.merge!(lightweight_texture_evidence(entity))
-      end
+    # Every Image has physical pixels, including a plain embedded JPEG/PNG
+    # with no text/Raster/decorative attributes. Keep all nested Images in the
+    # compact manifest and certify their actual export before and after save.
+    if texture_proof
+      evidence.merge!(texture_pixel_evidence(entity, performance_telemetry))
+    else
+      evidence.merge!(lightweight_texture_evidence(entity))
     end
+    bind_embedded_source_image!(entity, evidence, texture_proof)
     evidence
   rescue StandardError => error
     raise EvidenceError, "host image content evidence failed: #{error.message}"
   end
   private_class_method :image_content_evidence
+
+  def self.bind_embedded_source_image!(entity, evidence, texture_proof)
+    return unless entity.respond_to?(:get_attribute)
+    source = {}
+    ['artifact_sha256', 'artifact_bytes', 'pixel_width', 'pixel_height',
+     'visual_pixel_sha256', 'pdf_sha256', 'page', 'object_number',
+     'placement_index'].each do |key|
+      source[key] = entity.get_attribute(
+        'BC_PDF_Importer', "embedded_source_#{key}", nil
+      )
+    end
+    return if source.values.all? { |value| value.nil? }
+    unless source['artifact_sha256'].to_s =~ /\A[0-9a-f]{64}\z/ &&
+           source['artifact_bytes'].is_a?(Integer) && source['artifact_bytes'] > 0 &&
+           source['pixel_width'].is_a?(Integer) && source['pixel_width'] > 0 &&
+           source['pixel_height'].is_a?(Integer) && source['pixel_height'] > 0
+      raise EvidenceError, 'embedded source image binding is incomplete'
+    end
+    if source['pdf_sha256'] && source['pdf_sha256'].to_s !~ /\A[0-9a-f]{64}\z/
+      raise EvidenceError, 'embedded source image PDF identity is invalid'
+    end
+    unless evidence['host_pixel_width'] == source['pixel_width'] &&
+           evidence['host_pixel_height'] == source['pixel_height']
+      raise EvidenceError, 'embedded source image pixel dimensions differ'
+    end
+    visual_sha = source['visual_pixel_sha256']
+    if visual_sha
+      unless visual_sha.to_s =~ /\A[0-9a-f]{64}\z/
+        raise EvidenceError, 'embedded source image pixel digest is invalid'
+      end
+      if texture_proof && evidence['host_visual_pixel_sha256'] != visual_sha
+        raise EvidenceError, 'embedded source image native pixels differ'
+      end
+    end
+    evidence['embedded_source_binding'] = source
+  end
+  private_class_method :bind_embedded_source_image!
 
   def self.lightweight_texture_evidence(entity)
     pixel_width = entity.respond_to?(:pixelwidth) ? entity.pixelwidth.to_i : 0

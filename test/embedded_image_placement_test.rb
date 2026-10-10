@@ -2,6 +2,7 @@
 
 require 'minitest/autorun'
 require 'tmpdir'
+require 'zlib'
 
 REPO_ROOT = File.expand_path('..', __dir__)
 SRC_ROOT = File.join(REPO_ROOT, 'extracted', 'sketchup_ext')
@@ -62,19 +63,24 @@ module EmbeddedImagePlacementFixture
     :fully_transparent,
     :placement_error,
     :name,
-    :corners_pts
+    :corners_pts,
+    :width,
+    :height
   )
 
   class Image
-    attr_accessor :layer, :ignore_transform
+    attr_accessor :layer, :ignore_transform, :ignore_attributes
     attr_reader :transformation, :erased
     def initialize
       @transformation = Geom::Transformation.new([0.01,0,0,0,0,0.02,0,0,0,0,1,0,0,0,0,1])
       @erased = false
+      @attributes = {}
     end
     def transform!(value); @transformation = value * @transformation unless @ignore_transform; end
     def valid?; !@erased; end
     def erase!; @erased = true; end
+    def set_attribute(dictionary, key, value); @attributes[[dictionary, key]] = value unless @ignore_attributes; end
+    def get_attribute(dictionary, key, default = nil); @attributes.fetch([dictionary, key], default); end
   end
 
   class Entities
@@ -116,12 +122,84 @@ class EmbeddedImagePlacementTest < Minitest::Test
   def with_image
     Dir.mktmpdir('su_affine_image_') do |dir|
       path = File.join(dir, 'asymmetric.png')
-      File.binwrite(path, 'original pixel bytes remain untouched')
+      chunk = lambda { |kind, bytes| [bytes.bytesize].pack('N') + kind + bytes + [Zlib.crc32(kind + bytes)].pack('N') }
+      pixels = [255,0,0,255,0,255,0,255].pack('C*')
+      original = "\x89PNG\r\n\x1a\n".b +
+        chunk.call('IHDR', [2,1,8,6,0,0,0].pack('N2C5')) +
+        chunk.call('IDAT', Zlib::Deflate.deflate("\x00".b + pixels)) + chunk.call('IEND', ''.b)
+      File.binwrite(path, original)
       asset = EmbeddedImagePlacementFixture::Asset.new(path, false, nil, 'Im1',
-        [[300,200],[444,200],[444,128],[300,128]])
+        [[300,200],[444,200],[444,128],[300,128]], 2, 1)
       entities = EmbeddedImagePlacementFixture::Entities.new
       yield asset, entities, EmbeddedImagePlacementFixture::Model.new(entities)
-      assert_equal 'original pixel bytes remain untouched', File.binread(path)
+      assert_equal original, File.binread(path)
+    end
+  end
+
+  def test_png_source_binding_uses_independently_decoded_pixels
+    with_image do |asset, entities, model|
+      importer = BlueCollarSystems::PDFVectorImporter
+      importer.place_embedded_images(model, [asset], [0,0,720,360],
+        { :scale => 1.0, :embedded_source_pdf_sha256 => 'a' * 64 }, 0, 0)
+      image = entities.image
+      assert_equal Digest::SHA256.file(asset.file_path).hexdigest,
+        image.get_attribute('BC_PDF_Importer', 'embedded_source_artifact_sha256')
+      assert_equal Digest::SHA256.hexdigest([255,0,0,255,0,255,0,255].pack('C*')),
+        image.get_attribute('BC_PDF_Importer', 'embedded_source_visual_pixel_sha256')
+      assert_equal 2, image.get_attribute('BC_PDF_Importer', 'embedded_source_pixel_width')
+      assert_equal 1, image.get_attribute('BC_PDF_Importer', 'embedded_source_pixel_height')
+      assert_equal 'a' * 64, image.get_attribute('BC_PDF_Importer', 'embedded_source_pdf_sha256')
+    end
+  end
+
+  def test_source_binding_readback_failure_erases_partial_image
+    with_image do |asset, entities, model|
+      entities.image.ignore_attributes = true
+      error = assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+        BlueCollarSystems::PDFVectorImporter.place_embedded_images(
+          model, [asset], [0,0,720,360], { :scale => 1.0 }, 0, 0)
+      end
+      assert_match(/readback/, error.message)
+      assert entities.image.erased
+    end
+  end
+
+  def test_source_asset_change_during_host_load_erases_partial_image
+    with_image do |asset, entities, model|
+      original_bytes = File.binread(asset.file_path)
+      original_add_image = entities.method(:add_image)
+      entities.define_singleton_method(:add_image) do |*args|
+        image = original_add_image.call(*args)
+        File.binwrite(asset.file_path, 'changed while loading')
+        image
+      end
+      error = assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+        BlueCollarSystems::PDFVectorImporter.place_embedded_images(
+          model, [asset], [0,0,720,360], { :scale => 1.0 }, 0, 0)
+      end
+      assert_match(/changed while the host loaded/, error.message)
+      assert entities.image.erased
+      # Restore this fictional fixture so with_image still verifies its bytes.
+      File.binwrite(asset.file_path, original_bytes)
+    end
+  end
+
+  def test_jpeg_passes_original_encoded_bytes_to_host_without_claiming_a_pixel_decoder
+    Dir.mktmpdir('su_encoded_image_') do |dir|
+      path = File.join(dir, 'source.jpg')
+      bytes = "\xff\xd8encoded source preserved\xff\xd9".b
+      File.binwrite(path, bytes)
+      asset = EmbeddedImagePlacementFixture::Asset.new(path, false, nil, 'Im1',
+        [[0,0],[72,0],[72,72],[0,72]], 2, 1)
+      entities = EmbeddedImagePlacementFixture::Entities.new
+      model = EmbeddedImagePlacementFixture::Model.new(entities)
+      assert_equal 1, BlueCollarSystems::PDFVectorImporter.place_embedded_images(
+        model, [asset], [0,0,720,360], { :scale => 1.0 }, 0, 0)
+      assert_equal path, entities.arguments.first
+      assert_equal bytes, File.binread(path)
+      assert_equal Digest::SHA256.hexdigest(bytes),
+        entities.image.get_attribute('BC_PDF_Importer', 'embedded_source_artifact_sha256')
+      assert_nil entities.image.get_attribute('BC_PDF_Importer', 'embedded_source_visual_pixel_sha256')
     end
   end
 

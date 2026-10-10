@@ -2941,7 +2941,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       }
     end
 
-    assert_raises(IMP::RepresentationFidelity::ContractError) do
+    error = assert_raises(IMP::RepresentationFidelity::ContractError) do
       IMP.stub(:import_item_as_raster, renderer) do
         IMP.verified_item_raster_entity!(
           model, entities, 'fixture.pdf', 1, item, [0, 0, 144, 216],
@@ -2952,6 +2952,33 @@ class RepresentationFidelityContractTest < Minitest::Test
 
     assert_equal [101], entities.to_a.map(&:persistent_id)
     assert_equal [102], entities.erased.map(&:persistent_id)
+    assert_includes error.message, 'synthetic post-image failure'
+  end
+
+  def test_terminal_item_raster_preserves_source_scoped_renderer_failure
+    entities = FidelityEntities.new
+    model = Struct.new(:active_entities).new(entities)
+    source = item('A', 0, 12, 8, 'text_span:1:0')
+    opts = { :item_raster_failure_evidence => { :error => 'stale peer error' } }
+    renderer = lambda do |*_args|
+      refute opts.key?(:item_raster_failure_evidence), 'old renderer failure must be cleared before this attempt'
+      opts[:item_raster_failure_evidence] = {
+        :source_span_id => 'text_span:1:0', :page_number => 1,
+        :source_pdf_path => File.expand_path('fixture.pdf'),
+        :error => 'transparent renderer exit 1: /syntaxerror'
+      }
+      false
+    end
+    error = assert_raises(IMP::RepresentationFidelity::ContractError) do
+      IMP.stub(:import_item_as_raster, renderer) do
+        IMP.verified_item_raster_entity!(model, entities, 'fixture.pdf', 1,
+          source, [0, 0, 100, 100], opts, Time.now, 0.0, 0)
+      end
+    end
+    assert_includes error.message, 'text_span:1:0'
+    assert_includes error.message, '/syntaxerror'
+    refute_includes error.message, 'lacks verified source-crop evidence'
+    assert_empty entities.erased
   end
 
   def test_terminal_raster_does_not_claim_unreturned_unverified_image

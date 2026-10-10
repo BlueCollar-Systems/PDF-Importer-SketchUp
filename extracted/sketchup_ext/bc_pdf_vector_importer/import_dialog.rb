@@ -624,7 +624,7 @@ module BlueCollarSystems
           recognition_mode: :auto,
           arc_mode:         'Auto',
           cleanup_level:    'Balanced',
-          lineweight_mode:  is_raster ? 'Ignore' : 'Preserve visually',
+          lineweight_mode:  is_raster ? 'Ignore' : (raw[:lineweight_mode] || 'Preserve visually').to_s,
           grouping_mode:    (raw[:grouping_mode] || 'Group per page').to_s,
           import_mode:      mode_str,
           match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes',
