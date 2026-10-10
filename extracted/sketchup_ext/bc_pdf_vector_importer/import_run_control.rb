@@ -144,16 +144,35 @@ module BlueCollarSystems
       # stop even an unattended run that normally skips individual errors.
       class RollbackFailure < ResumeMismatch; end
 
+      # Reads the Esc key for the run controller. SketchUp 2024+ ships Ruby
+      # 3.2, which no longer has Win32API, so Fiddle (present in SketchUp
+      # 2017's Ruby 2.2 and in every Ruby 3.x) is tried first and Win32API is
+      # the fallback. Without either, Esc cannot be read: that is logged once
+      # and the import simply runs to the end.
       class EscapeCancelProbe
         ESCAPE_VIRTUAL_KEY = 0x1B
+        # GetAsyncKeyState: 0x8000 = held down now, 0x0001 = pressed since
+        # the previous call, so a quick tap between two checkpoints counts.
+        PRESSED_MASK = 0x8001
+        UNAVAILABLE_MESSAGE = 'Esc cancel unavailable on this Ruby'.freeze
 
-        def initialize(adapter = nil)
-          @adapter = adapter || windows_key_adapter
+        # :fiddle, :win32api, :injected or :none
+        attr_reader :adapter_kind
+
+        def initialize(adapter = nil, logger = nil)
+          @logger = logger
+          if adapter
+            @adapter = adapter
+            @adapter_kind = :injected
+          else
+            @adapter, @adapter_kind = windows_key_adapter
+          end
         end
 
         def call
+          return false unless @adapter
           value = @adapter.call(ESCAPE_VIRTUAL_KEY).to_i
-          (value & 0x8000) != 0
+          (value & PRESSED_MASK) != 0
         rescue StandardError
           false
         end
@@ -161,11 +180,57 @@ module BlueCollarSystems
         private
 
         def windows_key_adapter
+          adapter = fiddle_key_adapter
+          return [adapter, :fiddle] if adapter
+          adapter = win32api_key_adapter
+          return [adapter, :win32api] if adapter
+          warn_unavailable
+          [nil, :none]
+        end
+
+        def fiddle_key_adapter
+          require 'fiddle'
+          user32 = Fiddle.dlopen('user32')
+          key_state = Fiddle::Function.new(
+            user32['GetAsyncKeyState'], [Fiddle::TYPE_INT],
+            Fiddle::TYPE_SHORT, fiddle_abi
+          )
+          # Clear the pressed-since-last-call bit so an Esc pressed before
+          # the import started (for example to close a dialog) is ignored.
+          key_state.call(ESCAPE_VIRTUAL_KEY)
+          lambda { |key| key_state.call(key) }
+        rescue LoadError, StandardError
+          nil
+        end
+
+        # 32-bit Windows needs stdcall for user32; 64-bit has one convention.
+        def fiddle_abi
+          if [nil].pack('p').bytesize == 4 &&
+             defined?(Fiddle::Function::STDCALL)
+            Fiddle::Function::STDCALL
+          else
+            Fiddle::Function::DEFAULT
+          end
+        end
+
+        def win32api_key_adapter
           require 'Win32API'
           api = Win32API.new('user32', 'GetAsyncKeyState', ['I'], 'I')
+          api.call(ESCAPE_VIRTUAL_KEY)
           lambda { |key| api.call(key) }
         rescue LoadError, StandardError
-          lambda { |_key| 0 }
+          nil
+        end
+
+        def warn_unavailable
+          logger = @logger
+          if logger.nil? && defined?(BlueCollarSystems::PDFVectorImporter::Logger)
+            logger = BlueCollarSystems::PDFVectorImporter::Logger
+          end
+          return unless logger && logger.respond_to?(:warn)
+          logger.warn('ImportRunControl', UNAVAILABLE_MESSAGE)
+        rescue StandardError
+          nil
         end
       end
 

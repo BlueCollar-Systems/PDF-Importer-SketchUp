@@ -8,6 +8,7 @@
 # failed pages.
 
 require 'minitest/autorun'
+require 'tmpdir'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/main'
 
 unless defined?(UI) && UI.respond_to?(:messagebox)
@@ -17,6 +18,21 @@ unless defined?(UI) && UI.respond_to?(:messagebox)
 end
 MB_OKCANCEL = 1 unless defined?(MB_OKCANCEL)
 IDOK = 1 unless defined?(IDOK)
+
+# Minimal host stand-ins for driving the real non-resumable and Raster
+# pipelines up to an Esc checkpoint.
+unless defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+  module Sketchup
+    def self.status_text=(_text); end
+  end
+end
+unless defined?(Geom::BoundingBox)
+  module Geom
+    class BoundingBox
+      def add(*_args); self; end
+    end
+  end
+end
 
 class UnattendedMultipageImportTest < Minitest::Test
   IMP = BlueCollarSystems::PDFVectorImporter
@@ -503,6 +519,113 @@ class UnattendedMultipageImportTest < Minitest::Test
       assert_includes summary, 'Stopped: rollback could not be confirmed'
       assert_empty aborts
     end
+  end
+
+  # ---- Esc stops imports that cannot resume ------------------------------
+
+  class FakeParser
+    def initialize(page_count); @page_count = page_count; end
+    def parse; true; end
+    def page_count; @page_count; end
+    def page_data(_page); { :media_box => [0, 0, 612, 792] }; end
+    def release; true; end
+  end
+
+  class FakeOCG
+    def parse; true; end
+    def layer_list; []; end
+  end
+
+  # Stands in for the first geometry a page build leaves inside the open
+  # operation before Esc is seen at the page checkpoint.
+  class PartialLayerManager
+    def initialize(model); @model = model; end
+    def precreate_pdf_layers(_layers)
+      @model.active_entities.add(Group.new(900, 1))
+    end
+    def register_imported_names!; end
+  end
+
+  def dialog_opts(mode, extra = {})
+    raw = {}
+    IMP::ImportDialog::MODES[mode].each { |key, value| raw[key.to_sym] = value }
+    IMP::ImportDialog.send(:build_opts, raw.merge(:import_mode => raw[:import_mode],
+                                                  :pages => 'All').merge(extra))
+  end
+
+  def with_stubs(stubs, &block)
+    return yield if stubs.empty?
+    target, name, value = stubs.first
+    target.stub(name, value) { with_stubs(stubs[1..-1], &block) }
+  end
+
+  def with_pdf_fixture
+    Dir.mktmpdir('esc-cancel') do |dir|
+      path = File.join(dir, 'D042-esc.pdf')
+      File.binwrite(path, "%PDF-1.4\n%%EOF\n")
+      yield path
+    end
+  end
+
+  def page_groups(model)
+    model.active_entities.to_a.select { |entity| entity.is_a?(Group) }
+  end
+
+  def test_esc_stops_an_import_text_no_import_and_leaves_the_model_unchanged
+    opts = dialog_opts('Auto', :import_text => 'No')
+    refute IMP.resumable_import?(opts), 'Import Text = No must take the non-resumable path'
+    model = TransactionModel.new
+    stats = nil
+    with_pdf_fixture do |path|
+      with_stubs([[IMP::PdfSalvage, :prepare_if_needed, [path, nil]],
+                  [IMP::PdfSalvage, :cleanup, nil],
+                  [IMP::PDFParser, :new, FakeParser.new(2)],
+                  [IMP::OCGParser, :new, FakeOCG.new],
+                  [IMP::LayerManager, :new, PartialLayerManager.new(model)]]) do
+        stats = IMP.run_resumable_pipeline(
+          model, path,
+          opts.merge(:cancel_probe => lambda { true },
+                     :extract_embedded_images => false,
+                     :status_sink => lambda { |_snapshot| true })
+        )
+      end
+    end
+    assert_equal true, stats[:cancelled]
+    assert_equal 'cancelled', IMP.import_result_status(stats)
+    assert_operator model.abort_count, :>=, 1
+    assert_empty page_groups(model), 'the open operation must be rolled back'
+    assert_match(/stopped with Esc/, stats[:message])
+    assert_match(/stopped with Esc/, R.cancelled_status(stats))
+  end
+
+  def test_esc_stops_a_raster_import_and_rolls_back_finished_pages
+    opts = dialog_opts('Raster')
+    assert_equal true, opts[:force_raster]
+    refute IMP.resumable_import?(opts)
+    model = TransactionModel.new
+    probe_calls = 0
+    probe = lambda { probe_calls += 1; probe_calls >= 2 }
+    raster = lambda do |*_args|
+      model.active_entities.add(Group.new(700, 1))
+      { :entity_id => 700, :artifact_evidence => {}, :performance => {} }
+    end
+    stats = nil
+    with_pdf_fixture do |path|
+      with_stubs([[IMP::PDFParser, :new, FakeParser.new(2)],
+                  [IMP, :verified_raster_entity!, raster],
+                  [IMP, :add_page_fit_bounds, nil]]) do
+        stats = IMP.run_resumable_pipeline(
+          model, path,
+          opts.merge(:cancel_probe => probe,
+                     :status_sink => lambda { |_snapshot| true })
+        )
+      end
+    end
+    assert_equal 2, probe_calls, 'Esc is checked before every Raster page'
+    assert_equal true, stats[:cancelled]
+    assert_equal 1, model.abort_count
+    assert_empty page_groups(model), 'page 1 is rolled back with the operation'
+    assert_match(/model unchanged/, R.cancelled_status(stats))
   end
 
   # ---- single end-of-import summary --------------------------------------

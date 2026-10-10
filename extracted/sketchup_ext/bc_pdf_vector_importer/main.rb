@@ -219,19 +219,26 @@ module BlueCollarSystems
     # is built: a very large file. Returns true to continue, false when the
     # operator declined. Noninteractive batch runs keep raising
     # BatchHostPolicy::NoninteractiveError (policy unchanged). An unreadable
-    # size is logged and never blocks the import.
-    def self.confirm_large_pdf_once!(path, file_size_bytes = nil)
+    # size is logged and never blocks the import. Only a resumable import
+    # keeps completed pages when Esc is pressed; the others roll back.
+    def self.confirm_large_pdf_once!(path, file_size_bytes = nil, resumable = true)
       file_size_bytes ||= File.size(path)
       return true unless file_size_bytes.to_i > BatchHostPolicy::LARGE_PDF_BYTES
       size_mb = (file_size_bytes / (1024.0 * 1024.0)).round(1)
+      esc_text = if resumable
+                   'press Esc during the import to stop after the current ' \
+                     'page; completed pages are kept and can be resumed.'
+                 else
+                   'press Esc during the import to stop; nothing is kept ' \
+                     'and the model is left unchanged.'
+                 end
       choice = BatchHostPolicy.confirm_large_pdf!(file_size_bytes) do
         if defined?(UI) && UI.respond_to?(:messagebox)
           UI.messagebox(
             "This PDF is very large (#{size_mb} MB). Import may take a " \
             'significant amount of time and use considerable memory. This ' \
-            'is the only question this import will ask: press Esc during ' \
-            'the import to stop after the current page; completed pages ' \
-            "are kept and can be resumed.\n\nContinue?",
+            "is the only question this import will ask: #{esc_text}" \
+            "\n\nContinue?",
             MB_OKCANCEL
           )
         else
@@ -268,6 +275,54 @@ module BlueCollarSystems
                     "started (#{reason}). The model was not changed.",
         :resume_message => 'Nothing was imported; run the import again to start.'
       }
+    end
+
+    # Result of a non-resumable import stopped with Esc: the open SketchUp
+    # operation was rolled back, so nothing was kept.
+    def self.stopped_without_changes(source_path, reason)
+      result = cancelled_before_start(source_path, reason)
+      result[:cancelled_before_start] = false
+      result[:message] = "Import of #{File.basename(source_path.to_s)} was " \
+                         'stopped with Esc. The model was not changed.'
+      result[:resume_message] = 'Nothing was kept; run the import again to start over.'
+      result
+    end
+
+    # Progress on SketchUp's status bar ("... Esc to cancel"). Batch/host
+    # jobs stream progress JSON instead and never touch the status bar.
+    def self.import_status_sink(opts)
+      return opts[:status_sink] if opts[:status_sink]
+      if defined?(BatchHostPolicy) &&
+         BatchHostPolicy.respond_to?(:noninteractive?) &&
+         BatchHostPolicy.noninteractive?
+        return lambda { |_snapshot| true }
+      end
+      lambda do |snapshot|
+        if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+          Sketchup.status_text = ImportDialog.progress_status(snapshot)
+        end
+      end
+    end
+
+    # Imports that cannot resume (Import Text = No, Raster, pages not
+    # grouped) still stop with Esc: the run controller checks the key at
+    # every safe checkpoint and the pipeline rolls its open operation back,
+    # so the model is left unchanged.
+    def self.run_non_resumable_pipeline(model, source_path, opts)
+      inner_opts = opts.dup
+      inner_opts[:resumable_page_call] = true
+      inner_opts[:run_controller] ||= ImportRunControl::Controller.new(
+        :model => model,
+        :pages => [],
+        :requested_mode => opts[:text_mode],
+        :cancel_probe => opts[:cancel_probe] ||
+          ImportRunControl::EscapeCancelProbe.new,
+        :status_sink => import_status_sink(opts)
+      )
+      run_pipeline(model, source_path, inner_opts)
+    rescue ImportRunControl::ImportCancelled
+      Logger.info('Pipeline', 'Import stopped with Esc; the open operation was rolled back.')
+      stopped_without_changes(source_path, 'stopped with Esc; model unchanged')
     end
 
     def self.confirm_page_complexity!(opts, page_num, path_count, text_count)
@@ -3821,6 +3876,12 @@ module BlueCollarSystems
       start_import_operation!(model, 'Import PDF Raster')
       operation_open = true
       pages.each_with_index do |page_num, index|
+        run_control_checkpoint!(
+          opts, :page,
+          :page => page_num, :page_index => index + 1,
+          :page_total => pages.length,
+          :completed => index, :total => pages.length
+        )
         raw = parser.page_data(page_num)
         unless raw.is_a?(Hash)
           raise RepresentationFidelity::ContractError,
@@ -3948,14 +4009,12 @@ module BlueCollarSystems
       # Decide once, before anything is built. Every page call below carries
       # :large_pdf_confirmed, so no page can put a question in front of the
       # operator mid-import; Esc (run controller) and resume are the safety net.
-      unless confirm_large_pdf_once!(source_path)
+      unless confirm_large_pdf_once!(source_path, nil, resumable_import?(opts))
         return cancelled_before_start(source_path, 'very large PDF declined')
       end
       opts = opts.merge(:large_pdf_confirmed => true)
       unless resumable_import?(opts)
-        inner_opts = opts.dup
-        inner_opts[:resumable_page_call] = true
-        return run_pipeline(model, source_path, inner_opts)
+        return run_non_resumable_pipeline(model, source_path, opts)
       end
 
       Logger.reset
@@ -4181,7 +4240,7 @@ module BlueCollarSystems
       # per-page call never asks again. Direct (non-resumable) callers still
       # get the single question here.
       unless opts[:large_pdf_confirmed]
-        return nil unless confirm_large_pdf_once!(path)
+        return nil unless confirm_large_pdf_once!(path, nil, false)
       end
 
       # Round 18: encrypted (empty-password) and damaged-xref files are

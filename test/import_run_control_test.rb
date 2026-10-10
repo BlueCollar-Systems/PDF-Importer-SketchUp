@@ -137,6 +137,92 @@ class ImportRunControlTest < Minitest::Test
 
     refute probe.call
     assert probe.call
+    assert_equal :injected, probe.adapter_kind
+  end
+
+  # A quick Esc tap between two checkpoints sets only the low
+  # "pressed since the last call" bit; it must still cancel.
+  def test_escape_probe_counts_a_tap_between_checkpoints
+    probe = IRC::EscapeCancelProbe.new(lambda { |_key| 0x0001 })
+
+    assert probe.call
+  end
+
+  # Fiddle returns GetAsyncKeyState as a signed short.
+  def test_escape_probe_accepts_a_signed_short_key_state
+    probe = IRC::EscapeCancelProbe.new(lambda { |_key| -32_768 })
+
+    assert probe.call
+  end
+
+  # SketchUp 2024+ ships Ruby 3.2 without Win32API. The default probe must
+  # still build a real key reader on Windows, never the always-zero stub.
+  def test_default_escape_probe_reads_the_real_key_on_windows
+    skip 'Windows only' unless Gem.win_platform?
+    probe = IRC::EscapeCancelProbe.new
+
+    assert_includes [:fiddle, :win32api], probe.adapter_kind
+    assert_includes [true, false], probe.call
+  end
+
+  class RecordingLogger
+    attr_reader :warnings
+
+    def initialize
+      @warnings = []
+    end
+
+    def warn(context, message)
+      @warnings << [context, message]
+    end
+  end
+
+  class NoKeyLibraryProbe < IRC::EscapeCancelProbe
+    private
+
+    def require(name)
+      raise LoadError, "cannot load such file -- #{name}"
+    end
+  end
+
+  class FakeWin32API
+    def initialize(*_args); end
+
+    def call(_key)
+      0x8000
+    end
+  end
+
+  class FiddleMissingProbe < IRC::EscapeCancelProbe
+    private
+
+    def require(name)
+      raise LoadError, "cannot load such file -- #{name}" if name == 'fiddle'
+      true
+    end
+  end
+
+  # SketchUp 2017-2023 also ship Win32API; it stays as the fallback.
+  def test_win32api_is_the_fallback_when_fiddle_is_missing
+    defined_here = !defined?(::Win32API)
+    Object.const_set(:Win32API, FakeWin32API) if defined_here
+    skip 'a real Win32API is loaded' unless ::Win32API == FakeWin32API
+    probe = FiddleMissingProbe.new(nil, RecordingLogger.new)
+
+    assert_equal :win32api, probe.adapter_kind
+    assert probe.call
+  ensure
+    Object.send(:remove_const, :Win32API) if defined_here && defined?(::Win32API)
+  end
+
+  def test_missing_key_libraries_log_once_and_never_cancel
+    logger = RecordingLogger.new
+    probe = NoKeyLibraryProbe.new(nil, logger)
+
+    assert_equal :none, probe.adapter_kind
+    3.times { assert_equal false, probe.call }
+    assert_equal 1, logger.warnings.length
+    assert_match(/Esc cancel unavailable/, logger.warnings.first[1])
   end
 
   def test_controller_accepts_a_callable_object_without_proc_arity

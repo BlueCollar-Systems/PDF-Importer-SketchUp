@@ -138,7 +138,10 @@ module BlueCollarSystems
 
       def self.cancelled_status(stats)
         retained = Array(stats[:retained_pages]).map { |page| page.to_i }.sort
-        kept = if retained.empty?
+        reason = stats[:cancel_reason].to_s
+        kept = if retained.empty? && !reason.empty?
+                 reason
+               elsif retained.empty?
                  'no completed pages kept'
                elsif retained.length == 1
                  "page #{retained.first} kept"
