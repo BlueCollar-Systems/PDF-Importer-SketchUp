@@ -459,6 +459,10 @@ class UnattendedMultipageImportTest < Minitest::Test
     dialog.define_singleton_method(:build_opts) { |opts| opts }
     logger = Module.new
     logger.define_singleton_method(:error) { |*_| }
+    logger.define_singleton_method(:log_path) { nil }
+    report = Module.new
+    report.define_singleton_method(:announce) { |*_| }
+    report.define_singleton_method(:announce_cancelled) { |*_| }
     namespace = Module.new
     namespace.const_set(:PDFVectorImporter, scope)
     scope.const_set(:BlueCollarSystems, namespace)
@@ -467,13 +471,14 @@ class UnattendedMultipageImportTest < Minitest::Test
     scope.const_set(:ImportDialog, dialog)
     scope.const_set(:ImportRunControl, IRC)
     scope.const_set(:Logger, logger)
+    scope.const_set(:ReportDialog, report)
     scope.const_set(:MB_YESNO, 4)
     scope.const_set(:IDYES, 6)
     scope.const_set(:BatchHostPolicy, policy)
     scope.define_singleton_method(:handle_open_gate) { |*_| false }
     scope.define_singleton_method(:import_result_status) { |stats| IMP.import_result_status(stats) }
     scope.define_singleton_method(:safe_abort_operation) { |*args| aborts << args }
-    scope.define_singleton_method(:run_pipeline) do |_model, path, opts|
+    run = lambda do |_model, path, opts|
       calls << path
       seen_opts << opts
       events << [:import, File.basename(path)]
@@ -481,10 +486,12 @@ class UnattendedMultipageImportTest < Minitest::Test
       raise outcome if outcome.is_a?(Exception)
       outcome
     end
+    scope.define_singleton_method(:run_pipeline, &run)
+    scope.define_singleton_method(:run_resumable_pipeline, &run)
     source = File.read(MAIN_RB)
     load_file = source[/^      def load_file\(.*?^      end\n/m]
     batch = source[/^    def self\.batch_import\n.*?^    end\n/m]
-    helpers = %w[batch_large_pdfs batch_confirm_large_pdfs].map do |name|
+    helpers = %w[batch_large_pdfs batch_confirm_large_pdfs import_pdf_path].map do |name|
       source[/^    def self\.#{name}\(.*?^    end\n/m]
     end
     refute_nil load_file

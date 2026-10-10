@@ -245,6 +245,28 @@ class CompatibilityReportTest < Minitest::Test
                  report)
   end
 
+  def with_importer_registration(state)
+    importer = BlueCollarSystems::PDFVectorImporter
+    importer.define_singleton_method(:importer_registered?) { state }
+    yield
+  ensure
+    importer.singleton_class.send(:remove_method, :importer_registered?)
+  end
+
+  # File > Import works only when SketchUp actually lists the importer.
+  def test_file_import_line_says_available_only_when_registered
+    unregistered = REPORT.build_report
+    assert_includes unregistered, '- File > Import hook: Not registered'
+    refute_includes unregistered, '- File > Import hook: Available.'
+
+    with_importer_registration(false) do
+      assert_includes REPORT.build_report, '- File > Import hook: Not registered'
+    end
+    with_importer_registration(true) do
+      assert_includes REPORT.build_report, '- File > Import hook: Available.'
+    end
+  end
+
   def test_path_redaction_preserves_exact_helper_compatibility_decisions
     RESOLVER.test_status = {
       :bundled_bin => false,

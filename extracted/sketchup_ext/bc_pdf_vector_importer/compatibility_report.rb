@@ -151,6 +151,13 @@ module BlueCollarSystems
           capability_line(label, ok, redacted)
         end
 
+        def importer_registered?
+          importer = BlueCollarSystems::PDFVectorImporter
+          importer.respond_to?(:importer_registered?) && importer.importer_registered? == true
+        rescue StandardError
+          false
+        end
+
         def feature_impact_lines(model, entities, pdftocairo, mutool, pdftotext, pdffonts, ghostscript)
           lines = []
           lines << "- Core vector parser: Built-in Ruby parser available; no helper executable required for baseline vector extraction."
@@ -162,9 +169,11 @@ module BlueCollarSystems
           end
 
           if !(defined?(Sketchup::Importer) ? true : false)
-            lines << "- File > Import hook: Not available; use Extensions/Plugins menu import."
-          else
+            lines << "- File > Import hook: Not available; use Extensions > PDF Vector Importer > Import PDF..."
+          elsif importer_registered?
             lines << "- File > Import hook: Available."
+          else
+            lines << "- File > Import hook: Not registered; use Extensions > PDF Vector Importer > Import PDF..."
           end
 
           if !entities_responds?(entities, :add_image)

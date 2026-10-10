@@ -11,7 +11,7 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 ### Unattended multi-page import
 
-A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > Import Health has the full summary.
+A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > PDF Vector Importer > Import Health... has the full summary.
 
 ### Page selection
 
@@ -261,12 +261,13 @@ assets, checksums, license, and notes.
 - **Quick Scale** — type the drawing scale the way it is printed (`48`,
   `1:48`, `1/4"=1'-0"`, `3/8"=1'`) and a paper-size import grows to real size
 - **Architectural scale notation parsing**
-- **Import quality assessment** with warnings and performance metrics
-- **Post-import action workflow** (geometry only, scale, cleanup, feature inventory)
-- **Native DXF bridge command** from the extension menu/toolbar
-- **Tag visibility controls** for PDF layers
+- **Import quality assessment** with warnings and performance metrics in
+  `import_report.json` and **Import Health**
+- **Post-import tools** in **Extensions > PDF Vector Importer**: Clean Up
+  Selected Groups, Feature Inventory (what each imported page holds) and
+  Show/Hide PDF Tags
 - **Document profiling** (fabrication, CAD, architectural, vector art, raster)
-  drives Auto-mode strategy selection
+  used by recognition; it does not switch the import mode
 - **FlateDecode decompression** for compressed PDF streams
 - **Form XObject recursion** for embedded PDF forms
 
@@ -279,12 +280,16 @@ assets, checksums, license, and notes.
 3. Select the `.rbz` file
 4. Restart SketchUp if prompted
 
-The extension registers under **File > Import** and adds a PDF Vector Importer toolbar.
+The extension adds **File > Import PDF Vectors...**, lists **PDF Vector Drawings (*.pdf)**
+in SketchUp's own **File > Import**, and adds the **Extensions > PDF Vector Importer**
+menu (Import PDF, Safe Mode, Batch Import Folder, the scale tools, Clean Up Selected
+Groups, Feature Inventory, Show/Hide PDF Tags, Compatibility Report, Import Health and
+About). There is no toolbar.
 
 **Offline install:** The GitHub Release `.rbz` installs without internet. Core vector import and the bundled free Poppler and Ghostscript helpers work offline. MuPDF is an optional separate free install.
 
 For SketchUp 2025 users: native PDF import discoverability changed in SketchUp UI,
-but this extension still provides dedicated PDF import menu and toolbar commands.
+but this extension still provides its own PDF import menu commands.
 
 ## Upgrading / skipping versions
 
@@ -361,16 +366,11 @@ anything moves, a box says which way the drawing changes, for example
 
 ## Import Report
 
-After every import, the extension presents a quality assessment report with three sections:
-
-### Quality Assessment (diagnostics only)
-
-The post-import report shows a **quality grade** as a diagnostic summary of what the parser observed — not a user-selectable fidelity tier. Every import targets maximum fidelity (BCS-ARCH-001); the grade helps you decide whether to review the result, not which "speed vs quality" mode to use.
-
-- **Excellent** -- All vectors parsed, arcs reconstructed, no anomalies
-- **Good** -- Minor issues (small gaps, unclosed paths) that do not affect usability
-- **Fair** -- Some geometry lost or degraded; manual review recommended
-- **Poor** -- Significant parsing failures; consider alternate export settings or source PDF export settings
+No box pops up after an import. When it finishes, one line on SketchUp's status
+bar says how many pages came in, any page delivered as a picture (with the reason)
+and any page that failed. **Extensions > PDF Vector Importer > Import Health...**
+shows the full summary of the last import in this SketchUp session, and every
+import writes a detailed `import_report.json`.
 
 ### Warnings
 

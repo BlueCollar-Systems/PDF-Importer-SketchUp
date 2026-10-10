@@ -100,6 +100,7 @@ jobs:
           ruby test/import_health_test.rb
           ruby test/compatibility_report_test.rb
           ruby test/compatibility_report_isolation_test.rb
+          ruby test/menu_registration_test.rb
           ruby test/qa_report_isolation_test.rb
           ruby test/finalize_diagnostics_isolation_test.rb
           ruby test/batch_geometry_sidecar_isolation_test.rb

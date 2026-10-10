@@ -7573,28 +7573,45 @@ module BlueCollarSystems
       return UI.messagebox("No active model.") unless model
       path = UI.openpanel("Select PDF File", "", "PDF Files|*.pdf||")
       return unless path && File.exist?(path)
-      return if handle_open_gate(path)
-      begin
-        opts = ImportDialog.show(path)
-        return unless opts
-        stats = run_resumable_pipeline(model, path, opts)
-        if stats
-          # No blocking every-import modal (owner rule). Concise result on
-          # the status bar; full summary in import_report.json + Import Health.
-          if stats[:cancelled]
-            ReportDialog.announce_cancelled(stats)
-          else
-            ReportDialog.announce(stats)
-          end
-        else
-          UI.messagebox("No vector content found in PDF.")
-        end
-      rescue StandardError => e
-        safe_abort_operation(model, "Import") unless e.is_a?(ImportRunControl::RollbackFailure)
-        Logger.error("Import", "Import failed", e)
-        log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
-        UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
+      import_pdf_path(model, path)
+    end
+
+    # One import of one chosen file, shared by Extensions > Import PDF...,
+    # File > Import PDF Vectors... and SketchUp's own File > Import: the
+    # open check, the options dialog, the import, then one status-bar line
+    # or one "PDF import failed" box with the reason. Returns :success,
+    # :cancelled or :failed.
+    def self.import_pdf_path(model, path)
+      return :cancelled if handle_open_gate(path)
+      opts = ImportDialog.show(path)
+      return :cancelled unless opts
+      stats = run_resumable_pipeline(model, path, opts)
+      unless stats
+        UI.messagebox("No vector content found in PDF.")
+        return :failed
       end
+      # No blocking every-import modal (owner rule). Concise result on
+      # the status bar; full summary in import_report.json + Import Health.
+      outcome = import_result_status(stats)
+      if outcome == 'cancelled'
+        ReportDialog.announce_cancelled(stats)
+        return :cancelled
+      end
+      ReportDialog.announce(stats)
+      outcome == 'success' ? :success : :failed
+    rescue ImportRunControl::ImportCancelled
+      :cancelled
+    rescue StandardError => e
+      safe_abort_operation(model, "Import") unless e.is_a?(ImportRunControl::RollbackFailure)
+      Logger.error("Import", "Import failed", e)
+      log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
+      UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
+      :failed
+    end
+
+    # True once SketchUp's File > Import lists this importer.
+    def self.importer_registered?
+      @importer_registered == true
     end
 
     def self.import_pdf_safe
@@ -7766,16 +7783,66 @@ module BlueCollarSystems
       nil
     end
 
+    # What an import built, page by page (or for the selected groups):
+    # edges, faces, groups, components, pictures and labels.
     def self.feature_inventory
       model = Sketchup.active_model; return unless model
-      t = model.selection.grep(Sketchup::Group).first
-      UI.messagebox(Metadata.report(t ? t.entities : model.active_entities))
+      picked = model.selection.to_a.select do |entity|
+        entity.respond_to?(:typename) && entity.typename == 'Group'
+      end
+      targets = picked.empty? ? pdf_page_entities(model) : picked
+      if targets.empty?
+        return UI.messagebox('No imported PDF pages found. Import a PDF, ' \
+                             'or select a group, then try again.')
+      end
+      lines = ['PDF Feature Inventory', '']
+      targets.each do |entity|
+        counts = Hash.new(0)
+        if entity.respond_to?(:typename) && entity.typename == 'Image'
+          counts[:pictures] += 1
+        else
+          count_inventory(entity, counts, 0)
+        end
+        label = entity.respond_to?(:name) ? entity.name.to_s : ''
+        label = entity.typename.to_s if label.empty? && entity.respond_to?(:typename)
+        lines << "#{label}: #{inventory_text(counts)}"
+      end
+      UI.messagebox(lines.join("\n"))
+    end
+
+    INVENTORY_KINDS = [
+      ['Edge', :edges, 'edge'], ['Face', :faces, 'face'],
+      ['Group', :groups, 'group'],
+      ['ComponentInstance', :components, 'component'],
+      ['Image', :pictures, 'picture'], ['Text', :labels, 'label']
+    ].freeze
+
+    def self.count_inventory(entity, counts, depth)
+      return if depth > 32 || !entity.respond_to?(:entities)
+      entity.entities.to_a.each do |child|
+        typename = child.respond_to?(:typename) ? child.typename.to_s : ''
+        kind = INVENTORY_KINDS.find { |row| row[0] == typename }
+        counts[kind[1]] += 1 if kind
+        # Groups are unique and counted inside; a component's shared
+        # definition (one letter used many times) is counted once per use
+        # as a component, not opened again.
+        count_inventory(child, counts, depth + 1) if typename == 'Group'
+      end
+    end
+
+    def self.inventory_text(counts)
+      parts = INVENTORY_KINDS.map do |_typename, key, word|
+        value = counts[key].to_i
+        next nil unless value > 0
+        "#{ImportDialog.format_integer(value)} #{word}#{value == 1 ? '' : 's'}"
+      end.compact
+      parts.empty? ? 'nothing inside' : parts.join(', ')
     end
 
     def self.visibility_toggles; ReportDialog.show_visibility_menu; end
 
     # ================================================================
-    # MENU & TOOLBAR
+    # MENUS (File > Import PDF Vectors... and Extensions submenu)
     # ================================================================
     if !@loaded && defined?(UI) && UI.respond_to?(:menu)
       UI.menu('File').add_item('Import PDF Vectors...') { self.import_pdf }
@@ -7787,6 +7854,10 @@ module BlueCollarSystems
       sub.add_separator
       sub.add_item('Scale to Real Dimensions...') { self.scale_by_reference }
       sub.add_item('Quick Scale...') { self.quick_scale }
+      sub.add_separator
+      sub.add_item('Clean Up Selected Groups') { self.cleanup_selected }
+      sub.add_item('Feature Inventory...') { self.feature_inventory }
+      sub.add_item('Show/Hide PDF Tags...') { self.visibility_toggles }
       sub.add_separator
       sub.add_item('Compatibility Report...') { CompatibilityReport.show }
       sub.add_item('Import Health...') { ImportHealth.show }
@@ -7819,32 +7890,34 @@ module BlueCollarSystems
       def description; "PDF Vector Drawings (*.pdf)"; end
       def file_extension; "pdf"; end
       def id; "com.bluecollar.pdfvectorimporter"; end
-      def supports_options?; true; end
+      # There are no importer options; the import's own dialog opens.
+      def supports_options?; false; end
 
       def load_file(file_path, status)
-        # Open-time gate: a clear message was already shown for bad files,
-        # so report Canceled to suppress SketchUp's generic failure dialog.
-        if BlueCollarSystems::PDFVectorImporter.handle_open_gate(file_path)
-          return Sketchup::Importer::ImportCanceled
-        end
-        opts = ImportDialog.show(file_path)
-        return Sketchup::Importer::ImportCanceled unless opts
         model = Sketchup.active_model
         return Sketchup::Importer::ImportFail unless model
-        stats = BlueCollarSystems::PDFVectorImporter.run_pipeline(model, file_path, opts)
-        outcome = BlueCollarSystems::PDFVectorImporter.import_result_status(stats)
-        if outcome == 'cancelled'
-          return Sketchup::Importer::ImportCanceled
+        outcome = BlueCollarSystems::PDFVectorImporter.import_pdf_path(model, file_path)
+        case outcome
+        when :success then Sketchup::Importer::ImportSuccess
+        when :cancelled then Sketchup::Importer::ImportCanceled
+        else Sketchup::Importer::ImportFail
         end
-        outcome == 'success' ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
-      rescue BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled
-        Sketchup::Importer::ImportCanceled
       rescue StandardError => e
-        unless e.is_a?(BlueCollarSystems::PDFVectorImporter::ImportRunControl::RollbackFailure)
-          BlueCollarSystems::PDFVectorImporter.safe_abort_operation(model, "PDFFileImporter")
-        end
         Logger.error("PDFFileImporter", "load_file failed", e)
         Sketchup::Importer::ImportFail
+      end
+    end
+
+    # Register once per SketchUp session (main.rb can be loaded again).
+    unless @importer_registered
+      begin
+        if defined?(Sketchup) && Sketchup.respond_to?(:register_importer)
+          Sketchup.register_importer(PDFFileImporter.new)
+          @importer_registered = true
+        end
+      rescue StandardError => e
+        @importer_registered = :failed
+        Logger.error('PDFFileImporter', 'File > Import registration failed', e)
       end
     end
     end # if defined?(Sketchup::Importer)
