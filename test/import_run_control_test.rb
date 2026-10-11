@@ -263,6 +263,12 @@ class ImportRunControlTest < Minitest::Test
   class FiddleMissingProbe < IRC::EscapeCancelProbe
     private
 
+    # A Windows host without Fiddle, also when the test runs on Linux CI:
+    # the reader only looks for Win32API and Fiddle on Windows.
+    def windows_platform?
+      true
+    end
+
     def require(name)
       raise LoadError, "cannot load such file -- #{name}" if name == 'fiddle'
       true
