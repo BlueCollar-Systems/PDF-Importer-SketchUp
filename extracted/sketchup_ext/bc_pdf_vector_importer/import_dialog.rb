@@ -187,7 +187,8 @@ module BlueCollarSystems
         apply_dialog_size(dlg, :basic)
 
         mode_val    = valid_mode_name(saved[:last_mode])
-        pages_val   = saved[:pages]       || 'All'
+        # A page range belongs to this request, not the next PDF opened.
+        pages_val   = 'All'
         scale_val   = saved[:scale]       || '1.0'
         text_val    = effective_text_mode(saved)
         itext_val   = saved[:import_text] || 'Yes'
@@ -266,7 +267,7 @@ module BlueCollarSystems
 
         d = {
           mode:             valid_mode_name(saved[:last_mode]),
-          pages:            pages_str      || saved[:pages]            || 'All',
+          pages:            pages_str      || 'All',
           scale:            scale_str      || saved[:scale]            || '1.0',
           text_mode:        text_mode_str  || effective_text_mode(saved),
           import_text:      saved[:import_text]                        || 'Yes',
@@ -545,7 +546,7 @@ module BlueCollarSystems
       def self.show_inputbox_basic(filename, saved)
         prompts   = ["Pages (1, 1-5, or All):","Scale Factor:",
                      "Import Text:","Text Rendering:","Match PDF Layers:"]
-        defaults  = [saved[:pages]||'All', saved[:scale]||'1.0',
+        defaults  = ['All', saved[:scale]||'1.0',
                      saved[:import_text]||'Yes', effective_text_mode(saved),
                      effective_match_pdf_layers(saved)]
         dropdowns = ['', '', YES_NO, TEXT_MODES, YES_NO]
@@ -574,7 +575,7 @@ module BlueCollarSystems
         ]
         defaults = [
           valid_mode_name(saved[:last_mode]),
-          pages_str||saved[:pages]||'All', scale_str||saved[:scale]||'1.0',
+          pages_str||'All', scale_str||saved[:scale]||'1.0',
           saved[:import_text]||'Yes',
           text_mode_str||effective_text_mode(saved),
           effective_match_pdf_layers(saved),
@@ -797,7 +798,7 @@ module BlueCollarSystems
       def self.load_prefs
         prefs = {}
         begin
-          %w[last_mode last_preset pages scale layer_name
+          %w[last_mode last_preset scale layer_name
              group_per_page group_by_color
              import_text text_mode match_pdf_layers
              grouping_mode
@@ -823,6 +824,7 @@ module BlueCollarSystems
       def self.save_prefs(hash)
         begin
           hash.each do |key, val|
+            next if key.to_s == 'pages'
             stored = case key.to_s
                      when 'text_mode'
                        effective_text_mode(text_mode: val)

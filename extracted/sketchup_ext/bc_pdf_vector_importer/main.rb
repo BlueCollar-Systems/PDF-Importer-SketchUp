@@ -2114,6 +2114,41 @@ module BlueCollarSystems
       row
     end
 
+    # Only the current page's affirmative, byte-bound no-painting-text proof
+    # removes a text renderer dependency. Empty extraction alone cannot do so.
+    def self.verified_empty_page_text_source?(stats, page_num, text_items)
+      return false unless stats.is_a?(Hash) && Array(text_items).empty?
+      return false unless page_num.is_a?(Integer) && page_num > 0
+      immutable_sha = stats[:source_input_sha256]
+      rendered_sha = stats[:normalized_input_sha256]
+      return false unless [immutable_sha, rendered_sha].all? do |sha|
+        sha.is_a?(String) && sha =~ /\A[0-9a-f]{64}\z/
+      end
+      rows = stats[:empty_page_source_inspections]
+      return false unless rows.is_a?(Array) && rows.all? do |row|
+        row.is_a?(Hash) && row[:page].is_a?(Integer) && row[:page] > 0
+      end
+      matches = rows.select { |row| row[:page] == page_num }
+      return false unless matches.length == 1
+      proof = matches.first
+      # Empty-artifact inspection may discover exact SVG glyphs even when
+      # semantic extraction is empty. Keep their existing renderer path.
+      return false if proof.key?(:source_glyph_placements) &&
+        (!proof[:source_glyph_placements].is_a?(Integer) ||
+         proof[:source_glyph_placements] != 0)
+      proof[:source_page_number].is_a?(Integer) &&
+        proof[:source_page_number] == page_num &&
+        proof[:canonical_text_item_count].is_a?(Integer) &&
+        proof[:canonical_text_item_count] == 0 &&
+        proof[:semantic_text_extraction_complete].equal?(true) &&
+        proof[:decoded_stream_text_operators].equal?(false) &&
+        proof[:decoded_form_stream_text_operators].equal?(false) &&
+        proof[:immutable_pdf_sha256].is_a?(String) &&
+        proof[:immutable_pdf_sha256] == immutable_sha &&
+        proof[:rendered_pdf_sha256].is_a?(String) &&
+        proof[:rendered_pdf_sha256] == rendered_sha
+    end
+
     def self.canonical_terminal_text_bbox(value, label)
       return nil if value.nil?
       unless value.is_a?(Array) && value.length == 4
@@ -2994,7 +3029,10 @@ module BlueCollarSystems
         next nil unless item
         x = item.respond_to?(:x) ? item.x.to_f : nil
         y = item.respond_to?(:y) ? item.y.to_f : nil
-        size = item.respond_to?(:font_size) ? item.font_size.to_f : 0.0
+        # A signed PDF Tf value still has a positive physical glyph height.
+        # Preserve the matrix angle and raw item; rejecting a negative size
+        # discards the only source rotation for joined external text runs.
+        size = item.respond_to?(:font_size) ? item.font_size.to_f.abs : 0.0
         next nil unless x && y && x.finite? && y.finite? &&
           size.finite? && size > 0.05
         angle = item.respond_to?(:angle) ? item.angle.to_f : 0.0
@@ -3775,10 +3813,6 @@ module BlueCollarSystems
       end
       camera.set(eye, target, up)
       view.invalidate if view.respond_to?(:invalidate)
-      begin
-        view.refresh if view.respond_to?(:refresh)
-      rescue StandardError
-      end
       framed
     rescue StandardError
       false
@@ -4553,6 +4587,7 @@ module BlueCollarSystems
           :status_sink => status_sink,
           :audit => opts[:audit] == true
         )
+        controller.begin_request!
         runner = lambda do |page, offset, certifier|
           page_opts = opts.dup
           page_opts[:pages] = [page]
@@ -5605,6 +5640,10 @@ module BlueCollarSystems
                        opts[:import_text]
         use_svg_3d_text = [:text, :text3d].include?(requested_text_mode) &&
                           opts[:import_text]
+        if verified_empty_page_text_source?(stats, page_num, text_items)
+          use_svg_text = false
+          use_svg_3d_text = false
+        end
         use_item_raster = requested_text_mode == :raster && opts[:import_text]
         if match_pdf_layers && !ocg.layer_list.empty? &&
            [:text, :labels].include?(requested_text_mode)

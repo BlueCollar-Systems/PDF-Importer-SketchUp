@@ -468,7 +468,6 @@ module BlueCollarSystems
       # way. Side-by-side contours stay on the ordinary face path.
       def compound_fill_needs_punch?(path)
         return false unless compound_source_fill?(path)
-        return true if source_fill_rule(path) == :evenodd
         loops = []
         areas = []
         Array(path.subpaths).each do |subpath|
@@ -481,6 +480,21 @@ module BlueCollarSystems
           areas << area
         end
         return false if loops.length < 2
+        if source_fill_rule(path) == :evenodd
+          boxes = loops.map do |pts|
+            xs = pts.map { |point| point[0] }
+            ys = pts.map { |point| point[1] }
+            [xs.min, ys.min, xs.max, ys.max]
+          end
+          # Disjoint contours cannot punch holes or cancel overlapping ink.
+          # Keep them on the ordinary face path without host boolean work.
+          return boxes.each_with_index.any? do |box, index|
+            boxes.each_with_index.any? do |other, other_index|
+              other_index > index && box[0] <= other[2] && other[0] <= box[2] &&
+                box[1] <= other[3] && other[1] <= box[3]
+            end
+          end
+        end
         loops.each_with_index.any? do |pts, index|
           cx, cy = polygon_centroid(pts)
           loops.each_with_index.any? do |other, other_index|
@@ -559,7 +573,7 @@ module BlueCollarSystems
       end
 
       # Fill-only containers ("PDF Fill") are created before their contours are
-      # drawn (fill_targets in #build). A fill path whose every subpath is open,
+      # drawn (fill_targets in #build). A fill path whose every subpath is
       # degenerate or rejected by the host leaves that container EMPTY. SketchUp
       # purges empty groups at commit_operation, i.e. after the page was
       # certified, so PageOrchestrator's immediate re-validation then reads a
@@ -1077,9 +1091,9 @@ module BlueCollarSystems
 
       # PDF fill closes the contour even when the stroke operator does not.
       def subpath_filled?(subpath)
-        return false unless subpath
-        return true if subpath.closed
-        subpath.respond_to?(:fill_closed) && subpath.fill_closed ? true : false
+        # Called only while building a path's fill. Every contour is closed
+        # for that paint, even for callers supplying a native open SubPath.
+        !subpath.nil?
       end
 
       # ---------------------------------------------------------------

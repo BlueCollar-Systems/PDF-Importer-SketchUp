@@ -212,12 +212,12 @@ module BlueCollarSystems
             end
 
             raw_font_size = nil
-            if anchor && anchor.size_pt > 0.05
-              font_size = anchor.size_pt
+            anchor_size = anchor && anchor.size_pt.to_f.abs
+            if anchor_size && anchor_size.finite? && anchor_size > 0.05
+              font_size = anchor_size
               angle = anchor.angle_deg
-              # Keep the CAD callout horizontal overrides authoritative.
-              angle = 0.0 if line_text =~ /\A\d{1,2}\/\d{1,2}"?\z/
-              angle = 0.0 if line_text =~ /\ATYP\.?\z/i
+              # Source text-matrix rotation outranks spelling heuristics.
+              # Fractions and TYP can legitimately be rotated in the PDF.
             elsif angle.abs > 20 && angle.abs < 160
               # Fallback (no anchor): rotated bbox — the SHORTER dimension is
               # the character height; the LONGER is the string length.
@@ -237,7 +237,7 @@ module BlueCollarSystems
               raw_font_size = font_size.to_f
               font_size = [bbox_w, bbox_h].min
             end
-            font_size = [font_size, 1.0].max unless anchor && anchor.size_pt > 0.05
+            font_size = [font_size, 1.0].max unless anchor_size && anchor_size.finite? && anchor_size > 0.05
 
             x_pdf = x_min + offset_x
             y_pdf = (page_h - y_max) + offset_y

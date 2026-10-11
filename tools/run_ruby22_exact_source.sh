@@ -165,6 +165,7 @@ readonly SMOKE_TESTS=(
   test/mesh_text_scaling_test.rb
   test/mesh_text_width_fidelity_test.rb
   test/condensed_text_width_regression_test.rb
+  test/negative_font_source_angle_test.rb
   test/all_modes_placement_contract_test.rb
   test/textmode1_invariant_test.rb
   test/geometry_builder_text_fallback_test.rb
@@ -184,8 +185,13 @@ readonly SMOKE_TESTS=(
   test/page_paint_bounds_test.rb
   test/stroke_clipping_test.rb
   test/stroke_color_preservation_test.rb
+  test/pdf_color_space_test.rb
+  test/implicit_fill_close_test.rb
   test/labels_empty_text_group_resume_signature_test.rb
   test/pdf_color_display_test.rb
+  test/pdf_object_tokenizer_test.rb
+  test/import_dialog_defaults_test.rb
+  test/import_resume_test.rb
   test/geometry_cleanup_collinear_coverage_test.rb
   test/cleanup_selected_operation_test.rb
   test/embedded_image_affine_test.rb

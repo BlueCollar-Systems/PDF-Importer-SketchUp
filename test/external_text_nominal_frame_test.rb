@@ -46,4 +46,12 @@ class ExternalTextNominalFrameTest < Minitest::Test
       :nominal_anchors => [anchor], :strict_text_fidelity => true)
     assert_in_delta 0.5, items.first.font_size, 1e-9
   end
+
+  def test_negative_source_nominal_size_keeps_its_small_physical_height_and_angle
+    anchor = IMP::NominalTextScanner::Anchor.new(100, 200, -0.5, -90)
+    items = IMP::ExternalTextExtractor.send(:parse_bbox_html, html([100, 200, 110, 201], 500),
+      :nominal_anchors => [anchor], :strict_text_fidelity => true)
+    assert_in_delta 0.5, items.first.font_size, 1e-9
+    assert_in_delta(-90, items.first.angle, 1e-9)
+  end
 end
