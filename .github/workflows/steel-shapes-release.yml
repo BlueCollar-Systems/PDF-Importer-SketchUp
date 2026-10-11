@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "steel-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing steel-v tag whose exact committed shape pack is built.'
+        type: string
+        required: true
+      publish_release:
+        description: 'Publish the validated shape pack; false uploads a build artifact only.'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -11,11 +21,14 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      STEEL_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -26,17 +39,28 @@ jobs:
         id: pack
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#steel-}"
+          VERSION="${STEEL_TAG#steel-}"
           ZIP_NAME="Structural-Steel-SU-Shapes-${VERSION}.zip"
           LATEST_ZIP="Structural-Steel-SU-Shapes-latest.zip"
           OUT="$RUNNER_TEMP/steel-shapes-release"
           python tools/build_steel_shapes_release.py \
-            --tag "$GITHUB_REF_NAME" --source steel_shapes --out-dir "$OUT"
+            --tag "$STEEL_TAG" --source steel_shapes --out-dir "$OUT"
           echo "zip=$OUT/$ZIP_NAME" >> "$GITHUB_OUTPUT"
           echo "latest=$OUT/$LATEST_ZIP" >> "$GITHUB_OUTPUT"
           echo "checksums=$OUT/SHA256SUMS.txt" >> "$GITHUB_OUTPUT"
 
+      - name: Upload validated shape pack for inspection
+        uses: actions/upload-artifact@v7
+        with:
+          name: steel-shapes-build-${{ env.STEEL_TAG }}-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            ${{ steps.pack.outputs.zip }}
+            ${{ steps.pack.outputs.latest }}
+            ${{ steps.pack.outputs.checksums }}
+
       - name: Publish exact non-product-latest release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -45,9 +69,9 @@ jobs:
           printf '%s\n' 'Deterministic SketchUp structural-steel shape pack. Verify either ZIP with the release-bound SHA256SUMS.txt asset.' > "$NOTES"
           python tools/complete_github_release.py \
             --repo "$GITHUB_REPOSITORY" \
-            --tag "$GITHUB_REF_NAME" \
-            --target "$GITHUB_SHA" \
-            --title "Steel Shapes $GITHUB_REF_NAME" \
+            --tag "$STEEL_TAG" \
+            --target "$(git rev-parse HEAD)" \
+            --title "Steel Shapes $STEEL_TAG" \
             --notes-file "$NOTES" \
             --asset "${{ steps.pack.outputs.zip }}" \
             --asset "${{ steps.pack.outputs.latest }}" \

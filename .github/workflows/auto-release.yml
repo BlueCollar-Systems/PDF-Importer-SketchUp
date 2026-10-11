@@ -15,6 +15,11 @@ on:
       - "dev_logs/**"
       - "steel_shapes/**"
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish validated assets after all current work and native checks are complete; false builds only.'
+        type: boolean
+        default: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -50,7 +55,7 @@ jobs:
       - name: Verify current release control plane
         run: |
           python tools/test_release_safety.py
-          python -m unittest tools.test_complete_github_release tools.test_workflow_release_identity_contract
+          python -m unittest tools.test_complete_github_release tools.test_workflow_release_identity_contract tools.test_manual_publication_workflow
       - name: Read committed version
         id: version
         run: |
@@ -219,7 +224,7 @@ jobs:
 
   release:
     needs: [release-plan, ruby22-exact-parse, source-only-build-windows]
-    if: "needs.source-only-build-windows.outputs.publication_ready == 'true' && !startsWith(github.event.head_commit.message, 'chore: bump version to') && !contains(github.event.head_commit.message, 'automation/version-bump') && !contains(github.event.head_commit.message, '[skip release]')"
+    if: "github.event_name == 'workflow_dispatch' && inputs.publish_release == true && needs.source-only-build-windows.outputs.publication_ready == 'true' && !startsWith(github.event.head_commit.message, 'chore: bump version to') && !contains(github.event.head_commit.message, 'automation/version-bump') && !contains(github.event.head_commit.message, '[skip release]')"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout current release control plane
