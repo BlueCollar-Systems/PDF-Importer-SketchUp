@@ -138,7 +138,9 @@ class MenuRegistrationTest < Minitest::Test
     end
   end
 
-  def test_file_import_failure_shows_the_reason_and_reports_fail
+  # Our own box already explains the failure, so SketchUp is told Canceled;
+  # ImportFail would make it show its generic failure box as well.
+  def test_file_import_failure_shows_one_box_with_the_reason
     with_pdf do |path|
       failing = lambda { |*_args| raise RuntimeError, 'page 1 renderer failed' }
       result = IMP.stub(:handle_open_gate, nil) do
@@ -148,7 +150,7 @@ class MenuRegistrationTest < Minitest::Test
           end
         end
       end
-      assert_equal Sketchup::Importer::ImportFail, result
+      assert_equal Sketchup::Importer::ImportCanceled, result
       assert_equal 1, MenuRecorder.messages.length
       assert_includes MenuRecorder.messages.first, 'PDF import failed'
       assert_includes MenuRecorder.messages.first, 'page 1 renderer failed'
