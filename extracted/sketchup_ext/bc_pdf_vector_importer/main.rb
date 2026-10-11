@@ -59,6 +59,7 @@ module BlueCollarSystems
     # Host Builders
     require File.join(dir, 'embedded_image_extractor')
     require File.join(dir, 'extrude_3d')
+    require File.join(dir, 'selected_face_extruder')
     require File.join(dir, 'geometry_builder')
     require File.join(dir, 'planar_white_knockout')
     require File.join(dir, 'svg_paint_order')
@@ -8372,44 +8373,39 @@ module BlueCollarSystems
     def self.extrude_selected_faces
       model = Sketchup.active_model
       return UI.messagebox('Please open a SketchUp model first.') unless model
-
-      selection = model.selection
-      if selection.empty?
-        UI.messagebox(
-          "Please select one or more imported faces or groups to extrude.\n\n" \
-          "Tip: You can select closed structural profiles, plates, or floor plan walls."
-        )
+      if model.selection.empty?
+        UI.messagebox('Close any open group or component, then select isolated closed profiles, plates, or whole instances.')
         return
       end
-
-      prompts = ['Extrusion Depth (e.g. 1/8", 1/4", 10mm, 2\'):']
-      defaults = ['0.125"']
-      results = UI.inputbox(prompts, defaults, 'Extrude 2D Faces to 3D')
-      return unless results
-
-      raw_depth = results[0].to_s.strip
-      depth_inches = UnitParser.parse_inches(raw_depth)
-      if depth_inches.nil? || depth_inches <= 0.0
-        UI.messagebox("Invalid extrusion depth: #{raw_depth.inspect}\nPlease enter a positive dimension (e.g. 1/8\", 0.25, 10mm).")
-        return
+      values = UI.inputbox(['Depth upward (+Z; bare numbers mean inches):'], ['0.125"'], 'Extrude Selected Planar Faces')
+      return unless values
+      depth = SelectedFaceExtruder.parse_depth(values[0])
+      outcome = SelectedFaceExtruder.run(model, depth)
+      labels = {
+        :source_stroke_paint => 'PDF stroke paint', :source_text => 'PDF text',
+        :hidden => 'hidden objects', :locked => 'locked objects',
+        :non_horizontal_face => 'nonhorizontal faces', :unsupported_entity => 'other objects'
+      }
+      skipped = outcome[:skipped].select { |_kind,count| count > 0 }.map do |kind,count|
+        "#{count} #{labels[kind] || kind.to_s.tr('_',' ')}"
       end
-
-      model.start_operation('Extrude 2D Faces to 3D', true)
-      begin
-        stats = Extrude3D.apply(selection, depth_inches)
-        model.commit_operation
-        if stats[:faces_extruded] > 0
-          UI.messagebox("Successfully extruded #{stats[:faces_extruded]} face(s) by #{raw_depth} into 3D!")
-        else
-          UI.messagebox(
-            "Found #{stats[:faces_found]} face(s), but none were eligible for extrusion.\n" \
-            "Faces must be horizontal closed planar surfaces."
-          )
-        end
-      rescue StandardError => e
-        model.abort_operation
-        UI.messagebox("Extrusion failed: #{e.message}")
+      note = skipped.empty? ? '' : "\nSkipped: #{skipped.join(', ')}."
+      if outcome[:status] == :completed
+        UI.messagebox("Extruded #{outcome[:faces_extruded]} closed profile(s) upward by #{values[0].to_s.strip}.#{note}")
+      else
+        UI.messagebox("No eligible planar profiles were selected.#{note}\nSelect isolated horizontal closed faces; connected geometry needs a separate edit.")
       end
+      outcome
+    rescue SelectedFaceExtruder::RollbackFailure => error
+      Logger.error('Manual extrusion', error.message, error)
+      UI.messagebox("Extrusion failed: #{error.primary_error.message.to_s[0,500]}\n\n" \
+        "SketchUp could not confirm rollback: #{error.rollback_error.to_s[0,300]}.\n" \
+        'Partial model changes may remain. Inspect the model before continuing.')
+      nil
+    rescue StandardError => error
+      Logger.error('Manual extrusion', error.message, error)
+      UI.messagebox("Extrusion did not finish: #{error.message.to_s[0,1000]}")
+      nil
     end
 
     def self.cleanup_selected
@@ -8513,7 +8509,7 @@ module BlueCollarSystems
       sub.add_separator
       sub.add_item('Scale to Real Dimensions...') { self.scale_by_reference }
       sub.add_item('Quick Scale...') { self.quick_scale }
-      sub.add_item('Extrude Selected 2D Faces to 3D...') { self.extrude_selected_faces }
+      sub.add_item('Extrude Selected Planar Faces...') { self.extrude_selected_faces }
       sub.add_separator
       sub.add_item('Clean Up Selected Groups') { self.cleanup_selected }
       sub.add_item('Feature Inventory...') { self.feature_inventory }
