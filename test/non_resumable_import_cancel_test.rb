@@ -167,6 +167,8 @@ class NonResumableImportCancelTest < Minitest::Test
     scope.define_singleton_method(:new_import_session_id) { 'fictional-cancel-test' }
     scope.define_singleton_method(:raster_display_dimensions) { |*_| [72, 72] }
     scope.define_singleton_method(:page_stack_step) { |*_| 1.2 }
+    # A fresh import into this empty fake model starts at the origin.
+    scope.define_singleton_method(:fresh_import_start_offset) { |*_| 0.0 }
     scope.define_singleton_method(:import_contract_ready?) { |_| true }
     scope.define_singleton_method(:start_import_operation!) { |model, name| IMP.start_import_operation!(model, name) }
     scope.define_singleton_method(:abort_open_operation!) { |*args| IMP.abort_open_operation!(*args) }
