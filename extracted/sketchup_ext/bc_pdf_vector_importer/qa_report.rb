@@ -307,6 +307,7 @@ module BlueCollarSystems
           entry[:degraded] || entry['degraded']
         end
         warnings += degraded_renderers.length
+        warnings += lineweight_approximation_block(stats)[:unresolved_path_count]
         version = importer_version
 
         report = {
@@ -624,6 +625,7 @@ module BlueCollarSystems
         {
           text_renderers: renderers,
           geometry_staging: geometry_staging,
+          lineweight_approximations: lineweight_approximation_block(stats),
           planar_white_knockout: normalize_json(
             stats[:planar_white_knockout] || stats['planar_white_knockout'] || []
           ),
@@ -2603,6 +2605,12 @@ module BlueCollarSystems
             'empty'
           end
         signals << 'embedded_images_extracted' if embedded_images > 0
+        lineweights=lineweight_approximation_block(stats)
+        if lineweights[:unresolved_path_count] > 0
+          quality_level='review'
+          signals << 'approximate_source_lineweights'
+          actions << "#{lineweights[:unresolved_path_count]} vector path(s) retain approximate native line widths; source centerlines remain editable. Compare the reported pages and line widths with the PDF."
+        end
 
         fallback = fallback_block(stats, degraded_renderers)
         if fallback[:used] || fallback['used']
@@ -2714,6 +2722,25 @@ module BlueCollarSystems
         end
       end
 
+      def lineweight_approximation_block(stats)
+        total=0; pages=[]; reasons={}
+        Array(telemetry_value(stats,:geometry_staging)).each do |page|
+          proof=telemetry_value(page,:stroke_footprints)
+          next unless proof.is_a?(Hash) && telemetry_value(proof,:requested_mode).to_s == 'Preserve visually'
+          count=telemetry_value(proof,:unresolved_path_count).to_i
+          next unless count > 0
+          total += count
+          number=telemetry_value(page,:page).to_i
+          pages << number if number > 0
+          source_reasons=telemetry_value(proof,:unresolved_reasons)
+          if source_reasons.is_a?(Hash)
+            source_reasons.each { |reason,n| reasons[reason.to_s]=(reasons[reason.to_s] || 0)+n.to_i }
+          end
+        end
+        {:schema=>'bcs.lineweight_approximations/1',:unresolved_path_count=>total,
+          :pages=>pages.uniq.sort,:reasons=>reasons,:whole_page_visual_fidelity_claimed=>false}
+      end
+
       def import_mode_label(opts)
         return 'raster' if opts[:force_raster]
         mode = (opts[:import_mode] || opts[:mode] || 'auto').to_s
@@ -2817,7 +2844,15 @@ module BlueCollarSystems
         end
 
         quality = diagnostics['quality_level'].to_s
-        parts << "Overall fidelity: #{quality}" unless quality.empty?
+        parts << "Vector content: #{quality}" unless quality.empty?
+        lineweights=extra['lineweight_approximations'] || {}
+        if lineweights['unresolved_path_count'].to_i > 0
+          count=lineweights['unresolved_path_count'].to_i
+          note="Line widths remain approximate for #{count} vector path#{count == 1 ? '' : 's'}"
+          pages=Array(lineweights['pages'])
+          note += " on page#{pages.length == 1 ? '' : 's'} #{pages.join(', ')}" unless pages.empty?
+          parts << note
+        end
 
         if warnings > 0
           parts << "#{warnings} warning#{'s' if warnings != 1} recorded — review the import log before production use"

@@ -123,12 +123,37 @@ class ImportDialogDefaultsTest < Minitest::Test
     end
   end
 
+  def test_invalid_scale_never_silently_becomes_one_or_reaches_geometry
+    ['', 'oops', '2in', '0', '-1', 'NaN', 'Infinity', '1e999', Float::INFINITY].each do |value|
+      error = assert_raises(ArgumentError) { BID.send(:build_opts, :scale => value) }
+      assert_match(/positive, finite number/, error.message)
+    end
+  end
+
+  def test_finite_scale_preserves_fractional_and_scientific_input
+    { '0.5' => 0.5, ' 2.5 ' => 2.5, '1e-3' => 0.001 }.each do |value, expected|
+      assert_in_delta expected, BID.send(:build_opts, :scale => value)[:scale], 1e-12
+    end
+  end
+
+  def test_units_conversion_cannot_overflow_or_underflow_the_scale
+    [['1e308', 'Feet'], ['1e-323', 'Points']].each do |value, units|
+      assert_raises(ArgumentError) { BID.send(:build_opts, :scale => value, :units => units) }
+    end
+  end
+
   def test_missing_text_mode_builds_as_3d_text
     opts = BID.send(:build_opts, import_mode: 'auto', import_text: 'Yes')
 
     assert_equal :text3d, opts[:text_mode]
     assert_equal true, opts[:use_3d_text]
     assert_equal true, opts[:import_text]
+  end
+
+  def test_explicit_lineweight_choice_survives_config_and_dialog_translation
+    assert_equal 'Ignore', BIC.new(:lineweight_mode=>'Ignore').to_opts[:lineweight_mode]
+    assert_equal 'Preserve visually', BID.send(:build_opts,{})[:lineweight_mode]
+    assert_equal 'Ignore', BID.send(:build_opts,:import_mode=>'Raster',:lineweight_mode=>'Preserve visually')[:lineweight_mode]
   end
 
   def test_saved_labels_preference_is_preserved

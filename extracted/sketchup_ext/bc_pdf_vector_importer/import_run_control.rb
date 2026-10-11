@@ -147,20 +147,20 @@ module BlueCollarSystems
       # stop even an unattended run that normally skips individual errors.
       class RollbackFailure < ResumeMismatch; end
 
-      # Reads the Esc key for the run controller. SketchUp 2024+ ships Ruby
-      # 3.2, which no longer has Win32API, so Fiddle (present in SketchUp
-      # 2017's Ruby 2.2 and in every Ruby 3.x) is tried first and Win32API is
-      # the fallback. Without either, Esc cannot be read: that is logged once
-      # and the import simply runs to the end.
+      # Reads the Esc key for the run controller. SketchUp 2017-2023 ship
+      # Win32API, which stays the first choice there. SketchUp 2024+ ships
+      # Ruby 3.2, which no longer has Win32API, so the stdlib Fiddle reader
+      # (present in every SketchUp Ruby) is used instead. Without either, Esc
+      # cannot be read: that is reported once and the import simply runs to
+      # the end.
       class EscapeCancelProbe
         ESCAPE_VIRTUAL_KEY = 0x1B
         # GetAsyncKeyState: 0x8000 = held down now, 0x0001 = pressed since
-        # the previous call, so a quick tap between two checkpoints counts.
-        PRESSED_MASK = 0x8001
-        UNAVAILABLE_MESSAGE = 'Esc cancel unavailable on this Ruby'.freeze
+        # the previous read.
+        KEY_DOWN_BIT = 0x8000
+        PRESSED_SINCE_LAST_READ_BIT = 0x0001
 
-        # :fiddle, :win32api, :injected or :none
-        attr_reader :adapter_kind
+        attr_reader :backend, :unavailable_reason
 
         # Answers "is SketchUp the program in front?": true, false, or nil
         # when Windows cannot say. A hung SketchUp shows a "Not Responding"
@@ -191,66 +191,159 @@ module BlueCollarSystems
           end
         end
 
-        # foreground: an object whose #call answers like ForegroundCheck.
-        # Without one, the real Windows check is used with the real key
-        # reader, and no check with an injected key reader.
+        # adapter: answers #call(key) like GetAsyncKeyState (tests inject
+        # one). logger: anything with #warn(context, message); without one
+        # the importer Logger, or stderr, gets the one unavailable notice.
+        # foreground: answers #call like ForegroundCheck. Without an adapter
+        # the real Windows key reader is used together with the real Windows
+        # "which program is in front" check.
         def initialize(adapter = nil, logger = nil, foreground = nil)
           @logger = logger
-          if adapter
-            @adapter = adapter
-            @adapter_kind = :injected
-            @foreground = foreground
-          else
-            @adapter, @adapter_kind = windows_key_adapter
-            @foreground = foreground
-            @foreground ||= fiddle_foreground_check if @adapter
-          end
+          @backend = adapter ? :injected : nil
+          @unavailable_reason = nil
+          @diagnostic_reported = false
+          @adapter = adapter || windows_key_adapter
+          @foreground = foreground
+          @foreground ||= default_foreground_check if adapter.nil? && available?
+          # A real reader's first "pressed since the previous read" bit can
+          # carry a press from before the import (for example the Esc that
+          # closed a dialog), so that first bit is ignored.
+          @first_read = adapter.nil?
         end
 
-        # Esc counts only while SketchUp is the program in front, so Esc
-        # pressed in another program does not stop the import. When Windows
-        # cannot say which program is in front, the press counts.
-        def call
-          return false unless @adapter
-          value = @adapter.call(ESCAPE_VIRTUAL_KEY).to_i
-          return false if (value & PRESSED_MASK) == 0
-          host_in_front?
-        rescue StandardError
-          false
+        def available?
+          @backend != :unavailable
+        end
+
+        # :win32api, :fiddle, :injected, or :none when Esc cannot be read.
+        def adapter_kind
+          available? ? @backend : :none
         end
 
         def foreground_check?
           !@foreground.nil?
         end
 
-        private
-
-        def host_in_front?
-          return true unless @foreground
-          @foreground.call != false
-        rescue StandardError
-          true
+        # Holding Esc (the key-down bit) cancels unless another program is
+        # known to be in front, so Esc pressed in another program does not
+        # stop the import. A quick tap between two checkpoints leaves only
+        # the "pressed since the previous read" bit, which Windows does not
+        # tie to one program, so a tap counts only while SketchUp is
+        # confirmed to be the program in front.
+        def call
+          unless available?
+            report_unavailable!
+            return false
+          end
+          value = @adapter.call(ESCAPE_VIRTUAL_KEY).to_i
+          first_read = @first_read
+          @first_read = false
+          held = (value & KEY_DOWN_BIT) != 0
+          tapped = !first_read && (value & PRESSED_SINCE_LAST_READ_BIT) != 0
+          return false unless held || tapped
+          in_front = host_in_front
+          held ? in_front != false : in_front == true
+        rescue StandardError => error
+          @backend = :unavailable
+          @unavailable_reason = "keyboard read failed: #{error.class}: #{error.message}"
+          report_unavailable!
+          false
         end
 
-        def fiddle_foreground_check
-          require 'fiddle'
-          user32 = Fiddle.dlopen('user32')
-          abi = fiddle_abi
-          foreground = Fiddle::Function.new(
-            user32['GetForegroundWindow'], [], Fiddle::TYPE_VOIDP, abi
-          )
-          thread_process = Fiddle::Function.new(
-            user32['GetWindowThreadProcessId'],
-            [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP], Fiddle::TYPE_INT, abi
+        private
+
+        # true, false, or nil when there is no check or it cannot say.
+        def host_in_front
+          return nil unless @foreground
+          answer = @foreground.call
+          answer == true || answer == false ? answer : nil
+        rescue StandardError
+          nil
+        end
+
+        def windows_key_adapter
+          unless windows_platform?
+            @backend = :unavailable
+            @unavailable_reason = 'no Windows keyboard reader on this platform'
+            return lambda { |_key| 0 }
+          end
+          failures = []
+          begin
+            load_key_library('Win32API')
+            api = win32api_class.new('user32', 'GetAsyncKeyState', ['I'], 'I')
+            @backend = :win32api
+            return lambda { |key| api.call(key) }
+          rescue LoadError, StandardError => error
+            failures << "Win32API: #{error.class}: #{error.message}"
+          end
+          begin
+            load_key_library('fiddle')
+            fiddle = fiddle_module
+            raise LoadError, 'Fiddle signed SHORT return type is unavailable' unless fiddle.const_defined?(:TYPE_SHORT)
+            function_class = fiddle.const_get(:Function)
+            abi = windows_api_abi(fiddle)
+            @keyboard_library = fiddle.dlopen(system_user32_path)
+            @keyboard_function = function_class.new(
+              @keyboard_library['GetAsyncKeyState'],
+              [fiddle.const_get(:TYPE_INT)], fiddle.const_get(:TYPE_SHORT), abi
+            )
+            @backend = :fiddle
+            # Keep both the DLL handle and function alive for every checkpoint.
+            return lambda { |key| @keyboard_function.call(key) }
+          rescue LoadError, StandardError => error
+            failures << "Fiddle: #{error.class}: #{error.message}"
+            @keyboard_function = nil
+            @keyboard_library = nil
+          end
+          @backend = :unavailable
+          @unavailable_reason = failures.join('; ')
+          lambda { |_key| 0 }
+        end
+
+        # WINAPI is stdcall on 32-bit Windows. Windows x64 uses its unified
+        # platform ABI, exposed by Fiddle::Function::DEFAULT.
+        def windows_api_abi(fiddle)
+          function_class = fiddle.const_get(:Function)
+          if function_class.const_defined?(:STDCALL)
+            function_class.const_get(:STDCALL)
+          elsif fiddle.const_get(:SIZEOF_VOIDP) == 8
+            function_class.const_get(:DEFAULT)
+          else
+            raise LoadError, 'Fiddle Windows stdcall ABI is unavailable'
+          end
+        end
+
+        def system_user32_path
+          system_root = ENV['SystemRoot'].to_s
+          system_root = 'C:/Windows' if system_root.empty?
+          File.join(system_root, 'System32', 'user32.dll')
+        end
+
+        # The real "is SketchUp in front?" check over user32 through Fiddle.
+        # It reuses the key reader's user32 handle when that reader is Fiddle.
+        # nil when it cannot be built: a held Esc then counts wherever it is
+        # pressed, as before.
+        def default_foreground_check
+          load_key_library('fiddle')
+          fiddle = fiddle_module
+          abi = windows_api_abi(fiddle)
+          user32 = @keyboard_library
+          user32 ||= fiddle.dlopen(system_user32_path)
+          function_class = fiddle.const_get(:Function)
+          voidp = fiddle.const_get(:TYPE_VOIDP)
+          foreground = function_class.new(user32['GetForegroundWindow'], [], voidp, abi)
+          thread_process = function_class.new(
+            user32['GetWindowThreadProcessId'], [voidp, voidp],
+            fiddle.const_get(:TYPE_INT), abi
           )
           ghost = begin
-            Fiddle::Function.new(
-              user32['HungWindowFromGhostWindow'], [Fiddle::TYPE_VOIDP],
-              Fiddle::TYPE_VOIDP, abi
-            )
+            function_class.new(user32['HungWindowFromGhostWindow'], [voidp], voidp, abi)
           rescue StandardError
             nil
           end
+          # Keep the handle and functions alive for every checkpoint.
+          @foreground_library = user32
+          @foreground_functions = [foreground, thread_process, ghost]
           ForegroundCheck.new(
             lambda { foreground.call.to_i },
             lambda { |window|
@@ -264,57 +357,35 @@ module BlueCollarSystems
           nil
         end
 
-        def windows_key_adapter
-          adapter = fiddle_key_adapter
-          return [adapter, :fiddle] if adapter
-          adapter = win32api_key_adapter
-          return [adapter, :win32api] if adapter
-          warn_unavailable
-          [nil, :none]
+        def windows_platform?
+          RUBY_PLATFORM =~ /mswin|mingw|cygwin/i
         end
 
-        def fiddle_key_adapter
-          require 'fiddle'
-          user32 = Fiddle.dlopen('user32')
-          key_state = Fiddle::Function.new(
-            user32['GetAsyncKeyState'], [Fiddle::TYPE_INT],
-            Fiddle::TYPE_SHORT, fiddle_abi
-          )
-          # Clear the pressed-since-last-call bit so an Esc pressed before
-          # the import started (for example to close a dialog) is ignored.
-          key_state.call(ESCAPE_VIRTUAL_KEY)
-          lambda { |key| key_state.call(key) }
-        rescue LoadError, StandardError
-          nil
+        def load_key_library(name)
+          require name
         end
 
-        # 32-bit Windows needs stdcall for user32; 64-bit has one convention.
-        def fiddle_abi
-          if [nil].pack('p').bytesize == 4 &&
-             defined?(Fiddle::Function::STDCALL)
-            Fiddle::Function::STDCALL
-          else
-            Fiddle::Function::DEFAULT
-          end
+        def win32api_class
+          Win32API
         end
 
-        def win32api_key_adapter
-          require 'Win32API'
-          api = Win32API.new('user32', 'GetAsyncKeyState', ['I'], 'I')
-          api.call(ESCAPE_VIRTUAL_KEY)
-          lambda { |key| api.call(key) }
-        rescue LoadError, StandardError
-          nil
+        def fiddle_module
+          Fiddle
         end
 
-        def warn_unavailable
+        def report_unavailable!
+          return if @diagnostic_reported
+          @diagnostic_reported = true
+          message = "Escape-key cancellation is unavailable: #{@unavailable_reason}"
           logger = @logger
-          if logger.nil? && defined?(BlueCollarSystems::PDFVectorImporter::Logger)
-            logger = BlueCollarSystems::PDFVectorImporter::Logger
+          logger = Logger if logger.nil? && defined?(Logger) && Logger.respond_to?(:warn)
+          if logger && logger.respond_to?(:warn)
+            logger.warn('ImportRunControl', message)
+          else
+            warn(message)
           end
-          return unless logger && logger.respond_to?(:warn)
-          logger.warn('ImportRunControl', UNAVAILABLE_MESSAGE)
         rescue StandardError
+          # Keyboard diagnostics must not change import/fidelity outcomes.
           nil
         end
       end

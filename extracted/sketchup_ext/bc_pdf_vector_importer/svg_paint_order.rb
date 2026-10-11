@@ -331,7 +331,7 @@ module BlueCollarSystems
       def self.opaque_fill?(frame)
         rgb = frame[:fill]
         rgb.is_a?(Array) && rgb.length == 3 &&
-          rgb.all? { |value| value.is_a?(Numeric) && value.finite? && value >= 0.0 && value <= 1.0 } &&
+          rgb.all? { |value| value.is_a?(Numeric) && value.to_f.finite? && value >= 0.0 && value <= 1.0 } &&
           frame[:alpha] == 1.0
       end
 
@@ -434,7 +434,7 @@ module BlueCollarSystems
 
       def self.coordinate_mapping(source, media_box, opts)
         page_box = opts[:svg_page_box] || media_box
-        unless [media_box, page_box].all? { |box| box.is_a?(Array) && box.length >= 4 && box.first(4).all? { |v| v.is_a?(Numeric) && v.finite? } }
+        unless [media_box, page_box].all? { |box| box.is_a?(Array) && box.length >= 4 && box.first(4).all? { |v| v.is_a?(Numeric) && v.to_f.finite? } }
           raise ArgumentError, 'invalid_page_box'
         end
         viewbox = SvgTextRenderer.parse_viewbox(source)

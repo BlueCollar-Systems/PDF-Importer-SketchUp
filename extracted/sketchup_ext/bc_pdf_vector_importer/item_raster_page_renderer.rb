@@ -85,7 +85,16 @@ module BlueCollarSystems
       def self.validate_result!(run, plan)
         unless run.is_a?(Hash) && run[:ok] == true && run[:exitstatus] == 0 &&
                !run[:timed_out] && run[:error].to_s.empty?
-          fail_contract('transparent item Raster page renderer did not complete successfully')
+          output = run.is_a?(Hash) ? [run[:stdout], run[:stderr]].map(&:to_s).join("\n") : ''
+          detail = output.each_line.find { |line| line =~ /\A\s*Error:/i }.to_s.strip
+          if detail.empty? && run.is_a?(Hash)
+            detail = run[:timed_out] ? 'renderer timed out' : run[:error].to_s.strip
+          end
+          detail = detail[0, 300]
+          exit_code = run.is_a?(Hash) ? run[:exitstatus] : nil
+          message = "transparent item Raster page renderer did not complete successfully (exit #{exit_code.inspect})"
+          message += ": #{detail}" unless detail.empty?
+          fail_contract(message)
         end
         # Do not certify a repaired, font-substituted, or otherwise warned render
         # as complete merely because the process wrote a PNG and exited zero.

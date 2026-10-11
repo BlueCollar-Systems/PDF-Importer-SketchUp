@@ -8,16 +8,20 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 
 | SketchUp | Ruby | Status |
 |----------|------|--------|
-| Current Pro (verify Ruby at install) | 3.2.x+ | ⚠️ Expected |
+| Current Pro | Verify actual host identity | ⚠️ Expected — dedicated host acceptance pending |
 | 2024 | 3.2.2 | ⚠️ Expected |
-| 2020–2023 | 2.7.x | ⚠️ Expected |
-| 2018–2019 | 2.5.x | ⚠️ Expected |
-| Make 2017 | 2.2.4 | ✅ Verified for the v3.7.100 live-host gate; current source passes exact Ruby 2.2.4 CI parse/smoke |
+| 2021–2023 | 2.7.x | ⚠️ Expected — dedicated host acceptance pending |
+| 2020 | 2.5.5 | ⚠️ Expected — dedicated host acceptance pending |
+| 2019 | 2.5.x | ⚠️ Expected — dedicated host acceptance pending |
+| 2018 | 2.2.4 | ⚠️ Expected — dedicated host acceptance pending |
+| Make 2017 | 2.2.4 | Native fixture checks and exact runtime tests in [the dated validation](docs/validation/2026-10-10-sketchup-persistence.md) |
 | Pro 2017 | 2.2.4 | ⚠️ Expected — exact Ruby 2.2.4 CI parse/smoke, no dedicated Pro host evidence |
-| 2014–2016 | 2.0.x | ⚠️ Expected only after dedicated host verification |
+| 2014–2016 | 2.0.x | ❌ Below the supported Ruby 2.2.4 / SketchUp 2017 floor |
 | 2013 and earlier | | ❌ Not supported |
 
 See also [COMPATIBILITY.md](COMPATIBILITY.md) for Ruby 2.2 language constraints.
+
+Check the actual host identity and available API features on each later host. The [official release notes](https://ruby.sketchup.com/file.ReleaseNotes.html) document Ruby/API changes; a language test is not native-host acceptance.
 
 ## Any-PC helper policy
 
@@ -66,7 +70,7 @@ The dialog defaults to 3D Text on first run and restores the last text rendering
 
 **Mode fidelity:** honor the selected text option first. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. A missing helper, generic exception, empty artifact, or broken implementation cannot authorize fallback. The exact ladders are Text → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; and Geometry → item Raster. Raster has no next rung. Requested Raster uses verified item crops when canonical text spans exist and a verified page image for a selected zero-canonical-text page; fallback Raster is item-scoped. Each adjacent rung requires its own renderer and type/visual certificate. Terminal Raster can still fail verification, in which case the exact failure is reported and delivery stops. Successful peer spans and page geometry remain intact. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
 
-`Sketchup::Text` exposes neither source-glyph size nor source run-width control,
+In SketchUp 2017, `Sketchup::Text` exposes neither source-glyph size nor source run-width control,
 and `Text#vector` controls the leader rather than glyph orientation. For each
 finite-bbox Labels item, SketchUp 2017 therefore records an affirmative size/run-
 width proof before `add_text`; a nonzero requested angle records the rotation
@@ -120,3 +124,10 @@ Ruby **2.7 / 3.2** and runs smoke tests on **2.7 / 3.0 / 3.2**. These runtime
 lanes do not replace named SketchUp host evidence. Graceful degradation paths
 exist for SU 2017 (line_styles absent, zoom extents fallback, UI.inputbox dialog
 fallback).
+
+
+## Verified r4 Make 2017 checks — 2026-10-10
+
+The exact local r4 package passed eleven native mode/image/lineweight rows and independent external verification, including three injected native cancellation rollbacks. Fresh separate-process Text (2 Images), item Raster (5 Images) and zero-text page Raster (1 Image) reopened with fixture PDF/cache files unavailable, actual TextureWriter pixels and strict geometry/style/IDs preserved, and every fixture file restored. The frozen-package regression results are 179 files, 2,345 runs, 21,027 assertions, zero failures/errors and eight skips; four copied-environment test files were retested after restoring shared reference/guidance files and the owned Git test context. The package source remained unchanged.
+
+Native render measurements show the corrected flat display substantially reduces the old brightness shift. Native Image boundaries, antialiasing and quantization still differ; pixel equality is not claimed. Current Pro, physical keyboard/GUI interaction, additional hosts and broader corpus/hardware checks remain pending. See `docs/validation/2026-10-10-sketchup-persistence.md` and the local test guide. The later repository extrusion menu is preserved outside r4; a safe repair is staged under `C:\TMP\su17-packaged-20261010\extrusion-upgrade` and needs native acceptance before packaging.

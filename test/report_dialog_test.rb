@@ -86,4 +86,23 @@ class ReportDialogTest < Minitest::Test
     assert_includes summary, 'Resume starts at page 3.'
     refute_includes summary, 'Import Complete!'
   end
+  def test_approximate_source_lineweights_are_visible_even_on_dense_vector_pages
+    stats={:pages=>2,:edges=>1000,:geometry_staging=>[
+      {'page'=>2,'stroke_footprints'=>{'requested_mode'=>'Preserve visually','unresolved_path_count'=>3,
+        'unresolved_reasons'=>{'combined fill/stroke paint is outside this bounded footprint route'=>3}}}]}
+    status=R.completion_status(stats)
+    summary=R.build_summary(stats)
+    assert_includes status,'Approximate line widths: 3 vector paths.'
+    assert_includes summary,'Line widths remain approximate for 3 vector paths on page 2.'
+    assert_includes summary,'Source centerlines remain editable.'
+    assert_includes summary,'Review needed'
+    refute_includes summary,'Import quality: High'
+  end
+  def test_organization_and_ignore_choices_do_not_claim_width_approximation_warnings
+    ['Ignore','Group by lineweight','Map to tags'].each do |mode|
+      stats={:pages=>1,:geometry_staging=>[{:page=>1,:stroke_footprints=>{:requested_mode=>mode,:unresolved_path_count=>3}}]}
+      assert_equal 0,R.lineweight_approximations(stats)[:count]
+      refute_includes R.completion_status(stats),'Approximate line widths'
+    end
+  end
 end

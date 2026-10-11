@@ -13,7 +13,7 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 
 | Host | Status |
 |------|--------|
-| SketchUp Make 2017 | ✅ Verified for the v3.7.100 live-host gate; current source passes exact Ruby 2.2.4 CI parse/smoke (use **v3.7.90+**) |
+| SketchUp Make 2017 | Native import/save/reopen checks and exact Ruby 2.2.4 tests are recorded in [the dated validation](docs/validation/2026-10-10-sketchup-persistence.md); these certify the tested fixtures, not every PDF |
 | SketchUp 2018–2023 | ⚠️ Expected |
 | Current SketchUp Pro | ⚠️ Expected |
 
@@ -24,7 +24,7 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 | Runtime | Notes |
 |---------|-------|
 | **Ruby 2.2.4** | SketchUp 2017 — hard syntax/API floor; see [Ruby 2.2 guide](#ruby-22-compatibility-guide) below |
-| Ruby 2.5–3.2.x | SketchUp 2018 through current Pro |
+| Later Ruby versions | Use the host's actual Ruby identity and feature checks; language tests alone do not certify a later SketchUp host |
 | Python | **Not required** for core vector import |
 
 ## External dependencies
@@ -33,7 +33,7 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 |------------|-------------------------|
 | Poppler (`pdftocairo`, `pdftotext`, `pdffonts` + `share/poppler`) | ✅ Bundled — free zero-ceremony helper |
 | MuPDF `mutool` | ❌ Not bundled — free optional helper |
-| Ghostscript | ❌ Not bundled — optional font repair |
+| Ghostscript | ✅ Bundled Windows runtime — optional font repair path |
 
 Windows releases include an integrity-checked Poppler runtime. Legacy direct
 `bin/` trees are rejected; only `Library/bin` + `share/poppler` is accepted.
@@ -48,7 +48,7 @@ Windows releases include an integrity-checked Poppler runtime. Legacy direct
 
 ## Offline install
 
-The Windows **RBZ** installs without internet. Core vector import and bundled Poppler helpers work offline. MuPDF and Ghostscript are not bundled; those optional paths need a free helper installed or configured separately when used.
+The Windows **RBZ** installs without internet. Core vector import and the bundled Poppler and Ghostscript runtimes work offline. MuPDF remains an optional free helper installed or configured separately when used.
 
 ## Enterprise / multi-user
 
@@ -70,16 +70,20 @@ SketchUp Make 2017 is **not redistributed** from bluecollar-systems.com — obta
 
 | SketchUp | Ruby | Status |
 |----------|------|--------|
-| Current Pro | 3.2.x+ | ⚠️ Expected |
+| Current Pro | Verify actual host identity | ⚠️ Expected — dedicated host acceptance pending |
 | 2024 | 3.2.2 | ⚠️ Expected |
-| 2020–2023 | 2.7.x | ⚠️ Expected |
-| 2018–2019 | 2.5.x | ⚠️ Expected |
-| Make 2017 | 2.2.4 | ✅ Verified for the v3.7.100 live-host gate; current source passes exact Ruby 2.2.4 CI parse/smoke |
+| 2021–2023 | 2.7.x | ⚠️ Expected — dedicated host acceptance pending |
+| 2020 | 2.5.5 | ⚠️ Expected — dedicated host acceptance pending |
+| 2019 | 2.5.x | ⚠️ Expected — dedicated host acceptance pending |
+| 2018 | 2.2.4 | ⚠️ Expected — dedicated host acceptance pending |
+| Make 2017 | 2.2.4 | Tested fixture scope in [the dated validation](docs/validation/2026-10-10-sketchup-persistence.md) |
 | Pro 2017 | 2.2.4 | ⚠️ Expected — exact Ruby 2.2.4 CI parse/smoke, no dedicated Pro host evidence |
-| 2014–2016 | 2.0.x | ⚠️ Expected only after dedicated host verification |
+| 2014–2016 | 2.0.x | ❌ Below the supported Ruby 2.2.4 / SketchUp 2017 floor |
 | 2013 and earlier | | ❌ Not supported |
 
 See also [HOST_COMPATIBILITY.md](HOST_COMPATIBILITY.md) for helper policy and text-mode matrix.
+
+Host API and Ruby changes are documented in the [official SketchUp release notes](https://ruby.sketchup.com/file.ReleaseNotes.html). A current Pro executable was not found on this workstation during the dated checks, so current-host acceptance remains pending.
 
 ## CI coverage
 
@@ -112,3 +116,10 @@ All Ruby code in this extension **must** run on Ruby 2.2.4, which ships with Ske
 1. CI runs `ruby22_syntax_check.rb` on every shipped `.rb` file.
 2. Default: do not use features listed above without a version guard (or a Ruby-2.2-safe polyfill). This is a host floor, not a freeze on dropping Make 2017 support — raising the floor is an explicit product decision that updates this doc + CI matrix together.
 3. When in doubt: `docker run --rm ruby:2.2 ruby -c yourfile.rb`.
+
+
+## Verified r4 Make 2017 checks — 2026-10-10
+
+The exact local r4 package passed eleven native mode/image/lineweight rows and independent external verification, including three injected native cancellation rollbacks. Fresh separate-process Text (2 Images), item Raster (5 Images) and zero-text page Raster (1 Image) reopened with fixture PDF/cache files unavailable, actual TextureWriter pixels and strict geometry/style/IDs preserved, and every fixture file restored. The frozen-package regression results are 179 files, 2,345 runs, 21,027 assertions, zero failures/errors and eight skips; four copied-environment test files were retested after restoring shared reference/guidance files and the owned Git test context. The package source remained unchanged.
+
+Native render measurements show the corrected flat display substantially reduces the old brightness shift. Native Image boundaries, antialiasing and quantization still differ; pixel equality is not claimed. Current Pro, physical keyboard/GUI interaction, additional hosts and broader corpus/hardware checks remain pending. See `docs/validation/2026-10-10-sketchup-persistence.md` and the local test guide. The later repository extrusion menu is preserved outside r4; a safe repair is staged under `C:\TMP\su17-packaged-20261010\extrusion-upgrade` and needs native acceptance before packaging.

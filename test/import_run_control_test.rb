@@ -141,11 +141,23 @@ class ImportRunControlTest < Minitest::Test
   end
 
   # A quick Esc tap between two checkpoints sets only the low
-  # "pressed since the last call" bit; it must still cancel.
+  # "pressed since the last call" bit; it must still cancel while
+  # SketchUp is confirmed to be the program in front.
   def test_escape_probe_counts_a_tap_between_checkpoints
-    probe = IRC::EscapeCancelProbe.new(lambda { |_key| 0x0001 })
+    probe = IRC::EscapeCancelProbe.new(lambda { |_key| 0x0001 }, nil, lambda { true })
 
     assert probe.call
+  end
+
+  # Windows does not tie the low bit to one program, so a tap counts only
+  # when SketchUp is known to be in front; held Esc (high bit) is unchanged.
+  def test_escape_tap_needs_sketchup_confirmed_in_front
+    tap = lambda { |_key| 0x0001 }
+
+    refute IRC::EscapeCancelProbe.new(tap).call, 'no foreground check'
+    refute IRC::EscapeCancelProbe.new(tap, nil, lambda { nil }).call, 'front unknown'
+    refute IRC::EscapeCancelProbe.new(tap, nil, lambda { false }).call, 'another program in front'
+    assert IRC::EscapeCancelProbe.new(lambda { |_key| 0x8000 }).call, 'held Esc'
   end
 
   # Fiddle returns GetAsyncKeyState as a signed short.
@@ -277,7 +289,7 @@ class ImportRunControlTest < Minitest::Test
     assert_equal :none, probe.adapter_kind
     3.times { assert_equal false, probe.call }
     assert_equal 1, logger.warnings.length
-    assert_match(/Esc cancel unavailable/, logger.warnings.first[1])
+    assert_match(/Escape-key cancellation is unavailable/, logger.warnings.first[1])
   end
 
   def test_controller_accepts_a_callable_object_without_proc_arity

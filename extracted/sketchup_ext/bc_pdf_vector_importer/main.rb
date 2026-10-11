@@ -311,18 +311,30 @@ module BlueCollarSystems
     def self.run_non_resumable_pipeline(model, source_path, opts)
       inner_opts = opts.dup
       inner_opts[:resumable_page_call] = true
+      requested_mode = opts[:force_raster] ? :raster : opts[:text_mode]
+      # Cancellation/progress do not need a retained-page journal. These
+      # modes use one transaction, so Esc rolls back the entire import. No
+      # model/identity is given to this controller and no resume is claimed.
       inner_opts[:run_controller] ||= ImportRunControl::Controller.new(
-        :model => model,
         :pages => [],
-        :requested_mode => opts[:text_mode],
+        :requested_mode => requested_mode,
         :cancel_probe => opts[:cancel_probe] ||
           ImportRunControl::EscapeCancelProbe.new,
         :status_sink => import_status_sink(opts)
       )
       run_pipeline(model, source_path, inner_opts)
-    rescue ImportRunControl::ImportCancelled
+    rescue ImportRunControl::ImportCancelled => error
+      # The inner pipeline confirms rollback before this result is built.
+      # A RollbackFailure remains terminal and is never reported cancelled.
       Logger.info('Pipeline', 'Import stopped with Esc; the open operation was rolled back.')
-      stopped_without_changes(source_path, 'stopped with Esc; model unchanged')
+      result = stopped_without_changes(source_path, 'stopped with Esc; model unchanged')
+      result.merge(
+        :resume_supported => false,
+        :snapshot => error.snapshot,
+        :requested_text_mode => requested_mode,
+        :text_mode => opts[:text_mode],
+        :import_mode => opts[:import_mode]
+      )
     end
 
     def self.confirm_page_complexity!(opts, page_num, path_count, text_count)
@@ -1888,12 +1900,25 @@ module BlueCollarSystems
       parent = target_entities
       delivery = nil
       before = RepresentationFidelity.snapshot(parent)
+      opts.delete(:item_raster_failure_evidence)
       delivery = import_item_as_raster(
         model, parent, pdf_path, page_num, item, media_box, opts,
         import_start, y_offset, page_rotation
       )
       unless delivery.is_a?(Hash) && delivery[:entity] &&
              delivery[:artifact_evidence].is_a?(Hash)
+        failure = opts[:item_raster_failure_evidence]
+        if failure.is_a?(Hash) &&
+           failure[:source_span_id].to_s == RepresentationFidelity.source_span_id(item) &&
+           failure[:page_number] == page_num.to_i &&
+           failure[:source_pdf_path].to_s == File.expand_path(pdf_path.to_s)
+          raise RepresentationFidelity::ContractError,
+                "#{failure[:source_span_id]}: item Raster failed: #{failure[:error]}"
+        end
+        if delivery.is_a?(Hash) && delivery[:failure] && !delivery[:error].to_s.empty?
+          raise RepresentationFidelity::ContractError,
+                "#{RepresentationFidelity.source_span_id(item)}: item Raster failed: #{delivery[:error]}"
+        end
         raise RepresentationFidelity::ContractError,
               'terminal item raster lacks verified source-crop evidence'
       end
@@ -3797,9 +3822,24 @@ module BlueCollarSystems
       }
       previous = {}
       desired.each_key { |key| previous[key] = options[key] }
+      # SketchUp's ordinary viewport lighting brightens planar PDF materials.
+      # Use the native flat display recipe; preserve source RGB values and
+      # leave geometry/materials untouched. These ShadowInfo keys exist in
+      # SketchUp 6+, including Make 2017. Capture every prior value first.
+      shadows = model.respond_to?(:shadow_info) ? model.shadow_info : nil
+      desired_shadows = shadows ? {
+        'UseSunForAllShading' => true, 'Light' => 0,
+        'Dark' => 80, 'DisplayShadows' => false
+      } : {}
+      previous_shadows = {}
+      desired_shadows.each_key { |key| previous_shadows[key] = shadows[key] }
       desired.each { |key, value| options[key] = value }
+      desired_shadows.each { |key, value| shadows[key] = value }
       unless desired.all? { |key, value| options[key] == value }
         raise 'native PDF color display settings were not retained'
+      end
+      unless desired_shadows.all? { |key, value| shadows[key] == value }
+        raise 'native PDF flat shading settings were not retained'
       end
       true
     rescue StandardError => error
@@ -3813,6 +3853,16 @@ module BlueCollarSystems
           end
         rescue StandardError => restore_error
           Logger.warn('Pipeline', "Could not restore display option #{key}: #{restore_error.message}")
+        end
+      end
+      (previous_shadows || {}).each do |key, value|
+        begin
+          shadows[key] = value
+          unless shadows[key] == value
+            Logger.warn('Pipeline', "Could not restore shading option #{key}: native setting was not retained")
+          end
+        rescue StandardError => restore_error
+          Logger.warn('Pipeline', "Could not restore shading option #{key}: #{restore_error.message}")
         end
       end
       Logger.warn('Pipeline', "PDF colors are stored, but native display setup failed: #{error.message}. " \
@@ -4365,6 +4415,11 @@ module BlueCollarSystems
         height_in = display_height.to_f * (1.0 / 72.0) * scale
         running_y_offset += page_stack_step(height_in, arrangement, gap_ratio)
         stats[:pages] += 1
+        run_control_checkpoint!(
+          opts, :page_completed, :page => page_num,
+          :page_index => index + 1, :page_total => pages.length,
+          :completed => index + 1, :total => pages.length
+        )
       end
 
       # Raster page caches are importer-owned evidence artifacts.  They must be
@@ -4377,6 +4432,7 @@ module BlueCollarSystems
       stats[:pipeline_performance][:source_verify_ms] =
         ((Time.now - source_verify_started) * 1000.0).round(3)
       stats[:pipeline_performance][:page_certify_ms] = 0.0
+      run_control_checkpoint!(opts, :pre_commit, :completed => 0, :total => 1)
       commit_operation_started = Time.now
       model.commit_operation
       stats[:pipeline_performance][:commit_operation_ms] =
@@ -4660,8 +4716,7 @@ module BlueCollarSystems
 
     def self.run_pipeline(model, path, opts)
       unless opts[:resumable_page_call]
-        return run_resumable_pipeline(model, path, opts) if
-          resumable_import?(opts)
+        return run_resumable_pipeline(model, path, opts)
       end
       Logger.reset unless opts[:preserve_logger]
       config = RecognitionConfig.default
@@ -5611,6 +5666,7 @@ module BlueCollarSystems
           flatten_to_2d: true, merge_tolerance: opts[:merge_tolerance],
           import_fills: (opts[:import_fills] || force_import_fills_for_page), group_by_color: opts[:group_by_color],
           detect_arcs: opts[:detect_arcs], map_dashes: opts[:map_dashes],
+          lineweight_mode: opts[:lineweight_mode],
           import_text: (use_svg_text || use_svg_3d_text || use_item_raster ||
                         text_renderer_missing) ? false : opts[:import_text],
           use_3d_text: builder_use_3d_text,
@@ -6244,7 +6300,8 @@ module BlueCollarSystems
             model,
             embedded_assets,
             media_box,
-            opts,
+            opts.merge(:embedded_source_pdf_sha256 =>
+              cached_source_pdf_sha256!(opts, path)),
             page_y_offset,
             page_rotation,
             builder.page_group.entities,
@@ -6698,6 +6755,16 @@ module BlueCollarSystems
 
         image = nil
         begin
+          # Bind the bytes actually handed to the host. PNG pixels can be
+          # independently decoded with the bundled Ruby/native PNG helper.
+          # SketchUp 2017 supplies the JPEG decoder through add_image; its
+          # TextureWriter pixels are independently checked across save/load
+          # by host acceptance, without inventing a JPEG-to-PNG substitute.
+          artifact_sha256 = Digest::SHA256.file(asset.file_path).hexdigest
+          artifact_bytes = File.size(asset.file_path).to_i
+          source_pixels = if File.extname(asset.file_path).downcase == '.png'
+                            PngCropper.inspect_pixels!(asset.file_path, false)
+                          end
           placement = EmbeddedImagePlacement.affine(
             asset.corners_pts, media_box, opts[:scale], y_offset, page_rotation
           )
@@ -6705,6 +6772,40 @@ module BlueCollarSystems
           # an actual 1x1-inch image; do not replace that intrinsic transform.
           image = entities.add_image(asset.file_path, Geom::Point3d.new(0.0, 0.0, 0.0), 1.0, 1.0)
           if image
+            unless artifact_bytes > 0 &&
+                   File.size(asset.file_path).to_i == artifact_bytes &&
+                   Digest::SHA256.file(asset.file_path).hexdigest == artifact_sha256
+              raise RepresentationFidelity::ContractError,
+                    'embedded source image changed while the host loaded it'
+            end
+            source_width = source_pixels ? source_pixels[:pixel_width] :
+              (asset.respond_to?(:width) ? asset.width.to_i : 0)
+            source_height = source_pixels ? source_pixels[:pixel_height] :
+              (asset.respond_to?(:height) ? asset.height.to_i : 0)
+            unless source_width > 0 && source_height > 0 &&
+                   image.respond_to?(:set_attribute) && image.respond_to?(:get_attribute)
+              raise RepresentationFidelity::ContractError,
+                    'embedded source image dimensions or host binding are unavailable'
+            end
+            binding = {
+              'artifact_sha256' => artifact_sha256,
+              'artifact_bytes' => artifact_bytes,
+              'pixel_width' => source_width, 'pixel_height' => source_height,
+              'visual_pixel_sha256' => source_pixels && source_pixels[:visual_pixel_sha256],
+              'pdf_sha256' => opts[:embedded_source_pdf_sha256],
+              'page' => (asset.respond_to?(:page_number) ? asset.page_number : nil),
+              'object_number' => (asset.respond_to?(:obj_num) ? asset.obj_num : nil),
+              'placement_index' => (asset.respond_to?(:placement_index) ? asset.placement_index : nil)
+            }
+            binding.each do |key, value|
+              next if value.nil?
+              attribute = "embedded_source_#{key}"
+              image.set_attribute('BC_PDF_Importer', attribute, value)
+              unless image.get_attribute('BC_PDF_Importer', attribute, nil) == value
+                raise RepresentationFidelity::ContractError,
+                      'embedded source image host binding readback differs'
+              end
+            end
             transform = Geom::Transformation.new(placement[:matrix])
             expected = transform * image.transformation
             image.transform!(transform)
@@ -7591,6 +7692,7 @@ module BlueCollarSystems
       image = nil
       owned_crop_dir = nil
       standalone_cache = opts[:item_raster_cache_persistent] != true
+      opts.delete(:item_raster_failure_evidence)
       source_id = RepresentationFidelity.source_span_id(item)
       page_render = prepare_item_raster_page!(
         pdf_path, page_num, media_box, page_rotation, opts
@@ -7711,6 +7813,11 @@ module BlueCollarSystems
       delivery
     rescue StandardError => e
       Logger.warn('Raster', "Item raster failed: #{e.message}")
+      opts[:item_raster_failure_evidence] = {
+        :source_span_id => source_id, :page_number => page_num.to_i,
+        :source_pdf_path => File.expand_path(pdf_path.to_s),
+        :error_class => e.class.name.to_s, :error => e.message.to_s
+      }
       image ? {
         :failure => true,
         :error => e.message.to_s,
@@ -8262,6 +8369,49 @@ module BlueCollarSystems
     def self.scale_by_reference; ScaleTool.activate; end
     def self.quick_scale; ScaleTool.quick_scale; end
 
+    def self.extrude_selected_faces
+      model = Sketchup.active_model
+      return UI.messagebox('Please open a SketchUp model first.') unless model
+
+      selection = model.selection
+      if selection.empty?
+        UI.messagebox(
+          "Please select one or more imported faces or groups to extrude.\n\n" \
+          "Tip: You can select closed structural profiles, plates, or floor plan walls."
+        )
+        return
+      end
+
+      prompts = ['Extrusion Depth (e.g. 1/8", 1/4", 10mm, 2\'):']
+      defaults = ['0.125"']
+      results = UI.inputbox(prompts, defaults, 'Extrude 2D Faces to 3D')
+      return unless results
+
+      raw_depth = results[0].to_s.strip
+      depth_inches = UnitParser.parse_inches(raw_depth)
+      if depth_inches.nil? || depth_inches <= 0.0
+        UI.messagebox("Invalid extrusion depth: #{raw_depth.inspect}\nPlease enter a positive dimension (e.g. 1/8\", 0.25, 10mm).")
+        return
+      end
+
+      model.start_operation('Extrude 2D Faces to 3D', true)
+      begin
+        stats = Extrude3D.apply(selection, depth_inches)
+        model.commit_operation
+        if stats[:faces_extruded] > 0
+          UI.messagebox("Successfully extruded #{stats[:faces_extruded]} face(s) by #{raw_depth} into 3D!")
+        else
+          UI.messagebox(
+            "Found #{stats[:faces_found]} face(s), but none were eligible for extrusion.\n" \
+            "Faces must be horizontal closed planar surfaces."
+          )
+        end
+      rescue StandardError => e
+        model.abort_operation
+        UI.messagebox("Extrusion failed: #{e.message}")
+      end
+    end
+
     def self.cleanup_selected
       operation_open = false
       model = Sketchup.active_model; return unless model
@@ -8363,6 +8513,7 @@ module BlueCollarSystems
       sub.add_separator
       sub.add_item('Scale to Real Dimensions...') { self.scale_by_reference }
       sub.add_item('Quick Scale...') { self.quick_scale }
+      sub.add_item('Extrude Selected 2D Faces to 3D...') { self.extrude_selected_faces }
       sub.add_separator
       sub.add_item('Clean Up Selected Groups') { self.cleanup_selected }
       sub.add_item('Feature Inventory...') { self.feature_inventory }

@@ -620,6 +620,129 @@ class SketchupHostEvidenceTest < Minitest::Test
     end
   end
 
+  def test_unmarked_nested_embedded_image_has_physical_pixels_and_rejects_reopen_drift
+    Dir.mktmpdir('bc_ordinary_image_texture_') do |directory|
+      first_path = File.join(directory, 'source.png')
+      changed_path = File.join(directory, 'changed.png')
+      pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+      write_rgba_png(first_path, 2, 1, pixels)
+      write_rgba_png(changed_path, 2, 1, [[0, 0, 255, 255], pixels.last])
+      image = FakeImage.new(70)
+      group = FakeGroup.new(71, [image])
+      writer = FakeTextureWriter.new(first_path)
+      saved = with_texture_writer(writer) do
+        SketchupHostEvidence.snapshot_entities([group], :compact => true)
+      end
+      content = saved.first['children'].first['content_evidence']
+      assert_equal true, content['host_texture_export_verified']
+      assert_equal Digest::SHA256.hexdigest(pixels.flatten.pack('C*')),
+                   content['host_visual_pixel_sha256']
+      assert_equal [2, 1], content.values_at('host_pixel_width', 'host_pixel_height')
+      assert_nil content['source_span_id']
+      assert_nil content['raster_visual_pixel_sha256']
+      writer.source_path = changed_path
+      changed = with_texture_writer(writer) do
+        SketchupHostEvidence.snapshot_entities([group], :compact => true)
+      end
+      [:verify_host_heal_preservation!, :verify_reopen_continuity!].each do |method|
+        error = assert_raises(SketchupHostEvidence::EvidenceError) do
+          SketchupHostEvidence.send(method, saved, changed)
+        end
+        assert_match(/content/i, error.message)
+      end
+    end
+  end
+
+  def test_unmarked_image_cannot_certify_without_a_real_texture_export
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
+      SketchupHostEvidence.snapshot_entities([FakeImage.new(70)])
+    end
+    assert_match(/TextureWriter/, error.message)
+  end
+
+  def test_embedded_source_png_pixel_binding_survives_deleted_source_and_rejects_wrong_pixels
+    Dir.mktmpdir('bc_bound_embedded_texture_') do |directory|
+      source = File.join(directory, 'source.png')
+      export = File.join(directory, 'host.png')
+      changed = File.join(directory, 'changed.png')
+      pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+      write_rgba_png(source, 2, 1, pixels)
+      FileUtils.cp(source, export)
+      write_rgba_png(changed, 2, 1, [[0, 0, 255, 255], pixels.last])
+      dictionary = 'BC_PDF_Importer'
+      image = FakeImage.new(70, :attributes => {
+        [dictionary, 'embedded_source_artifact_sha256'] => Digest::SHA256.file(source).hexdigest,
+        [dictionary, 'embedded_source_artifact_bytes'] => File.size(source),
+        [dictionary, 'embedded_source_pixel_width'] => 2,
+        [dictionary, 'embedded_source_pixel_height'] => 1,
+        [dictionary, 'embedded_source_visual_pixel_sha256'] => Digest::SHA256.hexdigest(pixels.flatten.pack('C*')),
+        [dictionary, 'embedded_source_pdf_sha256'] => 'a' * 64
+      })
+      saved = with_texture_writer(FakeTextureWriter.new(export)) do
+        SketchupHostEvidence.snapshot_entities([image], :compact => true)
+      end
+      File.delete(source)
+      reopened = with_texture_writer(FakeTextureWriter.new(export)) do
+        SketchupHostEvidence.snapshot_entities([image], :compact => true)
+      end
+      assert SketchupHostEvidence.verify_reopen_continuity!(saved, reopened)
+      binding = reopened.first['content_evidence']['embedded_source_binding']
+      assert_equal 'a' * 64, binding['pdf_sha256']
+      error = assert_raises(SketchupHostEvidence::EvidenceError) do
+        with_texture_writer(FakeTextureWriter.new(changed)) do
+          SketchupHostEvidence.snapshot_entities([image], :compact => true)
+        end
+      end
+      assert_match(/native pixels differ/, error.message)
+      image.set_attribute(dictionary, 'embedded_source_pixel_width', 3)
+      error = assert_raises(SketchupHostEvidence::EvidenceError) do
+        with_texture_writer(FakeTextureWriter.new(export)) do
+          SketchupHostEvidence.snapshot_entities([image], :compact => true)
+        end
+      end
+      assert_match(/dimensions differ/, error.message)
+    end
+  end
+
+  def test_encoded_embedded_source_keeps_native_pixel_proof_without_claiming_source_pixel_decode
+    Dir.mktmpdir('bc_encoded_embedded_texture_') do |directory|
+      export = File.join(directory, 'native-export.png')
+      changed = File.join(directory, 'changed-export.png')
+      pixels = [[255, 0, 0, 255], [0, 255, 0, 255]]
+      write_rgba_png(export, 2, 1, pixels)
+      write_rgba_png(changed, 2, 1, [[0, 0, 255, 255], pixels.last])
+      dictionary = 'BC_PDF_Importer'
+      image = FakeImage.new(70, :attributes => {
+        [dictionary, 'embedded_source_artifact_sha256'] => 'b' * 64,
+        [dictionary, 'embedded_source_artifact_bytes'] => 123,
+        [dictionary, 'embedded_source_pixel_width'] => 2,
+        [dictionary, 'embedded_source_pixel_height'] => 1,
+        [dictionary, 'embedded_source_pdf_sha256'] => 'a' * 64
+      })
+      saved = with_texture_writer(FakeTextureWriter.new(export)) do
+        SketchupHostEvidence.snapshot_entities([image], :compact => true)
+      end
+      content = saved.first['content_evidence']
+      assert_equal true, content['host_texture_export_verified']
+      assert_nil content['embedded_source_binding']['visual_pixel_sha256']
+      assert_equal 'b' * 64, content['embedded_source_binding']['artifact_sha256']
+      reopened = with_texture_writer(FakeTextureWriter.new(changed)) do
+        SketchupHostEvidence.snapshot_entities([image], :compact => true)
+      end
+      error = assert_raises(SketchupHostEvidence::EvidenceError) do
+        SketchupHostEvidence.verify_reopen_continuity!(saved, reopened)
+      end
+      assert_match(/content/, error.message)
+      image.set_attribute(dictionary, 'embedded_source_artifact_bytes', nil)
+      error = assert_raises(SketchupHostEvidence::EvidenceError) do
+        with_texture_writer(FakeTextureWriter.new(export)) do
+          SketchupHostEvidence.snapshot_entities([image], :compact => true)
+        end
+      end
+      assert_match(/binding is incomplete/, error.message)
+    end
+  end
+
   def test_original_annotation_image_is_retained_and_physically_decoded_without_text_raster_claim
     Dir.mktmpdir('bc_annotation_texture_') do |directory|
       png_path = File.join(directory,'original.png')
@@ -1693,8 +1816,10 @@ class SketchupHostEvidenceTest < Minitest::Test
       [dictionary, 'raster_page_render_sha256'] => sha256
     })
     page = FakeGroup.new(50, [image])
+    # This fixture tests source claims; physical pixels have separate real
+    # TextureWriter regressions above and are not asserted by this fake.
     manifest = SketchupHostEvidence.snapshot_entities(
-      [page], :compact => true
+      [page], :compact => true, :texture_proof => false
     )
     row = manifest.first['children'].first
     record = {
@@ -1785,22 +1910,17 @@ class SketchupHostEvidenceTest < Minitest::Test
       identities
     )
 
-    # The unflagged image (pre-fix behaviour) is exactly what the harness
-    # could not find.
+    # All Images now retain a row, including an unflagged page Image. Source
+    # claim certification remains a separate gate from physical inventory.
     image, page = build.call(false)
     manifest = SketchupHostEvidence.snapshot_entities([page], :compact => true, :texture_proof => false)
     identities = SketchupHostEvidence.manifest_identity_sets(
       SketchupHostEvidence.owned_manifest([], manifest)
     )
-    refute_includes identities['persistent_id'], image.persistent_id
-    error = assert_raises(SketchupHostEvidence::EvidenceError) do
-      SketchupHostEvidence.send(
-        :verify_delivery_record!, 'terminal_text_delivery_records', 6,
-        record.merge(:resulting_entity_ids => ["persistent_id:#{image.persistent_id}"]),
-        identities
-      )
-    end
-    assert_match(/identities are absent from manifest: persistent_id:#{image.persistent_id}/, error.message)
+    assert_includes identities['persistent_id'], image.persistent_id
+    row = manifest.first['children'].first
+    assert_equal false, row['content_evidence']['host_texture_export_verified']
+    refute_equal true, row['representation_evidence']['source_claim_root']
   end
 
   def test_source_evidence_is_attached_to_owned_root_not_every_face
@@ -2026,13 +2146,61 @@ class SketchupHostEvidenceTest < Minitest::Test
     assert_match(/geometry/i, error.message)
   end
 
-  def test_host_heal_preservation_accepts_proven_compact_digest_normalization
+  def test_host_heal_preservation_rejects_digest_drift_even_with_equal_compact_topology
     before = compact_heal_manifest('a' * 64)
     healed = Marshal.load(Marshal.dump(before))
     healed[0]['entity_id'] = 90
     healed[0]['geometry_evidence']['sha256'] = 'b' * 64
 
-    assert SketchupHostEvidence.verify_host_heal_preservation!(before, healed)
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
+      SketchupHostEvidence.verify_host_heal_preservation!(before, healed)
+    end
+    assert_match(/geometry/, error.message)
+  end
+
+  def test_host_heal_preservation_rejects_changed_concave_face_inside_same_bounds
+    bounds = FakeBounds.new(FakePoint.new(0, 0, 0), FakePoint.new(1, 1, 0))
+    build = lambda do |middle|
+      points = [[0,0,0], [1,0,0], [1,1,0], [middle,0.5,0], [0,1,0]].map do |point|
+        FakePoint.new(*point)
+      end
+      face = FakeFace.new(14, [FakeLoop.new(points)], :bounds => bounds)
+      SketchupHostEvidence.snapshot_entities([
+        FakeGroup.new(13, [face], :bounds => bounds)
+      ], :compact => true)
+    end
+    before, changed = build.call(0.25), build.call(0.75)
+    assert_equal before.first['bounds'], changed.first['bounds']
+    assert_equal before.first['geometry_evidence']['topology'], changed.first['geometry_evidence']['topology']
+    refute_equal before.first['geometry_evidence']['sha256'], changed.first['geometry_evidence']['sha256']
+    assert SketchupHostEvidence.verify_host_heal_preservation!(before, build.call(0.25))
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
+      SketchupHostEvidence.verify_host_heal_preservation!(before, changed)
+    end
+    assert_match(/geometry/, error.message)
+  end
+
+  def test_native_face_boundary_preserves_adjacency_with_cyclic_and_direction_normalization
+    points = [[0,0,0], [2,0,0], [2,2,0], [1,0.5,0], [0,2,0]].map do |point|
+      FakePoint.new(*point)
+    end
+    snapshot = lambda do |order|
+      face = FakeFace.new(14, [FakeLoop.new(order.map { |i| points[i] })])
+      SketchupHostEvidence.snapshot_entities([FakeGroup.new(13, [face])], :compact => true)
+    end
+    before = snapshot.call([0,1,2,3,4])
+    changed = snapshot.call([0,1,3,2,4])
+    # The former coordinate-set digest cannot see changed adjacency.
+    assert_equal before.first['geometry_evidence']['sha256'], changed.first['geometry_evidence']['sha256']
+    refute_equal before.first['geometry_evidence']['boundary_sha256'], changed.first['geometry_evidence']['boundary_sha256']
+    [:verify_host_heal_preservation!, :verify_reopen_continuity!].each do |method|
+      error = assert_raises(SketchupHostEvidence::EvidenceError) do
+        SketchupHostEvidence.send(method, before, changed)
+      end
+      assert_match(/geometry/, error.message)
+      assert SketchupHostEvidence.send(method, before, snapshot.call([2,3,4,0,1]))
+      assert SketchupHostEvidence.send(method, before, snapshot.call([4,3,2,1,0]))
+    end
   end
 
   def test_host_heal_preservation_rejects_compact_topology_change
@@ -2566,7 +2734,7 @@ class SketchupHostEvidenceTest < Minitest::Test
         ['BC_PDF_Importer', 'raster_content_bytes'] => 48_000,
         ['BC_PDF_Importer', 'raster_source_pdf_sha256'] => source_sha256
       })
-    ])
+    ], :texture_proof => false)
     assert SketchupHostEvidence.verify_delivery_evidence!(
       stats, image_manifest, :raster, [1]
     )
@@ -4015,7 +4183,7 @@ class SketchupHostEvidenceTest < Minitest::Test
         ['BC_PDF_Importer', 'raster_page_render_once_verified'] => true,
         ['BC_PDF_Importer', 'raster_page_render_sha256'] => 'c' * 64
       })
-    ])
+    ], :texture_proof => false)
     [stats, manifest]
   end
 
@@ -4157,7 +4325,7 @@ class SketchupHostEvidenceTest < Minitest::Test
         ['BC_PDF_Importer', 'raster_content_bytes'] => 48_000,
         ['BC_PDF_Importer', 'raster_source_pdf_sha256'] => source_sha
       })
-    ])
+    ], :texture_proof => false)
     [stats, manifest]
   end
 

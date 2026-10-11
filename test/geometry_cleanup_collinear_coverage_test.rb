@@ -236,4 +236,58 @@ class GeometryCleanupCollinearCoverageTest < Minitest::Test
     end
     assert_match(/native host did not create/, error.message)
   end
+
+  class OwnedStroke < Sketchup::Group
+    def initialize(entities,style=true)
+      super(entities)
+      @style=style ? JSON.generate('source_width_pdf_points'=>1.0,'source_ctm'=>[1,0,0,1,0,0],
+        'source_rgb'=>[0,0,0],'source_line_cap'=>0,'source_line_join'=>0,
+        'native_curve_representation'=>'source_sampled_polygonal_footprint') : ''
+    end
+    def get_attribute(dictionary,key,default)
+      return default unless dictionary == 'BC_PDF_Importer'
+      key == 'source_width_footprint' ? true : (key == 'source_width_style' ? @style : default)
+    end
+  end
+  Definition = Struct.new(:instances)
+  def test_owned_source_stroke_subtree_keeps_shallow_corner_and_tiny_centerlines
+    children=Entities.new
+    first=children.line([0,0,0],[4,0,0])
+    second=children.line([4,0,0],[8,0.000001,0])
+    tiny=children.line([20,0,0],[20.0000001,0,0])
+    owned=OwnedStroke.new(children)
+    stats=Cleanup.cleanup([owned],:merge_tolerance=>0.0005)
+    assert_equal [first,second,tiny],children.live
+    assert_equal 1,stats[:preserved_source_strokes]
+    assert_equal 0,stats[:joined_collinear]
+    assert_equal 0,stats[:removed_micro]
+    assert_equal [4.0,0.0,0.0],[first.end.position.x,first.end.position.y,first.end.position.z]
+  end
+  def test_direct_selected_footprint_or_nested_centerline_uses_owned_definition_ancestry
+    [false,true].each do |nested|
+      children=Entities.new
+      edge=children.line([0,0,0],[0.0000001,0,0])
+      owned=OwnedStroke.new(children)
+      parent=Definition.new([owned])
+      if nested
+        group=Sketchup::Group.new(children)
+        group.define_singleton_method(:parent) { parent }
+        child_parent=Definition.new([group])
+        children.define_singleton_method(:parent) { child_parent }
+      else
+        children.define_singleton_method(:parent) { parent }
+      end
+      stats=Cleanup.cleanup(children,:merge_tolerance=>0.0005)
+      assert edge.valid?
+      assert_equal 1,stats[:preserved_source_strokes]
+      assert_equal 0,stats[:removed_micro]
+    end
+  end
+  def test_incomplete_claimed_ownership_fails_before_destructive_cleanup
+    children=Entities.new
+    edge=children.line([0,0,0],[0.0000001,0,0])
+    error=assert_raises(Cleanup::CleanupFailure) { Cleanup.cleanup([OwnedStroke.new(children,false)]) }
+    assert_match(/ownership is incomplete/,error.message)
+    assert edge.valid?
+  end
 end

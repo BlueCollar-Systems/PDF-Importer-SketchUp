@@ -68,6 +68,12 @@ class ItemRasterPageRendererTest < Minitest::Test
       assert Subject.validate_result!(ok, plan)
       standard = 'Loading font Helvetica (or substitute) from %rom%Resource/Font/NimbusSans-Regular'
       assert Subject.validate_result!(ok.merge(:stdout => standard), plan)
+      error = assert_raises(ContractError) do
+        Subject.validate_result!(ok.merge(:ok => false, :exitstatus => 1,
+          :stdout => "GPL Ghostscript\nError: /syntaxerror in --.PDFDrawPage--\n"), plan)
+      end
+      assert_includes error.message, 'exit 1'
+      assert_includes error.message, '/syntaxerror'
       [{ :ok => false }, { :exitstatus => 1 }, { :timed_out => true },
        { :error => 'could not start' }, { :stderr => 'Warning: damaged PDF repaired' },
        { :stdout => 'Substituting font for MissingFont' },
@@ -79,6 +85,38 @@ class ItemRasterPageRendererTest < Minitest::Test
       File.delete(png)
       assert_raises(ContractError) { Subject.validate_result!(ok, plan) }
     end
+  end
+
+  def test_failed_renderer_keeps_actual_error_line_ahead_of_timeout_or_launch_error
+    run = { :ok => false, :exitstatus => 1, :timed_out => true,
+      :error => 'secondary launcher failure',
+      :stdout => "GPL Ghostscript\n",
+      :stderr => "Error: /rangecheck in --.PDFDrawPage--\nmore context\n" }
+    error = assert_raises(ContractError) { Subject.validate_result!(run, {}) }
+    assert_includes error.message, 'exit 1'
+    assert_includes error.message, 'Error: /rangecheck'
+    refute_includes error.message, 'renderer timed out'
+    refute_includes error.message, 'secondary launcher failure'
+  end
+
+  def test_failed_renderer_without_error_line_names_a_timeout
+    run = { :ok => false, :exitstatus => nil, :timed_out => true,
+      :error => 'secondary process cleanup detail', :stdout => '', :stderr => '' }
+    error = assert_raises(ContractError) { Subject.validate_result!(run, {}) }
+    assert_includes error.message, 'exit nil'
+    assert_includes error.message, 'renderer timed out'
+    refute_includes error.message, 'secondary process cleanup detail'
+  end
+
+  def test_failed_renderer_without_error_line_preserves_bounded_launch_error
+    detail = '  Access is denied: ' + ('x' * 400) + 'TRAILING_DETAIL_NOT_TO_REPORT  '
+    run = { :ok => false, :exitstatus => nil, :timed_out => false,
+      :error => detail, :stdout => '', :stderr => '' }
+    error = assert_raises(ContractError) { Subject.validate_result!(run, {}) }
+    assert_includes error.message, 'exit nil'
+    assert_includes error.message, detail.strip[0, 300]
+    refute_includes error.message, 'TRAILING_DETAIL_NOT_TO_REPORT'
+    assert_equal 300, error.message.split('): ', 2).last.length
   end
 
   def test_real_rgba_render_preserves_media_canvas_origin_rotation_and_declared_crop_clip
