@@ -165,6 +165,61 @@ class ImportRunControlTest < Minitest::Test
     assert_includes [true, false], probe.call
   end
 
+  # Esc pressed in another program must not stop the import.
+  def test_escape_counts_only_while_sketchup_is_in_front
+    pressed = lambda { |_key| 0x8001 }
+
+    refute IRC::EscapeCancelProbe.new(pressed, nil, lambda { false }).call
+    assert IRC::EscapeCancelProbe.new(pressed, nil, lambda { true }).call
+    # Windows could not say which program is in front: the press counts.
+    assert IRC::EscapeCancelProbe.new(pressed, nil, lambda { nil }).call
+    assert IRC::EscapeCancelProbe.new(pressed, nil, lambda { raise 'lookup failed' }).call
+    # No press: the foreground is never asked.
+    asked = false
+    idle = IRC::EscapeCancelProbe.new(lambda { |_key| 0 }, nil, lambda { asked = true })
+    refute idle.call
+    refute asked
+  end
+
+  def test_foreground_check_knows_sketchup_its_ghost_and_other_programs
+    ours = 4242
+    owners = { 10 => ours, 20 => 777, 30 => 888 }
+    owner = lambda { |window| owners.fetch(window, 0) }
+    ghosts = { 30 => 10 } # window 30 is the "Not Responding" ghost of 10
+    ghost = lambda { |window| ghosts.fetch(window, 0) }
+    check = lambda do |front, with_ghost = true|
+      IRC::EscapeCancelProbe::ForegroundCheck.new(
+        lambda { front }, owner, with_ghost ? ghost : nil, ours
+      ).call
+    end
+
+    assert_equal true, check.call(10)
+    assert_equal false, check.call(20)
+    assert_equal true, check.call(30), 'the ghost of a busy SketchUp is SketchUp'
+    assert_nil check.call(0), 'no foreground window: unknown'
+    assert_nil check.call(99), 'owner lookup failed: unknown'
+    assert_nil check.call(20, false), 'no ghost lookup: another program is unknown'
+    assert_nil IRC::EscapeCancelProbe::ForegroundCheck.new(
+      lambda { raise 'boom' }, owner, ghost, ours
+    ).call
+  end
+
+  def test_default_escape_probe_checks_the_window_in_front_on_windows
+    skip 'Windows only' unless Gem.win_platform?
+    probe = IRC::EscapeCancelProbe.new
+
+    assert probe.foreground_check?
+    check = probe.instance_variable_get(:@foreground)
+    assert_includes [true, false, nil], check.call
+  end
+
+  # The unattended host harness passes its own never-cancel probe.
+  def test_batch_host_never_listens_for_escape
+    source = File.read(File.expand_path('../tools/sketchup_batch_import.rb', __dir__))
+
+    assert_match(/opts\[:cancel_probe\]\s*=\s*lambda\s*\{\s*false\s*\}/, source)
+  end
+
   class RecordingLogger
     attr_reader :warnings
 

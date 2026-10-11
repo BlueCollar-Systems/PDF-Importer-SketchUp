@@ -8074,8 +8074,12 @@ module BlueCollarSystems
     # One import of one chosen file, shared by Extensions > Import PDF...,
     # File > Import PDF Vectors... and SketchUp's own File > Import: the
     # open check, the options dialog, the import, then one status-bar line
-    # or one "PDF import failed" box with the reason. Returns :success,
-    # :cancelled or :failed.
+    # or one "PDF import failed" box with the reason. Returns :success
+    # (also when every page arrived and only some text was listed as not
+    # delivered), :incomplete (some pages failed and were skipped; the
+    # rest are in the model and the status line names the skipped pages),
+    # :cancelled or :failed. Every outcome has already told the user what
+    # happened.
     def self.import_pdf_path(model, path)
       return :cancelled if handle_open_gate(path)
       opts = ImportDialog.show(path)
@@ -8093,10 +8097,11 @@ module BlueCollarSystems
         return :cancelled
       end
       ReportDialog.announce(stats)
+      return :success if outcome == 'success'
       # Pages kept with text listed as not delivered are an import, not a
       # failure; the list is in Import Health.
-      return :success if outcome == 'success'
-      pages_kept_with_step_downs?(stats) ? :success : :failed
+      return :success if pages_kept_with_step_downs?(stats)
+      outcome == 'incomplete' ? :incomplete : :failed
     rescue ImportRunControl::ImportCancelled
       :cancelled
     rescue StandardError => e
@@ -8399,10 +8404,14 @@ module BlueCollarSystems
         model = Sketchup.active_model
         return Sketchup::Importer::ImportFail unless model
         outcome = BlueCollarSystems::PDFVectorImporter.import_pdf_path(model, file_path)
+        # import_pdf_path has already shown its own message. ImportFail would
+        # make SketchUp show its generic failure box as a second message, so
+        # a failure we explained reports Canceled. An incomplete import left
+        # its good pages in the model and the status line names the skipped
+        # ones, so it reports Success.
         case outcome
-        when :success then Sketchup::Importer::ImportSuccess
-        when :cancelled then Sketchup::Importer::ImportCanceled
-        else Sketchup::Importer::ImportFail
+        when :success, :incomplete then Sketchup::Importer::ImportSuccess
+        else Sketchup::Importer::ImportCanceled
         end
       rescue StandardError => e
         Logger.error("PDFFileImporter", "load_file failed", e)

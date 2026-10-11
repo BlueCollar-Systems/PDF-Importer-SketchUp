@@ -74,11 +74,16 @@ module BlueCollarSystems
         'Raster: picture'
       ].map(&:freeze).freeze
       TEXT_MODE_HINT = TEXT_MODE_HINT_LINES.join("\n").freeze
-      AUTO_MODE_HINT = 'Auto keeps lines and text editable, places pictures where they are, ' \
-                       'and uses a page picture only for scanned pages.'.freeze
+      # A page with inline pictures can also arrive as one picture (the
+      # inline-image paint-order rule), so the hint names both cases.
+      AUTO_MODE_HINT = 'Auto keeps lines and text editable and places pictures where they are; ' \
+                       'a page becomes one picture only when it is a scan or its pictures ' \
+                       'cannot be placed separately.'.freeze
       # Grouping is fixed: one group per page with color sub-groups inside.
+      # 'Picture of each page' (Raster) places one picture per page instead.
       # The saved grouping_mode value is still read so old settings load.
-      GROUPING_HINT = 'Each page comes in as its own group, with color sub-groups inside.'.freeze
+      GROUPING_HINT = 'Each page comes in as its own group, with color sub-groups inside ' \
+                      '(in Picture of each page mode, each page comes in as one picture).'.freeze
       # Advanced 'Mode' choices in plain words. 'Hybrid' behaves exactly like
       # Auto, so it is not offered; saved 'Hybrid' settings show as Auto.
       MODE_CHOICE_LABELS = [
@@ -87,10 +92,16 @@ module BlueCollarSystems
         ['Raster', 'Picture of each page']
       ].map { |pair| pair.map(&:freeze).freeze }.freeze
       MODE_CHOICES = MODE_CHOICE_LABELS.map(&:first).join('|').freeze
+      # Outer window sizes. Both fit a 1366x768 screen and a 1080p laptop at
+      # 150% scaling (about 720 px) with the taskbar showing. The Import and
+      # Cancel buttons are pinned to the bottom of the window and the
+      # settings above them scroll, so a shorter window never hides them.
       DIALOG_SIZES = {
         :basic => [440, 620],
-        :advanced => [460, 780]
+        :advanced => [460, 620]
       }.freeze
+      # The tallest window that still fits those screens.
+      DIALOG_MAX_HEIGHT = 640
       FIRST_RUN_TEXT_MODE = '3D Text'.freeze
       FIRST_RUN_MATCH_PDF_LAYERS = 'Yes'.freeze
 
@@ -494,7 +505,9 @@ module BlueCollarSystems
             extrude_to_3d:'No',
             extrude_depth_mm:''});}
           function cancel(){sketchup.on_cancel({});}
-          document.addEventListener('keydown',function(e){if(e.key==='Escape')cancel();});
+          document.addEventListener('keydown',function(e){
+            if(e.key==='Enter' && e.target && e.target.tagName!=='BUTTON'){e.preventDefault();doImport();}
+            if(e.key==='Escape')cancel();});
           </script></body></html>
         HTML
       end

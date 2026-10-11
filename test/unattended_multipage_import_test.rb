@@ -505,26 +505,37 @@ class UnattendedMultipageImportTest < Minitest::Test
     [scope, calls, messages, aborts, seen_opts, events]
   end
 
+  # File > Import shows only our own message. An incomplete import keeps its
+  # good pages and names the skipped ones on the status line (Success); a
+  # failure we already explained in a box reports Canceled so SketchUp does
+  # not add its generic failure box (ImportFail = 1 never appears).
   def test_native_importer_reports_explicit_outcomes_and_preserves_legacy_success
     outcomes = [{:result_status => 'incomplete'}, {:cancelled => true},
       {:result_status => 'cancelled'}, {:failed_pages => [{:page => 2}]},
       {:result_status => 'success'}, {:pages => 1}, nil,
       IRC::ImportCancelled.new([1], 2, {})]
-    scope, = entrypoint_scope(outcomes)
+    scope, _calls, messages = entrypoint_scope(outcomes)
     importer = scope.const_get(:NativeImporter).new
     results = 8.times.map { importer.load_file('fixture.pdf', nil) }
-    assert_equal [1, 2, 2, 1, 0, 0, 1, 2], results
+    assert_equal [0, 2, 2, 0, 0, 0, 2, 2], results
+    assert_equal ['No vector content found in PDF.'], messages
   end
 
   # Owner ruling 2026-10-05: pages kept with text listed as not delivered
   # are an import (incomplete, listed in Import Health), never a failure.
+  # The shared import path calls that a plain success; a lost page is
+  # :incomplete. File > Import reports both as Success (good pages stay in
+  # the model and the status line names any skipped page) and shows no box.
   def test_native_importer_counts_kept_pages_with_listed_text_as_imported
     kept = { :result_status => 'incomplete', :failed_pages => [],
              :text_delivery_failures => [{ :page => 1, :reason => 'renderer_missing' }] }
     lost = kept.merge(:failed_pages => [{ :page => 2 }])
-    scope, = entrypoint_scope([kept, lost])
+    scope, _calls, messages = entrypoint_scope([kept, lost, kept, lost])
+    assert_equal [:success, :incomplete],
+                 2.times.map { scope.import_pdf_path(Object.new, 'fixture.pdf') }
     importer = scope.const_get(:NativeImporter).new
-    assert_equal [0, 1], 2.times.map { importer.load_file('fixture.pdf', nil) }
+    assert_equal [0, 0], 2.times.map { importer.load_file('fixture.pdf', nil) }
+    assert_empty messages
   end
 
   def test_folder_batch_counts_kept_pages_with_listed_text_as_imported
@@ -537,9 +548,11 @@ class UnattendedMultipageImportTest < Minitest::Test
   end
 
   def test_native_importer_does_not_retry_failed_rollback
-    scope, _calls, _messages, aborts = entrypoint_scope([IRC::RollbackFailure.new('rollback failed')])
-    assert_equal 1, scope.const_get(:NativeImporter).new.load_file('fixture.pdf', nil)
+    scope, _calls, messages, aborts = entrypoint_scope([IRC::RollbackFailure.new('rollback failed')])
+    assert_equal 2, scope.const_get(:NativeImporter).new.load_file('fixture.pdf', nil)
     assert_empty aborts
+    assert_equal 1, messages.length
+    assert_includes messages.first, 'rollback failed'
   end
 
   def with_batch_fixture(outcomes)
