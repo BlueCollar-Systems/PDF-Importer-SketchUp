@@ -159,25 +159,107 @@ module BlueCollarSystems
         # :fiddle, :win32api, :injected or :none
         attr_reader :adapter_kind
 
-        def initialize(adapter = nil, logger = nil)
+        # Answers "is SketchUp the program in front?": true, false, or nil
+        # when Windows cannot say. A hung SketchUp shows a "Not Responding"
+        # ghost window owned by another process; the ghost counts as
+        # SketchUp, so Esc still works while an import keeps it busy.
+        class ForegroundCheck
+          def initialize(foreground_window, window_process_id,
+                         hung_window_from_ghost = nil, process_id = nil)
+            @foreground_window = foreground_window
+            @window_process_id = window_process_id
+            @hung_window_from_ghost = hung_window_from_ghost
+            @process_id = (process_id || Process.pid).to_i
+          end
+
+          def call
+            window = @foreground_window.call.to_i
+            return nil if window == 0
+            owner = @window_process_id.call(window).to_i
+            return nil if owner == 0
+            return true if owner == @process_id
+            return nil unless @hung_window_from_ghost
+            hung = @hung_window_from_ghost.call(window).to_i
+            return false if hung == 0
+            hung_owner = @window_process_id.call(hung).to_i
+            hung_owner == 0 ? nil : hung_owner == @process_id
+          rescue StandardError
+            nil
+          end
+        end
+
+        # foreground: an object whose #call answers like ForegroundCheck.
+        # Without one, the real Windows check is used with the real key
+        # reader, and no check with an injected key reader.
+        def initialize(adapter = nil, logger = nil, foreground = nil)
           @logger = logger
           if adapter
             @adapter = adapter
             @adapter_kind = :injected
+            @foreground = foreground
           else
             @adapter, @adapter_kind = windows_key_adapter
+            @foreground = foreground
+            @foreground ||= fiddle_foreground_check if @adapter
           end
         end
 
+        # Esc counts only while SketchUp is the program in front, so Esc
+        # pressed in another program does not stop the import. When Windows
+        # cannot say which program is in front, the press counts.
         def call
           return false unless @adapter
           value = @adapter.call(ESCAPE_VIRTUAL_KEY).to_i
-          (value & PRESSED_MASK) != 0
+          return false if (value & PRESSED_MASK) == 0
+          host_in_front?
         rescue StandardError
           false
         end
 
+        def foreground_check?
+          !@foreground.nil?
+        end
+
         private
+
+        def host_in_front?
+          return true unless @foreground
+          @foreground.call != false
+        rescue StandardError
+          true
+        end
+
+        def fiddle_foreground_check
+          require 'fiddle'
+          user32 = Fiddle.dlopen('user32')
+          abi = fiddle_abi
+          foreground = Fiddle::Function.new(
+            user32['GetForegroundWindow'], [], Fiddle::TYPE_VOIDP, abi
+          )
+          thread_process = Fiddle::Function.new(
+            user32['GetWindowThreadProcessId'],
+            [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP], Fiddle::TYPE_INT, abi
+          )
+          ghost = begin
+            Fiddle::Function.new(
+              user32['HungWindowFromGhostWindow'], [Fiddle::TYPE_VOIDP],
+              Fiddle::TYPE_VOIDP, abi
+            )
+          rescue StandardError
+            nil
+          end
+          ForegroundCheck.new(
+            lambda { foreground.call.to_i },
+            lambda { |window|
+              buffer = [0].pack('L')
+              thread_process.call(window, buffer)
+              buffer.unpack('L').first
+            },
+            ghost ? lambda { |window| ghost.call(window).to_i } : nil
+          )
+        rescue LoadError, StandardError
+          nil
+        end
 
         def windows_key_adapter
           adapter = fiddle_key_adapter
