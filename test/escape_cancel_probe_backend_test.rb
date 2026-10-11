@@ -21,6 +21,9 @@ class EscapeCancelProbeBackendTest < Minitest::Test
     end
     def win32api_class; @fixture[:legacy]; end
     def fiddle_module; @fixture[:fiddle]; end
+    # These fixtures cover key-reader selection only. The "which program is
+    # in front" check is covered in import_run_control_test.rb.
+    def default_foreground_check; nil; end
   end
 
   class FakeHandle

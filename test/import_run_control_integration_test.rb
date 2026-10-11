@@ -66,14 +66,17 @@ class ImportRunControlIntegrationTest < Minitest::Test
   end
 
   def test_page_offset_and_certification_are_inside_the_page_transaction
-    assert_includes MAIN, 'running_y_offset = opts[:initial_y_offset].to_f'
-    loop_setup = MAIN[
-      /running_y_offset = opts\[:initial_y_offset\]\.to_f.*?pages\.each_with_index/m
-    ]
-    refute_nil loop_setup
-    assert_includes loop_setup, 'page_group_for_certification = nil'
     pipeline = MAIN[/def self\.run_pipeline\(model, path, opts\).*\z/m]
     refute_nil pipeline
+    # A resumed page keeps the orchestrator's offset; a fresh non-resumable
+    # run starts above earlier PDF pages in the model.
+    loop_setup = pipeline[
+      /running_y_offset = if opts\[:initial_y_offset\]\.nil\?.*?pages\.each_with_index/m
+    ]
+    refute_nil loop_setup
+    assert_includes loop_setup, 'fresh_import_start_offset(model'
+    assert_includes loop_setup, 'opts[:initial_y_offset].to_f'
+    assert_includes loop_setup, 'page_group_for_certification = nil'
     page_end = pipeline[/running_y_offset \+= page_stack_step.*?model\.commit_operation/m]
     refute_nil page_end
     assert_includes page_end, 'opts[:page_certifier].call'

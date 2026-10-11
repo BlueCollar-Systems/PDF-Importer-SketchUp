@@ -116,6 +116,10 @@ module BlueCollarSystems
         if @group_per_page
           @page_group = entities.add_group
           @page_group.name = "PDF Page #{@page_number}"
+          # Lets the next import find this page and land beside it.
+          if @page_group.respond_to?(:set_attribute)
+            @page_group.set_attribute('BC_PDF_Importer', 'page_group', true)
+          end
           set_layer(@page_group, base_layer)
           target = @page_group.entities
         else

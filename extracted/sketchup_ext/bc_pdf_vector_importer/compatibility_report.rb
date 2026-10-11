@@ -17,11 +17,18 @@ module BlueCollarSystems
           saved_path = save_report(report)
           copied = copy_to_clipboard(report)
           print_to_console(report)
+          # SketchUp 2017 through 2023.0 have no clipboard API: open the
+          # saved report in the PC's text editor so it can still be shared.
+          opened = !copied && saved_path ? open_report_file(saved_path) : false
 
           lines = []
           lines << "Compatibility report generated."
           lines << ""
-          lines << "Clipboard: #{copied ? 'Copied' : 'Not available'}"
+          if copied
+            lines << "Clipboard: Copied"
+          else
+            lines << "Clipboard: Not available in this SketchUp version."
+          end
           report_file = if saved_path
                           'Saved locally (path hidden for privacy)'
                         else
@@ -29,7 +36,16 @@ module BlueCollarSystems
                         end
           lines << "Report file: #{report_file}"
           lines << ""
-          lines << "Use the clipboard or Ruby Console to access the full report."
+          lines.concat(summary_lines(report))
+          lines << ""
+          lines << if copied
+                     "Use the clipboard or Ruby Console to access the full report."
+                   elsif opened
+                     "The full report opened in #{text_editor_name}. " \
+                       'It is also printed in Window > Ruby Console.'
+                   else
+                     'The full report is printed in Window > Ruby Console.'
+                   end
           UI.messagebox(lines.join("\n"))
         rescue StandardError => e
           Logger.error("CompatibilityReport", "show failed", e)
@@ -84,6 +100,16 @@ module BlueCollarSystems
           lines << ""
           lines << "[Feature Impact]"
           lines.concat(feature_impact_lines(model, entities, pdftocairo, mutool, pdftotext, pdffonts, ghostscript))
+          lines << ""
+          lines << "[Other PDF extensions]"
+          others = other_pdf_extensions
+          if others.empty?
+            lines << "- None found."
+          else
+            others.each { |entry| lines << "- #{entry}" }
+            lines << "- Another PDF importer may answer File > Import for .pdf files; " \
+                     "if results differ from this importer, turn it off in Window > Extension Manager."
+          end
           missing = DependencyResolver.missing_recommended(status)
           unless missing.empty?
             lines << ""
@@ -151,6 +177,95 @@ module BlueCollarSystems
           capability_line(label, ok, redacted)
         end
 
+        def importer_registered?
+          importer = BlueCollarSystems::PDFVectorImporter
+          importer.respond_to?(:importer_registered?) && importer.importer_registered? == true
+        rescue StandardError
+          false
+        end
+
+        # Helper status and what works, taken from the already redacted
+        # report text, so the box can never show a local path.
+        def summary_lines(report)
+          helpers = []
+          impact = []
+          others = []
+          section = nil
+          report.to_s.split("\n").each do |line|
+            if line =~ /\A\[(.+)\]\z/
+              section = $1
+              next
+            end
+            next if line.strip.empty?
+            case section
+            when 'Capabilities'
+              if line =~ /found:|Bundled bin folder ready:/
+                helpers << "- #{line.sub(/ \(\[path redacted\]\)\z/, '')}"
+              end
+            when 'Feature Impact'
+              impact << line
+            when 'Other PDF extensions'
+              others << line
+            end
+          end
+          lines = ['Helpers:'] + helpers
+          lines << '' << 'What works:'
+          lines.concat(impact)
+          lines << '' << 'Other PDF extensions:'
+          lines.concat(others)
+          lines
+        end
+
+        def open_report_file(saved_path)
+          return false unless UI.respond_to?(:openURL)
+          path = saved_path.to_s.tr('\\', '/')
+          path = path.gsub('%', '%25').gsub(' ', '%20').gsub('#', '%23')
+          path = path.sub(%r{\A/+}, '')
+          UI.openURL("file:///#{path}")
+          true
+        rescue StandardError => e
+          Logger.warn("CompatibilityReport", "open report failed: #{e.class}")
+          false
+        end
+
+        # UI.openURL opens the report in whatever program Windows has set
+        # for .txt files, which is usually, but not always, Notepad.
+        def text_editor_name
+          platform = safe_call { Sketchup.platform }
+          platform.to_s =~ /win/i ? 'your text editor (usually Notepad)' : 'your text editor'
+        end
+
+        # Loaded extensions other than this one whose name or description
+        # mentions PDF (for example a second PDF importer).
+        def other_pdf_extensions
+          return [] unless defined?(Sketchup) && Sketchup.respond_to?(:extensions)
+          list = Sketchup.extensions
+          return [] unless list.respond_to?(:each)
+          found = []
+          list.each do |extension|
+            name = extension_text(extension, :name)
+            creator = extension_text(extension, :creator)
+            next if creator =~ /BlueCollar/i || name == 'PDF Vector Importer'
+            next unless "#{name} #{extension_text(extension, :description)}" =~ /pdf/i
+            next if extension.respond_to?(:loaded?) && !extension.loaded?
+            version = extension_text(extension, :version)
+            entry = name.dup
+            entry << " #{version}" unless version.empty?
+            entry << " by #{creator}" unless creator.empty?
+            found << entry
+          end
+          found
+        rescue StandardError
+          []
+        end
+
+        def extension_text(extension, attribute)
+          return '' unless extension.respond_to?(attribute)
+          extension.send(attribute).to_s.strip
+        rescue StandardError
+          ''
+        end
+
         def feature_impact_lines(model, entities, pdftocairo, mutool, pdftotext, pdffonts, ghostscript)
           lines = []
           lines << "- Core vector parser: Built-in Ruby parser available; no helper executable required for baseline vector extraction."
@@ -162,9 +277,11 @@ module BlueCollarSystems
           end
 
           if !(defined?(Sketchup::Importer) ? true : false)
-            lines << "- File > Import hook: Not available; use Extensions/Plugins menu import."
-          else
+            lines << "- File > Import hook: Not available; use Extensions > PDF Vector Importer > Import PDF..."
+          elsif importer_registered?
             lines << "- File > Import hook: Available."
+          else
+            lines << "- File > Import hook: Not registered; use Extensions > PDF Vector Importer > Import PDF..."
           end
 
           if !entities_responds?(entities, :add_image)

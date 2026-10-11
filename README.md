@@ -11,7 +11,7 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 ### Unattended multi-page import
 
-A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > Import Health has the full summary.
+A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > PDF Vector Importer > Import Health... has the full summary.
 
 ### Page selection
 
@@ -77,7 +77,7 @@ use the same validation.
 - Very short, source-proven round-cap Ink annotations retain their original centerline and editable semicircular arcs even below SketchUp's normal edge tolerance. Their native fill uses 48 segments per semicircle, with its polygon area reported separately from the analytic source area. Where an unrotated original-page crop proves no glyph ink or unrelated annotation overlap, a bounded 600-DPI RGB display patch preserves the original blend appearance above that geometry. The report binds the original source, pixel lattice, saved image pixels and native arcs; unsupported composite scope is reported while retaining the qualified geometry. Text modes are unchanged.
 - Encrypted PDFs that open without a password and repaired PDFs use the same screen-visible annotation handling. Temporary normalized files are checked against both source and output bytes; repeating an import after cleanup or repairing a missing helper works within the same session.
 - Simultaneous imports keep their reports, parts data and source provenance in separate run folders, preventing one importer from replacing another importer's verification evidence.
-- Each import retains its own diagnostic log, and saved compatibility reports remain available for later review.
+- Each import retains its own diagnostic log, and every Compatibility Report is saved as its own file. On SketchUp 2023.1 and newer the report is also copied to the clipboard; on SketchUp 2017 through 2023.0, which have no clipboard access, the saved report opens in your text editor instead (usually Notepad). The report box itself shows the helper status and lists any other PDF extension that is loaded.
 - Default report names handle long and non-ASCII drawing names. Explicit CLI report destinations retain their chosen paths.
 
 ### Earlier notes (v3.7.151)
@@ -163,8 +163,11 @@ assets, checksums, license, and notes.
 
 ## Key Features
 
-- **4 Import Modes** (BCS-ARCH-001) — Auto (default, picks strategy per page),
-  Vector, Raster, Hybrid. Every mode targets maximum fidelity.
+- **3 Import Modes** (BCS-ARCH-001) — Auto (default: keeps lines and text
+  editable and places pictures where they are; a page becomes one picture only
+  when it is a scan or its pictures cannot be placed separately), Vector (lines
+  and text only, skips pictures) and Raster (a picture of each page). `Hybrid` from older saved settings or the CLI works
+  the same as Auto. Every mode targets maximum fidelity.
 - **6 Text Rendering Options** — Text, Labels, 3D Text, Glyphs, Geometry,
   Raster (orthogonal to mode) + separate Import text toggle. The dialog reopens
   with the last text rendering option used; the first-run default is 3D Text for
@@ -255,15 +258,16 @@ assets, checksums, license, and notes.
 - **PDF layer matching by default** — PDF layers become same-named SketchUp Tags when the PDF contains layer data
 - **Color-based tag grouping** with dash pattern mapping
 - **Scale by Reference** tool — select an edge, type the real-world dimension
-- **Quick Scale** with 15 architectural/engineering ratio preferences
-  (`1/4"=1'-0"`, `3/8"=1'`, etc.)
+- **Quick Scale** — type the drawing scale the way it is printed (`48`,
+  `1:48`, `1/4"=1'-0"`, `3/8"=1'`) and a paper-size import grows to real size
 - **Architectural scale notation parsing**
-- **Import quality assessment** with warnings and performance metrics
-- **Post-import action workflow** (geometry only, scale, cleanup, feature inventory)
-- **Native DXF bridge command** from the extension menu/toolbar
-- **Tag visibility controls** for PDF layers
+- **Import quality assessment** with warnings and performance metrics in
+  `import_report.json` and **Import Health**
+- **Post-import tools** in **Extensions > PDF Vector Importer**: Clean Up
+  Selected Groups, Feature Inventory (what each imported page holds) and
+  Show/Hide PDF Tags
 - **Document profiling** (fabrication, CAD, architectural, vector art, raster)
-  drives Auto-mode strategy selection
+  used by recognition; it does not switch the import mode
 - **FlateDecode decompression** for compressed PDF streams
 - **Form XObject recursion** for embedded PDF forms
 
@@ -276,12 +280,16 @@ assets, checksums, license, and notes.
 3. Select the `.rbz` file
 4. Restart SketchUp if prompted
 
-The extension registers under **File > Import** and adds a PDF Vector Importer toolbar.
+The extension adds **File > Import PDF Vectors...**, lists **PDF Vector Drawings (*.pdf)**
+in SketchUp's own **File > Import**, and adds the **Extensions > PDF Vector Importer**
+menu (Import PDF, Safe Mode, Batch Import Folder, the scale tools, Extrude Selected
+Planar Faces, Clean Up Selected Groups, Feature Inventory, Show/Hide PDF Tags,
+Compatibility Report, Import Health and About). There is no toolbar.
 
 **Offline install:** The GitHub Release `.rbz` installs without internet. Core vector import and the bundled free Poppler and Ghostscript helpers work offline. MuPDF is an optional separate free install.
 
 For SketchUp 2025 users: native PDF import discoverability changed in SketchUp UI,
-but this extension still provides dedicated PDF import menu and toolbar commands.
+but this extension still provides its own PDF import menu commands.
 
 ## Upgrading / skipping versions
 
@@ -289,7 +297,7 @@ Install the latest `.rbz` from Releases via Extension Manager (overwrites the pr
 
 ## Enterprise / multi-user installs
 
-Install the RBZ **per Windows user** on each PC where SketchUp runs. Avoid roaming only the `Plugins` folder across PCs with different SketchUp years. **Compatibility Report** records extension/helper capability status while redacting local extension and executable paths, so the copied report is safe to share in IT support tickets.
+Install the RBZ **per Windows user** on each PC where SketchUp runs. Avoid roaming only the `Plugins` folder across PCs with different SketchUp years. **Compatibility Report** records extension/helper capability status and any other loaded PDF extension while redacting local extension and executable paths, so the report is safe to share in IT support tickets. SketchUp 2023.1 and newer copy it to the clipboard; on SketchUp 2017 through 2023.0 it opens in your text editor (usually Notepad).
 
 ## External Helpers / Any-PC Behavior
 
@@ -327,44 +335,42 @@ Environment overrides are supported for managed PCs: `BC_PDFTOCAIRO_PATH`,
 
 The Scale by Reference tool lets you correct imported geometry to real-world dimensions. Select any edge, type the known real dimension, and all imported geometry scales proportionally.
 
-### Quick Scale Presets
+### Quick Scale
 
-The Quick Scale dialog provides 15 architectural and engineering presets:
+Imports arrive at paper size. **Quick Scale** takes the drawing's scale typed
+the way it is printed and multiplies the drawing up to real size. A plain
+number is used as the multiplier itself (`0.5` halves the drawing). Before
+anything moves, a box says which way the drawing changes, for example
+"This makes the drawing 48x LARGER", and Undo puts it back.
 
-| Preset | Scale Ratio | Factor | Common Use |
-|--------|-------------|--------|------------|
-| 1:1 | Full size | 1.0 | Detail drawings |
-| 1:2 | Half size | 0.5 | Large details |
-| 1:4 | Quarter size | 0.25 | Construction details |
-| 1:5 | 1/5 size | 0.2 | Detail drawings (metric) |
-| 1:8 | 1/8 size | 0.125 | Room plans |
-| 1:10 | 1/10 size | 0.1 | Detailed plans (metric) |
-| 1:16 | 1/16 size | 0.0625 | Section drawings |
-| 1:20 | 1/20 size | 0.05 | Building plans (metric) |
-| 1:24 | 1/24 size | 0.04167 | 1/2"=1'-0" plans |
-| 1:48 | 1/48 size | 0.02083 | 1/4"=1'-0" plans |
-| 1:50 | 1/50 size | 0.02 | General plans (metric) |
-| 1:96 | 1/96 size | 0.01042 | 1/8"=1'-0" plans |
-| 1:100 | 1/100 size | 0.01 | Site plans (metric) |
-| 1:192 | 1/192 size | 0.00521 | 1/16"=1'-0" plans |
-| 1:200 | 1/200 size | 0.005 | Site plans (metric) |
+| You type | Multiplier | Common use |
+|----------|------------|------------|
+| `1:1` | 1 | Full-size details |
+| `1:2` | 2 | Large details |
+| `1:4` or `3"=1'-0"` | 4 | Construction details |
+| `1:8` or `1-1/2"=1'-0"` | 8 | Details |
+| `1:10` | 10 | Detailed plans (metric) |
+| `1:16` or `3/4"=1'-0"` | 16 | Section drawings |
+| `1:24` or `1/2"=1'-0"` | 24 | Plans |
+| `1:32` or `3/8"=1'-0"` | 32 | Plans |
+| `1:48` or `1/4"=1'-0"` | 48 | Plans |
+| `1:50` | 50 | General plans (metric) |
+| `1:96` or `1/8"=1'-0"` | 96 | Plans |
+| `1:100` | 100 | Site plans (metric) |
+| `1"=10'` | 120 | Civil and site plans |
+| `1:192` or `1/16"=1'-0"` | 192 | Site plans |
 
-The tool also accepts freeform architectural notation such as `1/4"=1'-0"`, `3/8"=1'`, `1"=10'`, and similar formats.
+`1/48` is read the same as `1:48`.
 
 ---
 
 ## Import Report
 
-After every import, the extension presents a quality assessment report with three sections:
-
-### Quality Assessment (diagnostics only)
-
-The post-import report shows a **quality grade** as a diagnostic summary of what the parser observed — not a user-selectable fidelity tier. Every import targets maximum fidelity (BCS-ARCH-001); the grade helps you decide whether to review the result, not which "speed vs quality" mode to use.
-
-- **Excellent** -- All vectors parsed, arcs reconstructed, no anomalies
-- **Good** -- Minor issues (small gaps, unclosed paths) that do not affect usability
-- **Fair** -- Some geometry lost or degraded; manual review recommended
-- **Poor** -- Significant parsing failures; consider alternate export settings or source PDF export settings
+No box pops up after an import. When it finishes, one line on SketchUp's status
+bar says how many pages came in, any page delivered as a picture (with the reason)
+and any page that failed. **Extensions > PDF Vector Importer > Import Health...**
+shows the full summary of the last import in this SketchUp session, and every
+import writes a detailed `import_report.json`.
 
 ### Warnings
 

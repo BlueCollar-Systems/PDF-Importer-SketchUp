@@ -725,6 +725,8 @@ module SketchupBatchImport
       opts[:use_3d_text] = (opts[:text_mode] == :text3d)
       opts[:group_per_page] = true
       opts[:resumable] = !full_page_raster
+      # Unattended run: an Esc pressed anywhere on the machine must not stop it.
+      opts[:cancel_probe] = lambda { false }
       opts[:source_lineage] = {
         :original_pdf_path => job[:original_pdf_path],
         :original_pdf_sha256 => job[:original_pdf_sha256],

@@ -299,11 +299,27 @@ class EmptyFillGroupResumeSignatureTest < Minitest::Test
     [builder, result]
   end
 
-  def controller_for(model)
+  # The named-group diagnostics below come from the per-page census, which
+  # is taken only with Audit import (slow self-checks) on (SU-1010-17).
+  def controller_for(model, audit = true)
     IRC::Controller.new(
       :model => model, :pages => [1], :requested_mode => :text3d,
-      :identity => identity, :clock => lambda { 0.0 }
+      :identity => identity, :clock => lambda { 0.0 }, :audit => audit
     )
+  end
+
+  def test_audit_off_still_fails_closed_and_reseals_without_the_census
+    model = PurgingHost::Model.new
+    builder, _result = build_page(model, [stroke_line(10.0)])
+    controller = controller_for(model, false)
+    controller.certify_page!(builder.page_group, 1)
+    model.commit_operation
+    host_drops_a_populated_group!(builder)
+    error = assert_raises(IRC::ResumeMismatch) { controller.resumable_pages }
+    assert_equal 'page 1 retained entity signature changed', error.message
+    message = controller.reseal_page!(builder.page_group, 1)
+    assert_match(/\(turn on Audit import for a detailed list\); journal re-sealed/, message)
+    assert_equal [1], controller.resumable_pages
   end
 
   # Failure diagnostics: the whole tree under the model, so a CI-only

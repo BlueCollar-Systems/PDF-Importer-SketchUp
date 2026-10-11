@@ -259,7 +259,8 @@ module BlueCollarSystems
               owned_groups << owned_group
             end
             assign_group_identity(
-              group, source_id, :text_span, opts[:layer], indices
+              group, source_id, :text_span, opts[:layer], indices,
+              (opts[:keep_id_names] == true ? nil : item)
             )
             span_result = build_span_group(
               group, entries, source_id, depth, :text_span, solid_cache
@@ -1542,9 +1543,59 @@ module BlueCollarSystems
         end
       end
 
+      # The words a text group stands for, so a fitter can find a piece mark
+      # (EX101) in the Outliner or read a note in Entity Info. Whitespace and
+      # control characters collapse to one space; nil when nothing is left.
+      DISPLAY_NAME_LIMIT = 60
+
+      def self.display_text(item)
+        text = utf8_text(CairoGlyphSource.item_text(item))
+        text = text.gsub(/[[:cntrl:]\s]+/, ' ').strip
+        text.empty? ? nil : text
+      rescue StandardError
+        nil
+      end
+
+      # Attribute and name values must be valid UTF-8 on every SketchUp
+      # version; bytes that are not are replaced, never raised on.
+      def self.utf8_text(value)
+        text = value.to_s.dup
+        if [Encoding::UTF_8, Encoding::ASCII_8BIT, Encoding::US_ASCII].include?(text.encoding)
+          text.force_encoding(Encoding::UTF_8)
+        else
+          text = text.encode(Encoding::UTF_8, :invalid => :replace,
+                             :undef => :replace, :replace => '?')
+        end
+        text.valid_encoding? ? text : text.scrub('?')
+      end
+
+      def self.text_group_name(display)
+        shown = display.length > DISPLAY_NAME_LIMIT ?
+          display[0, DISPLAY_NAME_LIMIT].rstrip + '...' : display
+        "PDF Text: #{shown}"
+      end
+
+      # Names the group by its words when they are known ("PDF Text: EX101")
+      # and keeps the full source string in BC_PDF_Importer/source_text;
+      # otherwise (no words, or a page whose font codes carry no meaning)
+      # the id name stays.
+      def self.apply_text_words!(group, item)
+        display = display_text(item)
+        return false unless display
+        group.name = text_group_name(display) if group.respond_to?(:name=)
+        if group.respond_to?(:set_attribute)
+          group.set_attribute('BC_PDF_Importer', 'source_text',
+                              utf8_text(CairoGlyphSource.item_text(item)))
+        end
+        true
+      rescue StandardError
+        false
+      end
+
       def self.assign_group_identity(group, source_id, source_kind, layer,
-                                     placement_indices = [])
+                                     placement_indices = [], item = nil)
         group.name = "PDF 3D Text #{source_id}" if group.respond_to?(:name=)
+        apply_text_words!(group, item) if item
         group.layer = layer if layer && group.respond_to?(:layer=)
         return unless group.respond_to?(:set_attribute)
         if source_kind == :text_span

@@ -139,6 +139,10 @@ class TextModeRoutingTest < Minitest::Test
       def self.prepare_item_page_match_and_peer_boxes(*); [{}, [], [], [], {}]; end
       def self.report_pipeline_progress(*); end
       def self.run_control_checkpoint!(*); end
+      # Owner ruling 2026-10-05: each text stage runs inside the keep-page
+      # wrapper; on success it only yields (its failure path is covered in
+      # test/keep_page_on_text_failure_test.rb).
+      def self.keep_page_on_text_failure(*); yield; true; end
       def self.svg_source_context(*); {}; end
       def self.complete_item_representation_ladder!(stats, _model, _parent, _path, _page, _item, mode, *)
         stats[:deliveries] << [:semantic, mode]
@@ -240,18 +244,34 @@ class TextModeRoutingTest < Minitest::Test
   def test_geometry_glyphs_preflight_warns_when_svg_renderer_missing
     assert_match(/svg_renderer_missing/, @main)
     assert_match(/SvgTextRenderer\.svg_renderer_available\?/, @main)
-    # User-facing contract: the import stops explicitly with ONE failure
-    # message that directs the user to a free external renderer; a
-    # source-only RBZ cannot repair this by being reinstalled and the
-    # importer never offers a downgrade. Since PR #86 (554cead) there is no
-    # mid-import modal here - the remedy rides in the raised error.
-    assert_match(/free Poppler\/MuPDF SVG/, @main)
+    # Owner ruling 2026-10-05 (deliver, step down, report): a missing or
+    # blocked free text helper no longer costs the page. The check returns
+    # false (no raise, no modal), the page's helper-based text is turned
+    # off, its lines, fills and pictures still build, and every text item is
+    # listed as not delivered with reason 'renderer_missing'. The remedy
+    # still names the free renderer and how to point the importer at it.
+    # Behaviour: test/keep_page_on_text_failure_test.rb.
+    assert_match(/free Poppler\/MuPDF/, @main)
     assert_match(/renderer is unavailable/, @main)
-    assert_match(/representation fallback is authorized/, @main)
-    assert_match(/The requested representation will not be substituted/, @main)
     enforce = @main[/def self\.enforce_svg_renderer_available!.*?\n    end\n/m]
     refute_nil enforce
     refute_match(/UI\.messagebox/, enforce)
+    refute_match(/\braise\b/, enforce,
+                 'a missing helper must not raise and roll the page back')
+    assert_match(/\n      false\n    end\n\z/, enforce)
+    assert_match(
+      /text_renderer_missing\s*=\s*!enforce_svg_renderer_available!\(/m, @main
+    )
+    assert_match(/'renderer_missing',\s*SVG_RENDERER_REMEDY/, @main)
+    assert_includes @main,
+                    "        if text_renderer_missing\n" \
+                    "          use_svg_text = false\n" \
+                    "          use_svg_3d_text = false\n" \
+                    "        end\n",
+                    "a missing helper turns off only this page's helper-based text"
+    assert_match(/use_item_raster \|\|\s*text_renderer_missing\) \? \[\] : text_items/m,
+                 @main,
+                 'the builder must not try to place the undelivered text another way')
     assert_match(/BC_PDFTOCAIRO_PATH/, @main)
     assert_match(/BC_MUTOOL_PATH/, @main)
     assert_match(/Compatibility Report/, @main)

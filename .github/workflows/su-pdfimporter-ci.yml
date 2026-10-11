@@ -100,6 +100,7 @@ jobs:
           ruby test/import_health_test.rb
           ruby test/compatibility_report_test.rb
           ruby test/compatibility_report_isolation_test.rb
+          ruby test/menu_registration_test.rb
           ruby test/qa_report_isolation_test.rb
           ruby test/finalize_diagnostics_isolation_test.rb
           ruby test/batch_geometry_sidecar_isolation_test.rb
@@ -113,6 +114,7 @@ jobs:
           ruby test/corpus_harness_test.rb
           ruby test/arc_fitter_test.rb
           ruby test/unit_parser_test.rb
+          ruby test/quick_scale_parse_test.rb
           ruby test/mesh_text_width_fidelity_test.rb
           ruby test/condensed_text_width_regression_test.rb
           ruby test/all_modes_placement_contract_test.rb
@@ -151,6 +153,8 @@ jobs:
           ruby test/inline_image_composite_test.rb
           ruby test/inline_image_delivery_accounting_test.rb
           ruby test/unattended_multipage_import_test.rb
+          ruby test/keep_page_on_text_failure_test.rb
+          ruby test/audit_setting_test.rb
           ruby test/failed_page_outcome_test.rb
           ruby test/retained_page_view_fit_test.rb
           ruby test/opaque_mask_source_unit_test.rb

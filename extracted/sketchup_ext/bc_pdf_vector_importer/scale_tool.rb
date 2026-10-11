@@ -147,7 +147,7 @@ module BlueCollarSystems
         end
 
         prompts = [
-          "Scale factor or ratio (e.g. 2.0, 1:50, 48, 0.5):",
+          "Drawing scale or factor (e.g. 48, 1:48, 1/4\"=1'-0\", 0.5):",
           "Scale target:"
         ]
         defaults = ["1.0", "All Groups"]
@@ -159,24 +159,41 @@ module BlueCollarSystems
 
         factor_str, scale_target = result
 
-        # Parse factor — support "1:50" ratio format
+        # Read the scale the way drawings print it: 1:48 and 1/4"=1'-0"
+        # both make a paper-size import 48 times larger.
         factor = parse_scale_factor(factor_str)
         unless factor && factor > 0
-          UI.messagebox("Could not parse scale factor: \"#{factor_str}\"\n\n" \
-                        "Examples: 2.0, 1:50, 48, 0.5")
+          UI.messagebox("Could not read \"#{factor_str}\" as a scale.\n\n" \
+                        "Examples: 48, 1:48, 1/4\"=1'-0\", 0.5")
           return
         end
 
-        if factor > 10000 || factor < 0.0001
-          warn_choice = UI.messagebox(
-            "Scale factor %.6f is extremely %s.\n\n" \
-            "This may indicate a unit mismatch. Continue anyway?" %
-            [factor, factor > 10000 ? "large" : "small"],
-            MB_YESNO)
-          return unless warn_choice == IDYES
-        end
+        # Say which way the drawing changes before anything moves.
+        choice = UI.messagebox(scale_direction_message(factor, factor_str),
+                               MB_YESNO)
+        return unless choice == IDYES
 
         apply_scale(model, factor, scale_target, nil, nil, factor_str)
+      end
+
+      def self.scale_direction_message(factor, typed)
+        change = if factor > 1.0
+                   "This makes the drawing #{format_factor(factor)}x LARGER."
+                 elsif factor < 1.0
+                   "This makes the drawing #{format_factor(1.0 / factor)}x smaller."
+                 else
+                   'This keeps the drawing the same size.'
+                 end
+        message = "#{change}\n\nYou typed: #{typed.to_s.strip}"
+        if factor > 10000 || factor < 0.0001
+          message += "\n\nThat is an extreme change and may mean a unit mix-up."
+        end
+        message + "\n\nContinue?"
+      end
+
+      def self.format_factor(value)
+        rounded = value.to_f.round(4)
+        rounded == rounded.round ? rounded.round.to_s : rounded.to_s
       end
 
       private
@@ -337,22 +354,11 @@ module BlueCollarSystems
       end
 
       # ---------------------------------------------------------------
-      # Parse scale factor from string — supports "2.0", "1:50", etc.
+      # Parse a typed scale into the paper-to-real multiplier:
+      # "48", "1:48", "1/4\"=1'-0\"" -> 48.0; "0.5" -> 0.5; nil if unreadable.
       # ---------------------------------------------------------------
       def self.parse_scale_factor(text)
-        text = text.strip
-        # Ratio format: "1:50" → 1/50 = 0.02
-        if text =~ /\A(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\z/
-          num = $1.to_f
-          den = $2.to_f
-          return nil if den == 0
-          return num / den
-        end
-        # Plain number
-        if text =~ /\A[+-]?\d*\.?\d+\z/
-          return text.to_f
-        end
-        nil
+        ResolvedScaleDetect.enlargement_from_text(text)
       end
 
     end
