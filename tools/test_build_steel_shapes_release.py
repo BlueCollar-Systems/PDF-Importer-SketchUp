@@ -109,7 +109,16 @@ class SteelShapesReleaseBuilderTest(unittest.TestCase):
         )
         self.assertIn("tools/build_steel_shapes_release.py", workflow)
         self.assertIn("tools/complete_github_release.py", workflow)
-        self.assertIn('--target "$GITHUB_SHA"', workflow)
+        # A manual run may select an existing tag different from the dispatch
+        # ref, so publication must bind the checked-out shape pack commit.
+        self.assertIn('ref: ${{ inputs.tag || github.ref }}', workflow)
+        self.assertIn('--tag "$STEEL_TAG"', workflow)
+        self.assertIn('--target "$(git rev-parse HEAD)"', workflow)
+        self.assertNotIn('--target "$GITHUB_SHA"', workflow)
+        self.assertIn(
+            "if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true",
+            workflow,
+        )
         self.assertNotIn("--latest", workflow)
         self.assertNotIn("softprops/action-gh-release", workflow)
         self.assertNotIn("overwrite_files", workflow)
