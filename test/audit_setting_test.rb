@@ -252,7 +252,9 @@ class AuditSettingTest < Minitest::Test
     main = File.read(File.expand_path(
       '../extracted/sketchup_ext/bc_pdf_vector_importer/main.rb', __dir__
     ), :encoding => 'UTF-8')
-    assert_match(/:audit => opts\[:audit\] == true\n\s*\)\n\s*runner = lambda/, main,
+    # The flag is the last argument of the controller call that the page
+    # runner uses; a line or two may sit between that call and the runner.
+    assert_match(/:audit => opts\[:audit\] == true\n\s*\)\n(?:[^\n]*\n){0,3}?\s*runner = lambda/, main,
                  'the page certifier gets the Audit flag')
     assert_match(/pipeline_performance: \{ :audit => audit_mode\?\(opts\) \}/, main)
     assert_match(/immutable_sha256 = import_file_sha256\(opts, immutable_path\)/, main)
