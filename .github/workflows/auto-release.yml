@@ -295,7 +295,12 @@ jobs:
           ruby test/annotation_microstroke_geometry_test.rb
           ruby test/original_annotation_pipeline_test.rb
           ruby test/page_paint_bounds_test.rb
-          ruby test/separation_fill_fidelity_test.rb
+          # This test arrived after tag v3.7.162. Verifying that published
+          # tag checks out those bytes while this workflow file is from a
+          # later commit, so the file is absent there. Current source runs it.
+          if [ -f test/separation_fill_fidelity_test.rb ]; then
+            ruby test/separation_fill_fidelity_test.rb
+          fi
           ruby test/stroke_color_preservation_test.rb
           ruby test/labels_empty_text_group_resume_signature_test.rb
           ruby test/pdf_color_display_test.rb
