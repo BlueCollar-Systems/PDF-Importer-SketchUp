@@ -3,6 +3,8 @@
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
+require_relative 'unit_parser'
+
 module BlueCollarSystems
   module PDFVectorImporter
     module ResolvedScaleDetect
@@ -16,7 +18,7 @@ module BlueCollarSystems
       # 1-1/2"=1'-0" (a whole number plus a fraction of an inch on paper)
       TYPED_MIXED_ARCH = /\A(\d+)\s*[- ]\s*(\d+)\s*\/\s*(\d+)\s*["\u2033]?\s*=\s*(.+)\z/.freeze
       # A 'SCALE:' word in front of a pasted scale.
-      TYPED_LABEL = /\A(?:SCALE|SCL\.?|SC\.?)\s*[:=]?\s*/i.freeze
+      TYPED_LABEL = /\A(?:SCALE|SCL\.?|SC\.?)(?=\s|[:=]|\z)\s*[:=]?\s*/i.freeze
       # paper = real
       TYPED_EQUATION = /\A([^=]+?)\s*=\s*([^=]+)\z/.freeze
       # Inches: 3, 1/4, 1-1/2 or 1 1/2, with an optional inch mark (group 4).
@@ -33,6 +35,10 @@ module BlueCollarSystems
       #   1=48 -> 48 (bare numbers on both sides are a ratio)
       # Extra ':' or '=' parts (1:48:2) are refused rather than guessed.
       def enlargement_from_text(text)
+        return nil unless text.is_a?(String) && text.bytesize <= UnitParser::MAX_TEXT_BYTES
+        return nil unless text.valid_encoding? && text.encoding.ascii_compatible?
+        return nil unless text.ascii_only? || text.encoding == Encoding::UTF_8
+        return nil if text =~ /[\x00-\x08\x0a-\x1f\x7f]/
         typed = text.to_s.strip.sub(TYPED_LABEL, '')
         return nil if typed.empty?
         return positive_factor(typed.to_f) if typed =~ TYPED_NUMBER
@@ -40,8 +46,7 @@ module BlueCollarSystems
 
         equation = typed.match(TYPED_EQUATION)
         if equation
-          factor = equation_factor(equation[1].strip, equation[2].strip)
-          return factor if factor
+          return equation_factor(equation[1].strip, equation[2].strip)
         end
 
         ratio = typed.match(TYPED_RATIO) || typed.match(TYPED_FRACTION)
@@ -55,15 +60,14 @@ module BlueCollarSystems
         if mixed
           return nil unless mixed[3].to_f > 0.0
           paper = mixed[1].to_f + mixed[2].to_f / mixed[3].to_f
-          real = parse_feet_inches_token(mixed[4].to_s) ||
-                 DimensionParser.parse_length_token(mixed[4].to_s)
+          real = typed_real_inches(mixed[4].to_s)
           return nil unless real && paper > 0.0
           return positive_factor(real.to_f / paper)
         end
 
-        factor_conf = factor_from_parsed(DimensionParser.parse(typed))
-        factor_conf ||= factor_from_arch_match(typed)
-        positive_factor(factor_conf ? factor_conf[0] : nil)
+        # Title-block detection intentionally searches within a note. Typed
+        # input must consume the whole entry; never borrow that loose parser.
+        nil
       rescue StandardError
         nil
       end
@@ -79,11 +83,20 @@ module BlueCollarSystems
         end
         paper = typed_inches(paper_text, false)
         return nil unless paper && paper > 0.0
-        real = typed_inches(real_text, true) ||
-               parse_feet_inches_token(real_text) ||
-               DimensionParser.parse_length_token(real_text)
+        real = typed_real_inches(real_text)
         return nil unless real
         positive_factor(real.to_f / paper)
+      end
+
+      # An unmarked engineering-scale real side means feet (1"=10).
+      # Explicit dimensions use the strict standalone parser, including its
+      # zero-denominator/unknown-unit checks, independently of model units.
+      def typed_real_inches(text)
+        token = text.to_s.strip.tr("\u2032\u2033", "'\"")
+        token = token.sub(/\b(in|ft)\.\z/i, '\\1')
+        value = UnitParser.parse_inches(token)
+        return nil if value.nil?
+        token =~ TYPED_NUMBER ? value * 12.0 : value
       end
 
       # Inches from 3, 1/4", 1-1/2" or 6 in; nil when the text is not that

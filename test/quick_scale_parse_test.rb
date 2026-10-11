@@ -110,6 +110,23 @@ class QuickScaleParseTest < Minitest::Test
     end
   end
 
+  def test_typed_scales_consume_the_whole_entry_and_reject_invalid_dimensions
+    ['1:48garbage', 'junk 1:48', 'SCALED 1:48', '1:48mm',
+     '1"=1\'-6 1/0"', '1/4"=1\'-0" trailing', '1"=10 unknown',
+     "1:48\n", "1:48\x00", '9' * 129].each do |text|
+      assert_nil factor(text), text.inspect
+    end
+  end
+
+  def test_strict_real_dimensions_keep_printed_units_and_fractions
+    assert_in_delta 18.5, factor('1"=1\'-6 1/2"'), 1e-9
+    assert_in_delta 8.0, factor('1-1/2"=12"'), 1e-9
+    assert_in_delta 48.0, factor('1/4 in. = 1 ft.'), 1e-9
+    assert_in_delta 48.0, factor("1/4\u2033=1\u2032-0\u2033"), 1e-9
+    assert_in_delta 50.0, factor('SCL. 1:50'), 1e-9
+    assert_in_delta 10.0, factor('1"=254mm'), 1e-9
+  end
+
   def test_a_pasted_scale_label_is_ignored
     assert_in_delta 48.0, factor('SCALE: 1/4"=1\'-0"'), 1e-9
     assert_in_delta 50.0, factor('SCALE: 1:50'), 1e-9
