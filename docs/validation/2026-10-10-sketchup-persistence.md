@@ -69,3 +69,12 @@ Scratch helpers under `C:\TMP\su17-packaged-20261010` prepare the seven-row mode
 ## Staged manual-extrusion repair
 
 A separate working-repository menu addition changed `main.rb` during the first regression run. Its selection recursion, world-depth conversion, input validation and transaction messages had concrete defects. That addition was preserved outside r4. The reviewable safe replacement is `C:\TMP\su17-packaged-20261010\extrusion-upgrade`: 46 pure-fixture tests / 251 assertions pass on actual Ruby 2.2.4 and 3.4.4, with a byte-bound manifest and an unapplied patch. It protects shared instances, source stroke/text paint and closed-context world dimensions; native acceptance is still required before applying or packaging. It is manual profile extrusion, not automatic reconstruction of a complete structure from prints.
+
+
+## Manual extrusion and r6 native follow-up — 2026-10-11
+
+The manual selection command now uses finite full-dimension parsing, world +Z depth through composed transforms, unique selected/nested copies and physical cap/side/peer checks before one confirmed commit. Protected PDF stroke/text/hidden/locked content is skipped with reasons. Any unconfirmed result aborts the owned operation; rollback failure is explicit. It remains a bounded isolated-profile edit, separate from the PDF import pipeline.
+
+Exact r6 RBZ SHA-256 `17a05c83cd11ce61dbf7bbc8cb5d0c5475b62a877998dde14cdfb5567b144faf` (27,630,968 bytes), 648 members/92 Ruby files; tree `4d749cb5bf2ec37ea9cdfdfe82cb16ddd673d9205b87ddb03c793cbb41c0b635`. Frozen full legacy suite: **181 files, 2,405 tests, 21,391 assertions, zero failures/errors, 8 skips**; focused actual product module/action tests also pass Ruby 3.4.4. Actual SketchUp 2017 17.2.2555 passed **14 extrusion checks plus 1 native dimension check**, native Undo including restored shared definitions, save/reopen and a fresh-process physical geometry/material check. All 11 import/image/lineweight/cancellation matrix rows and all three distinct fresh Image portability scopes (Text: 2 Images; itemRaster: 5; zero-text Raster: 1) were repeated on this exact r6 package. Injected failure probes do not certify physical UI/Escape presses.
+
+Byte-bound neutral receipts/models are preserved under `C:\BlueCollar-Test-Builds\2026-10-10\SketchUp\Validation-r6`. r4 evidence remains historical. GUI interaction/open editing-context entry, current SketchUp Pro, other versions/platforms and broader PDFs/hardware remain pending.
