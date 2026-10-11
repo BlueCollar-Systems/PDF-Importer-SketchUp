@@ -164,9 +164,9 @@ assets, checksums, license, and notes.
 ## Key Features
 
 - **3 Import Modes** (BCS-ARCH-001) — Auto (default: keeps lines and text
-  editable, places pictures where they are, and uses a page picture only for
-  scanned pages), Vector (lines and text only, skips pictures) and Raster (a
-  picture of each page). `Hybrid` from older saved settings or the CLI works
+  editable and places pictures where they are; a page becomes one picture only
+  when it is a scan or its pictures cannot be placed separately), Vector (lines
+  and text only, skips pictures) and Raster (a picture of each page). `Hybrid` from older saved settings or the CLI works
   the same as Auto. Every mode targets maximum fidelity.
 - **6 Text Rendering Options** — Text, Labels, 3D Text, Glyphs, Geometry,
   Raster (orthogonal to mode) + separate Import text toggle. The dialog reopens

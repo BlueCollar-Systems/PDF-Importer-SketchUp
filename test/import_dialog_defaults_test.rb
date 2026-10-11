@@ -305,19 +305,41 @@ class ImportDialogDefaultsTest < Minitest::Test
     BID::TEXT_MODE_HINT_LINES.each { |line| assert_includes html, line }
   end
 
-  def test_dialog_windows_are_tall_enough_for_their_buttons
+  # Old shop laptops often have a 1366x768 screen; a 1080p laptop at 150%
+  # scaling has about 720 px. Minus the taskbar, a window taller than 640
+  # would put its bottom edge off the screen. The buttons are pinned to the
+  # bottom of the window, so a window that fits always shows them.
+  def test_dialog_windows_fit_a_768_pixel_screen_and_show_their_buttons
     BID.show_html_basic('sample.pdf', {})
     BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
     basic, advanced = UI::HtmlDialog.instances
 
     refute_empty basic.sizes, 'Basic window must set_size (SketchUp 2017 ignores width/height once a preferences_key is saved)'
     refute_empty advanced.sizes, 'Advanced window must set_size'
-    assert_operator basic.sizes.last[1], :>=, 600
-    assert_operator advanced.sizes.last[1], :>=, 760
-    assert_operator basic.options[:height], :>=, 600
-    assert_operator advanced.options[:height], :>=, 760
-    assert_equal false, basic.options[:resizable]
-    assert_equal false, advanced.options[:resizable]
+    assert_operator BID::DIALOG_MAX_HEIGHT, :<=, 768 - 128
+    [basic, advanced].each do |dlg|
+      height = dlg.sizes.last[1]
+      assert_operator height, :<=, BID::DIALOG_MAX_HEIGHT
+      assert_operator height, :>=, 560, 'tall enough that Basic needs no scrolling'
+      assert_equal height, dlg.options[:height]
+      assert_equal false, dlg.options[:resizable]
+    end
+    assert_match(/\.actions\{[^}]*position:fixed[^}]*bottom:0/, BID::DIALOG_CSS)
+  end
+
+  def test_enter_starts_the_import_from_the_advanced_window_too
+    html = BID.send(:advanced_html, 'sample.pdf', advanced_defaults)
+
+    assert_includes html, "e.key==='Enter' && e.target && e.target.tagName!=='BUTTON'"
+    assert_includes html, 'e.preventDefault();doImport();'
+  end
+
+  def test_hints_do_not_over_promise
+    assert_match(/scan/, BID::AUTO_MODE_HINT)
+    assert_match(/cannot be placed separately/, BID::AUTO_MODE_HINT)
+    refute_match(/only for scanned pages/, BID::AUTO_MODE_HINT)
+    assert_match(/Picture of each page/, BID::GROUPING_HINT)
+    assert_match(/one picture/, BID::GROUPING_HINT)
   end
 
   # Chromium 52 (SketchUp 2017) has no CSS grid and no flex gap; the buttons
