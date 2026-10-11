@@ -41,8 +41,8 @@ module BlueCollarSystems
           lines << if copied
                      "Use the clipboard or Ruby Console to access the full report."
                    elsif opened
-                     "The full report opened in #{text_editor_name} " \
-                       '(also printed in Window > Ruby Console).'
+                     "The full report opened in #{text_editor_name}. " \
+                       'It is also printed in Window > Ruby Console.'
                    else
                      'The full report is printed in Window > Ruby Console.'
                    end
@@ -228,9 +228,11 @@ module BlueCollarSystems
           false
         end
 
+        # UI.openURL opens the report in whatever program Windows has set
+        # for .txt files, which is usually, but not always, Notepad.
         def text_editor_name
           platform = safe_call { Sketchup.platform }
-          platform.to_s =~ /win/i ? 'Notepad' : 'your text editor'
+          platform.to_s =~ /win/i ? 'your text editor (usually Notepad)' : 'your text editor'
         end
 
         # Loaded extensions other than this one whose name or description

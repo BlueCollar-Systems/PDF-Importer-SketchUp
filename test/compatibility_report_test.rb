@@ -301,7 +301,8 @@ class CompatibilityReportTest < Minitest::Test
   end
 
   # SketchUp 2017 through 2023.0 have no clipboard API. The report must
-  # still reach the user: it opens in Notepad, and the box shows the
+  # still reach the user: it opens in the PC's text editor (usually
+  # Notepad), and the box shows the
   # helper status itself, never the saved file's location.
   def without_clipboard_api
     UI.singleton_class.send(:alias_method, :__test_set_clipboard_data, :set_clipboard_data)
@@ -330,7 +331,7 @@ class CompatibilityReportTest < Minitest::Test
 
     message = UI.messages.last.to_s
     assert_includes message, 'Not available'
-    assert_includes message, 'Notepad'
+    assert_includes message, 'The full report opened in your text editor (usually Notepad).'
     assert_includes message, 'Window > Ruby Console'
     assert_includes message, 'pdftocairo found: MISSING'
     assert_includes message, 'mutool found: MISSING'
