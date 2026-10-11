@@ -282,9 +282,9 @@ assets, checksums, license, and notes.
 
 The extension adds **File > Import PDF Vectors...**, lists **PDF Vector Drawings (*.pdf)**
 in SketchUp's own **File > Import**, and adds the **Extensions > PDF Vector Importer**
-menu (Import PDF, Safe Mode, Batch Import Folder, the scale tools, Clean Up Selected
-Groups, Feature Inventory, Show/Hide PDF Tags, Compatibility Report, Import Health and
-About). There is no toolbar.
+menu (Import PDF, Safe Mode, Batch Import Folder, the scale tools, Extrude Selected 2D
+Faces to 3D, Clean Up Selected Groups, Feature Inventory, Show/Hide PDF Tags,
+Compatibility Report, Import Health and About). There is no toolbar.
 
 **Offline install:** The GitHub Release `.rbz` installs without internet. Core vector import and the bundled free Poppler and Ghostscript helpers work offline. MuPDF is an optional separate free install.
 
