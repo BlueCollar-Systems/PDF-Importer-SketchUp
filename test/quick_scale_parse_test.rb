@@ -84,6 +84,40 @@ class QuickScaleParseTest < Minitest::Test
     end
   end
 
+  # A real side with only an inch mark is inches, not feet: 1/4"=12" is the
+  # same scale as 1/4"=1'-0". Before, it read as 576.
+  def test_inch_marked_real_side_is_read_as_inches
+    assert_in_delta 48.0, factor('1/4"=12"'), 1e-9
+    assert_in_delta 48.0, factor('1/4" = 12 in'), 1e-9
+    assert_in_delta 12.0, factor('1/2"=6"'), 1e-9
+    assert_in_delta 1.0, factor('1"=1"'), 1e-9
+    assert_in_delta 1.0, factor('12"=1\''), 1e-9
+    assert_in_delta 48.0, factor('1/4 in = 1 ft'), 1e-9
+    assert_in_delta 18.0, factor('1"=1\'-6"'), 1e-9
+  end
+
+  def test_bare_numbers_on_both_sides_are_a_ratio
+    assert_in_delta 48.0, factor('1=48'), 1e-9
+    assert_in_delta 48.0, factor('1 = 48'), 1e-9
+    assert_in_delta 0.5, factor('2=1'), 1e-9
+    # A unit on the paper side keeps the engineering-scale reading.
+    assert_in_delta 120.0, factor('1"=10'), 1e-9
+  end
+
+  def test_extra_ratio_or_equals_parts_are_refused
+    ['1:48:2', '1=1=48', '1/4"=1\'-0"=2', '1:48=2:1'].each do |text|
+      assert_nil factor(text), text.inspect
+    end
+  end
+
+  def test_a_pasted_scale_label_is_ignored
+    assert_in_delta 48.0, factor('SCALE: 1/4"=1\'-0"'), 1e-9
+    assert_in_delta 50.0, factor('SCALE: 1:50'), 1e-9
+    assert_in_delta 48.0, factor('Scale 1:48'), 1e-9
+    assert_in_delta 128.0, factor('3/32"=1\'-0"'), 1e-9
+    assert_in_delta 1.0 / 48.0, factor('48:1'), 1e-12
+  end
+
   def test_parse_scale_factor_uses_the_same_reading
     assert_in_delta 48.0, M::ScaleTool.parse_scale_factor('1:48'), 1e-9
     assert_nil M::ScaleTool.parse_scale_factor('abc')
