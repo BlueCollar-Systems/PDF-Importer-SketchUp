@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.163-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.164-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -22,7 +22,14 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.163)
+### Recent fixes (v3.7.164)
+
+- Selected-face extrusion preserves source dimensions through nested, reflected and nonuniformly scaled groups, isolates shared component copies, and leaves protected text and linework alone. One Undo restores the operation. Invalid heights and connected geometry that cannot be isolated are refused before editing.
+- Multi-contour fills keep their holes and separate filled islands. PDF tint functions and signed font transforms retain the reconciled source-fidelity fixes.
+- Publishing requires an explicit manual release run. Pushes continue to run validation.
+- The r8 test package passed all 11 import-matrix cases and 15 extrusion/dimension cases in SketchUp Make 2017, plus independent geometry and texture reopening. Those checks cover the specified fixtures, not every PDF or every host version.
+
+### Earlier fixes (v3.7.163)
 
 - A large sheet is drawn as it is read, so a finish-floor plan or grating sheet keeps the rest of its linework.
 - A simple font that names each letter in its own encoding comes through as text, including a beam chart that has no Unicode map. The text cleanup that follows stays fast enough for SketchUp 2017.
