@@ -22,7 +22,24 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.162)
+### Recent fixes (v3.7.163)
+
+- A large sheet is drawn as it is read, so a finish-floor plan or grating sheet keeps the rest of its linework.
+- A simple font that names each letter in its own encoding comes through as text, including a beam chart that has no Unicode map. The text cleanup that follows stays fast enough for SketchUp 2017.
+- A filled shape with a hole stays open when the inner contour winds the other way, or when the paint is even-odd.
+- Older LZW PDFs are decoded, including LZW images. Inline LZW strips are still reported as omitted. Fax and JBIG2 images are still skipped.
+- Very short dashes keep their gaps, and the pattern starts where the PDF starts.
+- Separation and DeviceN fills use the PDF's own color.
+- The import windows fit a 1366x768 screen, the buttons stay on screen, and the choices are in plain words. Enter starts the import. Esc stops it only while SketchUp is the program in front.
+- File > Import lists PDF. A failed import shows one message. A second PDF lands beside the first. Batch Import continues after a bad file.
+- Quick Scale reads a scale the way it is printed, including 1/4" = 12" and 1 = 48, and a malformed entry is refused.
+- A page whose text cannot be built still keeps its lines, fills, and pictures, and the import lists the text that was left out.
+- Audit import is off unless you turn it on, and the window says when it is on. A big set does not re-check every finished page after each new page.
+- Imported text is named by its words, so a piece mark can be found in the Outliner.
+- Extensions > Extrude Selected 2D Faces to 3D extrudes the faces you select, without resizing the rest of the model.
+- An invalid page selection stops with a plain reason.
+
+### Earlier notes (v3.7.162)
 
 - Pages that paint a pasted picture as one-pixel-tall inline image strips (BI/ID/EI), such as the AG&E title-block logo, keep their vectors and text editable and get that picture back as one placed native image at the source position and scale.
 - Inline-image boundaries are proved (exact sample length or /L, filter end-of-data) so a long strip run cannot desynchronize the rest of the page.
