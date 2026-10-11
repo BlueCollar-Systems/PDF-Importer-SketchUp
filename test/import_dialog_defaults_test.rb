@@ -495,8 +495,50 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_includes forced, '<option value="Yes" selected>Yes</option>'
     refute_includes forced, '<option value="No" selected>'
     assert_includes forced, BID::AUDIT_FORCED_NOTE
+    assert_includes forced, '<select id="audit" disabled>'
+    refute_includes plain, '<select id="audit" disabled>'
     assert_includes BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', 'Text', 'Yes', 'Yes',
                              BID.audit_requested?({})), BID::AUDIT_ON_NOTE
+  ensure
+    if saved_env.nil?
+      ENV.delete('BC_PDF_AUDIT')
+    else
+      ENV['BC_PDF_AUDIT'] = saved_env
+    end
+  end
+
+  # While BC_PDF_AUDIT=1 forces Audit on, the Advanced box shows Yes, but
+  # Import must not save that Yes: once the variable is removed, Audit goes
+  # back to what the user chose (or to the default, No).
+  def test_forced_audit_is_not_saved_as_the_users_choice
+    saved_env = ENV['BC_PDF_AUDIT']
+    UI::HtmlDialog.on_show = lambda do |dlg|
+      dlg.callbacks['on_import'].call(nil, 'pages' => 'All', 'scale' => '1.0',
+                                      'text_mode' => '3D Text', 'import_text' => 'Yes',
+                                      'match_pdf_layers' => 'Yes', 'mode' => 'Auto',
+                                      'page_arrangement' => 'Spread (20% gap)',
+                                      'audit' => 'Yes')
+    end
+
+    ENV['BC_PDF_AUDIT'] = '1'
+    # Nothing saved yet: the forced Yes is not written.
+    opts = BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', BID.load_prefs)
+    assert_equal true, opts[:audit]
+    assert_nil Sketchup.default_value(PREF_KEY, 'audit')
+    assert_equal '3D Text', Sketchup.default_value(PREF_KEY, 'text_mode')
+
+    # A saved No stays No.
+    Sketchup.write_default(PREF_KEY, 'audit', 'No')
+    opts = BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', BID.load_prefs)
+    assert_equal true, opts[:audit]
+    assert_equal 'No', Sketchup.default_value(PREF_KEY, 'audit')
+
+    ENV.delete('BC_PDF_AUDIT')
+    assert_equal false, BID.audit_requested?({})
+    BID.show_html_basic('sample.pdf', BID.load_prefs)
+    refute_includes UI::HtmlDialog.instances.last.html, BID::AUDIT_ON_NOTE
+    advanced = BID.send(:advanced_html, 'sample.pdf', advanced_defaults(audit: BID.load_prefs[:audit]))
+    assert_includes advanced, '<option value="No" selected>No (recommended)</option>'
   ensure
     if saved_env.nil?
       ENV.delete('BC_PDF_AUDIT')

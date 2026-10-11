@@ -276,16 +276,20 @@ module BlueCollarSystems
         dlg.add_action_callback('on_import') do |_ctx, p|
           begin
             PageSelection.parse(p['pages'])
-            save_prefs(
+            to_save = {
               last_mode: p['mode'],
               pages: p['pages'], scale: p['scale'],
               text_mode: p['text_mode'], import_text: p['import_text'],
               match_pdf_layers: p['match_pdf_layers'],
               page_arrangement: p['page_arrangement'],
               extrude_to_3d: p['extrude_to_3d'],
-              extrude_depth_mm: p['extrude_depth_mm'],
-              audit: audit_choice(p['audit'])
-            )
+              extrude_depth_mm: p['extrude_depth_mm']
+            }
+            # While BC_PDF_AUDIT=1 forces Audit on, the box shows Yes but is
+            # not the user's choice: keep the saved setting, so Audit does
+            # not stay on after the variable is removed.
+            to_save[:audit] = audit_choice(p['audit']) unless audit_env_on?
+            save_prefs(to_save)
             mode_raw = MODES[p['mode'] || 'Auto'] || MODES['Auto']
             result = build_opts(
               import_mode: mode_raw['import_mode'],
@@ -456,6 +460,8 @@ module BlueCollarSystems
         audit_opts = "<option value=\"No\"#{audit_on ? '' : ' selected'}>No (recommended)</option>" \
                      "<option value=\"Yes\"#{audit_on ? ' selected' : ''}>Yes</option>"
         audit_forced_html = audit_forced ? "<p class=\"hint hint-block audit-on\">#{esc(AUDIT_FORCED_NOTE)}</p>" : ''
+        # Forced on: the box shows Yes but cannot be changed here.
+        audit_select_attrs = audit_forced ? ' disabled' : ''
 
         <<-HTML
           <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -473,7 +479,7 @@ module BlueCollarSystems
             <div><label>Scale Factor</label>
               <input type="text" id="scale" value="#{esc(d[:scale])}" placeholder="1.0"></div>
             <div><label>#{esc(AUDIT_LABEL)}</label>
-              <select id="audit">#{audit_opts}</select></div>
+              <select id="audit"#{audit_select_attrs}>#{audit_opts}</select></div>
           </div>
           <p class="hint hint-block">#{esc(AUDIT_HINT)}</p>
           #{audit_forced_html}
