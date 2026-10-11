@@ -8157,8 +8157,10 @@ module BlueCollarSystems
       return unless folder && File.directory?(folder)
       pdfs = (Dir.glob(File.join(folder, "*.pdf")) + Dir.glob(File.join(folder, "*.PDF"))).uniq
       return UI.messagebox("No PDF files found.") if pdfs.empty?
+      # A saved Audit = Yes applies to the batch too, so the question says so.
+      audit_note = ImportDialog.audit_requested?({}) ? "\n\n#{ImportDialog::AUDIT_ON_BATCH_NOTE}" : ''
       return unless UI.messagebox(
-        "Import #{pdfs.length} PDF(s): all pages, 3D Text, scale 1.0 (Auto)?",
+        "Import #{pdfs.length} PDF(s): all pages, 3D Text, scale 1.0 (Auto)?#{audit_note}",
         MB_YESNO
       ) == IDYES
       # The very-large-PDF question is asked once, for the whole folder,

@@ -457,6 +457,8 @@ class UnattendedMultipageImportTest < Minitest::Test
     dialog.const_set(:MODES, {'Auto' => {}})
     dialog.define_singleton_method(:show) { |_| {} }
     dialog.define_singleton_method(:build_opts) { |opts| opts }
+    dialog.const_set(:AUDIT_ON_BATCH_NOTE, IMP::ImportDialog::AUDIT_ON_BATCH_NOTE)
+    dialog.define_singleton_method(:audit_requested?) { |_raw| false }
     logger = Module.new
     logger.define_singleton_method(:error) { |*_| }
     logger.define_singleton_method(:log_path) { nil }
@@ -595,6 +597,19 @@ class UnattendedMultipageImportTest < Minitest::Test
       scope, _calls, messages = entrypoint_scope([{:pages => 1}], folder)
       scope.batch_import
       assert_equal 'Import 1 PDF(s): all pages, 3D Text, scale 1.0 (Auto)?', messages.first
+    end
+  end
+
+  # A saved Audit = Yes applies to every file in the batch, so the batch
+  # question says Audit is on and how to turn it off.
+  def test_folder_batch_confirm_says_when_audit_is_on
+    Dir.mktmpdir('batch-audit') do |folder|
+      File.binwrite(File.join(folder, '0.pdf'), '%PDF-test')
+      scope, _calls, messages = entrypoint_scope([{:pages => 1}], folder)
+      scope.const_get(:ImportDialog).define_singleton_method(:audit_requested?) { |_raw| true }
+      scope.batch_import
+      assert_equal "Import 1 PDF(s): all pages, 3D Text, scale 1.0 (Auto)?\n\n" +
+                   IMP::ImportDialog::AUDIT_ON_BATCH_NOTE, messages.first
     end
   end
 

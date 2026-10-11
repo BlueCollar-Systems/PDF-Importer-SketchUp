@@ -456,6 +456,55 @@ class ImportDialogDefaultsTest < Minitest::Test
     end
   end
 
+  # A saved Audit = Yes also applies to the Basic window's import, so that
+  # window says Audit is on instead of leaving a slow mode on unseen.
+  def test_basic_window_says_when_a_saved_audit_choice_is_on
+    saved_env = ENV.delete('BC_PDF_AUDIT')
+    off = BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', 'Text', 'Yes', 'Yes')
+    refute_includes off, 'audit-note'
+    refute_includes off, BID::AUDIT_ON_NOTE
+
+    on = BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', 'Text', 'Yes', 'Yes', true)
+    assert_includes on, BID::AUDIT_ON_NOTE
+    assert_includes on, 'id="audit-note"'
+
+    BID.show_html_basic('sample.pdf', BID.load_prefs)
+    refute_includes UI::HtmlDialog.instances.last.html, BID::AUDIT_ON_NOTE
+
+    Sketchup.write_default(PREF_KEY, 'audit', 'Yes')
+    BID.show_html_basic('sample.pdf', BID.load_prefs)
+    assert_includes UI::HtmlDialog.instances.last.html, BID::AUDIT_ON_NOTE
+  ensure
+    if saved_env.nil?
+      ENV.delete('BC_PDF_AUDIT')
+    else
+      ENV['BC_PDF_AUDIT'] = saved_env
+    end
+  end
+
+  # BC_PDF_AUDIT=1 turns Audit on whatever is saved, so the Advanced box
+  # shows Yes and says the box cannot turn it off.
+  def test_advanced_window_shows_audit_forced_on_by_the_environment
+    saved_env = ENV['BC_PDF_AUDIT']
+    ENV.delete('BC_PDF_AUDIT')
+    plain = BID.send(:advanced_html, 'sample.pdf', advanced_defaults)
+    refute_includes plain, BID::AUDIT_FORCED_NOTE
+
+    ENV['BC_PDF_AUDIT'] = '1'
+    forced = BID.send(:advanced_html, 'sample.pdf', advanced_defaults(audit: 'No'))
+    assert_includes forced, '<option value="Yes" selected>Yes</option>'
+    refute_includes forced, '<option value="No" selected>'
+    assert_includes forced, BID::AUDIT_FORCED_NOTE
+    assert_includes BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', 'Text', 'Yes', 'Yes',
+                             BID.audit_requested?({})), BID::AUDIT_ON_NOTE
+  ensure
+    if saved_env.nil?
+      ENV.delete('BC_PDF_AUDIT')
+    else
+      ENV['BC_PDF_AUDIT'] = saved_env
+    end
+  end
+
   def test_inputbox_fallback_has_no_dead_grouping_prompt
     BID.show_inputbox_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
     prompts, _defaults, dropdowns, _title = UI.inputbox_calls.last

@@ -192,8 +192,12 @@ module BlueCollarSystems
         text_val    = effective_text_mode(saved)
         itext_val   = saved[:import_text] || 'Yes'
         match_val   = effective_match_pdf_layers(saved)
+        # A saved Audit = Yes (or BC_PDF_AUDIT=1) also applies here, so the
+        # window says so instead of leaving a slow mode on unseen.
+        audit_on    = audit_requested?({})
 
-        dlg.set_html(basic_html(filename, mode_val, pages_val, scale_val, text_val, itext_val, match_val))
+        dlg.set_html(basic_html(filename, mode_val, pages_val, scale_val, text_val, itext_val,
+                                match_val, audit_on))
 
         dlg.add_action_callback('on_import') do |_ctx, p|
           begin
@@ -356,9 +360,11 @@ module BlueCollarSystems
         .btn-secondary:hover{background:#f3f3f3}
         .hint{font-size:11px;color:#888;margin-top:2px}
         .hint-block{margin:-4px 0 12px}
+        .audit-on{color:#8a4b00;font-weight:600}
       CSS
 
-      def self.basic_html(filename, _mode, pages, scale, text_mode, import_text, match_pdf_layers)
+      def self.basic_html(filename, _mode, pages, scale, text_mode, import_text, match_pdf_layers,
+                          audit_on = false)
         text_opts = TEXT_MODE_CHOICES.map { |v|
           sel = v == text_mode ? ' selected' : ''
           "<option value=\"#{v}\"#{sel}>#{v}</option>"
@@ -368,6 +374,7 @@ module BlueCollarSystems
         itext_no  = import_text == 'No'  ? ' selected' : ''
         match_yes = match_pdf_layers == 'Yes' ? ' selected' : ''
         match_no  = match_pdf_layers == 'No'  ? ' selected' : ''
+        audit_note_html = audit_on ? "<p class=\"hint hint-block audit-on\" id=\"audit-note\">#{esc(AUDIT_ON_NOTE)}</p>" : ''
 
         <<-HTML
           <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -375,6 +382,7 @@ module BlueCollarSystems
           <h2>Import PDF Vectors</h2>
           <p class="sub">#{esc(filename)}</p>
           <p class="hint" style="margin-bottom:14px">#{esc(AUTO_MODE_HINT)}</p>
+          #{audit_note_html}
           <div class="row"><label>Pages</label>
             <input type="text" id="pages" value="#{esc(pages)}" placeholder="All">
             <p class="hint">e.g. All &nbsp;&bull;&nbsp; 1 &nbsp;&bull;&nbsp; 2-5 &nbsp;&bull;&nbsp; 1,3,7</p>
@@ -443,9 +451,11 @@ module BlueCollarSystems
           "<option value=\"#{esc(v)}\"#{sel}>#{esc(v)}</option>"
         }.join
 
-        audit_on = audit_choice(d[:audit]) == 'Yes'
+        audit_forced = audit_env_on?
+        audit_on = audit_forced || audit_choice(d[:audit]) == 'Yes'
         audit_opts = "<option value=\"No\"#{audit_on ? '' : ' selected'}>No (recommended)</option>" \
                      "<option value=\"Yes\"#{audit_on ? ' selected' : ''}>Yes</option>"
+        audit_forced_html = audit_forced ? "<p class=\"hint hint-block audit-on\">#{esc(AUDIT_FORCED_NOTE)}</p>" : ''
 
         <<-HTML
           <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -466,6 +476,7 @@ module BlueCollarSystems
               <select id="audit">#{audit_opts}</select></div>
           </div>
           <p class="hint hint-block">#{esc(AUDIT_HINT)}</p>
+          #{audit_forced_html}
           <div class="section">Text</div>
           <div class="row2">
             <div><label>Import Text</label>
@@ -690,6 +701,12 @@ module BlueCollarSystems
       AUDIT_HINT = 'Audit: Yes double-checks every page as it is built. It is slower; ' \
                    'turn it on only when asked for a detailed report.'.freeze
       AUDIT_ENV = 'BC_PDF_AUDIT'.freeze
+      AUDIT_ON_NOTE = 'Audit is on, so imports are slower. To turn it off, click ' \
+                      'Advanced... and set Audit to No.'.freeze
+      AUDIT_FORCED_NOTE = 'Audit is on for every import on this computer because ' \
+                          'BC_PDF_AUDIT=1 is set; this box cannot turn it off.'.freeze
+      AUDIT_ON_BATCH_NOTE = 'Audit is on, so these imports are slower. To turn it off, use ' \
+                            'Import PDF..., click Advanced... and set Audit to No.'.freeze
 
       # The Advanced window's Audit choice ('Yes' or 'No') from a saved
       # setting or the window's own value. Anything not clearly on is 'No'.
@@ -701,9 +718,14 @@ module BlueCollarSystems
       # audit: 'Yes'/true (dialog, --audit), or when the saved setting says
       # Yes. Anything else is off.
       def self.audit_requested?(raw)
-        return true if ENV[AUDIT_ENV].to_s.strip =~ /\A(?:1|true|yes|on)\z/i
+        return true if audit_env_on?
         value = raw.is_a?(Hash) && raw.key?(:audit) ? raw[:audit] : saved_audit_setting
         value == true || value.to_s.strip =~ /\A(?:yes|true|1|on)\z/i ? true : false
+      end
+
+      # BC_PDF_AUDIT=1 (CI, host harness) turns Audit on whatever is saved.
+      def self.audit_env_on?
+        ENV[AUDIT_ENV].to_s.strip =~ /\A(?:1|true|yes|on)\z/i ? true : false
       end
 
       def self.saved_audit_setting
