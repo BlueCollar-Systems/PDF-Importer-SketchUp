@@ -220,19 +220,26 @@ module BlueCollarSystems
     # is built: a very large file. Returns true to continue, false when the
     # operator declined. Noninteractive batch runs keep raising
     # BatchHostPolicy::NoninteractiveError (policy unchanged). An unreadable
-    # size is logged and never blocks the import.
-    def self.confirm_large_pdf_once!(path, file_size_bytes = nil)
+    # size is logged and never blocks the import. Only a resumable import
+    # keeps completed pages when Esc is pressed; the others roll back.
+    def self.confirm_large_pdf_once!(path, file_size_bytes = nil, resumable = true)
       file_size_bytes ||= File.size(path)
       return true unless file_size_bytes.to_i > BatchHostPolicy::LARGE_PDF_BYTES
       size_mb = (file_size_bytes / (1024.0 * 1024.0)).round(1)
+      esc_text = if resumable
+                   'press Esc during the import to stop after the current ' \
+                     'page; completed pages are kept and can be resumed.'
+                 else
+                   'press Esc during the import to stop; nothing is kept ' \
+                     'and the model is left unchanged.'
+                 end
       choice = BatchHostPolicy.confirm_large_pdf!(file_size_bytes) do
         if defined?(UI) && UI.respond_to?(:messagebox)
           UI.messagebox(
             "This PDF is very large (#{size_mb} MB). Import may take a " \
             'significant amount of time and use considerable memory. This ' \
-            'is the only question this import will ask: press Esc during ' \
-            'the import to stop after the current page; completed pages ' \
-            "are kept and can be resumed.\n\nContinue?",
+            "is the only question this import will ask: #{esc_text}" \
+            "\n\nContinue?",
             MB_OKCANCEL
           )
         else
@@ -269,6 +276,66 @@ module BlueCollarSystems
                     "started (#{reason}). The model was not changed.",
         :resume_message => 'Nothing was imported; run the import again to start.'
       }
+    end
+
+    # Result of a non-resumable import stopped with Esc: the open SketchUp
+    # operation was rolled back, so nothing was kept.
+    def self.stopped_without_changes(source_path, reason)
+      result = cancelled_before_start(source_path, reason)
+      result[:cancelled_before_start] = false
+      result[:message] = "Import of #{File.basename(source_path.to_s)} was " \
+                         'stopped with Esc. The model was not changed.'
+      result[:resume_message] = 'Nothing was kept; run the import again to start over.'
+      result
+    end
+
+    # Progress on SketchUp's status bar ("... Esc to cancel"). Batch/host
+    # jobs stream progress JSON instead and never touch the status bar.
+    def self.import_status_sink(opts)
+      return opts[:status_sink] if opts[:status_sink]
+      if defined?(BatchHostPolicy) &&
+         BatchHostPolicy.respond_to?(:noninteractive?) &&
+         BatchHostPolicy.noninteractive?
+        return lambda { |_snapshot| true }
+      end
+      lambda do |snapshot|
+        if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+          Sketchup.status_text = ImportDialog.progress_status(snapshot)
+        end
+      end
+    end
+
+    # Imports that cannot resume (Import Text = No, Raster, pages not
+    # grouped) still stop with Esc: the run controller checks the key at
+    # every safe checkpoint and the pipeline rolls its open operation back,
+    # so the model is left unchanged.
+    def self.run_non_resumable_pipeline(model, source_path, opts)
+      inner_opts = opts.dup
+      inner_opts[:resumable_page_call] = true
+      requested_mode = opts[:force_raster] ? :raster : opts[:text_mode]
+      # Cancellation/progress do not need a retained-page journal. These
+      # modes use one transaction, so Esc rolls back the entire import. No
+      # model/identity is given to this controller and no resume is claimed.
+      inner_opts[:run_controller] ||= ImportRunControl::Controller.new(
+        :pages => [],
+        :requested_mode => requested_mode,
+        :cancel_probe => opts[:cancel_probe] ||
+          ImportRunControl::EscapeCancelProbe.new,
+        :status_sink => import_status_sink(opts)
+      )
+      run_pipeline(model, source_path, inner_opts)
+    rescue ImportRunControl::ImportCancelled => error
+      # The inner pipeline confirms rollback before this result is built.
+      # A RollbackFailure remains terminal and is never reported cancelled.
+      Logger.info('Pipeline', 'Import stopped with Esc; the open operation was rolled back.')
+      result = stopped_without_changes(source_path, 'stopped with Esc; model unchanged')
+      result.merge(
+        :resume_supported => false,
+        :snapshot => error.snapshot,
+        :requested_text_mode => requested_mode,
+        :text_mode => opts[:text_mode],
+        :import_mode => opts[:import_mode]
+      )
     end
 
     def self.confirm_page_complexity!(opts, page_num, path_count, text_count)
@@ -365,6 +432,18 @@ module BlueCollarSystems
       !Array(text_items).empty? || source_inspection_required == true
     end
 
+    SVG_RENDERER_REMEDY =
+      'The free PDF text helper (Poppler or MuPDF) could not run, so this ' \
+      "page's text was left out; lines, fills and pictures were kept. " \
+      'Install Poppler or MuPDF and expose it on PATH, or configure ' \
+      'BC_PDFTOCAIRO_PATH / BC_MUTOOL_PATH, then open Extensions > PDF ' \
+      'Vector Importer > Compatibility Report to verify detection.'.freeze
+
+    # Owner ruling 2026-10-05 (deliver, step down, report): a missing text
+    # helper no longer costs the page. Returns false and flags the stats;
+    # the caller turns this page's helper-based text off, keeps its lines,
+    # fills and pictures, and lists every text item as not delivered with
+    # reason 'renderer_missing'. No modal here: this runs per page.
     def self.enforce_svg_renderer_available!(model, stats, requested_text_mode)
       return true if SvgTextRenderer.svg_renderer_available?
 
@@ -376,19 +455,10 @@ module BlueCollarSystems
                         end
       Logger.warn(
         'Pipeline',
-        "#{requested_label} text was requested, but a free Poppler/MuPDF SVG " \
-        'renderer is unavailable. The requested representation will not be substituted.'
+        "#{requested_label} text was requested, but the free Poppler/MuPDF " \
+        "SVG renderer is unavailable. #{SVG_RENDERER_REMEDY}"
       )
-      # No modal here: this runs per page and can fire after earlier pages
-      # were already imported. The import stops with ONE failure message
-      # (import_pdf shows it) that carries the remedy.
-      # The pipeline owns the open operation and performs its single rollback.
-      raise RepresentationFidelity::ContractError,
-            "requested #{requested_label} renderer is unavailable; no " \
-            'representation fallback is authorized. Install Poppler or ' \
-            'MuPDF and expose it on PATH, or configure BC_PDFTOCAIRO_PATH / ' \
-            'BC_MUTOOL_PATH, then open Extensions > PDF Vector Importer > ' \
-            'Compatibility Report to verify detection.'
+      false
     end
 
     def self.record_text_renderer(stats, page_num, attrs)
@@ -515,7 +585,8 @@ module BlueCollarSystems
       end
     end
 
-    def self.record_uncertified_text_spans!(stats, page_num, failures)
+    def self.record_uncertified_text_spans!(stats, page_num, failures,
+                                            log_each = true)
       return true unless stats.is_a?(Hash)
       stats[:text_delivery_failures] ||= []
       map_text_renderer_failures(failures).each do |mapped|
@@ -531,6 +602,7 @@ module BlueCollarSystems
           :detail => detail,
           :certified => false
         }
+        next unless log_each
         Logger.warn(
           'Pipeline',
           "Page #{page_num} #{source_id}: requested text was not certified " \
@@ -539,6 +611,281 @@ module BlueCollarSystems
         )
       end
       true
+    end
+
+    # ── Owner ruling 2026-10-05: deliver, step down, report ──────────────
+    # A text problem never costs the page. When a text stage fails, the
+    # page's lines, fills and pictures stay; whatever that stage created is
+    # erased; and every text item it was delivering is listed as not
+    # delivered, with the reason, in the report, Import Health and the
+    # end-of-import status line. Stops that must end the import still
+    # propagate (Esc, an uncertain rollback, a changed resume journal, a
+    # batch-policy stop), and a cleanup that cannot be verified still rolls
+    # the page back exactly as before. Geometry-builder and host failures
+    # are not wrapped: the page rescue in run_pipeline still rolls them back.
+    def self.terminal_import_error?(error)
+      return true if error.is_a?(ImportRunControl::ImportCancelled)
+      return true if error.is_a?(ImportRunControl::ResumeMismatch)
+      error.class.name.to_s =~ /NoninteractiveError\z/ ? true : false
+    end
+
+    def self.text_stage_entity_list(entities)
+      entities.respond_to?(:to_a) ? entities.to_a : []
+    end
+
+    def self.text_stage_entity_count(entities)
+      return entities.length if entities.respond_to?(:length)
+      text_stage_entity_list(entities).length
+    end
+
+    # Array lengths and counters only: a failed stage appends rows and adds
+    # to counters, and both are put back so the report never claims an
+    # entity the step-down erased. Arrays the failed stage created are
+    # dropped; hashes (timings) are left as they are.
+    def self.text_stage_stats_snapshot(stats)
+      return nil unless stats.is_a?(Hash)
+      snapshot = {}
+      stats.each do |key, value|
+        snapshot[key] = if value.is_a?(Array)
+                          [:array, value.length]
+                        elsif value.is_a?(Numeric)
+                          [:number, value]
+                        else
+                          [:other]
+                        end
+      end
+      snapshot
+    end
+
+    def self.restore_text_stage_stats!(stats, snapshot)
+      return stats unless stats.is_a?(Hash) && snapshot.is_a?(Hash)
+      stats.keys.each do |key|
+        saved = snapshot[key]
+        if saved.nil?
+          stats.delete(key) if stats[key].is_a?(Array)
+          next
+        end
+        case saved[0]
+        when :array
+          value = stats[key]
+          if value.is_a?(Array) && value.length > saved[1]
+            value.slice!(saved[1], value.length - saved[1])
+          end
+        when :number
+          stats[key] = saved[1]
+        end
+      end
+      stats
+    end
+
+    def self.safe_text_source_id(item)
+      RepresentationFidelity.source_span_id(item)
+    rescue StandardError
+      nil
+    end
+
+    TEXT_STEP_DOWN_REASON_TEXT = {
+      'renderer_missing' => 'the free PDF text helper could not run',
+      'text_not_read' => 'the text in this PDF could not be read',
+      'text_stage_failed' => 'a text step failed',
+      'text_item_failed' => 'a text item failed'
+    }.freeze
+
+    def self.text_step_down_reason_text(reason_code)
+      TEXT_STEP_DOWN_REASON_TEXT[reason_code.to_s] ||
+        reason_code.to_s.tr('_', ' ')
+    end
+
+    # Lists every item the failed stage was delivering (one row per item; a
+    # page-scoped row when the items are not known) and one summary row.
+    def self.record_text_step_down!(stats, page_num, mode, items, reason_code,
+                                    detail)
+      return true unless stats.is_a?(Hash)
+      detail = detail.to_s.gsub(/\s+/, ' ').strip[0, 400]
+      rows = Array(items).map do |item|
+        { :source_span_id => safe_text_source_id(item),
+          :reason => reason_code.to_s, :detail => detail }
+      end
+      if rows.empty?
+        rows << { :source_span_id => nil, :reason => reason_code.to_s,
+                  :detail => detail }
+      end
+      record_text_step_down_rows!(stats, page_num, mode, rows, reason_code,
+                                  detail)
+    end
+
+    # Failure rows that already carry their own reason (for example the
+    # builder's per-item failures) plus the one summary row.
+    def self.record_text_step_down_rows!(stats, page_num, mode, rows,
+                                         reason_code, detail)
+      return true unless stats.is_a?(Hash)
+      rows = Array(rows)
+      detail = detail.to_s.gsub(/\s+/, ' ').strip[0, 400]
+      record_uncertified_text_spans!(stats, page_num, rows, rows.length <= 20)
+      stats[:text_step_downs] ||= []
+      stats[:text_step_downs] << {
+        :page => page_num.to_i,
+        :requested_mode => normalize_text_renderer_mode(mode) || mode,
+        :reason_code => reason_code.to_s,
+        :item_count => rows.length,
+        :detail => detail,
+        :page_kept => true
+      }
+      Logger.warn(
+        'Pipeline',
+        "Page #{page_num}: #{rows.length} text item(s) could not be " \
+        "delivered (#{text_step_down_reason_text(reason_code)}" \
+        "#{detail.empty? ? '' : ': ' + detail}). The rest of the page " \
+        'was kept; the items are listed in the import report.'
+      )
+      true
+    end
+
+    # A page item delivered in a lesser form (or left out) while the page
+    # itself was kept. Listed in the report and the status line.
+    def self.record_page_step_down!(stats, page_num, item, reason_code, detail)
+      return true unless stats.is_a?(Hash)
+      detail = detail.to_s.gsub(/\s+/, ' ').strip[0, 400]
+      stats[:page_step_downs] ||= []
+      stats[:page_step_downs] << {
+        :page => page_num.to_i,
+        :item => item.to_s,
+        :reason_code => reason_code.to_s,
+        :detail => detail,
+        :page_kept => true
+      }
+      Logger.warn(
+        'Pipeline',
+        "Page #{page_num}: #{item.to_s.tr('_', ' ')} stepped down " \
+        "(#{reason_code}): #{detail}. The rest of the page was kept."
+      )
+      true
+    end
+
+    # A page stage that only refines what is already built (it changes each
+    # item completely or leaves it untouched, and undoes an item it cannot
+    # finish) steps down instead of costing the page: the page keeps its
+    # items in their plainer form and the step-down is listed. Returns true
+    # when the stage completed. Terminal stops still propagate.
+    def self.keep_page_on_page_stage_failure(stats, page_num, item,
+                                             reason_code, detail)
+      yield
+      true
+    rescue StandardError => error
+      raise if terminal_import_error?(error)
+      record_page_step_down!(
+        stats, page_num, item, reason_code,
+        "#{detail} (#{error.message.to_s.gsub(/\s+/, ' ')[0, 200]})"
+      )
+      false
+    end
+
+    # A page with nothing left in it after its text stepped down is not
+    # kept: the host would purge the empty group at commit and break the
+    # resume journal. It fails like before (rolled back, listed, resumable).
+    def self.ensure_kept_page_has_content!(page_group, page_num, stats,
+                                           failures_before)
+      return true unless page_group && page_group.respond_to?(:entities)
+      return true unless Array(stats[:text_delivery_failures]).length >
+                         failures_before.to_i
+      return true unless text_stage_entity_count(page_group.entities) == 0
+      raise RepresentationFidelity::ContractError,
+            "Page #{page_num}: nothing on this page could be delivered " \
+            '(its text was not delivered and it has no lines, fills or ' \
+            'pictures).'
+    end
+
+    TEXT_STAGE_OWNER_KEYS = %w[
+      source_span_id decorative_source_span_id source_unit_id
+    ].freeze
+    TEXT_STAGE_CONTAINER_KEYS = %w[
+      representation_container decorative_text_container source_claim_root
+    ].freeze
+
+    # Whether an entity was made by a text stage for this owner: one source
+    # item id, a list of ids, or :any_text (every text-owned entity; used
+    # only where the page held no text before the stage ran).
+    def self.text_stage_owned_by?(entity, owner)
+      return false unless entity.respond_to?(:get_attribute)
+      dictionary = 'BC_PDF_Importer'
+      if owner == :source_unit
+        return !entity.get_attribute(dictionary, 'source_unit_id', nil).to_s.empty?
+      end
+      if owner == :any_text
+        return true if TEXT_STAGE_CONTAINER_KEYS.any? do |key|
+          entity.get_attribute(dictionary, key, nil) == true
+        end
+        return TEXT_STAGE_OWNER_KEYS.any? do |key|
+          !entity.get_attribute(dictionary, key, nil).to_s.empty?
+        end
+      end
+      ids = Array(owner).map { |value| value.to_s }.reject(&:empty?)
+      return false if ids.empty?
+      %w[source_span_id decorative_source_span_id].any? do |key|
+        ids.include?(entity.get_attribute(dictionary, key, nil).to_s)
+      end
+    rescue StandardError
+      false
+    end
+
+    # Runs one text stage. Returns true when it delivered, false when it
+    # stepped down (page kept, items listed).
+    #   :parent      - the entity collection the stage builds in.
+    #   :owner       - who owns what the stage builds there: a source item id,
+    #                  a list of ids, :source_unit (the unclaimed source
+    #                  glyphs), or :any_text. Only a count is taken up
+    #                  front; on failure the owned entities are erased and the
+    #                  count must come back exactly, or the page rolls back.
+    #   :items       - the text items to list when the stage fails.
+    #   :reason_code - why, for the report.
+    def self.keep_page_on_text_failure(stats, page_num, mode, options = {})
+      parent = options[:parent]
+      owner = options[:owner]
+      before_count = parent ? text_stage_entity_count(parent) : nil
+      snapshot = text_stage_stats_snapshot(stats)
+      yield
+      true
+    rescue StandardError => error
+      raise if terminal_import_error?(error)
+      begin
+        if parent && text_stage_entity_count(parent) != before_count
+          owned = text_stage_entity_list(parent).select do |entity|
+            text_stage_owned_by?(entity, owner)
+          end
+          RepresentationFidelity.erase_owned!(parent, owned) unless owned.empty?
+          unless text_stage_entity_count(parent) == before_count
+            raise RepresentationFidelity::ContractError,
+                  'the failed text step left entities it could not identify'
+          end
+        end
+      rescue StandardError => cleanup_error
+        raise RepresentationFidelity::ContractError,
+              "Page #{page_num}: #{error.message}; the partial text could " \
+              "not be removed (#{cleanup_error.message})"
+      end
+      restore_text_stage_stats!(stats, snapshot)
+      record_text_step_down!(
+        stats, page_num, mode, options[:items],
+        options[:reason_code] || 'text_stage_failed', error.message
+      )
+      false
+    end
+
+    # True when any page kept text items it could not deliver.
+    def self.text_step_down_present?(stats)
+      return false unless stats.is_a?(Hash)
+      !Array(stats[:text_delivery_failures] ||
+             stats['text_delivery_failures']).empty?
+    end
+
+    # An import whose pages all arrived, but with some text items listed as
+    # not delivered, reports 'incomplete' (the list is in Import Health) and
+    # still counts as an imported file: nothing was lost to a text problem.
+    def self.pages_kept_with_step_downs?(stats)
+      return false unless stats.is_a?(Hash)
+      return false if stats[:cancelled] == true
+      return false unless Array(stats[:failed_pages]).empty?
+      text_step_down_present?(stats)
     end
 
     def self.failed_item_rung_from_transition(proof)
@@ -1062,7 +1409,8 @@ module BlueCollarSystems
            :precomputed_peer_owners => precomputed_peer_owners,
            :model => model,
            :glyph_component_cache => glyph_component_cache,
-           :progress_callback => opts[:progress_callback]
+           :progress_callback => opts[:progress_callback],
+           :keep_id_names => opts[:keep_id_names] == true
         )
         unless result.is_a?(Hash) && Array(result[:failures]).empty?
           raise RepresentationFidelity::ContractError,
@@ -1341,7 +1689,8 @@ module BlueCollarSystems
         :preserve_unmatched_source_placements => false,
         :decorative_text_containers => opts[:decorative_text_containers] == true,
         :source_context => svg_source_context(svg_document, page_num, {}),
-        :run_controller => opts[:run_controller]
+        :run_controller => opts[:run_controller],
+        :keep_id_names => opts[:keep_id_names] == true
       )
       unless Array(result[:failures]).empty?
         details = result[:failures].map do |failure|
@@ -2569,8 +2918,8 @@ module BlueCollarSystems
     rescue StandardError => e
       raise RepresentationFidelity::ContractError,
             "Page #{page_num}: no-text proof failed for requested " \
-            "#{requested_mode} (#{e.message}); import stopped instead of " \
-            'silently omitting possible text.'
+            "#{requested_mode} (#{e.message}); possible text is listed as " \
+            'not read instead of being silently omitted.'
     end
 
     # Round 20: accumulate faithful mesh-text target heights (inches) for
@@ -3169,6 +3518,107 @@ module BlueCollarSystems
       [[val, 0.0].max, 1.0].min
     end
 
+    PAGE_GROUP_DICTIONARY = 'BC_PDF_Importer'.freeze
+    PAGE_GROUP_KEY = 'page_group'.freeze
+    LEGACY_PAGE_GROUP_NAME = /\APDF Page \d+\z/
+
+    def self.mark_pdf_page_group!(group)
+      return group unless group && group.respond_to?(:set_attribute)
+      group.set_attribute(PAGE_GROUP_DICTIONARY, PAGE_GROUP_KEY, true)
+      group
+    rescue StandardError => e
+      Logger.warn('Placement', "page group mark failed: #{e.message}")
+      group
+    end
+
+    # Top-level PDF pages already in the model: marked page groups, resume
+    # journal groups, explicit Raster page images and older "PDF Page N"
+    # groups. Anything else (a template's person figure, the user's own
+    # geometry) is ignored.
+    def self.pdf_page_entities(model)
+      return [] unless model && model.respond_to?(:active_entities)
+      entities = model.active_entities
+      return [] unless entities && entities.respond_to?(:to_a)
+      entities.to_a.select { |entity| pdf_page_entity?(entity) }
+    rescue StandardError => e
+      Logger.warn('Placement', "earlier PDF page lookup failed: #{e.message}")
+      []
+    end
+
+    def self.pdf_page_entity?(entity)
+      return false if entity.respond_to?(:valid?) && !entity.valid?
+      typename = entity.respond_to?(:typename) ? entity.typename.to_s : ''
+      return false unless %w[Group Image].include?(typename)
+      if entity.respond_to?(:get_attribute)
+        return true if entity.get_attribute(PAGE_GROUP_DICTIONARY, PAGE_GROUP_KEY, nil) == true
+        journal = entity.get_attribute(ImportRunControl::JOURNAL_DICTIONARY, 'journal_id', nil)
+        return true unless journal.to_s.empty?
+        kind = entity.get_attribute(PAGE_GROUP_DICTIONARY, 'source_kind', nil)
+        return true if kind.to_s == 'page_raster'
+      end
+      name = entity.respond_to?(:name) ? entity.name.to_s : ''
+      !(name =~ LEGACY_PAGE_GROUP_NAME).nil?
+    rescue StandardError
+      false
+    end
+
+    # Where a new import's first page starts. 0.0 when the model holds no
+    # earlier PDF pages, so a first import lands at the origin exactly as
+    # before. Otherwise just above the highest earlier page, with the same
+    # 20% gap that Spread leaves between pages. first_page_height_in may be
+    # a number or a callable; it is only read when earlier pages exist.
+    def self.import_base_y_offset(model, first_page_height_in)
+      tops = pdf_page_entities(model).map { |entity| entity_top_y(entity) }.compact
+      return 0.0 if tops.empty?
+      height = first_page_height_in.respond_to?(:call) ? first_page_height_in.call : first_page_height_in
+      height = height.to_f
+      height = 11.0 unless height.finite? && height > 0.0
+      offset = tops.max + height * 0.20
+      Logger.info('Placement', "Earlier PDF pages found; this import starts at y=#{offset.round(3)} in.")
+      offset
+    rescue StandardError => e
+      Logger.warn('Placement', "start offset failed, using the origin: #{e.message}")
+      0.0
+    end
+
+    def self.entity_top_y(entity)
+      return nil unless entity.respond_to?(:bounds)
+      bounds = entity.bounds
+      return nil unless bounds && bounds.respond_to?(:max)
+      return nil if bounds.respond_to?(:empty?) && bounds.empty?
+      top = bounds.max.y.to_f
+      top.finite? ? top : nil
+    rescue StandardError
+      nil
+    end
+
+    # Start of a fresh (not resumed) import: above earlier PDF pages, or the
+    # origin in an empty model. The gap uses the first requested page's
+    # height, which is read only when earlier pages exist.
+    def self.fresh_import_start_offset(model, parser, requested_pages, opts)
+      first_requested = Array(requested_pages).first
+      import_base_y_offset(model, lambda {
+        requested_page_height_in(parser, first_requested, opts[:scale])
+      })
+    end
+
+    # Height in model inches of the first requested page (crop box when
+    # present, rotation-aware, times the import scale).
+    def self.requested_page_height_in(parser, page_num, scale)
+      raw = parser.page_data(page_num)
+      raw = {} unless raw.is_a?(Hash)
+      box = raw[:crop_box]
+      box = raw[:media_box] unless box.is_a?(Array) && box.length >= 4
+      box = [0, 0, 612, 792] unless box.is_a?(Array) && box.length >= 4
+      rotation = PageTransform.normalize_rotation(raw[:rotation])
+      factor = scale.to_f
+      factor = 1.0 unless factor > 0.0
+      PageTransform.effective_height(box, rotation).to_f / 72.0 * factor
+    rescue StandardError => e
+      Logger.warn('Placement', "page height lookup failed: #{e.message}")
+      11.0
+    end
+
     def self.page_stack_step(page_height_in, arrangement, gap_ratio)
       h = page_height_in.to_f
       h = 11.0 if h <= 0.0
@@ -3570,8 +4020,8 @@ module BlueCollarSystems
 
       immutable_path = File.expand_path(source_path.to_s)
       normalized = File.expand_path(normalized_path.to_s)
-      immutable_sha256 = Digest::SHA256.file(immutable_path).hexdigest
-      normalized_sha256 = Digest::SHA256.file(normalized).hexdigest
+      immutable_sha256 = import_file_sha256(opts, immutable_path)
+      normalized_sha256 = import_file_sha256(opts, normalized)
       declared_immutable_sha256 = lineage[:immutable_pdf_sha256].to_s
       unless declared_immutable_sha256.empty? ||
              declared_immutable_sha256 == immutable_sha256
@@ -3593,6 +4043,35 @@ module BlueCollarSystems
       stats[:normalized_input_sha256] = normalized_sha256
       stats[:salvage_note] = salvage_note
       lineage
+    end
+
+    # Audit import (slow self-checks), default off. On: every per-page proof
+    # re-reads the whole PDF as before. Off: the PDF is hashed once per
+    # import and "it did not change" is trusted from its size and times.
+    def self.audit_mode?(opts)
+      return true if opts.is_a?(Hash) && opts[:audit] == true
+      ENV['BC_PDF_AUDIT'].to_s.strip =~ /\A(?:1|true|yes|on)\z/i ? true : false
+    end
+
+    # Full-file SHA-256, at most once per file per import with Audit off
+    # (keyed by path, size and times). Audit on, or no import memo: hash.
+    def self.import_file_sha256(opts, path)
+      source_path = File.expand_path(path.to_s)
+      memo = opts.is_a?(Hash) ? opts[:import_digest_memo] : nil
+      unless memo.is_a?(Hash) && !audit_mode?(opts)
+        return Digest::SHA256.file(source_path).hexdigest
+      end
+      stat = File.stat(source_path)
+      identity = [stat.size.to_i, stat.mtime.to_f, stat.ctime.to_f]
+      key = source_path.downcase
+      entry = memo[key]
+      if entry.is_a?(Hash) && entry[:file_identity] == identity &&
+         entry[:sha256].to_s =~ /\A[0-9a-f]{64}\z/
+        return entry[:sha256]
+      end
+      sha256 = Digest::SHA256.file(source_path).hexdigest
+      memo[key] = { :file_identity => identity, :sha256 => sha256 }
+      sha256
     end
 
     # Resource names ("/TT1") of the fonts whose codes carry no meaning.
@@ -3825,7 +4304,11 @@ module BlueCollarSystems
       page_fit_bounds = Geom::BoundingBox.new
       arrangement = normalize_page_arrangement(opts[:page_arrangement])
       gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
-      running_y_offset = 0.0
+      running_y_offset = if opts[:initial_y_offset].nil?
+                           fresh_import_start_offset(model, parser, pages, opts)
+                         else
+                           opts[:initial_y_offset].to_f
+                         end
       operation_open = false
       stats = {
         :pages => 0, :primitives => 0, :edges => 0, :faces => 0,
@@ -3861,9 +4344,10 @@ module BlueCollarSystems
       operation_open = true
       pages.each_with_index do |page_num, index|
         run_control_checkpoint!(
-          opts, :page, :page => page_num, :page_index => index + 1,
-          :page_total => pages.length, :completed => index,
-          :total => pages.length
+          opts, :page,
+          :page => page_num, :page_index => index + 1,
+          :page_total => pages.length,
+          :completed => index, :total => pages.length
         )
         raw = parser.page_data(page_num)
         unless raw.is_a?(Hash)
@@ -3998,50 +4482,21 @@ module BlueCollarSystems
       # Decide once, before anything is built. Every page call below carries
       # :large_pdf_confirmed, so no page can put a question in front of the
       # operator mid-import; Esc (run controller) and resume are the safety net.
-      unless confirm_large_pdf_once!(source_path)
+      unless opts[:large_pdf_confirmed] ||
+             confirm_large_pdf_once!(source_path, nil, resumable_import?(opts))
         return cancelled_before_start(source_path, 'very large PDF declined')
       end
       opts = opts.merge(:large_pdf_confirmed => true)
+      # Audit import (slow self-checks), default off: BC_PDF_AUDIT=1 or the
+      # saved setting. Resolved once; one digest memo serves every page.
+      opts = opts.merge(
+        :audit => (opts[:audit] == true ||
+                   ENV['BC_PDF_AUDIT'].to_s.strip =~ /\A(?:1|true|yes|on)\z/i ?
+                   true : false),
+        :import_digest_memo => opts[:import_digest_memo] || {}
+      )
       unless resumable_import?(opts)
-        inner_opts = opts.dup
-        inner_opts[:resumable_page_call] = true
-        # Cancellation/progress do not require a retained-page journal. These
-        # modes use one transaction, so Escape rolls back the entire import.
-        # Do not assign a model/identity to this controller or claim resume.
-        status_sink = opts[:status_sink] || lambda do |snapshot|
-          if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
-            Sketchup.status_text = ImportDialog.progress_status(snapshot)
-          end
-        end
-        if defined?(BatchHostPolicy) &&
-           BatchHostPolicy.respond_to?(:noninteractive?) &&
-           BatchHostPolicy.noninteractive?
-          status_sink = lambda { |_snapshot| true }
-        end
-        inner_opts[:run_controller] ||= ImportRunControl::Controller.new(
-          :pages => [],
-          :requested_mode => opts[:force_raster] ? :raster : opts[:text_mode],
-          :cancel_probe => opts[:cancel_probe] ||
-            ImportRunControl::EscapeCancelProbe.new,
-          :status_sink => status_sink
-        )
-        begin
-          return run_pipeline(model, source_path, inner_opts)
-        rescue ImportRunControl::ImportCancelled => error
-          # The inner pipeline confirms rollback before this result is built.
-          # A RollbackFailure remains terminal and is never reported cancelled.
-          return {
-            :cancelled => true, :result_status => 'cancelled',
-            :resume_supported => false, :retained_pages => [],
-            :resumed_pages => [], :new_pages => [], :next_page => nil,
-            :snapshot => error.snapshot,
-            :requested_text_mode => opts[:force_raster] ? :raster : opts[:text_mode],
-            :text_mode => opts[:text_mode], :import_mode => opts[:import_mode],
-            :message => 'Import cancelled. The transactional import was rolled ' \
-              'back; no completed pages were kept.',
-            :resume_message => 'Run the import again to restart; this mode does not retain resumable pages.'
-          }
-        end
+        return run_non_resumable_pipeline(model, source_path, opts)
       end
 
       Logger.reset
@@ -4095,7 +4550,8 @@ module BlueCollarSystems
           :identity => identity,
           :cancel_probe => opts[:cancel_probe] ||
             ImportRunControl::EscapeCancelProbe.new,
-          :status_sink => status_sink
+          :status_sink => status_sink,
+          :audit => opts[:audit] == true
         )
         runner = lambda do |page, offset, certifier|
           page_opts = opts.dup
@@ -4123,6 +4579,9 @@ module BlueCollarSystems
           :model => model,
           :controller => controller,
           :pages => pages,
+          :base_y_offset => lambda {
+            fresh_import_start_offset(model, parser, pages, opts)
+          },
           :runner => runner,
           :group_per_page => opts[:group_per_page],
           :continue_on_page_error => opts[:stop_on_page_error] != true
@@ -4131,6 +4590,12 @@ module BlueCollarSystems
         stats[:requested_pages] = Array(result[:requested_pages]).dup
         stats[:selected_pages] = stats[:requested_pages].dup
         stats[:result_status] = result[:result_status]
+        # Every page arrived, but some text items are listed as not
+        # delivered: the import is incomplete, never failed.
+        if stats[:result_status].to_s == 'success' &&
+           !Array(stats[:text_delivery_failures]).empty?
+          stats[:result_status] = 'incomplete'
+        end
         stats[:failed_pages] = Array(result[:failed_pages])
         stats[:failed_pages].each do |failure|
           Logger.warn(
@@ -4148,6 +4613,10 @@ module BlueCollarSystems
         stats[:resume_message] = result[:message]
         stats[:resume_schema] = ImportRunControl::JOURNAL_SCHEMA
         stats[:resume_supported] = true
+        stats[:audit_mode] = opts[:audit] == true
+        stats[:pipeline_performance] = {} unless
+          stats[:pipeline_performance].is_a?(Hash)
+        stats[:pipeline_performance][:audit] = stats[:audit_mode]
         stats[:log_path] = Logger.log_path
         fit_retained_pages(model, parser, controller, stats, opts)
         report_pipeline_progress(
@@ -4243,7 +4712,7 @@ module BlueCollarSystems
       end
       group = model.active_entities.add_group
       group.name = "PDF Page #{page_num}" if group.respond_to?(:name=)
-      group
+      mark_pdf_page_group!(group)
     end
 
     def self.run_pipeline(model, path, opts)
@@ -4266,7 +4735,7 @@ module BlueCollarSystems
       # per-page call never asks again. Direct (non-resumable) callers still
       # get the single question here.
       unless opts[:large_pdf_confirmed]
-        return nil unless confirm_large_pdf_once!(path)
+        return nil unless confirm_large_pdf_once!(path, nil, false)
       end
 
       # Round 18: encrypted (empty-password) and damaged-xref files are
@@ -4338,7 +4807,8 @@ module BlueCollarSystems
                 selected_pages: pages.dup,
                 match_pdf_layers: match_pdf_layers,
                 text_renderers: [], geometry_staging: [],
-                pipeline_performance: {},
+                pipeline_performance: { :audit => audit_mode?(opts) },
+                audit_mode: audit_mode?(opts),
                 page_text_sources: {}, peak_mb: 0.0,
                 model_3d_texts: [], page_text_map: {},
                 recognition_skipped_pages: [],
@@ -4383,12 +4853,17 @@ module BlueCollarSystems
       reset_ownership_bookkeeping!
       page_arrangement = normalize_page_arrangement(opts[:page_arrangement])
       page_gap_ratio = normalize_page_gap_ratio(opts[:page_gap_ratio])
-      running_y_offset = opts[:initial_y_offset].to_f
+      running_y_offset = if opts[:initial_y_offset].nil?
+                           fresh_import_start_offset(model, parser, pages, opts)
+                         else
+                           opts[:initial_y_offset].to_f
+                         end
       page_group_for_certification = nil
 
       pages.each_with_index do |page_num, idx|
        begin
         page_started = Time.now
+        page_text_failures_before = Array(stats[:text_delivery_failures]).length
         pct = pages.length > 1 ? " (#{((idx.to_f / pages.length) * 100).round}%)" : ""
         elapsed = (Time.now - import_start).round(1)
 
@@ -4683,6 +5158,11 @@ module BlueCollarSystems
           # the delivered text: the dangerous spans are the ones that read as
           # ordinary text.
           glyph_code_font_rows = parser.page_font_glyph_code_status(page_num)
+          # Text groups are named by their words ("PDF Text: EX101") except on
+          # a page whose fonts carry raw glyph codes: garbled characters must
+          # never become a name, so that page keeps the id names.
+          opts[:keep_id_names] =
+            !unmapped_font_resources(glyph_code_font_rows).empty?
           glyph_code_text_parser = nil
           if prefer_internal_text
             font_maps = parser.page_font_maps(page_num)
@@ -4829,23 +5309,42 @@ module BlueCollarSystems
           end.map do |form|
             form.respond_to?(:stream_data) ? form.stream_data : nil
           end.compact
-          enforce_extracted_text_presence!(
-            page_num, requested_text_mode, text_items, streams,
-            referenced_form_streams
-          )
-          record_empty_page_source_inspection!(stats, page_num, {
-            :semantic_text_extraction_complete => true,
-            :decoded_stream_text_operators => false,
-            :decoded_form_stream_text_operators => false,
-            :embedded_image_asset_count => Array(embedded_assets).length,
-            :embedded_image_placed_count => 0
-          })
+          # Text the PDF draws but no extractor could read is listed as not
+          # delivered; the page's lines, fills and pictures still import.
+          text_presence_proved = keep_page_on_text_failure(
+            stats, page_num, requested_text_mode,
+            :reason_code => 'text_not_read'
+          ) do
+            enforce_extracted_text_presence!(
+              page_num, requested_text_mode, text_items, streams,
+              referenced_form_streams
+            )
+          end
+          if text_presence_proved
+            record_empty_page_source_inspection!(stats, page_num, {
+              :semantic_text_extraction_complete => true,
+              :decoded_stream_text_operators => false,
+              :decoded_form_stream_text_operators => false,
+              :embedded_image_asset_count => Array(embedded_assets).length,
+              :embedded_image_placed_count => 0
+            })
+          end
         end
 
+        # A missing text helper turns off this page's helper-based text only.
+        # Lines, fills and pictures still build; every text item is listed.
+        text_renderer_missing = false
         if svg_renderer_required_for_page?(
           requested_text_mode, opts[:import_text], text_items, false
         )
-          enforce_svg_renderer_available!(model, stats, requested_text_mode)
+          text_renderer_missing =
+            !enforce_svg_renderer_available!(model, stats, requested_text_mode)
+          if text_renderer_missing
+            record_text_step_down!(
+              stats, page_num, requested_text_mode, text_items,
+              'renderer_missing', SVG_RENDERER_REMEDY
+            )
+          end
         end
 
         explicit_zero_canonical_page_raster =
@@ -5111,13 +5610,20 @@ module BlueCollarSystems
            [:text, :labels].include?(requested_text_mode)
           use_svg_text = false
         end
+        # Helper missing on this page: its text was already listed as not
+        # delivered (renderer_missing). Build the page without it.
+        if text_renderer_missing
+          use_svg_text = false
+          use_svg_3d_text = false
+        end
         # Native add_3d_text cannot certify embedded PDF font identity. Exact
         # 3D text therefore uses the renderer's own glyph outlines; native 3D
         # text remains available only behind GeometryBuilder's explicit font
         # identity proof gate.
         builder_use_3d_text = false
         builder_text_items =
-          (use_svg_text || use_svg_3d_text || use_item_raster) ? [] : text_items
+          (use_svg_text || use_svg_3d_text || use_item_raster ||
+           text_renderer_missing) ? [] : text_items
         representation_renderer = if use_svg_3d_text
                                     :svg_3d_text
                                   elsif use_svg_text
@@ -5162,8 +5668,8 @@ module BlueCollarSystems
           import_fills: (opts[:import_fills] || force_import_fills_for_page), group_by_color: opts[:group_by_color],
           detect_arcs: opts[:detect_arcs], map_dashes: opts[:map_dashes],
           lineweight_mode: opts[:lineweight_mode],
-          import_text: (use_svg_text || use_svg_3d_text || use_item_raster) ?
-            false : opts[:import_text],
+          import_text: (use_svg_text || use_svg_3d_text || use_item_raster ||
+                        text_renderer_missing) ? false : opts[:import_text],
           use_3d_text: builder_use_3d_text,
           strict_text_fidelity: opts[:strict_text_fidelity],
           requested_text_mode: requested_text_mode,
@@ -5217,9 +5723,18 @@ module BlueCollarSystems
           end
         end
         hard_builder_failures = builder_failures - label_fallback_failures
+        hard_failure_source_ids = hard_builder_failures.map do |failure|
+          failure[:source_span_id].to_s
+        end
         unless hard_builder_failures.empty?
-          enforce_requested_text_delivery!(
-            page_num, requested_text_mode, hard_builder_failures
+          # Each item the builder could not deliver is listed; the page and
+          # the text it did deliver stay (owner ruling: deliver, step down,
+          # report). The builder already erased each failed item's artifacts.
+          record_text_step_down_rows!(
+            stats, page_num, requested_text_mode, hard_builder_failures,
+            'text_item_failed',
+            "#{hard_builder_failures.length} text item(s) could not be " \
+              'placed in the requested mode'
           )
         end
 
@@ -5227,7 +5742,8 @@ module BlueCollarSystems
           failure[:source_span_id].to_s
         end
         completed_builder_attempts = Array(result[:text_attempts]).reject do |attempt|
-          fallback_source_ids.include?(attempt[:source_span_id].to_s)
+          fallback_source_ids.include?(attempt[:source_span_id].to_s) ||
+            hard_failure_source_ids.include?(attempt[:source_span_id].to_s)
         end
         merge_text_attempts!(stats, completed_builder_attempts)
         if requested_text_mode == :text
@@ -5257,7 +5773,22 @@ module BlueCollarSystems
             count: result[:text_objects].to_i)
         end
 
+        # Assigned inside the step-down wrappers below and read after them.
+        svg_document = nil
         unless label_fallback_failures.empty?
+          fallback_items = text_items.select do |item|
+            fallback_source_ids.include?(
+              RepresentationFidelity.source_span_id(item)
+            )
+          end
+          fallback_parent = builder.page_group ?
+            builder.page_group.entities : model.active_entities
+          # Delivered Labels stay; only these items' outlines are undone.
+          keep_page_on_text_failure(
+            stats, page_num, requested_text_mode,
+            :parent => fallback_parent, :owner => fallback_source_ids,
+            :items => fallback_items, :reason_code => 'text_stage_failed'
+          ) do
           label_svg_failure = {}
           use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
             (a.to_f - b.to_f).abs > 0.01
@@ -5280,13 +5811,6 @@ module BlueCollarSystems
                   "Page #{page_num}: Labels fallback source inspection failed: " \
                   "#{label_svg_failure[:reason]}"
           end
-          fallback_items = text_items.select do |item|
-            fallback_source_ids.include?(
-              RepresentationFidelity.source_span_id(item)
-            )
-          end
-          fallback_parent = builder.page_group ?
-            builder.page_group.entities : model.active_entities
           complete_label_item_fallbacks!(
             stats, model, fallback_parent, path, page_num, fallback_items,
             media_box, svg_page_box, page_rotation, page_text_opts, import_start,
@@ -5294,6 +5818,7 @@ module BlueCollarSystems
             result[:text_attempts], layer_mgr.text_fallback_layer, text_items,
             requested_text_mode, flat_text_fallbacks
           )
+          end
         end
 
 
@@ -5313,12 +5838,20 @@ module BlueCollarSystems
             controller = RepresentationFidelity::FallbackController.new(
               :raster, source_id
             )
+            # One item that cannot be pictured is listed; its peers and the
+            # page stay.
+            keep_page_on_text_failure(
+              stats, page_num, :raster, :parent => raster_parent,
+              :owner => source_id, :items => [source_item],
+              :reason_code => 'text_item_failed'
+            ) do
             complete_item_representation_ladder!(
               stats, model, raster_parent, path, page_num, source_item,
               :raster, controller, [], media_box, svg_page_box,
               page_rotation, opts, import_start, page_y_offset, {},
               layer_mgr.text_fallback_layer, text_items
             )
+            end
             completed_items = item_index + 1
             if completed_items == Array(text_items).length ||
                (completed_items % 50).zero?
@@ -5350,6 +5883,15 @@ module BlueCollarSystems
           text_delivery_started = Time.now
           exact_3d_requested_mode =
             requested_text_mode == :text ? :text : :text3d
+          # A failure anywhere in this stage undoes this stage's text only and
+          # lists the page's text items; the page's lines and fills stay. The
+          # builder put no text in the page group, so every text-owned entity
+          # in it belongs to this stage.
+          keep_page_on_text_failure(
+            stats, page_num, exact_3d_requested_mode,
+            :parent => builder.page_group.entities, :owner => :any_text,
+            :items => text_items, :reason_code => 'text_stage_failed'
+          ) do
           svg_failure = {}
           use_cropbox = crop_box && crop_box.zip(media_box).any? do |a, b|
             (a.to_f - b.to_f).abs > 0.01
@@ -5413,6 +5955,7 @@ module BlueCollarSystems
             :run_controller => opts[:run_controller],
             :preserve_unmatched_source_placements => true,
             :decorative_text_containers => page_text_opts[:decorative_text_containers],
+            :keep_id_names => page_text_opts[:keep_id_names] == true,
             :source_context => svg_source_context(
               svg_document, page_num, svg_failure
             )
@@ -5515,6 +6058,19 @@ module BlueCollarSystems
               sum + row[:face_count].to_i
             end
             unless transition_proofs.empty?
+              # Items stepping down from 3D Text: if that step fails, only
+              # those items are listed; the delivered 3D Text stays.
+              proof_ids = transition_proofs.map do |proof|
+                RepresentationFidelity.source_span_id(proof[:source_span_id])
+              end
+              keep_page_on_text_failure(
+                stats, page_num, exact_3d_requested_mode,
+                :parent => representation_parent, :owner => proof_ids,
+                :items => Array(text_items).select { |item|
+                  proof_ids.include?(safe_text_source_id(item))
+                },
+                :reason_code => 'text_stage_failed'
+              ) do
               complete_text3d_item_fallbacks!(
                 stats, model, representation_parent, path, page_num,
                 text_items, media_box, svg_page_box, page_rotation, page_text_opts,
@@ -5523,7 +6079,9 @@ module BlueCollarSystems
                 (exact_3d_requested_mode == :text ?
                   flat_text_fallbacks : nil)
               )
+              end
             end
+          end
           end
           end
           stats[:pipeline_performance][:text_delivery_ms] =
@@ -5567,6 +6125,15 @@ module BlueCollarSystems
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
           text_layer = layer_mgr.text_fallback_layer
 
+          # A failure in this stage undoes this stage's text only and lists
+          # the page's text items; lines and fills stay. Glyphs/Geometry put
+          # no builder text in the page group, so every text-owned entity in
+          # it belongs to this stage.
+          keep_page_on_text_failure(
+            stats, page_num, requested_text_mode,
+            :parent => builder.page_group.entities, :owner => :any_text,
+            :items => text_items, :reason_code => 'text_stage_failed'
+          ) do
           # A page container cannot prove which physical descendants belong to
           # which source span. Render and certify every source item independently.
           # This also keeps same-text spans distinct by their deterministic span
@@ -5643,6 +6210,12 @@ module BlueCollarSystems
             controller = RepresentationFidelity::FallbackController.new(
               requested_text_mode, source_id
             )
+            # One item that fails is listed; its peers and the page stay.
+            keep_page_on_text_failure(
+              stats, page_num, requested_text_mode,
+              :parent => representation_parent, :owner => source_id,
+              :items => [source_item], :reason_code => 'text_item_failed'
+            ) do
             complete_item_representation_ladder!(
               stats, model, representation_parent, path, page_num,
               source_item, requested_text_mode, controller, [], media_box,
@@ -5652,6 +6225,7 @@ module BlueCollarSystems
               precomputed_placed, precomputed_pens, glyph_component_cache,
               precomputed_peer_owners
             )
+            end
             completed_items = item_index + 1
             run_control_checkpoint!(
               opts, :text_item,
@@ -5678,6 +6252,13 @@ module BlueCollarSystems
               )
             end
           end
+          # Drawn letters no text item claimed: if they fail, one page row
+          # is listed and every delivered item stays.
+          keep_page_on_text_failure(
+            stats, page_num, requested_text_mode,
+            :parent => representation_parent, :owner => :source_unit,
+            :items => [], :reason_code => 'text_stage_failed'
+          ) do
           source_unit = SvgItemRepresentationRenderer.render_unmatched_svg(
             representation_parent, svg_document[:svg], media_box, text_items,
             requested_text_mode, :scale => opts[:scale], :svg_page_box => svg_page_box,
@@ -5691,6 +6272,7 @@ module BlueCollarSystems
             SvgItemRepresentationRenderer.finalize_source_unit_evidence!(source_unit,page_rotation)
             record_source_unit_vector_delivery!(stats,page_num,source_unit)
           end
+          end
           stats[:pipeline_performance][:item_delivery_ms] =
             ((Time.now - delivery_started) * 1000.0).round(3)
           stats[:pipeline_performance][:glyph_component_definition_count] =
@@ -5701,6 +6283,7 @@ module BlueCollarSystems
               "items=#{Array(text_items).length}; mode=#{requested_text_mode}"
           )
           stats[:text_mode] = requested_text_mode
+          end
         end
 
         if opts[:cleanup_geometry] && builder.page_group
@@ -5741,11 +6324,24 @@ module BlueCollarSystems
           source_svg_document || svg_document || CairoGlyphSource.render_page_svg(
             path, page_num, :use_cropbox => use_cropbox == true)
         end
+        # White areas are cut around the text drawn on them. If that check
+        # fails, the remaining white areas stay as plain white shapes and the
+        # page is kept and listed (owner ruling: deliver, step down, report).
+        # Areas already cut stay cut; an area whose check fails before its
+        # final swap is restored by PlanarWhiteKnockout (its unfinished work
+        # is erased), and the areas after it are left untouched.
+        composition = nil
+        keep_page_on_page_stage_failure(
+          stats, page_num, 'white_areas', 'white_area_check_failed',
+          'Some white areas were left as plain white shapes; text drawn ' \
+            'over them may be hidden'
+        ) do
         composition = compose_page_white_masks!(builder, text_items, media_box,
           :scale => opts[:scale], :svg_page_box => svg_page_box,
           :page_rotation => page_rotation, :y_offset => page_y_offset,
           :svg_provider => paint_svg_provider,
           :source_units => Array(stats[:source_glyph_physical_deliveries]).select { |row| row[:page] == page_num })
+        end
         if composition
           stats[:planar_white_knockout] ||= []
           stats[:planar_white_knockout] << composition[:report].merge(:page => page_num)
@@ -5753,9 +6349,22 @@ module BlueCollarSystems
 
         # ── Closed-shape extrusion (disabled; independent of 3D text) ───
         unless late_overlays.empty?
-          unless composition && builder.page_group
+          unless builder.page_group
             raise RepresentationFidelity::ContractError,
-              'final vector annotations require the complete page text inventory'
+              'final vector annotations require the page group'
+          end
+          overlay_top = composition ? composition[:highest_text_z] : nil
+          overlay_crops = composition ? composition[:final_page_crops] : []
+          if overlay_top.nil?
+            # Step down: draw the final marks just above the page instead of
+            # dropping the page; they may sit under raised 3D text.
+            overlay_top = 0.0
+            record_page_step_down!(
+              stats, page_num, 'final_vector_annotations',
+              'text_inventory_unavailable',
+              'Marks drawn last in the PDF were placed without the text ' \
+                'height check'
+            )
           end
           factor = opts[:scale].to_f / 72.0
           mapper = lambda do |pdf_x, pdf_y|
@@ -5764,9 +6373,9 @@ module BlueCollarSystems
           end
           built_overlays = LatePdfOverlays.build!(builder.page_group.entities, late_overlays,
             :point_mapper => mapper, :materials => model.materials,
-            :highest_text_z => composition[:highest_text_z], :page_number => page_num,
+            :highest_text_z => overlay_top, :page_number => page_num,
             :source_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
-            :final_page_crops => composition[:final_page_crops])
+            :final_page_crops => overlay_crops)
           stats[:late_pdf_overlays] ||= []
           stats[:late_pdf_overlays] << {
             :page => page_num, :count => built_overlays.length,
@@ -5874,6 +6483,9 @@ module BlueCollarSystems
             "#{pruned_groups.uniq.first(8).inspect}"
           )
         end
+        ensure_kept_page_has_content!(
+          builder.page_group, page_num, stats, page_text_failures_before
+        )
         add_page_fit_bounds(page_fit_bounds, media_box, stack_box, opts[:scale], page_y_offset, page_rotation)
 
         # Advance the running page stack only after a successful import.
@@ -6026,6 +6638,10 @@ module BlueCollarSystems
 
       stats[:next_y_offset] = running_y_offset
       stats[:log_path] = Logger.log_path
+      if !opts[:resumable_page_call] && stats[:result_status].to_s.empty? &&
+         text_step_down_present?(stats)
+        stats[:result_status] = 'incomplete'
+      end
       unless opts[:defer_final_diagnostics]
         report_pipeline_progress(opts, 'diagnostics_started')
         diagnostics_started = Time.now
@@ -6366,8 +6982,14 @@ module BlueCollarSystems
     def self.prepare_embedded_image_display_plans(page_group, records, document, media_box, opts)
       return { :qualified_plans => [], :unqualified => [] } if records.empty?
       unless document && document[:svg].is_a?(String) && !document[:svg].empty?
-        raise RepresentationFidelity::ContractError,
-          'embedded image source paint-order SVG is unavailable'
+        # Owner ruling 2026-10-05: the pictures are already placed; without
+        # the page drawing (for example when the free text helper cannot
+        # run) they keep their plain placement instead of costing the page.
+        return { :qualified_plans => [], :unqualified => records.map do |record|
+          { :image_id => RepresentationFidelity.stable_entity_id(record[:image_entity]),
+            :reason => 'embedded image source paint-order SVG is unavailable; ' \
+                       'the picture keeps its plain placement' }
+        end }
       end
       svg = document[:svg]
       page_box = opts[:svg_page_box] || media_box
@@ -6816,7 +7438,7 @@ module BlueCollarSystems
         end
         return entry[:sha256]
       end
-      sha256 = Digest::SHA256.file(source_path).hexdigest
+      sha256 = import_file_sha256(opts, source_path)
       cache[key] = {
         :source_pdf_path => source_path,
         :file_identity => identity,
@@ -6824,6 +7446,7 @@ module BlueCollarSystems
       }
       sha256
     end
+
 
     def self.source_pdf_file_identity!(pdf_path)
       source_path = File.expand_path(pdf_path.to_s)
@@ -6900,9 +7523,16 @@ module BlueCollarSystems
         end
         path = File.expand_path(entry[:source_pdf_path].to_s)
         identity = source_pdf_file_identity!(path)
-        # Commit gate must re-hash: identity alone cannot prove content.
+        unless identity == entry[:file_identity]
+          raise RepresentationFidelity::ContractError,
+                'source PDF changed before the SketchUp operation committed'
+        end
+        # Audit on: re-hash, because identity alone cannot prove content (a
+        # same-size, same-time rewrite). Audit off: size and times are
+        # trusted, and the whole PDF is not re-read for every page.
+        next unless audit_mode?(opts)
         sha256 = Digest::SHA256.file(path).hexdigest
-        unless identity == entry[:file_identity] && sha256 == entry[:sha256].to_s
+        unless sha256 == entry[:sha256].to_s
           raise RepresentationFidelity::ContractError,
                 'source PDF changed before the SketchUp operation committed'
         end
@@ -7111,6 +7741,14 @@ module BlueCollarSystems
           image.set_attribute(dictionary, 'source_claim_root', true)
           image.set_attribute(dictionary, 'source_span_id', source_id)
           image.set_attribute(dictionary, 'source_kind', 'text_span')
+          # The words this picture shows, so they can be found and read.
+          unless opts[:keep_id_names] == true ||
+                 Svg3DTextRenderer.display_text(item).nil?
+            image.set_attribute(
+              dictionary, 'source_text',
+              Svg3DTextRenderer.utf8_text(CairoGlyphSource.item_text(item))
+            )
+          end
           image.set_attribute(dictionary, 'representation', 'raster')
           image.set_attribute(
             dictionary, 'renderer', page_render[:renderer]
@@ -7538,28 +8176,53 @@ module BlueCollarSystems
       return UI.messagebox("No active model.") unless model
       path = UI.openpanel("Select PDF File", "", "PDF Files|*.pdf||")
       return unless path && File.exist?(path)
-      return if handle_open_gate(path)
-      begin
-        opts = ImportDialog.show(path)
-        return unless opts
-        stats = run_resumable_pipeline(model, path, opts)
-        if stats
-          # No blocking every-import modal (owner rule). Concise result on
-          # the status bar; full summary in import_report.json + Import Health.
-          if stats[:cancelled]
-            ReportDialog.announce_cancelled(stats)
-          else
-            ReportDialog.announce(stats)
-          end
-        else
-          UI.messagebox("No vector content found in PDF.")
-        end
-      rescue StandardError => e
-        safe_abort_operation(model, "Import") unless e.is_a?(ImportRunControl::RollbackFailure)
-        Logger.error("Import", "Import failed", e)
-        log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
-        UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
+      import_pdf_path(model, path)
+    end
+
+    # One import of one chosen file, shared by Extensions > Import PDF...,
+    # File > Import PDF Vectors... and SketchUp's own File > Import: the
+    # open check, the options dialog, the import, then one status-bar line
+    # or one "PDF import failed" box with the reason. Returns :success
+    # (also when every page arrived and only some text was listed as not
+    # delivered), :incomplete (some pages failed and were skipped; the
+    # rest are in the model and the status line names the skipped pages),
+    # :cancelled or :failed. Every outcome has already told the user what
+    # happened.
+    def self.import_pdf_path(model, path)
+      return :cancelled if handle_open_gate(path)
+      opts = ImportDialog.show(path)
+      return :cancelled unless opts
+      stats = run_resumable_pipeline(model, path, opts)
+      unless stats
+        UI.messagebox("No vector content found in PDF.")
+        return :failed
       end
+      # No blocking every-import modal (owner rule). Concise result on
+      # the status bar; full summary in import_report.json + Import Health.
+      outcome = import_result_status(stats)
+      if outcome == 'cancelled'
+        ReportDialog.announce_cancelled(stats)
+        return :cancelled
+      end
+      ReportDialog.announce(stats)
+      return :success if outcome == 'success'
+      # Pages kept with text listed as not delivered are an import, not a
+      # failure; the list is in Import Health.
+      return :success if pages_kept_with_step_downs?(stats)
+      outcome == 'incomplete' ? :incomplete : :failed
+    rescue ImportRunControl::ImportCancelled
+      :cancelled
+    rescue StandardError => e
+      safe_abort_operation(model, "Import") unless e.is_a?(ImportRunControl::RollbackFailure)
+      Logger.error("Import", "Import failed", e)
+      log_hint = Logger.log_path ? "\n\nDetails saved to:\n#{Logger.log_path}" : ""
+      UI.messagebox("PDF import failed:\n#{e.message}#{log_hint}")
+      :failed
+    end
+
+    # True once SketchUp's File > Import lists this importer.
+    def self.importer_registered?
+      @importer_registered == true
     end
 
     def self.import_pdf_safe
@@ -7602,8 +8265,18 @@ module BlueCollarSystems
       return unless folder && File.directory?(folder)
       pdfs = (Dir.glob(File.join(folder, "*.pdf")) + Dir.glob(File.join(folder, "*.PDF"))).uniq
       return UI.messagebox("No PDF files found.") if pdfs.empty?
-      return unless UI.messagebox("Import #{pdfs.length} PDF(s) with Auto mode?", MB_YESNO) == IDYES
-      ok = 0; fail_c = 0; cancel_c = 0
+      # A saved Audit = Yes applies to the batch too, so the question says so.
+      audit_note = ImportDialog.audit_requested?({}) ? "\n\n#{ImportDialog::AUDIT_ON_BATCH_NOTE}" : ''
+      return unless UI.messagebox(
+        "Import #{pdfs.length} PDF(s): all pages, 3D Text, scale 1.0 (Auto)?#{audit_note}",
+        MB_YESNO
+      ) == IDYES
+      # The very-large-PDF question is asked once, for the whole folder,
+      # before anything is built. Yes imports them; No skips them and the
+      # rest still import. No file asks again mid-batch.
+      large = batch_large_pdfs(pdfs)
+      import_large = large.empty? || batch_confirm_large_pdfs(large)
+      ok = 0; fail_c = 0; cancel_c = 0; skip_c = 0
       stop_reason = nil
       # BCS-ARCH-001: batch import uses Auto mode — per-page strategy selection.
       mode_raw = ImportDialog::MODES['Auto']
@@ -7611,20 +8284,29 @@ module BlueCollarSystems
       mode_raw.each { |k, v| sym_attrs[k.to_sym] = v }
       pdfs.sort.each_with_index do |pdf, idx|
         Sketchup.status_text = "Batch: #{idx+1}/#{pdfs.length} #{File.basename(pdf)}"
+        if large.include?(pdf) && !import_large
+          skip_c += 1
+          next
+        end
         begin
           opts = ImportDialog.send(:build_opts, sym_attrs.merge(pages: 'All'))
+          opts[:large_pdf_confirmed] = true if large.include?(pdf)
           # Refuse bad PDFs quietly here; the summary box reports the count.
           if handle_open_gate(pdf, opts, show_ui: false)
             fail_c += 1
             next
           end
-          outcome = import_result_status(run_pipeline(model, pdf, opts))
+          stats = run_pipeline(model, pdf, opts)
+          outcome = import_result_status(stats)
           if outcome == 'success'
             ok += 1
           elsif outcome == 'cancelled'
             cancel_c += 1
             stop_reason = 'Import cancelled; remaining PDFs were not started.'
             break
+          elsif pages_kept_with_step_downs?(stats)
+            # Every page arrived; some text is listed in Import Health.
+            ok += 1
           else
             fail_c += 1
           end
@@ -7632,19 +8314,57 @@ module BlueCollarSystems
           cancel_c += 1
           stop_reason = 'Import cancelled; remaining PDFs were not started.'
           break
-        rescue ImportRunControl::ResumeMismatch => e
+        rescue ImportRunControl::RollbackFailure => e
+          # SketchUp could not confirm the undo: the model may be changed,
+          # so nothing more is imported on top of it.
           fail_c += 1
           Logger.error('Batch', File.basename(pdf), e)
           stop_reason = e.message
           break
+        rescue ImportRunControl::ResumeMismatch => e
+          # This file's earlier import record does not match the model; the
+          # file is counted as failed and the batch moves on.
+          fail_c += 1
+          Logger.error('Batch', File.basename(pdf), e)
         rescue StandardError => e
           fail_c += 1; Logger.error("Batch", File.basename(pdf), e)
         end
       end
       summary = "Batch: #{ok} imported, #{fail_c} failed, " \
-                "#{cancel_c} cancelled, #{pdfs.length} total."
+                "#{cancel_c} cancelled, #{skip_c} skipped, #{pdfs.length} total."
       summary += " Stopped: #{stop_reason}" if stop_reason
       UI.messagebox(summary)
+    end
+
+    def self.batch_large_pdfs(pdfs)
+      pdfs.select do |pdf|
+        size = begin
+          File.size(pdf)
+        rescue StandardError
+          0
+        end
+        size.to_i > BatchHostPolicy::LARGE_PDF_BYTES
+      end
+    end
+
+    # One question for every very large file in the folder. True imports
+    # them, false skips them.
+    def self.batch_confirm_large_pdfs(large)
+      names = large.map { |pdf| File.basename(pdf) }
+      shown = names.first(5).join(', ')
+      shown += ", and #{names.length - 5} more" if names.length > 5
+      limit_mb = (BatchHostPolicy::LARGE_PDF_BYTES / (1024.0 * 1024.0)).round
+      largest = large.map { |pdf| File.size(pdf) rescue 0 }.max.to_i
+      choice = BatchHostPolicy.confirm_large_pdf!(largest) do
+        UI.messagebox(
+          "#{names.length} PDF(s) in this folder are very large (over " \
+          "#{limit_mb} MB): #{shown}. They may take a long time and use a lot " \
+          "of memory.\n\nImport them too? Yes imports them; No skips them " \
+          'and the rest still import.',
+          MB_YESNO
+        )
+      end
+      choice == true || (defined?(IDYES) && choice == IDYES)
     end
 
     def self.scale_by_reference; ScaleTool.activate; end
@@ -7718,16 +8438,66 @@ module BlueCollarSystems
       nil
     end
 
+    # What an import built, page by page (or for the selected groups):
+    # edges, faces, groups, components, pictures and labels.
     def self.feature_inventory
       model = Sketchup.active_model; return unless model
-      t = model.selection.grep(Sketchup::Group).first
-      UI.messagebox(Metadata.report(t ? t.entities : model.active_entities))
+      picked = model.selection.to_a.select do |entity|
+        entity.respond_to?(:typename) && entity.typename == 'Group'
+      end
+      targets = picked.empty? ? pdf_page_entities(model) : picked
+      if targets.empty?
+        return UI.messagebox('No imported PDF pages found. Import a PDF, ' \
+                             'or select a group, then try again.')
+      end
+      lines = ['PDF Feature Inventory', '']
+      targets.each do |entity|
+        counts = Hash.new(0)
+        if entity.respond_to?(:typename) && entity.typename == 'Image'
+          counts[:pictures] += 1
+        else
+          count_inventory(entity, counts, 0)
+        end
+        label = entity.respond_to?(:name) ? entity.name.to_s : ''
+        label = entity.typename.to_s if label.empty? && entity.respond_to?(:typename)
+        lines << "#{label}: #{inventory_text(counts)}"
+      end
+      UI.messagebox(lines.join("\n"))
+    end
+
+    INVENTORY_KINDS = [
+      ['Edge', :edges, 'edge'], ['Face', :faces, 'face'],
+      ['Group', :groups, 'group'],
+      ['ComponentInstance', :components, 'component'],
+      ['Image', :pictures, 'picture'], ['Text', :labels, 'label']
+    ].freeze
+
+    def self.count_inventory(entity, counts, depth)
+      return if depth > 32 || !entity.respond_to?(:entities)
+      entity.entities.to_a.each do |child|
+        typename = child.respond_to?(:typename) ? child.typename.to_s : ''
+        kind = INVENTORY_KINDS.find { |row| row[0] == typename }
+        counts[kind[1]] += 1 if kind
+        # Groups are unique and counted inside; a component's shared
+        # definition (one letter used many times) is counted once per use
+        # as a component, not opened again.
+        count_inventory(child, counts, depth + 1) if typename == 'Group'
+      end
+    end
+
+    def self.inventory_text(counts)
+      parts = INVENTORY_KINDS.map do |_typename, key, word|
+        value = counts[key].to_i
+        next nil unless value > 0
+        "#{ImportDialog.format_integer(value)} #{word}#{value == 1 ? '' : 's'}"
+      end.compact
+      parts.empty? ? 'nothing inside' : parts.join(', ')
     end
 
     def self.visibility_toggles; ReportDialog.show_visibility_menu; end
 
     # ================================================================
-    # MENU & TOOLBAR
+    # MENUS (File > Import PDF Vectors... and Extensions submenu)
     # ================================================================
     if !@loaded && defined?(UI) && UI.respond_to?(:menu)
       UI.menu('File').add_item('Import PDF Vectors...') { self.import_pdf }
@@ -7740,6 +8510,10 @@ module BlueCollarSystems
       sub.add_item('Scale to Real Dimensions...') { self.scale_by_reference }
       sub.add_item('Quick Scale...') { self.quick_scale }
       sub.add_item('Extrude Selected Planar Faces...') { self.extrude_selected_faces }
+      sub.add_separator
+      sub.add_item('Clean Up Selected Groups') { self.cleanup_selected }
+      sub.add_item('Feature Inventory...') { self.feature_inventory }
+      sub.add_item('Show/Hide PDF Tags...') { self.visibility_toggles }
       sub.add_separator
       sub.add_item('Compatibility Report...') { CompatibilityReport.show }
       sub.add_item('Import Health...') { ImportHealth.show }
@@ -7772,32 +8546,38 @@ module BlueCollarSystems
       def description; "PDF Vector Drawings (*.pdf)"; end
       def file_extension; "pdf"; end
       def id; "com.bluecollar.pdfvectorimporter"; end
-      def supports_options?; true; end
+      # There are no importer options; the import's own dialog opens.
+      def supports_options?; false; end
 
       def load_file(file_path, status)
-        # Open-time gate: a clear message was already shown for bad files,
-        # so report Canceled to suppress SketchUp's generic failure dialog.
-        if BlueCollarSystems::PDFVectorImporter.handle_open_gate(file_path)
-          return Sketchup::Importer::ImportCanceled
-        end
-        opts = ImportDialog.show(file_path)
-        return Sketchup::Importer::ImportCanceled unless opts
         model = Sketchup.active_model
         return Sketchup::Importer::ImportFail unless model
-        stats = BlueCollarSystems::PDFVectorImporter.run_pipeline(model, file_path, opts)
-        outcome = BlueCollarSystems::PDFVectorImporter.import_result_status(stats)
-        if outcome == 'cancelled'
-          return Sketchup::Importer::ImportCanceled
+        outcome = BlueCollarSystems::PDFVectorImporter.import_pdf_path(model, file_path)
+        # import_pdf_path has already shown its own message. ImportFail would
+        # make SketchUp show its generic failure box as a second message, so
+        # a failure we explained reports Canceled. An incomplete import left
+        # its good pages in the model and the status line names the skipped
+        # ones, so it reports Success.
+        case outcome
+        when :success, :incomplete then Sketchup::Importer::ImportSuccess
+        else Sketchup::Importer::ImportCanceled
         end
-        outcome == 'success' ? Sketchup::Importer::ImportSuccess : Sketchup::Importer::ImportFail
-      rescue BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled
-        Sketchup::Importer::ImportCanceled
       rescue StandardError => e
-        unless e.is_a?(BlueCollarSystems::PDFVectorImporter::ImportRunControl::RollbackFailure)
-          BlueCollarSystems::PDFVectorImporter.safe_abort_operation(model, "PDFFileImporter")
-        end
         Logger.error("PDFFileImporter", "load_file failed", e)
         Sketchup::Importer::ImportFail
+      end
+    end
+
+    # Register once per SketchUp session (main.rb can be loaded again).
+    unless @importer_registered
+      begin
+        if defined?(Sketchup) && Sketchup.respond_to?(:register_importer)
+          Sketchup.register_importer(PDFFileImporter.new)
+          @importer_registered = true
+        end
+      rescue StandardError => e
+        @importer_registered = :failed
+        Logger.error('PDFFileImporter', 'File > Import registration failed', e)
       end
     end
     end # if defined?(Sketchup::Importer)

@@ -10,8 +10,104 @@ module BlueCollarSystems
       SCALE_LABEL = /\b(SCALE|SC\.?|SCL\.?)\b/i.freeze
       ARCH_SCALE = /(\d+(?:\.\d+)?(?:\s*\/\s*\d+)?)\s*["\u2033]?\s*=\s*(.+)/i.freeze
       RATIO_SCALE = /\b(\d+)\s*:\s*(\d+)\b/.freeze
+      TYPED_NUMBER = /\A[+-]?(?:\d+(?:\.\d*)?|\.\d+)\z/.freeze
+      TYPED_RATIO = /\A(\d+(?:\.\d+)?|\.\d+)\s*:\s*(\d+(?:\.\d+)?|\.\d+)\z/.freeze
+      TYPED_FRACTION = /\A(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\z/.freeze
+      # 1-1/2"=1'-0" (a whole number plus a fraction of an inch on paper)
+      TYPED_MIXED_ARCH = /\A(\d+)\s*[- ]\s*(\d+)\s*\/\s*(\d+)\s*["\u2033]?\s*=\s*(.+)\z/.freeze
+      # A 'SCALE:' word in front of a pasted scale.
+      TYPED_LABEL = /\A(?:SCALE|SCL\.?|SC\.?)\s*[:=]?\s*/i.freeze
+      # paper = real
+      TYPED_EQUATION = /\A([^=]+?)\s*=\s*([^=]+)\z/.freeze
+      # Inches: 3, 1/4, 1-1/2 or 1 1/2, with an optional inch mark (group 4).
+      TYPED_INCHES = /\A(?:(\d+)\s*[- ]\s*)?(\d+(?:\.\d+)?|\.\d+)(?:\s*\/\s*(\d+(?:\.\d+)?))?\s*("|\u2033|in\.?|inch(?:es)?)?\z/i.freeze
 
       module_function
+
+      # The paper-to-real multiplier for a scale typed the way drawings print
+      # it, or nil when the text cannot be read as a positive scale:
+      #   '48' -> 48, '0.5' -> 0.5 (a plain number is the multiplier itself)
+      #   '1:48' -> 48, '1/48' -> 48 (paper : real)
+      #   1/4"=1'-0" -> 48, 3/8"=1' -> 32, 1"=10' -> 120
+      #   1/4"=12" -> 48 (a real side with only an inch mark is inches)
+      #   1=48 -> 48 (bare numbers on both sides are a ratio)
+      # Extra ':' or '=' parts (1:48:2) are refused rather than guessed.
+      def enlargement_from_text(text)
+        typed = text.to_s.strip.sub(TYPED_LABEL, '')
+        return nil if typed.empty?
+        return positive_factor(typed.to_f) if typed =~ TYPED_NUMBER
+        return nil if typed.count(':') > 1 || typed.count('=') > 1
+
+        equation = typed.match(TYPED_EQUATION)
+        if equation
+          factor = equation_factor(equation[1].strip, equation[2].strip)
+          return factor if factor
+        end
+
+        ratio = typed.match(TYPED_RATIO) || typed.match(TYPED_FRACTION)
+        if ratio
+          paper = ratio[1].to_f
+          return nil unless paper > 0.0
+          return positive_factor(ratio[2].to_f / paper)
+        end
+
+        mixed = typed.match(TYPED_MIXED_ARCH)
+        if mixed
+          return nil unless mixed[3].to_f > 0.0
+          paper = mixed[1].to_f + mixed[2].to_f / mixed[3].to_f
+          real = parse_feet_inches_token(mixed[4].to_s) ||
+                 DimensionParser.parse_length_token(mixed[4].to_s)
+          return nil unless real && paper > 0.0
+          return positive_factor(real.to_f / paper)
+        end
+
+        factor_conf = factor_from_parsed(DimensionParser.parse(typed))
+        factor_conf ||= factor_from_arch_match(typed)
+        positive_factor(factor_conf ? factor_conf[0] : nil)
+      rescue StandardError
+        nil
+      end
+
+      # paper = real, both read as inches. A real side with no unit is feet
+      # when the paper side has a unit (1"=10' engineering scales), and a
+      # plain ratio when neither side has one (1=48).
+      def equation_factor(paper_text, real_text)
+        if paper_text =~ TYPED_NUMBER && real_text =~ TYPED_NUMBER
+          paper = paper_text.to_f
+          return nil unless paper > 0.0
+          return positive_factor(real_text.to_f / paper)
+        end
+        paper = typed_inches(paper_text, false)
+        return nil unless paper && paper > 0.0
+        real = typed_inches(real_text, true) ||
+               parse_feet_inches_token(real_text) ||
+               DimensionParser.parse_length_token(real_text)
+        return nil unless real
+        positive_factor(real.to_f / paper)
+      end
+
+      # Inches from 3, 1/4", 1-1/2" or 6 in; nil when the text is not that
+      # shape. With mark_required, a bare number is not read as inches.
+      def typed_inches(text, mark_required)
+        m = text.to_s.strip.match(TYPED_INCHES)
+        return nil unless m
+        return nil if mark_required && m[4].nil?
+        whole, number, denominator = m[1], m[2], m[3]
+        return nil if whole && denominator.nil?
+        value = number.to_f
+        if denominator
+          return nil unless denominator.to_f > 0.0
+          value /= denominator.to_f
+        end
+        value += whole.to_f if whole
+        value
+      end
+
+      def positive_factor(value)
+        return nil if value.nil?
+        number = value.to_f
+        number.finite? && number > 0.0 ? number : nil
+      end
 
       def resolve(page_data)
         best = nil

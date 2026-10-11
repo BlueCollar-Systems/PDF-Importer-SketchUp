@@ -20,7 +20,10 @@ module BlueCollarSystems
         :page_certifier, :resumable_page_call, :initial_y_offset,
         :defer_final_diagnostics, :complexity_confirm, :prepared_parser,
         :prepared_pdf_path, :preserve_prepared_parser, :preserve_logger,
-        :stop_on_page_error
+        :stop_on_page_error,
+        # Audit (slow self-checks) changes how much the importer re-proves,
+        # never what it builds, so it does not change resume identity.
+        :audit, :import_digest_memo
       ].freeze
       # Per-span evidence trees are restored from the live page groups on resume.
       # Cloning them into the model attribute dictionary is a multi-second JSON
@@ -144,28 +147,102 @@ module BlueCollarSystems
       # stop even an unattended run that normally skips individual errors.
       class RollbackFailure < ResumeMismatch; end
 
+      # Reads the Esc key for the run controller. SketchUp 2017-2023 ship
+      # Win32API, which stays the first choice there. SketchUp 2024+ ships
+      # Ruby 3.2, which no longer has Win32API, so the stdlib Fiddle reader
+      # (present in every SketchUp Ruby) is used instead. Without either, Esc
+      # cannot be read: that is reported once and the import simply runs to
+      # the end.
       class EscapeCancelProbe
         ESCAPE_VIRTUAL_KEY = 0x1B
+        # GetAsyncKeyState: 0x8000 = held down now, 0x0001 = pressed since
+        # the previous read.
+        KEY_DOWN_BIT = 0x8000
+        PRESSED_SINCE_LAST_READ_BIT = 0x0001
+
         attr_reader :backend, :unavailable_reason
 
-        def initialize(adapter = nil)
+        # Answers "is SketchUp the program in front?": true, false, or nil
+        # when Windows cannot say. A hung SketchUp shows a "Not Responding"
+        # ghost window owned by another process; the ghost counts as
+        # SketchUp, so Esc still works while an import keeps it busy.
+        class ForegroundCheck
+          def initialize(foreground_window, window_process_id,
+                         hung_window_from_ghost = nil, process_id = nil)
+            @foreground_window = foreground_window
+            @window_process_id = window_process_id
+            @hung_window_from_ghost = hung_window_from_ghost
+            @process_id = (process_id || Process.pid).to_i
+          end
+
+          def call
+            window = @foreground_window.call.to_i
+            return nil if window == 0
+            owner = @window_process_id.call(window).to_i
+            return nil if owner == 0
+            return true if owner == @process_id
+            return nil unless @hung_window_from_ghost
+            hung = @hung_window_from_ghost.call(window).to_i
+            return false if hung == 0
+            hung_owner = @window_process_id.call(hung).to_i
+            hung_owner == 0 ? nil : hung_owner == @process_id
+          rescue StandardError
+            nil
+          end
+        end
+
+        # adapter: answers #call(key) like GetAsyncKeyState (tests inject
+        # one). logger: anything with #warn(context, message); without one
+        # the importer Logger, or stderr, gets the one unavailable notice.
+        # foreground: answers #call like ForegroundCheck. Without an adapter
+        # the real Windows key reader is used together with the real Windows
+        # "which program is in front" check.
+        def initialize(adapter = nil, logger = nil, foreground = nil)
+          @logger = logger
           @backend = adapter ? :injected : nil
           @unavailable_reason = nil
           @diagnostic_reported = false
           @adapter = adapter || windows_key_adapter
+          @foreground = foreground
+          @foreground ||= default_foreground_check if adapter.nil? && available?
+          # A real reader's first "pressed since the previous read" bit can
+          # carry a press from before the import (for example the Esc that
+          # closed a dialog), so that first bit is ignored.
+          @first_read = adapter.nil?
         end
 
         def available?
           @backend != :unavailable
         end
 
+        # :win32api, :fiddle, :injected, or :none when Esc cannot be read.
+        def adapter_kind
+          available? ? @backend : :none
+        end
+
+        def foreground_check?
+          !@foreground.nil?
+        end
+
+        # Holding Esc (the key-down bit) cancels unless another program is
+        # known to be in front, so Esc pressed in another program does not
+        # stop the import. A quick tap between two checkpoints leaves only
+        # the "pressed since the previous read" bit, which Windows does not
+        # tie to one program, so a tap counts only while SketchUp is
+        # confirmed to be the program in front.
         def call
           unless available?
             report_unavailable!
             return false
           end
           value = @adapter.call(ESCAPE_VIRTUAL_KEY).to_i
-          (value & 0x8000) != 0
+          first_read = @first_read
+          @first_read = false
+          held = (value & KEY_DOWN_BIT) != 0
+          tapped = !first_read && (value & PRESSED_SINCE_LAST_READ_BIT) != 0
+          return false unless held || tapped
+          in_front = host_in_front
+          held ? in_front != false : in_front == true
         rescue StandardError => error
           @backend = :unavailable
           @unavailable_reason = "keyboard read failed: #{error.class}: #{error.message}"
@@ -174,6 +251,15 @@ module BlueCollarSystems
         end
 
         private
+
+        # true, false, or nil when there is no check or it cannot say.
+        def host_in_front
+          return nil unless @foreground
+          answer = @foreground.call
+          answer == true || answer == false ? answer : nil
+        rescue StandardError
+          nil
+        end
 
         def windows_key_adapter
           unless windows_platform?
@@ -195,18 +281,8 @@ module BlueCollarSystems
             fiddle = fiddle_module
             raise LoadError, 'Fiddle signed SHORT return type is unavailable' unless fiddle.const_defined?(:TYPE_SHORT)
             function_class = fiddle.const_get(:Function)
-            # WINAPI is stdcall on 32-bit Windows. Windows x64 uses its unified
-            # platform ABI, exposed by Fiddle::Function::DEFAULT.
-            abi = if function_class.const_defined?(:STDCALL)
-                    function_class.const_get(:STDCALL)
-                  elsif fiddle.const_get(:SIZEOF_VOIDP) == 8
-                    function_class.const_get(:DEFAULT)
-                  else
-                    raise LoadError, 'Fiddle Windows stdcall ABI is unavailable'
-                  end
-            system_root = ENV['SystemRoot'].to_s
-            system_root = 'C:/Windows' if system_root.empty?
-            @keyboard_library = fiddle.dlopen(File.join(system_root, 'System32', 'user32.dll'))
+            abi = windows_api_abi(fiddle)
+            @keyboard_library = fiddle.dlopen(system_user32_path)
             @keyboard_function = function_class.new(
               @keyboard_library['GetAsyncKeyState'],
               [fiddle.const_get(:TYPE_INT)], fiddle.const_get(:TYPE_SHORT), abi
@@ -222,6 +298,63 @@ module BlueCollarSystems
           @backend = :unavailable
           @unavailable_reason = failures.join('; ')
           lambda { |_key| 0 }
+        end
+
+        # WINAPI is stdcall on 32-bit Windows. Windows x64 uses its unified
+        # platform ABI, exposed by Fiddle::Function::DEFAULT.
+        def windows_api_abi(fiddle)
+          function_class = fiddle.const_get(:Function)
+          if function_class.const_defined?(:STDCALL)
+            function_class.const_get(:STDCALL)
+          elsif fiddle.const_get(:SIZEOF_VOIDP) == 8
+            function_class.const_get(:DEFAULT)
+          else
+            raise LoadError, 'Fiddle Windows stdcall ABI is unavailable'
+          end
+        end
+
+        def system_user32_path
+          system_root = ENV['SystemRoot'].to_s
+          system_root = 'C:/Windows' if system_root.empty?
+          File.join(system_root, 'System32', 'user32.dll')
+        end
+
+        # The real "is SketchUp in front?" check over user32 through Fiddle.
+        # It reuses the key reader's user32 handle when that reader is Fiddle.
+        # nil when it cannot be built: a held Esc then counts wherever it is
+        # pressed, as before.
+        def default_foreground_check
+          load_key_library('fiddle')
+          fiddle = fiddle_module
+          abi = windows_api_abi(fiddle)
+          user32 = @keyboard_library
+          user32 ||= fiddle.dlopen(system_user32_path)
+          function_class = fiddle.const_get(:Function)
+          voidp = fiddle.const_get(:TYPE_VOIDP)
+          foreground = function_class.new(user32['GetForegroundWindow'], [], voidp, abi)
+          thread_process = function_class.new(
+            user32['GetWindowThreadProcessId'], [voidp, voidp],
+            fiddle.const_get(:TYPE_INT), abi
+          )
+          ghost = begin
+            function_class.new(user32['HungWindowFromGhostWindow'], [voidp], voidp, abi)
+          rescue StandardError
+            nil
+          end
+          # Keep the handle and functions alive for every checkpoint.
+          @foreground_library = user32
+          @foreground_functions = [foreground, thread_process, ghost]
+          ForegroundCheck.new(
+            lambda { foreground.call.to_i },
+            lambda { |window|
+              buffer = [0].pack('L')
+              thread_process.call(window, buffer)
+              buffer.unpack('L').first
+            },
+            ghost ? lambda { |window| ghost.call(window).to_i } : nil
+          )
+        rescue LoadError, StandardError
+          nil
         end
 
         def windows_platform?
@@ -244,8 +377,10 @@ module BlueCollarSystems
           return if @diagnostic_reported
           @diagnostic_reported = true
           message = "Escape-key cancellation is unavailable: #{@unavailable_reason}"
-          if defined?(Logger) && Logger.respond_to?(:warn)
-            Logger.warn('ImportRunControl', message)
+          logger = @logger
+          logger = Logger if logger.nil? && defined?(Logger) && Logger.respond_to?(:warn)
+          if logger && logger.respond_to?(:warn)
+            logger.warn('ImportRunControl', message)
           else
             warn(message)
           end
@@ -271,6 +406,9 @@ module BlueCollarSystems
           @model = options[:model]
           @identity = stringify_hash(options[:identity] || {})
           @entity_signature_proc = options[:entity_signature]
+          # Audit import (slow self-checks): the per-page entity census below
+          # only feeds mismatch messages, so it is taken only when asked for.
+          @audit = options[:audit] == true
           # Per page, the group/typename census taken when the page was
           # certified in THIS process. It is never persisted; it only lets a
           # same-run signature mismatch name what changed instead of failing
@@ -403,7 +541,7 @@ module BlueCollarSystems
             row['page_number'].to_i == page_number
           end
           if existing
-            validate_page_entry!(existing)
+            validate_page_entry!(existing, data)
             unless existing['group_persistent_id'].to_i == group_id
               raise ResumeMismatch, "page #{page_number} already has another certified group"
             end
@@ -423,7 +561,9 @@ module BlueCollarSystems
           set_entity_attribute(group, 'identity_sha256', identity_digest)
           set_entity_attribute(group, 'certified', true)
           signature = entity_signature(group)
-          @certified_census[page_number] = entity_census(group)
+          # The key marks "certified in this run" (needed by the post-commit
+          # re-seal); the census itself is only taken with Audit on.
+          @certified_census[page_number] = @audit ? entity_census(group) : nil
           entry = {
             'page_number' => page_number,
             'group_persistent_id' => group_id,
@@ -445,11 +585,29 @@ module BlueCollarSystems
           return [] unless data
           validate_journal_identity!(data)
           pages = Array(data['pages']).map do |entry|
-            validate_page_entry!(entry)
+            validate_page_entry!(entry, data)
             entry['page_number'].to_i
           end.sort
           pages.each { |page| retain_page!(page) }
           pages
+        end
+
+        # The check after each new page: that page's journal entry and its
+        # retained group only. Every kept page is still checked once at the
+        # start of a run (resumable_pages); re-checking all finished pages
+        # after every new page made each page slower than the last.
+        def page_certified?(page)
+          ensure_journal_ready!
+          data = read_journal
+          return false unless data
+          validate_journal_identity!(data)
+          entry = Array(data['pages']).find do |row|
+            row['page_number'].to_i == page.to_i
+          end
+          return false unless entry
+          validate_page_entry!(entry, data)
+          retain_page!(entry['page_number'].to_i)
+          true
         end
 
         def resume_y_offset
@@ -500,11 +658,14 @@ module BlueCollarSystems
             row['page_number'].to_i == page_number
           end
           detail = signature_change_details(page_number, group)
+          detail = 'turn on Audit import for a detailed list' if detail.empty?
           message = "page #{page_number} retained tree changed between certification " \
                     "and host commit (#{detail}); journal re-sealed to the durable tree"
           log_resume_diagnostic(message)
           entry['entity_signature_sha256'] = durable
-          @certified_census[page_number] = entity_census(group)
+          # The key marks "certified in this run" (needed by the post-commit
+          # re-seal); the census itself is only taken with Audit on.
+          @certified_census[page_number] = @audit ? entity_census(group) : nil
           write_journal(data)
           message
         end
@@ -578,12 +739,15 @@ module BlueCollarSystems
           true
         end
 
-        def validate_page_entry!(entry)
+        # data: the journal the caller already parsed. The journal id is read
+        # once here; it used to be re-parsed from JSON for every top-level
+        # entity in the model.
+        def validate_page_entry!(entry, data = nil)
           page = entry['page_number'].to_i
+          journal_id = (data || journal)['journal_id'].to_s
           candidates = active_entities.select do |entity|
             live_entity?(entity) &&
-              entity_attribute(entity, 'journal_id').to_s ==
-                journal['journal_id'].to_s &&
+              entity_attribute(entity, 'journal_id').to_s == journal_id &&
               entity_attribute(entity, 'page_number').to_i == page
           end
           unless candidates.length == 1
@@ -1019,11 +1183,23 @@ module BlueCollarSystems
           # nothing partial is kept; it is never certified and a later resume
           # retries it. Callers opt in; the bare orchestrator stays strict.
           @continue_on_page_error = options[:continue_on_page_error] == true
+          # Where a fresh import's first page starts (above earlier PDF
+          # pages in the model). A number, or a callable evaluated only when
+          # nothing is resumed. A resume keeps its journal offsets.
+          @base_y_offset = options[:base_y_offset]
           @failed_pages = []
           @first_page_error = nil
         end
 
         attr_reader :failed_pages
+
+        def fresh_start_offset
+          value = @base_y_offset.respond_to?(:call) ? @base_y_offset.call : @base_y_offset
+          number = value.to_f
+          number.finite? ? number : 0.0
+        rescue StandardError
+          0.0
+        end
 
         def run
           unless @group_per_page
@@ -1037,7 +1213,7 @@ module BlueCollarSystems
           resumed.each do |page|
             merge_stats!(aggregate, @controller.page_stats(page))
           end
-          offset = @controller.resume_y_offset
+          offset = resumed.empty? ? fresh_start_offset : @controller.resume_y_offset
           new_pages = []
           pending = @pages.reject { |page| resumed.include?(page) }
 
@@ -1061,7 +1237,9 @@ module BlueCollarSystems
               @first_page_error ||= error
               next
             end
-            unless certified && @controller.resumable_pages.include?(page)
+            # Check only the page just built; finished pages were checked
+            # when they were built and once more at the start of the run.
+            unless certified && page_still_certified?(page)
               raise ResumeMismatch,
                     "page #{page} runner returned without a certified page group"
             end
@@ -1110,6 +1288,14 @@ module BlueCollarSystems
         end
 
         private
+
+        # Controllers that predate page_certified? keep the full re-check.
+        def page_still_certified?(page)
+          if @controller.respond_to?(:page_certified?)
+            return @controller.page_certified?(page)
+          end
+          @controller.resumable_pages.include?(page)
+        end
 
         # Individual certified page stats stay page-local in the journal.
         # The final aggregate describes the entire request, including pages

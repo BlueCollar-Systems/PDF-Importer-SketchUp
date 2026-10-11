@@ -130,7 +130,8 @@ module BlueCollarSystems
         )
 
         group = create_owned_group!(entities, source_id, mode, opts[:layer],
-                                    indices)
+                                    indices,
+                                    (opts[:keep_id_names] == true ? nil : item))
         emit_progress_callback(
           opts[:progress_callback], 'svg_item_build_started',
           "source_id=#{source_id}; placements=#{entries.length}; mode=#{mode}"
@@ -750,7 +751,10 @@ module BlueCollarSystems
               "#{source_id}: exact source outline inventory is malformed"
       end
 
-      def self.create_owned_group!(entities, source_id, mode, layer, indices)
+      # item: the source text item, when its words may name the group
+      # ("PDF Text: EX101", full words in BC_PDF_Importer/source_text).
+      def self.create_owned_group!(entities, source_id, mode, layer, indices,
+                                   item = nil)
         unless entities.respond_to?(:add_group)
           raise RepresentationFidelity::ContractError,
                 'parent entities cannot create an owned item vector group'
@@ -760,6 +764,9 @@ module BlueCollarSystems
               'owned item vector group was not created' unless group
         group.name = "PDF #{mode == :glyphs ? 'Glyphs' : 'Geometry'} " \
           "#{source_id}" if group.respond_to?(:name=)
+        Svg3DTextRenderer.apply_text_words!(group, item) if item &&
+          defined?(Svg3DTextRenderer) &&
+          Svg3DTextRenderer.respond_to?(:apply_text_words!)
         group.layer = layer if layer && group.respond_to?(:layer=)
         assign_identity!(group, source_id, mode, nil, indices)
         group

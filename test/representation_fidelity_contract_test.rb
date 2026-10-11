@@ -2450,6 +2450,10 @@ class RepresentationFidelityContractTest < Minitest::Test
     original_time = File.mtime(pdf)
     File.binwrite(pdf, "%PDF-1.4\nsource-b\n%%EOF\n")
     File.utime(original_time, original_time, pdf)
+    # A same-size, same-time rewrite is caught by the full re-hash, which
+    # runs with Audit import (slow self-checks) on (SU-1010-17). Audit off
+    # trusts size and times: test/audit_setting_test.rb.
+    opts[:audit] = true
     assert_raises(IMP::RepresentationFidelity::ContractError) do
       IMP.verify_cached_source_pdf_bindings!(opts)
     end

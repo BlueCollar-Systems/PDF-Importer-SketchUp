@@ -46,6 +46,28 @@ module Sketchup
     def is_pro?
       false
     end
+
+    attr_writer :test_extensions
+
+    def extensions
+      @test_extensions || []
+    end
+  end
+end
+
+class CompatibilityReportExtension
+  attr_reader :name, :description, :creator, :version
+
+  def initialize(name, description, creator, version, loaded = true)
+    @name = name
+    @description = description
+    @creator = creator
+    @version = version
+    @loaded = loaded
+  end
+
+  def loaded?
+    @loaded
   end
 end
 
@@ -56,6 +78,17 @@ module UI
     def reset_test_state
       @messages = []
       @clipboard_payload = nil
+      @opened_urls = []
+    end
+
+    def opened_urls
+      Array(@opened_urls).dup
+    end
+
+    def openURL(url)
+      @opened_urls ||= []
+      @opened_urls << url
+      true
     end
 
     def messages
@@ -243,6 +276,103 @@ class CompatibilityReportTest < Minitest::Test
     refute_includes report, SOURCE_DIR
     refute_match(/Private Operator|Client-Zephyr|private-server|SecretShare|private-client/,
                  report)
+  end
+
+  def with_importer_registration(state)
+    importer = BlueCollarSystems::PDFVectorImporter
+    importer.define_singleton_method(:importer_registered?) { state }
+    yield
+  ensure
+    importer.singleton_class.send(:remove_method, :importer_registered?)
+  end
+
+  # File > Import works only when SketchUp actually lists the importer.
+  def test_file_import_line_says_available_only_when_registered
+    unregistered = REPORT.build_report
+    assert_includes unregistered, '- File > Import hook: Not registered'
+    refute_includes unregistered, '- File > Import hook: Available.'
+
+    with_importer_registration(false) do
+      assert_includes REPORT.build_report, '- File > Import hook: Not registered'
+    end
+    with_importer_registration(true) do
+      assert_includes REPORT.build_report, '- File > Import hook: Available.'
+    end
+  end
+
+  # SketchUp 2017 through 2023.0 have no clipboard API. The report must
+  # still reach the user: it opens in the PC's text editor (usually
+  # Notepad), and the box shows the
+  # helper status itself, never the saved file's location.
+  def without_clipboard_api
+    UI.singleton_class.send(:alias_method, :__test_set_clipboard_data, :set_clipboard_data)
+    UI.singleton_class.send(:remove_method, :set_clipboard_data)
+    yield
+  ensure
+    UI.singleton_class.send(:alias_method, :set_clipboard_data, :__test_set_clipboard_data)
+    UI.singleton_class.send(:remove_method, :__test_set_clipboard_data)
+  end
+
+  def test_report_opens_in_notepad_when_the_clipboard_is_unavailable
+    private_path =
+      'C:\\Users\\Private Operator\\Temp\\bc_compat_1\\compatibility_report.txt'
+    without_clipboard_api do
+      refute UI.respond_to?(:set_clipboard_data)
+      REPORT.stub(:save_report, private_path) do
+        REPORT.stub(:print_to_console, nil) { REPORT.show }
+      end
+    end
+
+    urls = UI.opened_urls
+    assert_equal 1, urls.length
+    assert urls.first.start_with?('file:///C:/Users/'), urls.first
+    assert urls.first.end_with?('/compatibility_report.txt'), urls.first
+    refute_includes urls.first, '\\'
+
+    message = UI.messages.last.to_s
+    assert_includes message, 'Not available'
+    assert_includes message, 'The full report opened in your text editor (usually Notepad).'
+    assert_includes message, 'Window > Ruby Console'
+    assert_includes message, 'pdftocairo found: MISSING'
+    assert_includes message, 'mutool found: MISSING'
+    assert_includes message, 'SVG/geometry text render: Disabled'
+    refute_includes message, private_path
+    refute_match(/Private Operator|bc_compat_1|compatibility_report\.txt/, message)
+  end
+
+  def test_clipboard_hosts_do_not_open_an_extra_window
+    REPORT.stub(:save_report, 'C:\\Temp\\compatibility_report.txt') do
+      REPORT.stub(:print_to_console, nil) { REPORT.show }
+    end
+    assert_empty UI.opened_urls
+    assert_includes UI.messages.last.to_s, 'pdftocairo found: MISSING'
+  end
+
+  def test_other_pdf_extensions_are_listed
+    Sketchup.test_extensions = [
+      CompatibilityReportExtension.new('PDF Vector Importer', 'Import PDF vector geometry',
+                                       'BlueCollar-Systems', '3.7.162'),
+      CompatibilityReportExtension.new('PDFImport', 'Import PDF files',
+                                       'Prognosoft Inc.', '1.2.6'),
+      CompatibilityReportExtension.new('Solar North', 'Shows north',
+                                       'Trimble', '1.0'),
+      CompatibilityReportExtension.new('PDF Exporter Pro', 'Export to PDF',
+                                       'Example Co', '2.0', false)
+    ]
+    report = REPORT.build_report
+    section = report[/\[Other PDF extensions\]\n(.*?)(?:\n\n|\z)/m, 1].to_s
+
+    assert_includes section, 'PDFImport 1.2.6 by Prognosoft Inc.'
+    refute_includes section, 'PDF Vector Importer'
+    refute_includes section, 'Solar North'
+    refute_includes section, 'PDF Exporter Pro', 'only loaded extensions are listed'
+  ensure
+    Sketchup.test_extensions = nil
+  end
+
+  def test_no_other_pdf_extension_says_so
+    report = REPORT.build_report
+    assert_match(/\[Other PDF extensions\]\n- None found\./, report)
   end
 
   def test_path_redaction_preserves_exact_helper_compatibility_decisions

@@ -2,13 +2,14 @@
 # Import dialog v7 — BCS-ARCH-001 professional single-flow + Rule 5 sweep.
 # HtmlDialog with Modus styling (Trimble design system).
 #
-# Default UI: professional import (Auto per page internally). Vector/Raster/
-# Hybrid appear only in Advanced. Basic dialog shows:
+# Default UI: professional import (Auto per page internally). Vector and
+# Raster appear only in Advanced ('Hybrid' is still accepted from saved
+# settings and the CLI as another name for Auto). Basic dialog shows:
 #   1. Text rendering selector (Text, Labels, 3D Text, Glyphs, Geometry, Raster)
 #   2. Import text Yes/No toggle
-# Plus legitimate workflow controls: pages, scale, grouping, page
-# arrangement. Quality parameters are consolidated to the values in
-# import_config.rb defaults — they are no longer adjustable.
+# Plus legitimate workflow controls: pages, scale, page arrangement.
+# Quality parameters are consolidated to the values in import_config.rb
+# defaults — they are no longer adjustable.
 #
 # Falls back to UI.inputbox when HtmlDialog is unavailable (headless / test).
 #
@@ -60,13 +61,47 @@ module BlueCollarSystems
       MODE_NAMES   = MODES.keys.join('|')
       TEXT_MODES   = 'Text|Labels|3D Text|Glyphs|Geometry|Raster'
       TEXT_MODE_CHOICES = TEXT_MODES.split('|').freeze
+      # One short plain line per text choice, shown under the two text boxes.
       # Sketchup::Text is the Labels representation, not the distinct flat Text
-      # representation. On SketchUp 2017, finite-bbox Labels also cannot retain
-      # source glyph size/run width, so their audited adjacent delivery is the
-      # source-outline 3D visual equivalent rather than an editable annotation.
-      TEXT_MODE_HINT = '3D Text is the default visual mode: model-space size and rotation match the PDF. ' \
-                       'On SketchUp 2017, finite-bbox Labels advance to a source-outline 3D visual-equivalent; ' \
-                       'it is not a native editable annotation, preserves semantic/provenance identity, and uses no silent Raster.'.freeze
+      # representation. On SketchUp 2017, finite-bbox Text and Labels cannot
+      # keep the PDF's letter size, so they arrive as source-outline 3D letters
+      # (never an editable annotation and never a silent picture).
+      TEXT_MODE_HINT_LINES = [
+        '3D Text: solid letters that match the PDF',
+        'Text / Labels: on SketchUp 2017 these also arrive as 3D letters',
+        'Glyphs: letter outlines',
+        'Geometry: lines and faces',
+        'Raster: picture'
+      ].map(&:freeze).freeze
+      TEXT_MODE_HINT = TEXT_MODE_HINT_LINES.join("\n").freeze
+      # A page with inline pictures can also arrive as one picture (the
+      # inline-image paint-order rule), so the hint names both cases.
+      AUTO_MODE_HINT = 'Auto keeps lines and text editable and places pictures where they are; ' \
+                       'a page becomes one picture only when it is a scan or its pictures ' \
+                       'cannot be placed separately.'.freeze
+      # Grouping is fixed: one group per page with color sub-groups inside.
+      # 'Picture of each page' (Raster) places one picture per page instead.
+      # The saved grouping_mode value is still read so old settings load.
+      GROUPING_HINT = 'Each page comes in as its own group, with color sub-groups inside ' \
+                      '(in Picture of each page mode, each page comes in as one picture).'.freeze
+      # Advanced 'Mode' choices in plain words. 'Hybrid' behaves exactly like
+      # Auto, so it is not offered; saved 'Hybrid' settings show as Auto.
+      MODE_CHOICE_LABELS = [
+        ['Auto', 'Auto (recommended)'],
+        ['Vector', 'Lines and text only (skips pictures)'],
+        ['Raster', 'Picture of each page']
+      ].map { |pair| pair.map(&:freeze).freeze }.freeze
+      MODE_CHOICES = MODE_CHOICE_LABELS.map(&:first).join('|').freeze
+      # Outer window sizes. Both fit a 1366x768 screen and a 1080p laptop at
+      # 150% scaling (about 720 px) with the taskbar showing. The Import and
+      # Cancel buttons are pinned to the bottom of the window and the
+      # settings above them scroll, so a shorter window never hides them.
+      DIALOG_SIZES = {
+        :basic => [440, 620],
+        :advanced => [460, 620]
+      }.freeze
+      # The tallest window that still fits those screens.
+      DIALOG_MAX_HEIGHT = 640
       FIRST_RUN_TEXT_MODE = '3D Text'.freeze
       FIRST_RUN_MATCH_PDF_LAYERS = 'Yes'.freeze
 
@@ -146,8 +181,10 @@ module BlueCollarSystems
         dlg = UI::HtmlDialog.new(
           dialog_title: "Import PDF \u2014 #{filename}",
           preferences_key: 'BC_PDFImport_Basic',
-          width: 440, height: 380, resizable: false
+          width: DIALOG_SIZES[:basic][0], height: DIALOG_SIZES[:basic][1],
+          resizable: false
         )
+        apply_dialog_size(dlg, :basic)
 
         mode_val    = valid_mode_name(saved[:last_mode])
         pages_val   = saved[:pages]       || 'All'
@@ -155,8 +192,12 @@ module BlueCollarSystems
         text_val    = effective_text_mode(saved)
         itext_val   = saved[:import_text] || 'Yes'
         match_val   = effective_match_pdf_layers(saved)
+        # A saved Audit = Yes (or BC_PDF_AUDIT=1) also applies here, so the
+        # window says so instead of leaving a slow mode on unseen.
+        audit_on    = audit_requested?({})
 
-        dlg.set_html(basic_html(filename, mode_val, pages_val, scale_val, text_val, itext_val, match_val))
+        dlg.set_html(basic_html(filename, mode_val, pages_val, scale_val, text_val, itext_val,
+                                match_val, audit_on))
 
         dlg.add_action_callback('on_import') do |_ctx, p|
           begin
@@ -185,7 +226,10 @@ module BlueCollarSystems
           end
         end
 
-        dlg.add_action_callback('on_cancel') { |_ctx, _p| dlg.close }
+        dlg.add_action_callback('on_cancel') do |_ctx, _p|
+          result = nil
+          dlg.close
+        end
         dlg.add_action_callback('on_advanced') do |_ctx, p|
           begin
             PageSelection.parse(p['pages'] || 'All')
@@ -215,8 +259,10 @@ module BlueCollarSystems
         dlg = UI::HtmlDialog.new(
           dialog_title: "Advanced Import \u2014 #{filename}",
           preferences_key: 'BC_PDFImport_Advanced',
-          width: 460, height: 380, resizable: false
+          width: DIALOG_SIZES[:advanced][0], height: DIALOG_SIZES[:advanced][1],
+          resizable: false
         )
+        apply_dialog_size(dlg, :advanced)
 
         d = {
           mode:             valid_mode_name(saved[:last_mode]),
@@ -228,7 +274,8 @@ module BlueCollarSystems
           grouping_mode:    saved[:grouping_mode]                      || 'Group per page',
           page_arrangement: saved[:page_arrangement]                   || 'Spread (20% gap)',
           extrude_to_3d:    saved[:extrude_to_3d]                      || 'No',
-          extrude_depth_mm: saved[:extrude_depth_mm]                   || ''
+          extrude_depth_mm: saved[:extrude_depth_mm]                   || '',
+          audit:            audit_choice(saved[:audit])
         }
 
         dlg.set_html(advanced_html(filename, d))
@@ -237,16 +284,20 @@ module BlueCollarSystems
           begin
             PageSelection.parse(p['pages'])
             parse_import_scale(p['scale'] || '1.0')
-            save_prefs(
+            to_save = {
               last_mode: p['mode'],
               pages: p['pages'], scale: p['scale'],
               text_mode: p['text_mode'], import_text: p['import_text'],
               match_pdf_layers: p['match_pdf_layers'],
-              grouping_mode: p['grouping_mode'],
               page_arrangement: p['page_arrangement'],
               extrude_to_3d: p['extrude_to_3d'],
               extrude_depth_mm: p['extrude_depth_mm']
-            )
+            }
+            # While BC_PDF_AUDIT=1 forces Audit on, the box shows Yes but is
+            # not the user's choice: keep the saved setting, so Audit does
+            # not stay on after the variable is removed.
+            to_save[:audit] = audit_choice(p['audit']) unless audit_env_on?
+            save_prefs(to_save)
             mode_raw = MODES[p['mode'] || 'Auto'] || MODES['Auto']
             result = build_opts(
               import_mode: mode_raw['import_mode'],
@@ -257,10 +308,10 @@ module BlueCollarSystems
               text_mode: p['text_mode'],
               import_text: p['import_text'],
               match_pdf_layers: p['match_pdf_layers'],
-              grouping_mode: p['grouping_mode'],
               page_arrangement: p['page_arrangement'],
               extrude_to_3d: p['extrude_to_3d'],
-              extrude_depth_mm: p['extrude_depth_mm']
+              extrude_depth_mm: p['extrude_depth_mm'],
+              audit: audit_choice(p['audit'])
             )
             dlg.close
           rescue ArgumentError => error
@@ -268,16 +319,34 @@ module BlueCollarSystems
           end
         end
 
-        dlg.add_action_callback('on_cancel') { |_ctx, _p| dlg.close }
+        dlg.add_action_callback('on_cancel') do |_ctx, _p|
+          result = nil
+          dlg.close
+        end
         dlg.show_modal
         result
+      end
+
+      # SketchUp before 2019 ignores the width/height arguments once the
+      # preferences_key has a saved size, so set the size explicitly.
+      def self.apply_dialog_size(dlg, kind)
+        return unless dlg.respond_to?(:set_size)
+        width, height = DIALOG_SIZES.fetch(kind)
+        dlg.set_size(width, height)
+      rescue StandardError => e
+        Logger.warn('ImportDialog', "set_size failed: #{e.message}")
+      end
+
+      def self.text_mode_hint_html
+        lines = TEXT_MODE_HINT_LINES.map { |line| esc(line) }.join('<br>')
+        "<p class=\"hint hint-block\">#{lines}</p>"
       end
 
       # ---- HTML generators ------------------------------------------
       DIALOG_CSS = <<-CSS.freeze
         *{box-sizing:border-box;margin:0;padding:0}
         body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
-             font-size:13px;color:#1a1a1a;background:#fff;padding:20px}
+             font-size:13px;color:#1a1a1a;background:#fff;padding:20px;padding-bottom:64px}
         h2{font-size:14px;font-weight:600;margin-bottom:4px}
         .sub{font-size:11px;color:#666;margin-bottom:16px;
              white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -286,12 +355,15 @@ module BlueCollarSystems
             padding:6px 8px;font-size:13px;color:#1a1a1a;background:#fff;outline:none}
         select:focus,input:focus{border-color:#0078d7}
         .row{margin-bottom:12px}
-        .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+        .row2{margin-bottom:10px;font-size:0}
+        .row2>div{display:inline-block;width:48%;vertical-align:top;font-size:13px}
+        .row2>div+div{margin-left:4%}
         .section{border-top:1px solid #e4e4e4;padding-top:10px;margin-top:4px;
                  font-size:11px;font-weight:600;color:#888;text-transform:uppercase;
                  letter-spacing:.6px;margin-bottom:8px}
-        .actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;
-                 padding-top:14px;border-top:1px solid #e4e4e4}
+        .actions{position:fixed;left:0;right:0;bottom:0;background:#fff;padding:10px 20px;margin:0;
+                 text-align:right;border-top:1px solid #e4e4e4}
+        .btn+.btn{margin-left:8px}
         .btn{padding:7px 18px;border-radius:3px;font-size:13px;
              font-weight:500;cursor:pointer;border:1px solid transparent}
         .btn-primary{background:#0078d7;color:#fff;border-color:#0078d7}
@@ -299,9 +371,12 @@ module BlueCollarSystems
         .btn-secondary{background:#fff;color:#333;border-color:#ccc}
         .btn-secondary:hover{background:#f3f3f3}
         .hint{font-size:11px;color:#888;margin-top:2px}
+        .hint-block{margin:-4px 0 12px}
+        .audit-on{color:#8a4b00;font-weight:600}
       CSS
 
-      def self.basic_html(filename, _mode, pages, scale, text_mode, import_text, match_pdf_layers)
+      def self.basic_html(filename, _mode, pages, scale, text_mode, import_text, match_pdf_layers,
+                          audit_on = false)
         text_opts = TEXT_MODE_CHOICES.map { |v|
           sel = v == text_mode ? ' selected' : ''
           "<option value=\"#{v}\"#{sel}>#{v}</option>"
@@ -311,13 +386,15 @@ module BlueCollarSystems
         itext_no  = import_text == 'No'  ? ' selected' : ''
         match_yes = match_pdf_layers == 'Yes' ? ' selected' : ''
         match_no  = match_pdf_layers == 'No'  ? ' selected' : ''
+        audit_note_html = audit_on ? "<p class=\"hint hint-block audit-on\" id=\"audit-note\">#{esc(AUDIT_ON_NOTE)}</p>" : ''
 
         <<-HTML
           <!DOCTYPE html><html><head><meta charset="utf-8">
           <style>#{DIALOG_CSS}</style></head><body>
           <h2>Import PDF Vectors</h2>
           <p class="sub">#{esc(filename)}</p>
-          <p class="hint" style="margin-bottom:14px">Professional import &mdash; maximum fidelity; Auto picks vector, raster, or hybrid per page. Use Advanced for explicit strategy or layout options.</p>
+          <p class="hint" style="margin-bottom:14px">#{esc(AUTO_MODE_HINT)}</p>
+          #{audit_note_html}
           <div class="row"><label>Pages</label>
             <input type="text" id="pages" value="#{esc(pages)}" placeholder="All">
             <p class="hint">e.g. All &nbsp;&bull;&nbsp; 1 &nbsp;&bull;&nbsp; 2-5 &nbsp;&bull;&nbsp; 1,3,7</p>
@@ -331,15 +408,15 @@ module BlueCollarSystems
                 <option value="No"#{itext_no}>No</option>
               </select></div>
             <div><label>Text Rendering</label>
-              <select id="text_mode">#{text_opts}</select>
-              <p class="hint">#{esc(TEXT_MODE_HINT)}</p></div>
+              <select id="text_mode">#{text_opts}</select></div>
           </div>
+          #{text_mode_hint_html}
           <div class="row"><label>Match PDF Layers</label>
             <select id="match_pdf_layers">
               <option value="Yes"#{match_yes}>Yes — create SketchUp Tags from PDF layers</option>
               <option value="No"#{match_no}>No — single import layer</option>
             </select>
-            <p class="hint">When enabled, each PDF Optional Content Group (layer) becomes a matching Tag.</p>
+            <p class="hint">Yes: each PDF layer becomes a SketchUp Tag with the same name.</p>
           </div>
           <div class="actions">
             <button class="btn btn-secondary" onclick="cancel()">Cancel</button>
@@ -357,16 +434,17 @@ module BlueCollarSystems
           function advanced(){sketchup.on_advanced(payload());}
           function cancel(){sketchup.on_cancel({});}
           document.addEventListener('keydown',function(e){
-            if(e.key==='Enter')doImport();
+            if(e.key==='Enter' && e.target && e.target.tagName!=='BUTTON'){e.preventDefault();doImport();}
             if(e.key==='Escape')cancel();});
           </script></body></html>
         HTML
       end
 
       def self.advanced_html(filename, d)
-        mode_opts = MODES.keys.map { |m|
-          sel = d[:mode] == m ? ' selected' : ''
-          "<option value=\"#{esc(m)}\"#{sel}>#{esc(m)}</option>"
+        selected_mode = dialog_mode_name(d[:mode])
+        mode_opts = MODE_CHOICE_LABELS.map { |m, lbl|
+          sel = selected_mode == m ? ' selected' : ''
+          "<option value=\"#{esc(m)}\"#{sel}>#{esc(lbl)}</option>"
         }.join
 
           text_opts = [['Text','Text'],['Labels','Labels'],['3D Text','3D Text'],['Glyphs','Glyphs'],['Geometry','Geometry'],['Raster','Raster']].map{|v,lbl|
@@ -380,15 +458,18 @@ module BlueCollarSystems
           "<option value=\"Yes\"#{yes}>Yes</option><option value=\"No\"#{no}>No</option>"
         }
 
-        grouping_opts = GROUPING_CHOICES.split('|').map{|v|
-          sel = d[:grouping_mode] == v ? ' selected' : ''
-          "<option value=\"#{esc(v)}\"#{sel}>#{esc(v)}</option>"
-        }.join
-
         page_arrangement_opts = PAGE_ARRANGEMENT_CHOICES.split('|').map{|v|
           sel = d[:page_arrangement] == v ? ' selected' : ''
           "<option value=\"#{esc(v)}\"#{sel}>#{esc(v)}</option>"
         }.join
+
+        audit_forced = audit_env_on?
+        audit_on = audit_forced || audit_choice(d[:audit]) == 'Yes'
+        audit_opts = "<option value=\"No\"#{audit_on ? '' : ' selected'}>No (recommended)</option>" \
+                     "<option value=\"Yes\"#{audit_on ? ' selected' : ''}>Yes</option>"
+        audit_forced_html = audit_forced ? "<p class=\"hint hint-block audit-on\">#{esc(AUDIT_FORCED_NOTE)}</p>" : ''
+        # Forced on: the box shows Yes but cannot be changed here.
+        audit_select_attrs = audit_forced ? ' disabled' : ''
 
         <<-HTML
           <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -401,32 +482,35 @@ module BlueCollarSystems
             <div><label>Pages</label>
               <input type="text" id="pages" value="#{esc(d[:pages])}" placeholder="All"></div>
           </div>
+          <p class="hint hint-block">#{esc(AUTO_MODE_HINT)}</p>
           <div class="row2">
             <div><label>Scale Factor</label>
               <input type="text" id="scale" value="#{esc(d[:scale])}" placeholder="1.0"></div>
+            <div><label>#{esc(AUDIT_LABEL)}</label>
+              <select id="audit"#{audit_select_attrs}>#{audit_opts}</select></div>
           </div>
+          <p class="hint hint-block">#{esc(AUDIT_HINT)}</p>
+          #{audit_forced_html}
           <div class="section">Text</div>
           <div class="row2">
             <div><label>Import Text</label>
               <select id="import_text">#{yn.call(:import_text)}</select></div>
             <div><label>Text Rendering</label>
-              <select id="text_mode">#{text_opts}</select>
-              <p class="hint">#{esc(TEXT_MODE_HINT)}</p></div>
+              <select id="text_mode">#{text_opts}</select></div>
           </div>
+          #{text_mode_hint_html}
           <div class="section">Layers</div>
           <div class="row"><label>Match PDF Layers</label>
             <select id="match_pdf_layers">
               <option value="Yes"#{' selected' if d[:match_pdf_layers] == 'Yes'}>Yes</option>
               <option value="No"#{' selected' if d[:match_pdf_layers] == 'No'}>No</option>
             </select>
-            <p class="hint">Map PDF Optional Content Groups to SketchUp Tags (same name, sanitized).</p>
+            <p class="hint">Yes: each PDF layer becomes a SketchUp Tag with the same name.</p>
           </div>
           <div class="section">Layout</div>
-          <div class="row2">
-            <div><label>Grouping Mode</label>
-              <select id="grouping_mode">#{grouping_opts}</select></div>
-            <div><label>Page Arrangement</label>
-              <select id="page_arrangement">#{page_arrangement_opts}</select></div>
+          <div class="row"><label>Page Arrangement</label>
+            <select id="page_arrangement">#{page_arrangement_opts}</select>
+            <p class="hint">#{esc(GROUPING_HINT)}</p>
           </div>
           <!-- Closed-shape 3D Model controls intentionally disabled; source-glyph 3D Text remains available. -->
           <div class="actions">
@@ -441,12 +525,14 @@ module BlueCollarSystems
             import_text:document.getElementById('import_text').value,
             text_mode:document.getElementById('text_mode').value,
             match_pdf_layers:document.getElementById('match_pdf_layers').value,
-            grouping_mode:document.getElementById('grouping_mode').value,
             page_arrangement:document.getElementById('page_arrangement').value,
+            audit:document.getElementById('audit').value,
             extrude_to_3d:'No',
             extrude_depth_mm:''});}
           function cancel(){sketchup.on_cancel({});}
-          document.addEventListener('keydown',function(e){if(e.key==='Escape')cancel();});
+          document.addEventListener('keydown',function(e){
+            if(e.key==='Enter' && e.target && e.target.tagName!=='BUTTON'){e.preventDefault();doImport();}
+            if(e.key==='Escape')cancel();});
           </script></body></html>
         HTML
       end
@@ -484,7 +570,7 @@ module BlueCollarSystems
         prompts = [
           "Mode:","Pages:","Scale Factor:",
           "Import Text:","Text Rendering:","Match PDF Layers:",
-          "Grouping Mode:","Page Arrangement:"
+          "Page Arrangement:"
         ]
         defaults = [
           valid_mode_name(saved[:last_mode]),
@@ -492,20 +578,20 @@ module BlueCollarSystems
           saved[:import_text]||'Yes',
           text_mode_str||effective_text_mode(saved),
           effective_match_pdf_layers(saved),
-          saved[:grouping_mode]||'Group per page',
           saved[:page_arrangement]||'Spread (20% gap)'
         ]
-        dropdowns = [MODE_NAMES,'','',YES_NO,TEXT_MODES,YES_NO,GROUPING_CHOICES,PAGE_ARRANGEMENT_CHOICES]
+        # A saved 'Hybrid' is the same as Auto, which is what the list offers.
+        defaults[0] = dialog_mode_name(defaults[0])
+        dropdowns = [MODE_CHOICES,'','',YES_NO,TEXT_MODES,YES_NO,PAGE_ARRANGEMENT_CHOICES]
         result = UI.inputbox(prompts, defaults, dropdowns, "Advanced Import \u2014 #{filename}")
         return nil unless result
         p_mode,p_pages,p_scale,p_import_text,p_text_mode,
-        p_match_layers,p_grouping_mode,p_page_arrangement = result
+        p_match_layers,p_page_arrangement = result
         return nil unless valid_page_input?(p_pages)
         return nil unless valid_scale_input?(p_scale)
         save_prefs(last_mode:p_mode,pages:p_pages,scale:p_scale,
                    import_text:p_import_text,text_mode:p_text_mode,
                    match_pdf_layers:p_match_layers,
-                   grouping_mode:p_grouping_mode,
                    page_arrangement:p_page_arrangement)
         mode_raw = MODES[p_mode] || MODES['Auto']
         build_opts(import_mode:mode_raw['import_mode'],
@@ -515,7 +601,6 @@ module BlueCollarSystems
                    group_by_color:'Yes',
                    import_text:p_import_text,text_mode:p_text_mode,
                    match_pdf_layers:p_match_layers,
-                   grouping_mode:p_grouping_mode,
                    page_arrangement:p_page_arrangement)
       end
 
@@ -619,7 +704,7 @@ module BlueCollarSystems
           force_raster:     is_raster,
           raster_dpi:       300,
           page_arrangement: (raw[:page_arrangement] || 'Spread (20% gap)').to_s,
-          page_gap_ratio:   0.20,
+          page_gap_ratio:   ((raw[:page_arrangement] || '').to_s =~ /compact/i) ? 0.05 : 0.20,
           cleanup_geometry: true,
           recognition_mode: :auto,
           arc_mode:         'Auto',
@@ -629,8 +714,49 @@ module BlueCollarSystems
           import_mode:      mode_str,
           match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes',
           extrude_to_3d: SHAPE_EXTRUSION_UI_ENABLED && (raw[:extrude_to_3d] || 'No') == 'Yes',
-          extrude_depth_mm: SHAPE_EXTRUSION_UI_ENABLED ? parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth]) : nil
+          extrude_depth_mm: SHAPE_EXTRUSION_UI_ENABLED ? parse_extrude_depth_mm(raw[:extrude_depth_mm] || raw[:extrude_depth]) : nil,
+          # Audit import (slow self-checks), default off. It changes how much
+          # the importer re-proves, never what it builds.
+          audit:            audit_requested?(raw)
         }
+      end
+
+      AUDIT_LABEL = 'Audit import (slow self-checks)'.freeze
+      AUDIT_HINT = 'Audit: Yes double-checks every page as it is built. It is slower; ' \
+                   'turn it on only when asked for a detailed report.'.freeze
+      AUDIT_ENV = 'BC_PDF_AUDIT'.freeze
+      AUDIT_ON_NOTE = 'Audit is on, so imports are slower. To turn it off, click ' \
+                      'Advanced... and set Audit to No.'.freeze
+      AUDIT_FORCED_NOTE = 'Audit is on for every import on this computer because ' \
+                          'BC_PDF_AUDIT=1 is set; this box cannot turn it off.'.freeze
+      AUDIT_ON_BATCH_NOTE = 'Audit is on, so these imports are slower. To turn it off, use ' \
+                            'Import PDF..., click Advanced... and set Audit to No.'.freeze
+
+      # The Advanced window's Audit choice ('Yes' or 'No') from a saved
+      # setting or the window's own value. Anything not clearly on is 'No'.
+      def self.audit_choice(value)
+        value == true || value.to_s.strip =~ /\A(?:yes|true|1|on)\z/i ? 'Yes' : 'No'
+      end
+
+      # On when BC_PDF_AUDIT=1 (CI, host harness), when the caller passes
+      # audit: 'Yes'/true (dialog, --audit), or when the saved setting says
+      # Yes. Anything else is off.
+      def self.audit_requested?(raw)
+        return true if audit_env_on?
+        value = raw.is_a?(Hash) && raw.key?(:audit) ? raw[:audit] : saved_audit_setting
+        value == true || value.to_s.strip =~ /\A(?:yes|true|1|on)\z/i ? true : false
+      end
+
+      # BC_PDF_AUDIT=1 (CI, host harness) turns Audit on whatever is saved.
+      def self.audit_env_on?
+        ENV[AUDIT_ENV].to_s.strip =~ /\A(?:1|true|yes|on)\z/i ? true : false
+      end
+
+      def self.saved_audit_setting
+        return nil unless defined?(Sketchup) && Sketchup.respond_to?(:read_default)
+        Sketchup.read_default(PREF_KEY, 'audit', nil)
+      rescue StandardError
+        nil
       end
 
       def self.parse_import_scale(value)
@@ -676,6 +802,7 @@ module BlueCollarSystems
              import_text text_mode match_pdf_layers
              grouping_mode
              page_arrangement import_mode extrude_to_3d extrude_depth_mm
+             audit
           ].each do |key|
             val = Sketchup.read_default(PREF_KEY, key, nil)
             prefs[key.to_sym] = val if val
@@ -713,6 +840,13 @@ module BlueCollarSystems
 
       def self.valid_mode_name(name)
         MODES.key?(name.to_s) ? name.to_s : 'Auto'
+      end
+
+      # The mode a dialog shows selected. 'Hybrid' is the same as Auto, so a
+      # saved 'Hybrid' shows as Auto.
+      def self.dialog_mode_name(name)
+        mode = valid_mode_name(name)
+        mode == 'Hybrid' ? 'Auto' : mode
       end
 
     end

@@ -137,6 +137,165 @@ class ImportRunControlTest < Minitest::Test
 
     refute probe.call
     assert probe.call
+    assert_equal :injected, probe.adapter_kind
+  end
+
+  # A quick Esc tap between two checkpoints sets only the low
+  # "pressed since the last call" bit; it must still cancel while
+  # SketchUp is confirmed to be the program in front.
+  def test_escape_probe_counts_a_tap_between_checkpoints
+    probe = IRC::EscapeCancelProbe.new(lambda { |_key| 0x0001 }, nil, lambda { true })
+
+    assert probe.call
+  end
+
+  # Windows does not tie the low bit to one program, so a tap counts only
+  # when SketchUp is known to be in front; held Esc (high bit) is unchanged.
+  def test_escape_tap_needs_sketchup_confirmed_in_front
+    tap = lambda { |_key| 0x0001 }
+
+    refute IRC::EscapeCancelProbe.new(tap).call, 'no foreground check'
+    refute IRC::EscapeCancelProbe.new(tap, nil, lambda { nil }).call, 'front unknown'
+    refute IRC::EscapeCancelProbe.new(tap, nil, lambda { false }).call, 'another program in front'
+    assert IRC::EscapeCancelProbe.new(lambda { |_key| 0x8000 }).call, 'held Esc'
+  end
+
+  # Fiddle returns GetAsyncKeyState as a signed short.
+  def test_escape_probe_accepts_a_signed_short_key_state
+    probe = IRC::EscapeCancelProbe.new(lambda { |_key| -32_768 })
+
+    assert probe.call
+  end
+
+  # SketchUp 2024+ ships Ruby 3.2 without Win32API. The default probe must
+  # still build a real key reader on Windows, never the always-zero stub.
+  def test_default_escape_probe_reads_the_real_key_on_windows
+    skip 'Windows only' unless Gem.win_platform?
+    probe = IRC::EscapeCancelProbe.new
+
+    assert_includes [:fiddle, :win32api], probe.adapter_kind
+    assert_includes [true, false], probe.call
+  end
+
+  # Esc pressed in another program must not stop the import.
+  def test_escape_counts_only_while_sketchup_is_in_front
+    pressed = lambda { |_key| 0x8001 }
+
+    refute IRC::EscapeCancelProbe.new(pressed, nil, lambda { false }).call
+    assert IRC::EscapeCancelProbe.new(pressed, nil, lambda { true }).call
+    # Windows could not say which program is in front: the press counts.
+    assert IRC::EscapeCancelProbe.new(pressed, nil, lambda { nil }).call
+    assert IRC::EscapeCancelProbe.new(pressed, nil, lambda { raise 'lookup failed' }).call
+    # No press: the foreground is never asked.
+    asked = false
+    idle = IRC::EscapeCancelProbe.new(lambda { |_key| 0 }, nil, lambda { asked = true })
+    refute idle.call
+    refute asked
+  end
+
+  def test_foreground_check_knows_sketchup_its_ghost_and_other_programs
+    ours = 4242
+    owners = { 10 => ours, 20 => 777, 30 => 888 }
+    owner = lambda { |window| owners.fetch(window, 0) }
+    ghosts = { 30 => 10 } # window 30 is the "Not Responding" ghost of 10
+    ghost = lambda { |window| ghosts.fetch(window, 0) }
+    check = lambda do |front, with_ghost = true|
+      IRC::EscapeCancelProbe::ForegroundCheck.new(
+        lambda { front }, owner, with_ghost ? ghost : nil, ours
+      ).call
+    end
+
+    assert_equal true, check.call(10)
+    assert_equal false, check.call(20)
+    assert_equal true, check.call(30), 'the ghost of a busy SketchUp is SketchUp'
+    assert_nil check.call(0), 'no foreground window: unknown'
+    assert_nil check.call(99), 'owner lookup failed: unknown'
+    assert_nil check.call(20, false), 'no ghost lookup: another program is unknown'
+    assert_nil IRC::EscapeCancelProbe::ForegroundCheck.new(
+      lambda { raise 'boom' }, owner, ghost, ours
+    ).call
+  end
+
+  def test_default_escape_probe_checks_the_window_in_front_on_windows
+    skip 'Windows only' unless Gem.win_platform?
+    probe = IRC::EscapeCancelProbe.new
+
+    assert probe.foreground_check?
+    check = probe.instance_variable_get(:@foreground)
+    assert_includes [true, false, nil], check.call
+  end
+
+  # The unattended host harness passes its own never-cancel probe.
+  def test_batch_host_never_listens_for_escape
+    source = File.read(File.expand_path('../tools/sketchup_batch_import.rb', __dir__))
+
+    assert_match(/opts\[:cancel_probe\]\s*=\s*lambda\s*\{\s*false\s*\}/, source)
+  end
+
+  class RecordingLogger
+    attr_reader :warnings
+
+    def initialize
+      @warnings = []
+    end
+
+    def warn(context, message)
+      @warnings << [context, message]
+    end
+  end
+
+  class NoKeyLibraryProbe < IRC::EscapeCancelProbe
+    private
+
+    def require(name)
+      raise LoadError, "cannot load such file -- #{name}"
+    end
+  end
+
+  class FakeWin32API
+    def initialize(*_args); end
+
+    def call(_key)
+      0x8000
+    end
+  end
+
+  class FiddleMissingProbe < IRC::EscapeCancelProbe
+    private
+
+    # A Windows host without Fiddle, also when the test runs on Linux CI:
+    # the reader only looks for Win32API and Fiddle on Windows.
+    def windows_platform?
+      true
+    end
+
+    def require(name)
+      raise LoadError, "cannot load such file -- #{name}" if name == 'fiddle'
+      true
+    end
+  end
+
+  # SketchUp 2017-2023 also ship Win32API; it stays as the fallback.
+  def test_win32api_is_the_fallback_when_fiddle_is_missing
+    defined_here = !defined?(::Win32API)
+    Object.const_set(:Win32API, FakeWin32API) if defined_here
+    skip 'a real Win32API is loaded' unless ::Win32API == FakeWin32API
+    probe = FiddleMissingProbe.new(nil, RecordingLogger.new)
+
+    assert_equal :win32api, probe.adapter_kind
+    assert probe.call
+  ensure
+    Object.send(:remove_const, :Win32API) if defined_here && defined?(::Win32API)
+  end
+
+  def test_missing_key_libraries_log_once_and_never_cancel
+    logger = RecordingLogger.new
+    probe = NoKeyLibraryProbe.new(nil, logger)
+
+    assert_equal :none, probe.adapter_kind
+    3.times { assert_equal false, probe.call }
+    assert_equal 1, logger.warnings.length
+    assert_match(/Escape-key cancellation is unavailable/, logger.warnings.first[1])
   end
 
   def test_controller_accepts_a_callable_object_without_proc_arity

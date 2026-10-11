@@ -105,6 +105,7 @@ module BlueCollarSystems
           o.on('--extract-images', 'Extract embedded Image XObjects') { opts[:extract_images] = true }
           o.on('--no-extract-images', 'Do not extract embedded images') { opts[:extract_images] = false }
           o.on('--no-primitives-json', 'Skip primitives.json output') { opts[:write_primitives] = false }
+          o.on('--audit', 'Audit import (slow self-checks); same as BC_PDF_AUDIT=1') { opts[:audit] = true }
           # Unrelated closed-shape extrusion is disabled; do not expose its CLI flags.
           o.on('--preflight', 'Run preflight checks and emit ready_check JSON') { opts[:preflight] = true }
           o.on('--version', 'Print plugin version and exit') { opts[:version] = true }
@@ -138,6 +139,7 @@ module BlueCollarSystems
           extrude_to_3d: cli_opts[:extrude_to_3d],
           extrude_depth_mm: cli_opts[:extrude_depth_mm]
         }
+        raw_opts[:audit] = 'Yes' if cli_opts[:audit]
         import_opts = ImportDialog.send(:build_opts, raw_opts)
         import_opts[:extract_embedded_images] = cli_opts[:extract_images]
         import_opts[:embedded_image_dir] = File.join(output_dir, 'embedded_images')
@@ -255,6 +257,7 @@ module BlueCollarSystems
           page_text_map: {},
           model_3d_texts: [],
           text_mode: opts[:text_mode],
+          audit_mode: opts[:audit] == true,
           elapsed_seconds: 0.0
         }
         payload = {
