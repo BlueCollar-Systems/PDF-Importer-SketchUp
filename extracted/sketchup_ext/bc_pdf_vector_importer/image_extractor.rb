@@ -18,8 +18,9 @@
 #   JPXDecode  → write raw stream bytes with .jp2 extension (SU may handle)
 #   Unfiltered → write raw pixel bytes (limited usefulness without wrapping)
 #
-# Unsupported: JBIG2Decode, CCITTFaxDecode, LZWDecode — those images are
+# Unsupported: JBIG2Decode and CCITTFaxDecode — those images are
 # skipped with a Logger.warn and counted in :skipped.
+# LZWDecode image XObjects are inflated by PDFParser and written as PNG.
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 
@@ -332,8 +333,8 @@ module BlueCollarSystems
           File.binwrite(path, raw)
           return [path, 'JP2']
 
-        when '/FlateDecode', 'FlateDecode', nil, ''
-          # Deflate-compressed or unfiltered raw pixels → write as PNG.
+        when '/FlateDecode', 'FlateDecode', '/LZWDecode', 'LZWDecode', nil, ''
+          # Deflate, LZW, or unfiltered raw pixels → write as PNG.
           decoded = img_info[:decoded_bytes]
           return nil unless decoded && decoded.length > 0
           path = temp_path(name, page_num, 'png')
@@ -343,7 +344,7 @@ module BlueCollarSystems
           return [path, 'PNG'] if ok
 
         else
-          # JBIG2, CCITTFax, LZW, etc. — not supported.
+          # JBIG2, CCITTFax, and other undecoded filters — not supported.
           Logger.warn("ImageExtractor",
             "Page #{page_num}: #{name} uses unsupported filter #{filter} — skipped.")
           return nil

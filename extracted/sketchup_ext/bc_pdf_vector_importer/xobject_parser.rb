@@ -326,7 +326,8 @@ module BlueCollarSystems
           )
           [:source_stroke_opacity, :source_clip_clear,
            :source_miter_limit, :source_stroke_style_proven,
-           :source_stroke_ctm_proven, :source_stroke_solid_color_proven].each do |field|
+           :source_stroke_ctm_proven, :source_stroke_solid_color_proven,
+           :source_paint_order, :source_fill_opacity, :fill_rule].each do |field|
             transformed.send("#{field}=", path.send(field)) if path.respond_to?(field)
           end
           transformed.source_stroke_clip = StrokeClipping.transform(path.source_stroke_clip, matrix)

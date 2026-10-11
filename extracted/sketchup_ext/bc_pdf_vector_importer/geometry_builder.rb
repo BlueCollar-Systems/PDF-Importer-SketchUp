@@ -246,6 +246,23 @@ module BlueCollarSystems
             )
             should_fill = false
             next unless should_stroke
+          elsif should_fill && compound_fill_needs_punch?(path)
+            loops = filled_subpath_loops(path, page_origin_x, page_origin_y)
+            if loops.length >= 2
+              begin
+                draw_compound_clip_fill(
+                  staged_geometry_target(fill_dest, path_idx), loops,
+                  source_fill_rule(path), path_layer, path.fill_color,
+                  'PDF Compound Fill'
+                )
+                should_fill = false
+              rescue StandardError => e
+                Logger.warn(
+                  "GeometryBuilder",
+                  "compound #{source_fill_rule(path)} fill kept separate contours: #{e.message}"
+                )
+              end
+            end
           end
 
           # Keep the source style local to this path, including retained batches.
@@ -426,6 +443,95 @@ module BlueCollarSystems
                 @stroke_footprints[:unresolved_path_count] == 0 &&
                 @stroke_footprints[:represented_path_count] == @stroke_footprints[:stroke_path_count]))
         }
+      end
+
+      # A fill with two or more contours is one paint, not a stack of solids.
+      # Even-odd holes and opposite-winding holes are punched in that paint.
+      def compound_source_fill?(path)
+        return false unless path && path.fill
+        return false if path.respond_to?(:clip_fill_rule) && path.clip_fill_rule
+        filled = 0
+        Array(path.subpaths).each do |subpath|
+          filled += 1 if subpath_filled?(subpath)
+          return true if filled >= 2
+        end
+        false
+      end
+
+      def source_fill_rule(path)
+        rule = path.respond_to?(:fill_rule) ? path.fill_rule : nil
+        rule.to_s == 'evenodd' ? :evenodd : :nonzero
+      end
+
+      # Even-odd paints can punch an overlap anywhere. Nonzero paints punch
+      # only a contour that sits inside another contour and winds the other
+      # way. Side-by-side contours stay on the ordinary face path.
+      def compound_fill_needs_punch?(path)
+        return false unless compound_source_fill?(path)
+        return true if source_fill_rule(path) == :evenodd
+        loops = []
+        areas = []
+        Array(path.subpaths).each do |subpath|
+          next unless subpath_filled?(subpath)
+          pts = subpath_to_points(subpath).map { |pt| self.class.sheet_xy(pt) }
+          next if pts.length < 3
+          area = polygon_area(pts)
+          next if area.abs <= 1.0e-6
+          loops << pts
+          areas << area
+        end
+        return false if loops.length < 2
+        loops.each_with_index.any? do |pts, index|
+          cx, cy = polygon_centroid(pts)
+          loops.each_with_index.any? do |other, other_index|
+            next false if other_index == index
+            next false unless areas[index] * areas[other_index] < 0.0
+            pdf_point_inside?(cx, cy, other)
+          end
+        end
+      end
+
+      def polygon_area(pts)
+        area = 0.0
+        pts.each_with_index do |pt, index|
+          nxt = pts[(index + 1) % pts.length]
+          area += pt[0].to_f * nxt[1].to_f - nxt[0].to_f * pt[1].to_f
+        end
+        area * 0.5
+      end
+
+      def polygon_centroid(pts)
+        cx = 0.0
+        cy = 0.0
+        pts.each do |pt|
+          cx += pt[0].to_f
+          cy += pt[1].to_f
+        end
+        [cx / pts.length, cy / pts.length]
+      end
+
+      def pdf_point_inside?(x, y, loop)
+        winding = 0
+        loop.each_with_index do |a, index|
+          b = loop[(index + 1) % loop.length]
+          cross = (b[0] - a[0]) * (y - a[1]) - (x - a[0]) * (b[1] - a[1])
+          winding += 1 if a[1] <= y && b[1] > y && cross > 0
+          winding -= 1 if a[1] > y && b[1] <= y && cross < 0
+        end
+        winding != 0
+      end
+
+      def filled_subpath_loops(path, page_origin_x, page_origin_y)
+        loops = []
+        Array(path.subpaths).each do |subpath|
+          next unless subpath_filled?(subpath)
+          points = subpath_to_points(subpath).map do |pt|
+            sx, sy = self.class.sheet_xy(pt)
+            pdf_to_su(sx, sy, page_origin_x, page_origin_y)
+          end
+          loops << points if points.length >= 3
+        end
+        loops
       end
 
       # Empty color containers are temporary construction details. SketchUp
@@ -1059,7 +1165,7 @@ module BlueCollarSystems
         end
       end
 
-      def draw_compound_clip_fill(entities, source_loops, rule, layer, fill_rgb)
+      def draw_compound_clip_fill(entities, source_loops, rule, layer, fill_rgb, group_name = nil)
         loops = source_loops.map { |points| compound_fill_loop(points) }
         loops = loops.select { |points| points.length >= 3 }
         raise 'clipped fill has no usable source contours' if loops.empty?
@@ -1072,7 +1178,7 @@ module BlueCollarSystems
           end
         end
         group = entities.add_group
-        group.name = 'PDF Clipped Fill'
+        group.name = group_name.to_s.empty? ? 'PDF Clipped Fill' : group_name.to_s
         set_layer(group, layer)
         group.transformation = Geom::Transformation.translation(origin) *
           Geom::Transformation.scaling(1.0 / factor, 1.0 / factor, 1.0 / factor)
@@ -3695,6 +3801,8 @@ module BlueCollarSystems
 
         # SketchUp 2017 can visually collapse very short dash segments to solid.
         # Enforce a minimum visible segment length while preserving ratios.
+        # The phase uses the same scale, or the gaps start in the wrong place.
+        vis_scale = 1.0
         min_visible = 0.03 # inches
         min_seg = pattern.min
         if min_seg && min_seg < min_visible
@@ -3710,7 +3818,7 @@ module BlueCollarSystems
 
         {
           pattern: pattern,
-          phase: (phase.to_f * to_in) % cycle
+          phase: (phase.to_f * to_in * vis_scale) % cycle
         }
       end
 

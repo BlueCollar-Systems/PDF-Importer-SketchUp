@@ -63,8 +63,25 @@ class SyntheticPublicCorpusTest < Minitest::Test
   def generate(directory)
     script = File.join(ROOT, 'tools', 'generate_synthetic_public_corpus.py')
     _stdout, stderr, status = Open3.capture3(
-      'python', script, '--out', directory
+      python_executable, script, '--out', directory
     )
     assert status.success?, stderr
+  end
+
+  # CI images often expose `python`. This environment only has `python3`.
+  def python_executable
+    return @python_executable if @python_executable
+    ['python3', 'python'].each do |candidate|
+      begin
+        _out, _err, status = Open3.capture3(candidate, '--version')
+        if status.success?
+          @python_executable = candidate
+          return candidate
+        end
+      rescue Errno::ENOENT
+        next
+      end
+    end
+    @python_executable = 'python'
   end
 end
