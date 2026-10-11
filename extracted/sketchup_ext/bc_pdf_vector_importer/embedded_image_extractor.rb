@@ -1246,6 +1246,8 @@ module BlueCollarSystems
           inflate_data(data)
         when '/RunLengthDecode'
           @pdf.run_length_decode(data)
+        when '/LZWDecode'
+          @pdf.lzw_decode(data, 1)
         else
           data
         end

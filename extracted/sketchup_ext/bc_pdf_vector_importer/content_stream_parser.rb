@@ -43,7 +43,8 @@ module BlueCollarSystems
         attr_accessor :source_paint_order, :source_fill_opacity,
                       :source_stroke_opacity, :source_clip_clear,
                       :source_miter_limit, :source_stroke_style_proven, :source_stroke_clip,
-                      :source_stroke_ctm_proven, :source_stroke_solid_color_proven
+                      :source_stroke_ctm_proven, :source_stroke_solid_color_proven,
+                      :fill_rule
       end
 
       SubPath = Struct.new(
@@ -506,8 +507,20 @@ module BlueCollarSystems
         @streams.each_with_index do |stream, stream_index|
           next unless stream && !stream.empty?
           @source_stream_index = stream_index
-          tokens = tokenize_content_stream(stream)
-          execute_operators(tokens)
+          # Execute as tokens are recognized. A page stream can be many
+          # megabytes; holding every token, or stopping at the safety cap,
+          # drops the rest of a floor plan. The cap still applies when a
+          # caller asks for the token array itself.
+          operand_stack = []
+          tokenize_content_stream(stream) do |token|
+            if token[:type] == :operator
+              @source_paint_order = [@source_stream_index, token[:source_offset]]
+              handle_operator(token[:value], operand_stack)
+              operand_stack.clear
+            else
+              operand_stack << token
+            end
+          end
         end
 
         @paths
@@ -698,11 +711,21 @@ module BlueCollarSystems
 
       def tokenize_content_stream(stream)
         tokens = []
+        streaming = block_given?
+        count = 0
+        push = lambda do |token|
+          count += 1
+          if streaming
+            yield token
+          else
+            tokens << token
+          end
+        end
         i = 0
         len = stream.length
 
         while i < len
-          if tokens.length > MAX_TOKENS_PER_STREAM
+          if !streaming && count > MAX_TOKENS_PER_STREAM
             @nonpath_paint_orders << nil if @nonpath_paint_orders
             @other_paint_orders << nil if @other_paint_orders
             Logger.warn("ContentParser", "Token limit reached (#{MAX_TOKENS_PER_STREAM}) — truncating stream parse")
@@ -741,7 +764,7 @@ module BlueCollarSystems
               depth -= 1 if stream[j] == ')'
               j += 1
             end
-            tokens << { type: :string, value: stream[i...j] }
+            push.call({ type: :string, value: stream[i...j] })
             i = j
             next
           end
@@ -749,7 +772,7 @@ module BlueCollarSystems
           # Hex string
           if c == '<' && (i + 1 >= len || stream[i + 1] != '<')
             j = stream.index('>', i) || len
-            tokens << { type: :hex_string, value: stream[i..j] }
+            push.call({ type: :hex_string, value: stream[i..j] })
             i = j + 1
             next
           end
@@ -769,7 +792,7 @@ module BlueCollarSystems
                 j += 1
               end
             end
-            tokens << { type: :dict, value: stream[i...j] }
+            push.call({ type: :dict, value: stream[i...j] })
             i = j
             next
           end
@@ -788,7 +811,7 @@ module BlueCollarSystems
               depth -= 1 if stream[j] == ']'
               j += 1
             end
-            tokens << { type: :array, value: stream[i...j] }
+            push.call({ type: :array, value: stream[i...j] })
             i = j
             next
           end
@@ -804,7 +827,7 @@ module BlueCollarSystems
             while j < len && !DELIMITER_CHARS.include?(stream[j])
               j += 1
             end
-            tokens << { type: :name, value: stream[i...j] }
+            push.call({ type: :name, value: stream[i...j] })
             i = j
             next
           end
@@ -864,7 +887,7 @@ module BlueCollarSystems
           end
 
           if numeric_literal?(word)
-            tokens << { type: :number, value: word.to_f }
+            push.call({ type: :number, value: word.to_f })
           else
             if @nonpath_paint_orders && (word == 'Do' || word == 'sh')
               @nonpath_paint_orders << [@source_stream_index, i]
@@ -872,7 +895,7 @@ module BlueCollarSystems
             if @other_paint_orders && OTHER_PAINT_OPERATORS[word]
               @other_paint_orders << [@source_stream_index, i]
             end
-            tokens << { type: :operator, value: word, source_offset: i }
+            push.call({ type: :operator, value: word, source_offset: i })
           end
           i = j
         end
@@ -1096,43 +1119,43 @@ module BlueCollarSystems
         # --- Path painting ---
         when 'S'   # Stroke
           finish_subpath
-          emit_path(true, false)
+          emit_path(true, false, nil)
 
         when 's'   # Close and stroke
           close_current_subpath
           finish_subpath(true)
-          emit_path(true, false)
+          emit_path(true, false, nil)
 
         when 'f', 'F' # Fill (nonzero winding / old-style)
           # PDF closes an open subpath before filling. There is no stroke,
           # so the closing segment belongs on the face contour.
           close_current_subpath
           finish_subpath(true)
-          emit_path(false, true)
+          emit_path(false, true, :nonzero)
 
         when 'f*'  # Fill (even-odd)
           close_current_subpath
           finish_subpath(true)
-          emit_path(false, true)
+          emit_path(false, true, :evenodd)
 
         when 'B'   # Fill and stroke
           # The fill is closed. The closing segment is not stroked.
           finish_subpath(false, true)
-          emit_path(true, true)
+          emit_path(true, true, :nonzero)
 
         when 'B*'  # Fill (even-odd) and stroke
           finish_subpath(false, true)
-          emit_path(true, true)
+          emit_path(true, true, :evenodd)
 
         when 'b'   # Close, fill and stroke
           close_current_subpath
           finish_subpath(true)
-          emit_path(true, true)
+          emit_path(true, true, :nonzero)
 
         when 'b*'  # Close, fill (even-odd) and stroke
           close_current_subpath
           finish_subpath(true)
-          emit_path(true, true)
+          emit_path(true, true, :evenodd)
 
         when 'W', 'W*'
           @pending_clip_rule = op == 'W*' ? :evenodd : :nonzero
@@ -1225,7 +1248,7 @@ module BlueCollarSystems
         end
       end
 
-      def emit_path(stroke, fill)
+      def emit_path(stroke, fill, fill_rule = nil)
         return if @current_subpaths.empty?
 
         # Transform all points by current CTM
@@ -1265,6 +1288,7 @@ module BlueCollarSystems
         path.source_stroke_ctm_proven = @current_path_ctm_proven == true
         path.source_stroke_solid_color_proven = @stroke_solid_color_proven == true
         path.source_stroke_clip = StrokeClipping.snapshot(@clip_regions, @text_clip_active || @text_clip_pending) if stroke
+        path.fill_rule = fill ? fill_rule : nil
         apply_pending_clip!
         clear_path
       end

@@ -124,9 +124,9 @@ class EmbeddedImagePlacementTest < Minitest::Test
       path = File.join(dir, 'asymmetric.png')
       chunk = lambda { |kind, bytes| [bytes.bytesize].pack('N') + kind + bytes + [Zlib.crc32(kind + bytes)].pack('N') }
       pixels = [255,0,0,255,0,255,0,255].pack('C*')
-      original = "\x89PNG\r\n\x1a\n".b +
+      original = "\x89PNG\r\n\x1a\n".force_encoding(Encoding::BINARY) +
         chunk.call('IHDR', [2,1,8,6,0,0,0].pack('N2C5')) +
-        chunk.call('IDAT', Zlib::Deflate.deflate("\x00".b + pixels)) + chunk.call('IEND', ''.b)
+        chunk.call('IDAT', Zlib::Deflate.deflate("\x00".force_encoding(Encoding::BINARY) + pixels)) + chunk.call('IEND', ''.force_encoding(Encoding::BINARY))
       File.binwrite(path, original)
       asset = EmbeddedImagePlacementFixture::Asset.new(path, false, nil, 'Im1',
         [[300,200],[444,200],[444,128],[300,128]], 2, 1)
@@ -187,7 +187,7 @@ class EmbeddedImagePlacementTest < Minitest::Test
   def test_jpeg_passes_original_encoded_bytes_to_host_without_claiming_a_pixel_decoder
     Dir.mktmpdir('su_encoded_image_') do |dir|
       path = File.join(dir, 'source.jpg')
-      bytes = "\xff\xd8encoded source preserved\xff\xd9".b
+      bytes = "\xff\xd8encoded source preserved\xff\xd9".force_encoding(Encoding::BINARY)
       File.binwrite(path, bytes)
       asset = EmbeddedImagePlacementFixture::Asset.new(path, false, nil, 'Im1',
         [[0,0],[72,0],[72,72],[0,72]], 2, 1)

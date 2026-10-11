@@ -1,6 +1,6 @@
 # bc_pdf_vector_importer/pdf_parser.rb
 # Pure-Ruby PDF parser for extracting page geometry data.
-# Handles cross-reference tables, object streams, FlateDecode,
+# Handles cross-reference tables, object streams, FlateDecode, LZWDecode,
 # page trees, MediaBox, and content streams.
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
@@ -556,6 +556,9 @@ module BlueCollarSystems
         maps = {}
         font_dict.each do |font_name, font_ref|
           cmap = extract_font_to_unicode_map(font_ref)
+          if cmap.nil? || !cmap[:map].is_a?(Hash) || cmap[:map].empty?
+            cmap = simple_font_difference_map(font_ref)
+          end
           next unless cmap && cmap[:map].is_a?(Hash) && !cmap[:map].empty?
 
           key = font_name.to_s
@@ -867,15 +870,18 @@ module BlueCollarSystems
             when '/DCTDecode'
               # JPEG image streams — no further decode; keep current bytes.
             when '/LZWDecode'
-              Logger.warn("PdfParser",
-                "LZWDecode compression is not supported — skipping stream. " \
-                "Re-save the PDF with a modern tool (e.g., Adobe Acrobat, " \
-                "qpdf, Ghostscript) to convert to FlateDecode.")
-              decoded = nil
+              early_change = 1
+              if dict_part =~ /\/EarlyChange\s+(\d+)/
+                early_change = $1.to_i == 0 ? 0 : 1
+              end
+              decoded = lzw_decode(decoded, early_change)
+              unless decoded
+                Logger.warn("PdfParser", "LZWDecode failed — skipping stream.")
+              end
             else
               Logger.warn("PdfParser",
                 "Unsupported stream filter '#{filter}' — skipping stream. " \
-                "Supported filters: FlateDecode, ASCII85Decode, " \
+                "Supported filters: FlateDecode, LZWDecode, ASCII85Decode, " \
                 "ASCIIHexDecode, RunLengthDecode.")
               decoded = nil
             end
@@ -1025,6 +1031,96 @@ module BlueCollarSystems
       rescue StandardError => e
         Logger.warn("PdfParser", "ASCIIHex decode failed: #{e.message}")
         nil
+      end
+
+      # PDF LZWDecode. Codes are packed most-significant bit first.
+      # /EarlyChange defaults to 1: the width grows when the table reaches
+      # 511, 1023, or 2047 entries. /EarlyChange 0 waits until 512, 1024,
+      # or 2048. The first code after a clear does not add a table entry.
+      def lzw_decode(data, early_change = 1)
+        src = data.to_s.dup
+        src.force_encoding('BINARY')
+        return ''.dup.force_encoding('BINARY') if src.empty?
+
+        early = early_change.to_i == 0 ? 0 : 1
+        limits = early == 0 ? [512, 1024, 2048] : [511, 1023, 2047]
+        reader = LzwBitReader.new(src)
+        table = nil
+        code_size = 9
+        prev = nil
+        out = ''.dup.force_encoding('BINARY')
+
+        reset_table = lambda do
+          table = (0..255).map { |i| [i].pack('C') }
+          table << nil
+          table << nil
+          code_size = 9
+          prev = nil
+        end
+        reset_table.call
+
+        loop do
+          code = reader.read(code_size)
+          break if code.nil? || code == 257
+          if code == 256
+            reset_table.call
+            next
+          end
+
+          if prev.nil? || prev.empty?
+            entry = table[code]
+            return nil unless entry
+            prev = entry
+          else
+            if code < table.length
+              entry = table[code]
+              return nil unless entry
+              added = prev.dup
+              added << entry.byteslice(0, 1)
+              table << added if table.length < 4096
+            elsif code == table.length && table.length < 4096
+              entry = prev.dup
+              entry << prev.byteslice(0, 1)
+              table << entry
+            else
+              return nil
+            end
+            length = table.length
+            if code_size < 12 && length == limits[code_size - 9]
+              code_size += 1
+            end
+            prev = entry
+          end
+          out << entry
+        end
+        out
+      rescue StandardError => e
+        Logger.warn("PdfParser", "LZWDecode failed: #{e.message}")
+        nil
+      end
+
+      # MSB-first bit reader for LZW codes. Ruby 2.2 safe.
+      class LzwBitReader
+        def initialize(data)
+          @data = data
+          @pos = 0
+          @buf = 0
+          @nbits = 0
+        end
+
+        def read(count)
+          while @nbits < count
+            return nil if @pos >= @data.bytesize
+            @buf = (@buf << 8) | @data.getbyte(@pos)
+            @pos += 1
+            @nbits += 8
+          end
+          @nbits -= count
+          code = (@buf >> @nbits) & ((1 << count) - 1)
+          @buf &= (1 << @nbits) - 1 if @nbits > 0
+          @buf = 0 if @nbits == 0
+          code
+        end
       end
 
       def run_length_decode(data)
@@ -1460,6 +1556,61 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Font / ToUnicode extraction
       # ---------------------------------------------------------------
+      # A simple font can remap character codes with /Encoding /Differences
+      # and give no /ToUnicode. The names in that array are the PDF's own
+      # statement of which glyph each code draws. Codes the array does not
+      # mention stay on the ordinary byte fallback.
+      def simple_font_difference_map(font_ref)
+        font_dict = to_dict(resolve_object(font_ref))
+        return nil unless font_dict.is_a?(Hash)
+        subtype = font_dict['/Subtype'].to_s
+        return nil unless ['/Type1', '/MMType1', '/TrueType', '/Type3'].include?(subtype)
+
+        encoding = resolve_object(font_dict['/Encoding'])
+        encoding = to_dict(encoding)
+        return nil unless encoding.is_a?(Hash)
+        diffs = encoding['/Differences']
+        return nil unless diffs.is_a?(Array) && !diffs.empty?
+
+        map = {}
+        code = 0
+        diffs.each do |entry|
+          text = entry.to_s.strip
+          if text =~ /\A\d+\z/
+            code = text.to_i
+            next
+          end
+          name = text.sub(/\A\//, '')
+          utf8 = glyph_name_to_utf8(name)
+          if utf8 && code >= 0 && code <= 255
+            map[[code].pack('C')] = utf8
+          end
+          code += 1
+        end
+        return nil if map.empty?
+        { :map => map, :code_lengths => [1] }
+      rescue StandardError => e
+        Logger.warn("PdfParser", "encoding differences failed: #{e.message}")
+        nil
+      end
+
+      def glyph_name_to_utf8(name)
+        return nil if name.nil? || name.empty? || name == '.notdef'
+        if name =~ /\Auni([0-9A-Fa-f]{4,6})\z/ || name =~ /\Au([0-9A-Fa-f]{4,6})\z/
+          codepoint = $1.to_i(16)
+          return nil if codepoint <= 0 || codepoint > 0x10FFFF
+          return [codepoint].pack('U')
+        end
+        unless defined?(GlyphCodeRecovery::GLYPH_NAMES)
+          require File.join(File.dirname(__FILE__), 'glyph_code_recovery')
+        end
+        codepoint = GlyphCodeRecovery::GLYPH_NAMES[name]
+        return nil unless codepoint
+        [codepoint].pack('U')
+      rescue StandardError
+        nil
+      end
+
       def extract_font_to_unicode_map(font_ref)
         font_obj = resolve_object(font_ref)
         font_dict = to_dict(font_obj)

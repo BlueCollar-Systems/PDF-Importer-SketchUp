@@ -685,7 +685,30 @@ module BlueCollarSystems
 
         # ── Pass 2: Drop lone single-char digits truly overlapping multi-char items ──
         # Very conservative: tight bbox overlap only, and never drop digits
-        # that could be whole-number parts of dimensions
+        # that could be whole-number parts of dimensions.
+        # Fraction locations are collected once. Searching them inside every
+        # pair made a full beam table take about a minute.
+        fraction_points = []
+        items.each_with_index do |item, idx|
+          next if drop[idx]
+          next unless item.text =~ /\d+\/\d+/
+          fraction_points << [item.x.to_f, item.y.to_f]
+        end
+        digit_near_fraction = {}
+        items.each_with_index do |item, idx|
+          next if drop[idx]
+          txt = item.text.to_s.gsub(/\s/, '')
+          next unless txt.length == 1 && txt =~ /\d/
+          reach = item.font_size.to_f * 5
+          reach2 = reach * reach
+          sx = item.x.to_f
+          sy = item.y.to_f
+          digit_near_fraction[idx] = fraction_points.any? do |fx, fy|
+            dx = fx - sx
+            dy = fy - sy
+            (dx * dx) + (dy * dy) < reach2
+          end
+        end
         items.each_with_index do |multi, mi|
           next if drop[mi]
           mt = multi.text.to_s.gsub(/\s/, '')
@@ -701,19 +724,7 @@ module BlueCollarSystems
 
             # Never drop a digit if there's any fraction item nearby —
             # it's likely "3" in "3 15/16" or "2" in "R 2 1/2"
-            has_nearby_frac = false
-            items.each_with_index do |other, oi|
-              next if oi == si || drop[oi]
-              if other.text =~ /\d+\/\d+/
-                odist = Math.sqrt((other.x.to_f - single.x.to_f)**2 +
-                                  (other.y.to_f - single.y.to_f)**2)
-                if odist < single.font_size.to_f * 5
-                  has_nearby_frac = true
-                  break
-                end
-              end
-            end
-            next if has_nearby_frac
+            next if digit_near_fraction[si]
 
             scx = (bboxes[si][0] + bboxes[si][2]) / 2.0
             scy = (bboxes[si][1] + bboxes[si][3]) / 2.0

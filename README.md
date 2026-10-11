@@ -472,7 +472,7 @@ bc_pdf_vector_importer/
 | Limitation | Details |
 |-----------|---------|
 | **Encrypted PDFs** | Password-protected PDFs cannot be imported. Remove encryption first using Adobe Acrobat, Preview (macOS), or qpdf. |
-| **Compression filters** | FlateDecode is supported. LZWDecode, ASCII85Decode, ASCIIHexDecode, and RunLengthDecode streams are not fully supported and may be skipped. |
+| **Compression filters** | FlateDecode, LZWDecode, ASCII85Decode, ASCIIHexDecode, and RunLengthDecode streams are decoded. JBIG2 and CCITT fax images are still skipped. Inline images that use LZW are reported as omitted. |
 | **Font-dependent text** | Text rendered with embedded subset fonts, non-embedded fonts, or platform-missing display fonts may require Poppler and Ghostscript for maximum fidelity. Without a source that can certify the requested representation, the importer reports the unavailable capability and stops that representation instead of silently substituting another one. |
 | **Clipped/XObject-heavy PDFs** | Deeply nested form XObjects and aggressive clipping can lead to partial geometry recovery. |
 | **Raster-only scans** | Pure image/scanned PDFs with no vector operators will not produce SketchUp edges. |
