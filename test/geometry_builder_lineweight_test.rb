@@ -122,6 +122,19 @@ class GeometryBuilderLineweightTest < Minitest::Test
     assert_equal true, result[:geometry_staging][:enabled]
     assert_equal true, result[:geometry_staging][:stroke_footprints][:all_source_widths_represented]
   end
+  def test_width_footprints_report_page_path_progress
+    snapshots=[]
+    controller=IMP::ImportRunControl::Controller.new(:pages=>[3],:requested_mode=>:geometry,
+      :cancel_probe=>lambda { false },:clock=>lambda { 0.0 },:status_sink=>lambda { |s| snapshots << s })
+    paths=IMP::ContentStreamParser.new(['2 w 10 20 m 30 20 l S 2 w 10 30 m 30 30 l S'],nil).parse
+    builder=Subject.new(Model.new,paths,[],[0,0,100,80],:group_per_page=>false,:detect_arcs=>false,
+      :import_fills=>false,:lineweight_mode=>'Preserve visually',:page_number=>3,:run_controller=>controller)
+    IMP::VectorStrokeFootprint.stub(:build!,lambda { |_owner,plan,*_rest|
+      {:group=>Object.new,:face_count=>plan[:polygons].length,:edge_count=>4} }) { builder.build }
+    footprint=snapshots.select { |s| s[:stage] == :stroke_footprint }
+    assert_equal [[0,2,3],[1,2,3]],footprint.map { |s| [s[:completed],s[:total],s[:page]] }
+    assert_equal 50.0,footprint.last[:percentage]
+  end
 
   def test_unknown_lineweight_mode_fails_explicitly
     assert_raises(ArgumentError) { build('10 20 m 30 20 l S','invented') }

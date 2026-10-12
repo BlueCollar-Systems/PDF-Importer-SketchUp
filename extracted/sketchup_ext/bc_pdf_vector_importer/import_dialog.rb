@@ -710,7 +710,10 @@ module BlueCollarSystems
           recognition_mode: :auto,
           arc_mode:         'Auto',
           cleanup_level:    'Balanced',
-          lineweight_mode:  is_raster ? 'Ignore' : (raw[:lineweight_mode] || 'Preserve visually').to_s,
+          # 'Preserve visually' builds a width footprint (about 97 one-face
+          # groups) per round-capped line, so it stays an explicit choice. As
+          # the default it made a dense sheet run for tens of minutes.
+          lineweight_mode:  is_raster ? 'Ignore' : (raw[:lineweight_mode] || 'Ignore').to_s,
           grouping_mode:    (raw[:grouping_mode] || 'Group per page').to_s,
           import_mode:      mode_str,
           match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes',

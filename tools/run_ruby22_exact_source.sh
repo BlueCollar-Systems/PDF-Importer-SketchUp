@@ -191,6 +191,7 @@ readonly SMOKE_TESTS=(
   test/pdf_color_display_test.rb
   test/pdf_object_tokenizer_test.rb
   test/import_dialog_defaults_test.rb
+  test/default_import_round_cap_sheet_test.rb
   test/import_resume_test.rb
   test/geometry_cleanup_collinear_coverage_test.rb
   test/cleanup_selected_operation_test.rb
