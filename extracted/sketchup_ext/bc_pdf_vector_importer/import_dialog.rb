@@ -131,9 +131,36 @@ module BlueCollarSystems
           'certified completed pages are kept and can be resumed.'
       end
 
+      PROGRESS_STAGE_LABELS = {
+          'white_mask_scan' => 'checking page content',
+          'white_mask_inventory' => 'reading PDF paint order',
+          'white_mask_inventory_glyphs' => 'reading text outlines',
+          'white_mask_binding' => 'matching fills to PDF',
+          'white_mask_binding_ink' => 'matching text to PDF',
+          'white_mask_ink' => 'reading text outlines',
+          'white_mask_boundaries' => 'processing fill boundaries',
+          'white_mask_intersections' => 'processing fill boundaries',
+          'white_mask_partition' => 'dividing fill regions',
+          'white_mask_cells' => 'building fill cutouts',
+          'white_mask_verify' => 'checking fill cutouts',
+          'white_mask_coverage' => 'checking text coverage',
+          'white_mask_style' => 'finishing fill cutouts',
+          'white_mask' => 'layering fills and text'
+      }.freeze
+
       def self.progress_status(snapshot)
         data = snapshot.is_a?(Hash) ? snapshot : {}
-        stage = data[:stage].to_s.tr('_', ' ')
+        stage_key = data[:stage].to_s
+        stage = PROGRESS_STAGE_LABELS.fetch(stage_key, stage_key.tr('_', ' '))
+        # Fine composition stages repeat for separate masks on the same page.
+        # The controller's page-wide monotonic value/ETA belong to an earlier
+        # mask after a restart; display the current task's real count instead.
+        repeated_mask_stage = stage_key.start_with?('white_mask_')
+        percentage = data[:percentage].to_f
+        if repeated_mask_stage
+          total = data[:total].to_i
+          percentage = total > 0 ? [data[:completed].to_i, total].min * 100.0 / total : 0.0
+        end
         page = data[:page] || data[:page_index]
         page_total = data[:page_total]
         prefix = 'PDF Import'
@@ -143,9 +170,9 @@ module BlueCollarSystems
           prefix += " — page #{page}"
         end
         text = "#{prefix} — #{stage} #{data[:completed].to_i}/" \
-          "#{data[:total].to_i} — #{format('%.1f', data[:percentage].to_f)}% — " \
+          "#{data[:total].to_i} — #{format('%.1f', percentage)}% — " \
           "elapsed #{format('%.1f', data[:elapsed_seconds].to_f)}s"
-        unless data[:eta_seconds].nil?
+        unless data[:eta_seconds].nil? || repeated_mask_stage
           text += " — ETA #{format('%.1f', data[:eta_seconds].to_f)}s"
         end
         text + ' — Esc to cancel'

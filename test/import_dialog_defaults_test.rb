@@ -808,6 +808,20 @@ class ImportDialogDefaultsTest < Minitest::Test
     assert_includes message, 'certified completed pages are kept'
   end
 
+  def test_repeated_mask_work_does_not_show_the_previous_masks_completion_or_eta
+    controller = BlueCollarSystems::PDFVectorImporter::ImportRunControl::Controller.new(
+      :pages => [1], :requested_mode => :glyphs, :cancel_probe => lambda { false })
+    controller.progress(:white_mask_cells, :page => 1, :completed => 42, :total => 42)
+    current = controller.progress(:white_mask_cells, :page => 1, :completed => 0, :total => 120)
+    assert_equal 100.0, current[:percentage], 'the journal controller remains monotonic'
+    message = BID.progress_status(current.merge(:eta_seconds => 0.0))
+    refute_includes message, '100.0%'
+    assert_includes message, 'building fill cutouts 0/120'
+    assert_match(/— 0\.0% —/, message)
+    refute_includes message, 'ETA'
+    assert_includes message, 'Esc to cancel'
+  end
+
   def test_progress_status_uses_measured_eta_only_when_available
     measured = BID.progress_status(
       :stage => :text_item, :page => 2, :page_index => 2, :page_total => 3,

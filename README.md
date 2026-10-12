@@ -27,6 +27,7 @@ use the same validation.
 - Esc can stop white-mask scanning, source binding, exact intersections and native cell construction. Cancellation removes only the active composition stage before the pipeline rolls back the current page; uncertain cleanup remains a terminal error.
 - White-mask composition merges redundant adjacent cells with the same exact region and source owner. Original contours, ink coverage, material boundaries and construction checks remain intact; requested text modes are unchanged.
 - Source-unit lookup uses an index, and the source SVG is hashed once for all unit comparisons rather than once per unit.
+- Fill/text progress uses plain stage names and the current task's counts; a later mask no longer inherits the earlier mask's 100% or stale ETA.
 - Exact Ruby 2.2.4 tests cover bounded stroke batches, cancellation and exact partition coverage. Real-host timing and save/reopen acceptance for this candidate remain pending; earlier r8 native results do not certify these new changes.
 
 ### Earlier fixes (v3.7.165)
