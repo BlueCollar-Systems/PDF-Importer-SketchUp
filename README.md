@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.164-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.165-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -22,7 +22,11 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.164)
+### Recent fixes (v3.7.165)
+
+- A dense sheet such as a foundation detail keeps real stroke widths, and those width groups are built in batches of 250. SketchUp 2017 no longer stalls while every stroke is added to one parent.
+
+### Earlier fixes (v3.7.164)
 
 - Selected-face extrusion preserves source dimensions through nested, reflected and nonuniformly scaled groups, isolates shared component copies, and leaves protected text and linework alone. One Undo restores the operation. Invalid heights and connected geometry that cannot be isolated are refused before editing.
 - Multi-contour fills keep their holes and separate filled islands. PDF tint functions and signed font transforms retain the reconciled source-fidelity fixes.

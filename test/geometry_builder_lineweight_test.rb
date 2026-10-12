@@ -104,6 +104,26 @@ class GeometryBuilderLineweightTest < Minitest::Test
     assert_equal false,proof[:all_source_widths_represented]
     assert_match(/solid stroke color is unproven/,proof[:records].first[:reason])
   end
+  def test_dense_sheet_width_strokes_stay_inside_bounded_batches
+    count = Subject::GEOMETRY_STAGING_PATH_THRESHOLD + 40
+    stream = count.times.map { |index| "2 w 0 #{index} m 12 #{index} l S" }.join(' ')
+    model = Model.new
+    paths = IMP::ContentStreamParser.new([stream], nil).parse
+    builder = Subject.new(model, paths, [], [0, 0, 400, count + 10],
+      :group_per_page => false, :detect_arcs => false, :import_fills => false,
+      :lineweight_mode => 'Preserve visually')
+    owners = Hash.new(0)
+    result = IMP::VectorStrokeFootprint.stub(:build!, lambda { |owner, plan, *_rest|
+      owners[owner.object_id] += 1
+      { :group => Object.new, :face_count => plan[:polygons].length, :edge_count => 4 }
+    }) { builder.build }
+    assert_equal count, owners.values.inject(0) { |sum, value| sum + value }
+    assert owners.length > 1
+    assert owners.values.max <= Subject::GEOMETRY_STAGING_CHUNK_PATHS
+    assert_equal true, result[:geometry_staging][:enabled]
+    assert_equal true, result[:geometry_staging][:stroke_footprints][:all_source_widths_represented]
+  end
+
   def test_unknown_lineweight_mode_fails_explicitly
     assert_raises(ArgumentError) { build('10 20 m 30 20 l S','invented') }
   end
