@@ -387,6 +387,12 @@ module BlueCollarSystems
         # operation directly for colored or translucent source fill groups.
         entities = child_entities(group)
         originals = entities.to_a
+        original_visibility = []
+        if opts[:preserve_source] == true
+          originals.each do |entity|
+            original_visibility << [entity, entity.hidden?] if entity.respond_to?(:hidden?)
+          end
+        end
         stage = nil
         begin
           box = union_bounds(white)
@@ -467,19 +473,28 @@ module BlueCollarSystems
           terminal = error.is_a?(ImportRunControl::ImportCancelled) ||
                      error.is_a?(ImportRunControl::ResumeMismatch)
           begin
-            if opts[:preserve_source] == true
-              originals.each { |entity| entity.hidden = false if entity.respond_to?(:hidden=) && entity.valid? }
-            end
             stage.erase! if stage && stage.valid?
-            if terminal && stage && stage.valid?
-              raise ImportRunControl::RollbackFailure, 'cancelled white-mask stage remains live'
+            if stage && stage.valid?
+              raise ImportRunControl::RollbackFailure, 'white-mask stage remains live after erase'
+            end
+            unless originals.all? { |entity| entity.respond_to?(:valid?) && entity.valid? }
+              raise ImportRunControl::RollbackFailure, 'original white-mask source was destroyed'
+            end
+            original_visibility.each do |entity, hidden|
+              if entity.hidden? != hidden
+                unless entity.respond_to?(:hidden=)
+                  raise ImportRunControl::RollbackFailure, 'source fill visibility is not restorable'
+                end
+                entity.hidden = hidden
+              end
+              unless entity.hidden? == hidden
+                raise ImportRunControl::RollbackFailure, 'source fill visibility restoration failed readback'
+              end
             end
           rescue StandardError => cleanup_error
-            if terminal
-              raise ImportRunControl::RollbackFailure,
-                'cancelled white-mask rollback failed: ' + cleanup_error.class.to_s
-            end
-            raise
+            prefix = terminal ? 'cancelled white-mask rollback failed: ' : 'white-mask rollback failed: '
+            raise ImportRunControl::RollbackFailure,
+              prefix + cleanup_error.class.to_s + ': ' + cleanup_error.message.to_s
           end
           raise error if terminal
           partition_diagnostic(opts, white, ink, origin, error)

@@ -452,6 +452,185 @@ RUBY
     assert white.entities.stage.valid?
   end
 
+  # Production composition and page fallback boundaries; only native entity
+  # mutation APIs fail here. The first real emitted private cell is retained
+  # until rollback, so a live cleanup failure cannot pass as a clean fallback.
+  def with_noncancel_failure(cleanup, late = false, visibility = :normal,
+                            already_hidden = false, direct = false,
+                            preserve_source = late)
+    require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/main'
+    importer = BlueCollarSystems::PDFVectorImporter
+    white, text, original, ink = fixture
+    owners = [original]
+    if late
+      canonical = Group.new(Entities.new([original]))
+      canonical.material = :source_owner_colour if canonical.respond_to?(:material=)
+      canonical.attributes['source_fill_original'] = true
+      owners = [canonical]
+      if already_hidden
+        hidden = Group.new(Entities.new([Face.new([rect(8, 8, 9, 9)])]))
+        hidden.hidden = true
+        hidden.attributes['source_fill_original'] = true
+        owners << hidden
+      end
+      white.entities.items.replace(owners)
+      setter = canonical.method(:hidden=)
+      canonical.define_singleton_method(:hidden=) do |value|
+        if value == false && hidden? && visibility != :normal
+          raise 'fictional source visibility restore failed' if visibility == :throwing
+          next false
+        end
+        setter.call(value)
+      end
+    end
+    original.material = :original_front_colour
+    original.back_material = :original_back_colour
+    original.layer = :original_source_layer
+    original.attributes['source_owner_receipt'] = 'fictional-source-owner'
+    source_before = Marshal.dump([original.raw, original.material,
+      original.back_material, original.layer, original.attributes, ink.raw])
+    original_hidden = owners.map(&:hidden?)
+    native_error = RuntimeError.new(late ? 'fictional post-hide stage attribute failure' :
+                                         'fictional second native cell construction failure')
+    native_adds = 0
+    creator = white.entities.method(:add_group)
+    white.entities.define_singleton_method(:add_group) do
+      stage = creator.call
+      if cleanup == :silent
+        stage.define_singleton_method(:erase!) { false }
+      elsif cleanup == :throwing
+        stage.define_singleton_method(:erase!) { raise 'fictional stage erase failed' }
+      end
+      if late
+        attributes = stage.method(:set_attribute)
+        stage.define_singleton_method(:set_attribute) do |dictionary, key, value|
+          raise native_error if key == 'planar_white_knockout'
+          attributes.call(dictionary, key, value)
+        end
+      else
+        container_creator = stage.entities.method(:add_group)
+        stage.entities.define_singleton_method(:add_group) do
+          container = container_creator.call
+          adder = container.entities.method(:add_face)
+          container.entities.define_singleton_method(:add_face) do |points|
+            native_adds += 1
+            raise native_error if native_adds == 2
+            adder.call(points)
+          end
+          container
+        end
+      end
+      stage
+    end
+    opts = {:preserve_source => preserve_source}
+    operation = lambda do
+      if direct
+        Subject.compose_group!(white, white.transformation,
+          Subject.snapshots(white, white.transformation, false),
+          Subject.collect_text_faces([text]), opts)
+      else
+        Subject.compose!([{:group => white, :fill_rgb => [1,1,1],
+                          :before_text => true, :preserve_source => preserve_source}], [text])
+      end
+    end
+    yield importer, operation, {
+      :white => white, :text => text, :original => original, :ink => ink,
+      :owners => owners, :original_hidden => original_hidden,
+      :source_before => source_before, :native_error => native_error,
+      :native_adds => lambda { native_adds }
+    }
+  end
+
+  def assert_uncertain_noncancel_cleanup(cleanup, late = false, visibility = :normal)
+    with_noncancel_failure(cleanup, late, visibility) do |importer, operation, run|
+      stats = {}
+      error = assert_raises(importer::ImportRunControl::RollbackFailure) do
+        importer.keep_page_on_page_stage_failure(stats, 1, 'white_areas', 'x', 'y') { operation.call }
+      end
+      assert_match(/white-mask rollback failed/, error.message)
+      refute stats.key?(:page_step_downs), 'uncertain cleanup must stop at the page boundary'
+      if cleanup == :success
+        refute run[:white].entities.stage.valid?, 'private stage cleanup is still attempted'
+      else
+        assert run[:white].entities.stage.valid?
+        assert_operator Subject.partition_faces(run[:white].entities.stage.entities).length, :>, 0
+      end
+      assert run[:original].valid?
+      assert run[:ink].valid?
+      assert run[:text].valid?
+      assert_equal 2, run[:native_adds].call unless late
+    end
+  end
+
+  def test_noncancel_second_cell_failure_with_silent_erase_stops_the_page
+    assert_uncertain_noncancel_cleanup(:silent)
+  end
+
+  def test_noncancel_second_cell_failure_with_throwing_erase_stops_the_page
+    assert_uncertain_noncancel_cleanup(:throwing)
+  end
+
+  def test_noncancel_successful_cleanup_preserves_the_original_error
+    with_noncancel_failure(:success, false, :normal, false, true) do |_importer, operation, run|
+      assert_same run[:native_error], assert_raises(RuntimeError) { operation.call }
+      refute run[:white].entities.stage.valid?
+      assert run[:original].valid?
+      assert run[:ink].valid?
+    end
+  end
+
+  def test_noncancel_successful_cleanup_remains_eligible_for_page_fallback
+    with_noncancel_failure(:success) do |importer, operation, run|
+      stats = {}
+      result = importer.keep_page_on_page_stage_failure(stats, 1, 'white_areas', 'x', 'y') { operation.call }
+      assert_equal false, result
+      assert_equal 1, stats[:page_step_downs].length
+      refute run[:white].entities.stage.valid?
+      assert run[:original].valid?
+      assert run[:ink].valid?
+      assert_equal run[:source_before], Marshal.dump([run[:original].raw,
+        run[:original].material, run[:original].back_material,
+        run[:original].layer, run[:original].attributes, run[:ink].raw])
+    end
+  end
+
+  def test_noncancel_silent_source_visibility_restore_stops_the_page
+    assert_uncertain_noncancel_cleanup(:success, true, :silent)
+  end
+
+  def test_noncancel_throwing_source_visibility_restore_stops_the_page
+    assert_uncertain_noncancel_cleanup(:success, true, :throwing)
+  end
+
+  def test_noncancel_successful_rollback_keeps_preexisting_hidden_source_owner
+    with_noncancel_failure(:success, true, :normal, true) do |importer, operation, run|
+      stats = {}
+      assert_equal false, importer.keep_page_on_page_stage_failure(stats, 1, 'white_areas', 'x', 'y') { operation.call }
+      assert_equal [false, true], run[:original_hidden]
+      assert_equal run[:original_hidden], run[:owners].map(&:hidden?)
+      refute run[:white].entities.stage.valid?
+      assert run[:owners].all?(&:valid?)
+      assert_equal run[:source_before], Marshal.dump([run[:original].raw,
+        run[:original].material, run[:original].back_material,
+        run[:original].layer, run[:original].attributes, run[:ink].raw])
+    end
+  end
+
+  def test_noncancel_nonpreserving_swap_failure_with_destroyed_original_stops_the_page
+    with_noncancel_failure(:success, true, :normal, false, false, false) do |importer, operation, run|
+      stats = {}
+      error = assert_raises(importer::ImportRunControl::RollbackFailure) do
+        importer.keep_page_on_page_stage_failure(stats, 1, 'white_areas', 'x', 'y') { operation.call }
+      end
+      assert_match(/white-mask rollback failed/, error.message)
+      refute stats.key?(:page_step_downs)
+      refute run[:white].entities.stage.valid?
+      assert run[:owners].any? { |owner| !owner.valid? }, 'original ownership really was destroyed before failure'
+      assert run[:ink].valid?
+      assert run[:text].valid?
+    end
+  end
+
   def test_later_unknown_and_translucent_masks_do_not_change
     white, text, original, = fixture
     masks = [
