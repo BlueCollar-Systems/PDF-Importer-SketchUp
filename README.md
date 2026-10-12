@@ -30,6 +30,7 @@ use the same validation.
 - Fill/text progress uses plain stage names and the current task's counts; a later mask no longer inherits the earlier mask's 100% or stale ETA.
 - Status-bar drawing is limited to one update every two seconds while every progress and cancellation checkpoint still runs. Final import notices remain immediate.
 - Shared glyph definitions are scanned once when applying source outline styles; each instance keeps its own placement and material behavior.
+- Any failed fill construction verifies removal of its private stage and restoration of source visibility. Uncertain cleanup stops the page commit instead of retaining partial work.
 - Exact Ruby 2.2.4 tests cover bounded stroke batches, cancellation and exact partition coverage. Real-host timing and save/reopen acceptance for this candidate remain pending; earlier r8 native results do not certify these new changes.
 
 ### Earlier fixes (v3.7.165)
