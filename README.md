@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.165-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.166-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -22,9 +22,16 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.165)
+### Recent fixes (v3.7.166)
 
-- A dense sheet such as a foundation detail keeps real stroke widths, and those width groups are built in batches of 250. SketchUp 2017 no longer stalls while every stroke is added to one parent.
+- Esc can stop white-mask scanning, source binding, exact intersections and native cell construction. Cancellation removes only the active composition stage before the pipeline rolls back the current page; uncertain cleanup remains a terminal error.
+- White-mask composition merges redundant adjacent cells with the same exact region and source owner. Original contours, ink coverage, material boundaries and construction checks remain intact; requested text modes are unchanged.
+- Source-unit lookup uses an index, and the source SVG is hashed once for all unit comparisons rather than once per unit.
+- Exact Ruby 2.2.4 tests cover bounded stroke batches, cancellation and exact partition coverage. Real-host timing and save/reopen acceptance for this candidate remain pending; earlier r8 native results do not certify these new changes.
+
+### Earlier fixes (v3.7.165)
+
+- Dense sheets keep preserved stroke widths inside batches of 250 rather than attaching every stroke group to one live parent. This removes the unbounded construction path; import time still depends on the PDF and host.
 
 ### Earlier fixes (v3.7.164)
 
