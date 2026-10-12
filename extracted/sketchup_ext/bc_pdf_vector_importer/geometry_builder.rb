@@ -3483,7 +3483,8 @@ module BlueCollarSystems
         # A native failure after eligibility is terminal. Never hide source
         # centerlines or downgrade an entity on a host construction exception.
         plans.each_with_index do |plan,index|
-          run_checkpoint!(:stroke_footprint,:path=>path_index,:subpath=>index)
+          run_checkpoint!(:stroke_footprint,:path=>path_index,:subpath=>index,
+            :completed=>path_index,:total=>@paths.length,:page=>@page_number)
           built=VectorStrokeFootprint.build!(entities,plan,mapper,style[:material],layer)
           @face_count += built[:face_count]
           @edge_count += built[:edge_count]

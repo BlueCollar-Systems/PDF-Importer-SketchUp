@@ -107,6 +107,8 @@ jobs:
           ruby test/pdf_annotation_normalization_test.rb
           ruby test/pdf_object_tokenizer_test.rb
           ruby test/import_dialog_defaults_test.rb
+          ruby test/import_status_sink_throttle_test.rb
+          ruby test/source_outline_shared_definition_test.rb
           ruby test/import_resume_test.rb
           ruby test/pdf_navigation_link_appearance_test.rb
           ruby test/pdf_salvage_memo_integrity_test.rb

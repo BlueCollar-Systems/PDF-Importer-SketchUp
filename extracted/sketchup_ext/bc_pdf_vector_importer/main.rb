@@ -298,10 +298,17 @@ module BlueCollarSystems
          BatchHostPolicy.noninteractive?
         return lambda { |_snapshot| true }
       end
+      # Every controller checkpoint still publishes and probes Escape. Only
+      # expensive GUI writes are limited, using a clock unaffected by wall time.
+      last_status_at = nil
       lambda do |snapshot|
         if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+          now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          next true if last_status_at && now - last_status_at < 2.0
           Sketchup.status_text = ImportDialog.progress_status(snapshot)
+          last_status_at = now
         end
+        true
       end
     end
 
@@ -4597,11 +4604,7 @@ module BlueCollarSystems
         identity = ImportRunControl.identity_for(
           source_path, opts, File.dirname(__FILE__)
         )
-        status_sink = opts[:status_sink] || lambda do |snapshot|
-          if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
-            Sketchup.status_text = ImportDialog.progress_status(snapshot)
-          end
-        end
+        status_sink = import_status_sink(opts)
         if defined?(BatchHostPolicy) &&
            BatchHostPolicy.respond_to?(:noninteractive?) &&
            BatchHostPolicy.noninteractive?
