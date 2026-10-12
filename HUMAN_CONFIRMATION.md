@@ -18,7 +18,7 @@ For each representative shop drawing you import:
 | **3D Text** (first-run default) — BOM, dimensions, notes, rotation, and scale visually match Adobe Reader at the same zoom | ☐ |
 | **Glyphs** — per-glyph grouped outlines, placement, rotation, and scale are faithful when selected | ☐ |
 | **Geometry** — source/page path edges remain distinct from Glyph groups and are faithful when selected | ☐ |
-| **Raster** — requested item crops or zero-canonical-text page image are source-bound and visually faithful; a verification failure stops truthfully | ☐ |
+| **Raster** — requested item crops or zero-canonical-text page image are source-bound and visually faithful; a failed item is reported as not delivered and successful peer items remain | ☐ |
 | Scale plausible vs the source drawing | ☐ |
 | Multi-page import behaves as expected | ☐ |
 

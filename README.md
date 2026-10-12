@@ -168,7 +168,7 @@ Core vector import uses the built-in Ruby parser. Windows release RBZ files ship
 
 ## Overview
 
-PDF Vector Importer parses PDF content streams directly in Ruby and reconstructs vector geometry as native SketchUp edges. The core vector path does not require Ruby gems, C extensions, or external binaries. Higher-fidelity helper paths can use MuPDF (`mutool`), Poppler (`pdftocairo`, `pdftotext`) and Ghostscript when present. A missing helper may change the available source inside the same requested representation, but never by itself authorizes a different representation. Only affirmative item-specific impossibility can enter the finite closest fallback ladder. It runs on supported SketchUp PCs from SketchUp 2017 Make (Ruby 2.2) through the current Pro release.
+PDF Vector Importer parses PDF content streams directly in Ruby and reconstructs vector geometry as native SketchUp edges. The core vector path does not require Ruby gems, C extensions, or external binaries. Higher-fidelity helper paths can use MuPDF (`mutool`), Poppler (`pdftocairo`, `pdftotext`) and Ghostscript when present. The requested representation is attempted first. If an item cannot be delivered because a helper is missing, a host limit or exception occurs, or the result is empty, that item advances one rung at a time through the finite closest fallback ladder and every transition is reported. If no rung can deliver it, only that item's partial artifacts are removed and the omission is reported; the rest of the page remains. Alignment, rotation and size errors must be fixed within the requested representation. SketchUp 2017 Make (Ruby 2.2) is the host floor; later versions through current Pro remain in scope, with the actual tested hosts listed in [HOST_COMPATIBILITY.md](HOST_COMPATIBILITY.md).
 
 The importer profiles each PDF document to identify its origin (fabrication drawings, CAD exports, architectural plans, vector art, or raster scans) and adapts its import strategy accordingly.
 
@@ -220,8 +220,10 @@ assets, checksums, license, and notes.
   are accepted for those standard PDF fonts. A crop must retain alpha-channel provenance
   and visible pixels, but may be fully opaque; it is not rejected merely because
   it contains no `alpha < 255` pixel. One reference PDF digest is cached per
-  import, while full bytes are checked immediately before/after each renderer and
-  before commit—never once per item. Saved/reopened Raster acceptance exports the
+  import, while full bytes are checked immediately before/after each renderer—never
+  once per item. Audit import additionally rechecks full bytes before page commit;
+  with Audit off, that commit check uses the cached digest and current file size/times.
+  Saved/reopened Raster acceptance exports the
   actual SketchUp texture and matches its decoded visual-pixel digest and size;
   importer attributes alone are not proof.
 

@@ -14,7 +14,7 @@ Modes are extraction **strategy** (Auto / Vector / Raster / Hybrid), not quality
 | 2020 | 2.5.5 | ⚠️ Expected — dedicated host acceptance pending |
 | 2019 | 2.5.x | ⚠️ Expected — dedicated host acceptance pending |
 | 2018 | 2.2.4 | ⚠️ Expected — dedicated host acceptance pending |
-| Make 2017 | 2.2.4 | Native fixture checks and exact runtime tests in [the dated validation](docs/validation/2026-10-10-sketchup-persistence.md) |
+| Make 2017 | 2.2.4 | Native fixture checks and exact runtime tests in [the r8 validation](docs/validation/2026-10-11-sketchup-r8-neutral-acceptance.md) |
 | Pro 2017 | 2.2.4 | ⚠️ Expected — exact Ruby 2.2.4 CI parse/smoke, no dedicated Pro host evidence |
 | 2014–2016 | 2.0.x | ❌ Below the supported Ruby 2.2.4 / SketchUp 2017 floor |
 | 2013 and earlier | | ❌ Not supported |
@@ -38,9 +38,10 @@ importer must detect them rather than assume this workstation's paths.
 | Ghostscript | Temporary font embedding repair for PDFs with non-embedded fonts |
 
 If a helper is missing, the Compatibility Report must say which capability is
-unavailable. A same-representation source may be tried only when it is
-independently verified; missing helpers do not authorize changing the requested
-representation.
+unavailable. A verified source for the requested representation may still deliver
+the item. When that attempt fails, advance only that item through the finite
+closest fallback ladder and report each transition or omission. Keep successful
+peer items and the rest of the page; see the owner ruling in [AGENTS.md](AGENTS.md).
 
 ### Text rendering
 
@@ -60,15 +61,17 @@ and page. Item images retain the RGBA provenance of one transparent page render
 per page and contain visible pixels. A crop can validly be fully opaque; absence
 of an `alpha < 255` pixel inside that crop is not a failure. Cropping is streaming
 Ruby 2.2-safe code and adds no paid dependency. The importer caches one reference
-PDF digest, verifies the full bytes immediately before and after each renderer,
-and verifies them again before commit; it never renders or hashes once per item.
+PDF digest and verifies the full bytes immediately before and after each renderer;
+it never renders or hashes once per item. Audit import also rechecks full bytes
+before page commit; with Audit off, the commit check uses the cached digest and
+current file size/times.
 Saved/reopened Raster evidence is physical: SketchUp `TextureWriter` must export
 the actual image, and its decoded visual-pixel digest and dimensions must match.
 Self-authored attributes alone cannot certify the texture.
 
 The dialog defaults to 3D Text on first run and restores the last text rendering option used after that. On SketchUp 2017, Labels is an explicit audited request whose finite-bbox items use source-outline 3D visual-equivalent delivery; it does not promise native annotation editability.
 
-**Mode fidelity:** honor the selected text option first. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. A missing helper, generic exception, empty artifact, or broken implementation cannot authorize fallback. The exact ladders are Text → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; and Geometry → item Raster. Raster has no next rung. Requested Raster uses verified item crops when canonical text spans exist and a verified page image for a selected zero-canonical-text page; fallback Raster is item-scoped. Each adjacent rung requires its own renderer and type/visual certificate. Terminal Raster can still fail verification, in which case the exact failure is reported and delivery stops. Successful peer spans and page geometry remain intact. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
+**Mode fidelity:** honor the selected text option first. Fix alignment/rotation/scale inside that mode — do not switch representation to paper over transform bugs. A missing helper, host/API limit, exception, or empty artifact steps only the failed item down, with its reason reported. The exact ladders are Text → 3D Text → Glyphs → Geometry → item Raster; Labels → 3D Text → Glyphs → Geometry → item Raster; 3D Text → Glyphs → Geometry → item Raster; Glyphs → Geometry → item Raster; and Geometry → item Raster. Raster has no next rung. Requested Raster uses verified item crops when canonical text spans exist and a verified page image for a selected zero-canonical-text page; fallback Raster is item-scoped. Check what each adjacent rung actually builds. Terminal Raster can still fail verification, in which case remove only that item's partial artifacts and report it as not delivered. Successful peer spans and page geometry remain intact. Heavy self-checks belong in optional Audit import or CI and do not stop a page for one failed item. See [AGENTS.md](AGENTS.md) and `.cursor/rules/text-mode-fidelity.mdc`.
 
 In SketchUp 2017, `Sketchup::Text` exposes neither source-glyph size nor source run-width control,
 and `Text#vector` controls the leader rather than glyph orientation. For each
@@ -130,4 +133,4 @@ fallback).
 
 The exact local r4 package passed eleven native mode/image/lineweight rows and independent external verification, including three injected native cancellation rollbacks. Fresh separate-process Text (2 Images), item Raster (5 Images) and zero-text page Raster (1 Image) reopened with fixture PDF/cache files unavailable, actual TextureWriter pixels and strict geometry/style/IDs preserved, and every fixture file restored. The frozen-package regression results are 179 files, 2,345 runs, 21,027 assertions, zero failures/errors and eight skips; four copied-environment test files were retested after restoring shared reference/guidance files and the owned Git test context. The package source remained unchanged.
 
-Native render measurements show the corrected flat display substantially reduces the old brightness shift. Native Image boundaries, antialiasing and quantization still differ; pixel equality is not claimed. Current Pro, physical keyboard/GUI interaction, additional hosts and broader corpus/hardware checks remain pending. See `docs/validation/2026-10-10-sketchup-persistence.md` and the local test guide. The later repository extrusion menu is preserved outside r4; a safe repair is staged under `C:\TMP\su17-packaged-20261010\extrusion-upgrade` and needs native acceptance before packaging.
+Native render measurements show the corrected flat display substantially reduces the old brightness shift. Native Image boundaries, antialiasing and quantization still differ; pixel equality is not claimed. Current Pro, physical keyboard/GUI interaction, additional hosts and broader corpus/hardware checks remain pending. See `docs/validation/2026-10-10-sketchup-persistence.md` and the local test guide. The later r8 package passed the scoped Make 2017 importer, manual-extrusion, Undo and save/reopen checks recorded in [the r8 acceptance](docs/validation/2026-10-11-sketchup-r8-neutral-acceptance.md). These are bounded neutral-fixture results, not universal PDF or current-Pro certification.
