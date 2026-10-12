@@ -15,6 +15,7 @@ module BlueCollarSystems
       # inches; defaults match the existing glyph geometry mapping exactly.
       def self.build(svg, media_box, opts = {})
         source = svg.to_s
+        run_checkpoint!(opts, :white_mask_inventory, 0, source.length)
         result = { :white_paths => [], :opaque_paths => [], :glyphs => [], :glyphs_by_placement_index => {},
                    :excluded => [], :order_space => 'cairo_svg_document_offset' }
         if source =~ /<\s*style\b|<\s*script\b|<!DOCTYPE|<\?xml-stylesheet/i
@@ -31,8 +32,13 @@ module BlueCollarSystems
         definition_validity = {}
         glyph_events = []
         stack = [initial_context]
+        scanned_tags = 0
         source.scan(TAGS) do |token|
           offset = Regexp.last_match.begin(0) # Before any nested regex calls.
+          if (scanned_tags % 128).zero?
+            run_checkpoint!(opts, :white_mask_inventory, offset, source.length)
+          end
+          scanned_tags += 1
           next if token.start_with?('<!--', '<![CDATA[')
           if token =~ /\A<\s*\/\s*([A-Za-z][A-Za-z0-9:_-]*)/
             name = Regexp.last_match(1).downcase
@@ -76,7 +82,8 @@ module BlueCollarSystems
         end
         raise ArgumentError, 'unclosed SVG context' unless stack.length == 1
         by_physical = {}
-        glyph_events.each do |event|
+        glyph_events.each_with_index do |event, index|
+          run_checkpoint!(opts, :white_mask_inventory_glyphs, index, glyph_events.length) if (index % 64).zero?
           id = event[:glyph_id]
           frame = event[:context]
           reason = frame[:reason]
@@ -122,10 +129,19 @@ module BlueCollarSystems
                                   :svg_document_offset => event[:offset], :reason => error.message }
           end
         end
+        run_checkpoint!(opts, :white_mask_inventory_glyphs, glyph_events.length, glyph_events.length)
         result
       rescue ArgumentError => error
         { :white_paths => [], :opaque_paths => [], :glyphs => [], :glyphs_by_placement_index => {},
           :excluded => [{ :reason => error.message }], :order_space => 'cairo_svg_document_offset' }
+      end
+
+      def self.run_checkpoint!(opts, stage, completed, total)
+        controller = opts[:run_controller]
+        return false unless controller && controller.respond_to?(:checkpoint!)
+        controller.checkpoint!(stage, :completed => completed, :total => total,
+          :page => opts[:page_number])
+        true
       end
 
       def self.initial_context

@@ -2,6 +2,7 @@
 # The caller owns the import operation and must abort it if this module raises.
 # No text geometry, representation, identity, or depth is changed here.
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
+require File.join(File.dirname(__FILE__), 'import_run_control')
 require File.join(File.dirname(__FILE__), 'svg_region_boundary')
 require File.join(File.dirname(__FILE__), 'planar_region_partition')
 
@@ -18,17 +19,27 @@ module BlueCollarSystems
       GRID_SIZE = 0.25
       MAX_INDEX_CELLS = 4096
 
+      def self.run_checkpoint!(opts, stage, completed, total)
+        controller = opts[:run_controller]
+        return false unless controller && controller.respond_to?(:checkpoint!)
+        controller.checkpoint!(stage, :completed => completed, :total => total,
+          :page => opts[:page_number])
+        true
+      end
+
       # All transformations map to the same page coordinate system. A record's
       # :transformation is the complete transform of its group, not its parent.
       # :before_text must come from source paint order, never build order.
       # Text roots can instead be bare groups directly inside the page context.
       def self.compose!(fill_only_groups, text_roots, opts = {})
-        ink = opts.key?(:ink_faces) ? opts[:ink_faces] : collect_text_faces(text_roots)
+        ink = opts.key?(:ink_faces) ? opts[:ink_faces] : collect_text_faces(text_roots, opts)
         fail_contract('prebound physical ink faces must be an array') unless ink.is_a?(Array)
         result = { :white_groups => 0, :opaque_groups => 0, :composed_groups => 0,
                    :ink_faces => ink.length, :removed_area => 0.0,
                    :skipped_unproven_order => 0, :skipped_nonwhite => 0 }
-        Array(fill_only_groups).each do |record|
+        masks = Array(fill_only_groups)
+        masks.each_with_index do |record, mask_index|
+          run_checkpoint!(opts, :white_mask, mask_index, masks.length)
           unless opaque_fill?(record)
             result[:skipped_nonwhite] += 1
             next
@@ -37,7 +48,7 @@ module BlueCollarSystems
           result[:white_groups] += 1 if opaque_white?(record)
           group = record[:group]
           transform = record[:transformation] || group.transformation
-          white = snapshots(group, transform, false)
+          white = snapshots(group, transform, false, false, nil, [], nil, opts)
           next if white.empty?
           unless white.all? { |face| opaque_material?(face[:material]) }
             result[:skipped_nonwhite] += 1
@@ -56,7 +67,10 @@ module BlueCollarSystems
           group.erase! if child_entities(group).to_a.empty?
           result[:composed_groups] += 1
         end
+        run_checkpoint!(opts, :white_mask, masks.length, masks.length)
         result
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch
+        raise
       rescue RepresentationFidelity::ContractError
         raise
       rescue StandardError => error
@@ -107,9 +121,11 @@ module BlueCollarSystems
         alpha.is_a?(Numeric) && alpha == 1.0
       end
 
-      def self.collect_text_faces(roots)
+      def self.collect_text_faces(roots, opts = {})
         result = []
-        Array(roots).each do |root|
+        rows = Array(roots)
+        rows.each_with_index do |root, index|
+          run_checkpoint!(opts, :white_mask_ink, index, rows.length) if (index % 64).zero?
           record = root.is_a?(Hash) ? root : { :group => root }
           group = record[:group]
           next unless group
@@ -118,7 +134,8 @@ module BlueCollarSystems
                     image = image_snapshot(group, transform)
                     image ? [image] : []
                   else
-                    snapshots(group, transform, true, record[:verified_source_unit] == true)
+                    snapshots(group, transform, true, record[:verified_source_unit] == true,
+                              nil, [], nil, opts)
                   end
           # A positive-depth text item is already physically in front. Do not
           # punch white masks using its coplanar bottom faces alone.
@@ -131,18 +148,23 @@ module BlueCollarSystems
           end
           result.concat(faces)
         end
+        run_checkpoint!(opts, :white_mask_ink, rows.length, rows.length)
         result.uniq { |face| [face[:entity_id], face[:loops]] }
       end
 
       def self.snapshots(group, transform, require_owner, inherited_owner = false,
                          inherited_material = nil, inherited_indices = [],
-                         inherited_source_id = nil)
+                         inherited_source_id = nil, opts = {})
         owner = inherited_owner || source_owner?(group)
         material = (group.material if group.respond_to?(:material)) || inherited_material
         indices = source_indices_for(group, inherited_indices)
         source_id = source_id_for(group, inherited_source_id)
         result = []
-        child_entities(group).to_a.each do |entity|
+        children = child_entities(group).to_a
+        children.each_with_index do |entity, index|
+          if index > 0 && (index % 64).zero?
+            run_checkpoint!(opts, :white_mask_ink, 0, 0)
+          end
           next if entity.respond_to?(:valid?) && !entity.valid?
           next if entity.respond_to?(:hidden?) && entity.hidden? &&
                   entity.respond_to?(:get_attribute) &&
@@ -167,7 +189,7 @@ module BlueCollarSystems
             result << record
           elsif kind == 'Group' || kind == 'ComponentInstance'
             result.concat(snapshots(entity, transform * entity.transformation,
-                                    require_owner, owner, material, indices, source_id))
+                                    require_owner, owner, material, indices, source_id, opts))
           elsif kind != 'Edge' && !require_owner
             fail_contract('white fill-only group contains unrelated entities')
           end
@@ -368,13 +390,14 @@ module BlueCollarSystems
         begin
           box = union_bounds(white)
           origin = [(box[0] + box[2]) * 0.5, (box[1] + box[3]) * 0.5, 0.0]
-          source_cells = PlanarRegionPartition.partition(white, ink)
+          source_cells = PlanarRegionPartition.partition(white, ink, opts)
           scale = partition_construction_scale(source_cells)
           stage = entities.add_group
           stage.name = 'PDF planar white composition' if stage.respond_to?(:name=)
           origin, scale, point_map = partition_construction_frame!(
             stage, source_cells, origin, scale, transform)
-          source_cells.each do |cell|
+          source_cells.each_with_index do |cell, index|
+            run_checkpoint!(opts, :white_mask_cells, index, source_cells.length) if (index % 64).zero?
             # A convex source cell has no holes and cannot cross a source
             # boundary. Keep cells in separate identity groups so legacy host
             # face discovery cannot merge adjacent regions across that boundary.
@@ -384,11 +407,12 @@ module BlueCollarSystems
             fail_contract('native exact white-mask cell construction failed') unless face
             verify_partition_face!(face, points)
           end
+          run_checkpoint!(opts, :white_mask_cells, source_cells.length, source_cells.length)
           cells = partition_faces(stage.entities)
           fail_contract('native white-mask subdivision produced no faces') if cells.empty?
           white_index = spatial_index(white)
           ink_index = spatial_index(ink)
-          plan = classify_cells(cells, origin, white_index, ink_index, scale)
+          plan = classify_cells(cells, origin, white_index, ink_index, scale, opts)
           expected = source_area(white)
           partition_area = plan.inject(0.0) do |sum, cell|
             cell[:region] == :outside ? sum : sum + cell[:area]
@@ -399,8 +423,9 @@ module BlueCollarSystems
           end
           kept = plan.select { |cell| cell[:region] == :white }
           removed = plan.select { |cell| cell[:region] == :ink }
-          verify_ink_samples!(ink, white_index, spatial_index(kept), origin, ink_index)
-          plan.each do |cell|
+          verify_ink_samples!(ink, white_index, spatial_index(kept), origin, ink_index, opts)
+          plan.each_with_index do |cell, index|
+            run_checkpoint!(opts, :white_mask_style, index, plan.length) if (index % 64).zero?
             face = cell[:face]
             if cell[:region] == :white
               style = white.find { |record| contains?(record, cell[:sample]) }
@@ -413,6 +438,8 @@ module BlueCollarSystems
             end
           end
           clean_partition_edges!(stage.entities)
+          # Cancel before changing source visibility or erasing originals.
+          run_checkpoint!(opts, :white_mask_style, plan.length, plan.length)
           if opts[:preserve_source] == true
             unless originals.all? do |entity|
               entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?) &&
@@ -436,11 +463,25 @@ module BlueCollarSystems
           end
           removed.inject(0.0) { |sum, cell| sum + cell[:area] }
         rescue StandardError => error
-          if opts[:preserve_source] == true
-            originals.each { |entity| entity.hidden = false if entity.respond_to?(:hidden=) && entity.valid? }
+          terminal = error.is_a?(ImportRunControl::ImportCancelled) ||
+                     error.is_a?(ImportRunControl::ResumeMismatch)
+          begin
+            if opts[:preserve_source] == true
+              originals.each { |entity| entity.hidden = false if entity.respond_to?(:hidden=) && entity.valid? }
+            end
+            stage.erase! if stage && stage.valid?
+            if terminal && stage && stage.valid?
+              raise ImportRunControl::RollbackFailure, 'cancelled white-mask stage remains live'
+            end
+          rescue StandardError => cleanup_error
+            if terminal
+              raise ImportRunControl::RollbackFailure,
+                'cancelled white-mask rollback failed: ' + cleanup_error.class.to_s
+            end
+            raise
           end
+          raise error if terminal
           partition_diagnostic(opts, white, ink, origin, error)
-          stage.erase! if stage && stage.valid?
           if error.is_a?(RepresentationFidelity::ContractError)
             bounds = union_bounds(white).map { |value| format('%.8g', value) }.join(',')
             owners = ink.map { |face| face[:source_span_id] }.compact.uniq.first(6).join(',')
@@ -868,8 +909,9 @@ module BlueCollarSystems
         (term1 - term2).abs <= 8.0 * Float::EPSILON * (term1.abs + term2.abs)
       end
 
-      def self.classify_cells(cells, origin, white, ink, scale = CONSTRUCTION_SCALE)
-        cells.map do |face|
+      def self.classify_cells(cells, origin, white, ink, scale = CONSTRUCTION_SCALE, opts = {})
+        cells.each_with_index.map do |face, index|
+          run_checkpoint!(opts, :white_mask_verify, index, cells.length) if (index % 64).zero?
           samples = face_samples(face, origin, scale)
           regions = samples.map { |point| region_at(point, white, ink) }.uniq
           unless regions.length == 1
@@ -889,11 +931,12 @@ module BlueCollarSystems
         end
       end
 
-      def self.verify_ink_samples!(ink, white, kept, origin, ink_index = ink)
+      def self.verify_ink_samples!(ink, white, kept, origin, ink_index = ink, opts = {})
         # Check every source contour edge on both sides in addition to native
         # tessellation. This catches a small uncut glyph inside a large white
         # triangle whose ordinary centroid probes all fall outside the glyph.
-        ink.each do |record|
+        ink.each_with_index do |record, index|
+          run_checkpoint!(opts, :white_mask_coverage, index, ink.length) if (index % 16).zero?
           record[:loops].each do |loop|
             previous = loop[-1]
             loop.each do |point|

@@ -23,15 +23,17 @@ module BlueCollarSystems
             (glyphs_by_index[index] ||= []) << record
           end
         end
-        ink = Geometry.collect_text_faces(roots)
+        ink = Geometry.collect_text_faces(roots, opts)
         stats = { :source_white_paths => Array(inventory[:white_paths]).length,
                   :source_opaque_paths => source_masks.length, :source_glyphs => glyphs.length,
                   :matched_masks => 0, :unmatched_masks => 0, :bound_ink_faces => 0,
                   :final_page_crops => 0, :unbound_ink_faces => 0 }
         bound_masks = []
-        Array(masks).each do |record|
+        mask_rows = Array(masks)
+        mask_rows.each_with_index do |record, index|
+          Geometry.run_checkpoint!(opts, :white_mask_binding, index, mask_rows.length) if (index % 16).zero?
           transform = record[:transformation] || record[:group].transformation
-          white = Geometry.snapshots(record[:group], transform, false)
+          white = Geometry.snapshots(record[:group], transform, false, false, nil, [], nil, opts)
           next if white.empty?
           box = Geometry.union_bounds(white)
           unless Geometry.opaque_fill?(record)
@@ -51,11 +53,11 @@ module BlueCollarSystems
           native_boundary_checked = false
           candidates = near.select do |candidate|
             unless native_boundary_checked
-              native_boundary = SvgRegionBoundary.normalize(white, :native_union)
+              native_boundary = SvgRegionBoundary.normalize(white, :native_union, opts)
               native_boundary_checked = true
             end
             unless candidate.key?(:binding_boundary)
-              candidate[:binding_boundary] = SvgRegionBoundary.normalize([candidate], :svg)
+              candidate[:binding_boundary] = SvgRegionBoundary.normalize([candidate], :svg, opts)
             end
             source_boundary = candidate[:binding_boundary]
             native_boundary && source_boundary &&
@@ -75,7 +77,8 @@ module BlueCollarSystems
         end
         # Duplicate equal-shape paints remain distinct: associate their source
         # occurrences only when both inventories have the same complete count.
-        bound_masks.each do |mask|
+        bound_masks.each_with_index do |mask, index|
+          Geometry.run_checkpoint!(opts, :white_mask_binding, index, bound_masks.length) if (index % 16).zero?
           candidates = mask[:svg_candidates]
           matches = bound_masks.select { |other| other[:svg_candidates] == candidates }
           ordered = matches.all? { |m| Geometry.valid_order?(m[:pdf_paint_order]) }
@@ -92,7 +95,8 @@ module BlueCollarSystems
             stats[:unmatched_masks] += 1
           end
         end
-        ink.each do |face|
+        ink.each_with_index do |face, index|
+          Geometry.run_checkpoint!(opts, :white_mask_binding_ink, index, ink.length) if (index % 64).zero?
           face[:paint_order] = nil
           if face[:final_page_crop] == true
             # A verified crop is the final same-page composite, including the
@@ -122,7 +126,8 @@ module BlueCollarSystems
             stats[:unbound_ink_faces] += 1
           end
         end
-        bound_masks.each do |mask|
+        bound_masks.each_with_index do |mask, index|
+          Geometry.run_checkpoint!(opts, :white_mask_binding, index, bound_masks.length) if (index % 16).zero?
           overlapping = ink.select { |face| Geometry.boxes_overlap?(mask[:bounds], face[:bounds]) }
           next if overlapping.empty?
           if overlapping.all? { |face| face[:final_page_crop] == true }
@@ -151,6 +156,7 @@ module BlueCollarSystems
         stats[:glyph_bindings] = ink.map do |face|
           {:placement_indices=>face[:source_placement_indices], :svg_paint_order=>face[:paint_order]}
         end.uniq
+        Geometry.run_checkpoint!(opts, :white_mask_binding, mask_rows.length, mask_rows.length)
         { :masks => bound_masks, :ink_faces => ink, :binding => stats }
       end
 

@@ -2,6 +2,7 @@ require 'minitest/autorun'
 require 'open3'
 require 'rbconfig'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/planar_white_knockout'
+require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/import_run_control'
 
 module Geom
   class Point3d
@@ -84,7 +85,7 @@ RUBY
   end
 
   class Face
-    attr_accessor :material, :back_material, :layer, :attributes
+    attr_accessor :material, :back_material, :layer, :attributes, :hidden
     attr_reader :loops, :erased
     def initialize(loops)
       @loops = loops.map { |points| Loop.new(points.map { |p| Vertex.new(Geom::Point3d.new(*p)) }) }
@@ -95,6 +96,7 @@ RUBY
     def typename; 'Face'; end
     def outer_loop; loops.first; end
     def valid?; !@erased; end
+    def hidden?; hidden == true; end
     def erase!; @erased = true; end
     def normal; Normal.new(1); end
     def get_attribute(_dict, key, default); attributes.fetch(key, default); end
@@ -326,6 +328,102 @@ RUBY
     refute ink.erased
     assert white.entities.stage.erased
     assert_empty white.entities.erased
+  end
+
+  def test_partition_cancellation_keeps_its_terminal_type_and_original_ownership
+    white, text, original, ink = fixture
+    error = BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled.new([1], 2, {})
+    partition = BlueCollarSystems::PDFVectorImporter::PlanarRegionPartition
+    partition.stub(:partition, lambda { |*_args| raise error }) do
+      raised = assert_raises(error.class) do
+        Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }], [text])
+      end
+      assert_same error, raised
+    end
+    assert_nil white.entities.stage
+    refute original.erased
+    refute ink.erased
+    refute text.erased
+    assert_empty white.entities.erased
+  end
+
+  def cancelling_controller(stage, after_work = false)
+    BlueCollarSystems::PDFVectorImporter::ImportRunControl::Controller.new(
+      :pages => [1], :requested_mode => :glyphs,
+      :cancel_probe => lambda do |snapshot|
+        snapshot[:stage] == stage && (!after_work || snapshot[:completed] > 0)
+      end)
+  end
+
+  def test_real_controller_cancels_partial_native_cells_without_erasing_source_or_peer_text
+    white, text, original, ink = fixture
+    before = Marshal.dump(ink.raw)
+    original.attributes['source_fill_original'] = true
+    controller = cancelling_controller(:white_mask_cells, true)
+    assert_raises(BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled) do
+      Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true,
+                          :preserve_source => true }], [text],
+                       :run_controller => controller, :page_number => 1)
+    end
+    stage = white.entities.stage
+    refute_nil stage
+    assert stage.erased
+    assert_operator stage.entities.items.length, :>, 0, 'some private cells were constructed before Esc'
+    refute original.erased
+    refute text.erased
+    refute ink.erased
+    assert_equal before, Marshal.dump(ink.raw)
+    assert_empty white.entities.erased
+    refute original.respond_to?(:hidden?) && original.hidden?
+  end
+
+  def test_real_controller_cancels_exact_partition_before_creating_native_stage
+    white, text, original, ink = fixture
+    controller = cancelling_controller(:white_mask_intersections)
+    assert_raises(BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled) do
+      Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }],
+        [text], :run_controller => controller, :page_number => 1)
+    end
+    assert_nil white.entities.stage
+    refute original.erased
+    refute ink.erased
+  end
+
+  def test_cancelled_stage_that_host_does_not_erase_is_an_uncertain_rollback
+    white, text, original, ink = fixture
+    add_group = white.entities.method(:add_group)
+    white.entities.define_singleton_method(:add_group) do
+      stage = add_group.call
+      stage.define_singleton_method(:erase!) { true }
+      stage
+    end
+    controller = cancelling_controller(:white_mask_cells, true)
+    error = assert_raises(BlueCollarSystems::PDFVectorImporter::ImportRunControl::RollbackFailure) do
+      Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }],
+        [text], :run_controller => controller, :page_number => 1)
+    end
+    assert_match(/cancelled white-mask rollback failed/, error.message)
+    refute original.erased
+    refute ink.erased
+    assert white.entities.stage.valid?
+  end
+
+  def test_nested_mask_cancellation_reaches_page_boundary_without_a_step_down_warning
+    require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/main'
+    importer = BlueCollarSystems::PDFVectorImporter
+    white, text, original, ink = fixture
+    stats = {}
+    error = assert_raises(importer::ImportRunControl::ImportCancelled) do
+      importer.keep_page_on_page_stage_failure(stats, 1, 'white_areas', 'x', 'y') do
+        Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }],
+          [text], :run_controller => cancelling_controller(:white_mask_cells, true), :page_number => 1)
+      end
+    end
+    assert_equal 1, error.next_page
+    refute stats.key?(:page_step_downs)
+    refute original.erased
+    refute ink.erased
+    assert white.entities.stage.erased
   end
 
   def test_later_unknown_and_translucent_masks_do_not_change
