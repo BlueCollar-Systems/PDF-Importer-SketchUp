@@ -1100,6 +1100,9 @@ module BlueCollarSystems
                        entity.entities
                      elsif entity.respond_to?(:definition) && entity.definition &&
                            entity.definition.respond_to?(:entities)
+                       def_id = entity.definition.object_id
+                       return if seen.key?(def_id)
+                       seen[def_id] = true
                        entity.definition.entities
                      end
         return unless collection && collection.respond_to?(:to_a)

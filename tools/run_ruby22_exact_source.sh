@@ -202,6 +202,8 @@ readonly SMOKE_TESTS=(
   test/no_mid_import_prompts_test.rb
   test/import_run_control_test.rb
   test/import_run_control_integration_test.rb
+  test/import_status_sink_throttle_test.rb
+  test/source_outline_shared_definition_test.rb
   test/unattended_multipage_import_test.rb
   test/failed_page_outcome_test.rb
   test/retained_page_view_fit_test.rb
