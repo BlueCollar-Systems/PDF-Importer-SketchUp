@@ -12,7 +12,7 @@ module BlueCollarSystems
       # remaining loops holes. :svg applies each record's declared fill rule.
       # Returns filled-left loops (CCW outer / CW hole), without duplicate closing
       # vertices, or nil when the bounded topology proof cannot be completed.
-      def self.normalize(regions, rule)
+      def self.normalize(regions, rule, opts = {})
         return nil unless [:native_union, :svg].include?(rule)
         prepared = prepare_regions(regions, rule)
         return nil unless prepared
@@ -23,16 +23,19 @@ module BlueCollarSystems
         end
         return [] if edges.empty?
         return nil if edges.length > MAX_INPUT_EDGES
-        atoms = split_edges(edges)
+        atoms = split_edges(edges, opts)
         return nil unless atoms
         boundary = []
-        atoms.each do |edge|
+        run_checkpoint!(opts, :white_mask_boundaries, 0, atoms.length)
+        atoms.each_with_index do |edge, index|
+          run_checkpoint!(opts, :white_mask_boundaries, index, atoms.length) if index % 64 == 0
           sides = side_points(edge, edges)
           return nil unless sides
           left, right = sides.map { |point| filled?(prepared, rule, point) }
           next if left == right
           boundary << (left ? edge : edge.reverse)
         end
+        run_checkpoint!(opts, :white_mask_boundaries, atoms.length, atoms.length)
         loops = closed_loops(boundary)
         return nil unless loops
         # A new rational intersection can be smaller than the host's Float
@@ -92,12 +95,34 @@ module BlueCollarSystems
         end
       end
 
-      def self.split_edges(edges)
+      def self.run_checkpoint!(opts, stage, completed, total)
+        controller = opts.is_a?(Hash) ? opts[:run_controller] : nil
+        return unless controller && controller.respond_to?(:checkpoint!)
+        controller.checkpoint!(stage, :completed => completed, :total => total,
+                               :page => opts[:page_number])
+      end
+
+      def self.split_edges(edges, opts = {})
         splits = edges.map(&:dup)
+        # The same exact Rational bounds serve every pair; constructing min/max
+        # arrays for all quadratic comparisons adds no geometric information.
+        boxes = edges.map do |edge|
+          a, b = edge
+          [[a[0], b[0]].min, [a[1], b[1]].min,
+           [a[0], b[0]].max, [a[1], b[1]].max]
+        end
+        pair_total = edges.length * (edges.length - 1) / 2
+        pairs = 0
+        run_checkpoint!(opts, :white_mask_intersections, 0, pair_total)
         edges.each_with_index do |first, i|
+          run_checkpoint!(opts, :white_mask_intersections, pairs, pair_total)
           ((i + 1)...edges.length).each do |j|
+            pairs += 1
+            run_checkpoint!(opts, :white_mask_intersections, pairs, pair_total) if pairs % 256 == 0
             second = edges[j]
-            next unless boxes_overlap?(first, second)
+            box, other = boxes[i], boxes[j]
+            next unless box[0] <= other[2] && other[0] <= box[2] &&
+                        box[1] <= other[3] && other[1] <= box[3]
             a, b = first
             c, d = second
             r, s, q = minus(b, a), minus(d, c), minus(c, a)
@@ -115,6 +140,7 @@ module BlueCollarSystems
             end
           end
         end
+        run_checkpoint!(opts, :white_mask_intersections, pair_total, pair_total)
         unique = {}
         edges.each_with_index do |edge, index|
           direction = minus(edge[1], edge[0])
