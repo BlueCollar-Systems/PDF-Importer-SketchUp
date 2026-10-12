@@ -269,7 +269,12 @@ module BlueCollarSystems
           stroke_style = should_stroke ? source_stroke_style(path.stroke_color) : nil
           stroke_bounds = effective_stroke_bounds(path) if should_stroke
           @stroke_footprints[:stroke_path_count] += 1 if should_stroke
-          if should_stroke && build_source_width_stroke!(dest,path,path_idx,path_layer,
+          # Preserve-visually builds a group per stroke. On a dense sheet such as
+          # S-505 (about 32,000 paths) those groups must land in the same
+          # 250-path batches as ordinary edges. One live parent receiving every
+          # add_group stalls SketchUp 2017 for the rest of the import.
+          stroke_owner = should_stroke ? staged_geometry_target(dest, path_idx) : dest
+          if should_stroke && build_source_width_stroke!(stroke_owner,path,path_idx,path_layer,
                stroke_style,stroke_bounds,page_origin_x,page_origin_y)
             # Source fill/stroke combinations currently remain on the existing
             # route with a counted limitation, so this branch owns stroke only.
