@@ -69,7 +69,8 @@ module BlueCollarSystems
         end
         run_checkpoint!(opts, :white_mask, masks.length, masks.length)
         result
-      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::RollbackFailure,
+             ImportRunControl::ResumeMismatch
         raise
       rescue RepresentationFidelity::ContractError
         raise
