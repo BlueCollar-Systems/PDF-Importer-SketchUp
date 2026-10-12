@@ -426,6 +426,32 @@ RUBY
     assert white.entities.stage.erased
   end
 
+  def test_top_level_composition_keeps_throwing_cleanup_terminal_at_the_page_boundary
+    require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/main'
+    importer = BlueCollarSystems::PDFVectorImporter
+    white, text, original, ink = fixture
+    add_group = white.entities.method(:add_group)
+    white.entities.define_singleton_method(:add_group) do
+      stage = add_group.call
+      stage.define_singleton_method(:erase!) { raise 'fictional host erase failure' }
+      stage
+    end
+    stats = {}
+    error = assert_raises(importer::ImportRunControl::RollbackFailure) do
+      importer.keep_page_on_page_stage_failure(stats, 1, 'white_areas', 'x', 'y') do
+        Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }],
+          [text], :run_controller => cancelling_controller(:white_mask_cells, true), :page_number => 1)
+      end
+    end
+    assert_equal importer::ImportRunControl::RollbackFailure, error.class
+    assert_match(/cancelled white-mask rollback failed: RuntimeError/, error.message)
+    refute stats.key?(:page_step_downs)
+    refute original.erased
+    refute ink.erased
+    refute text.erased
+    assert white.entities.stage.valid?
+  end
+
   def test_later_unknown_and_translucent_masks_do_not_change
     white, text, original, = fixture
     masks = [
