@@ -126,6 +126,32 @@ class GeometryBuilderLineweightTest < Minitest::Test
   def test_unknown_lineweight_mode_fails_explicitly
     assert_raises(ArgumentError) { build('10 20 m 30 20 l S','invented') }
   end
+  def test_dense_preserved_width_strokes_keep_source_plans_and_bounded_live_parents
+    count = Subject::GEOMETRY_STAGING_PATH_THRESHOLD + 41
+    stream = count.times.map { |i| "2 w 0 #{i} m 12 #{i} l S" }.join(' ')
+    model = Model.new
+    paths = IMP::ContentStreamParser.new([stream], nil).parse
+    builder = Subject.new(model, paths, [], [0, 0, 400, count + 10],
+      :group_per_page => false, :detect_arcs => false, :import_fills => false,
+      :lineweight_mode => 'Preserve visually')
+    owners = Hash.new(0)
+    plans = []
+    result = IMP::VectorStrokeFootprint.stub(:build!, lambda { |owner, plan, *_rest|
+      owners[owner.object_id] += 1
+      plans << plan
+      owner.add_group # The native builder owns a separate editable stroke group.
+      { :group => Object.new, :face_count => plan[:polygons].length, :edge_count => 4 }
+    }) { builder.build }
+    assert_equal count, plans.length
+    assert_equal count, owners.values.inject(0) { |sum, n| sum + n }
+    assert_equal [250, 250, 41], owners.values
+    assert_equal (0...count).to_a, plans.map { |plan| plan[:source_path_index] }
+    assert_equal [2.0], plans.map { |plan| plan[:source_width_pdf_points] }.uniq
+    assert_equal count, result[:geometry_staging][:stroke_footprints][:represented_path_count]
+    assert_equal true, result[:geometry_staging][:stroke_footprints][:all_source_widths_represented]
+    assert_equal 3, result[:geometry_staging][:retained_group_count]
+    assert_equal 0, result[:geometry_staging][:explode_count]
+  end
   def test_declared_width_groups_are_real_and_reuse_equal_width_without_averaging_ctm
     stream='2 w 10 20 m 30 20 l S 3 w 10 30 m 30 30 l S 2 0 0 3 0 0 cm 2 w 10 15 m 30 15 l S'
     model,result,plans=build(stream,'Group by lineweight',true)
