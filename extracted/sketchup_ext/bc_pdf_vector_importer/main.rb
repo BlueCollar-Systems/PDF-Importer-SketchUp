@@ -298,9 +298,14 @@ module BlueCollarSystems
          BatchHostPolicy.noninteractive?
         return lambda { |_snapshot| true }
       end
+      last_update = 0.0
       lambda do |snapshot|
-        if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
-          Sketchup.status_text = ImportDialog.progress_status(snapshot)
+        now = Time.now.to_f
+        if (now - last_update) >= 2.0
+          last_update = now
+          if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+            Sketchup.status_text = ImportDialog.progress_status(snapshot)
+          end
         end
       end
     end
@@ -4564,9 +4569,17 @@ module BlueCollarSystems
         identity = ImportRunControl.identity_for(
           source_path, opts, File.dirname(__FILE__)
         )
-        status_sink = opts[:status_sink] || lambda do |snapshot|
-          if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
-            Sketchup.status_text = ImportDialog.progress_status(snapshot)
+        status_sink = opts[:status_sink]
+        unless status_sink
+          last_sink_update = 0.0
+          status_sink = lambda do |snapshot|
+            now = Time.now.to_f
+            if (now - last_sink_update) >= 2.0
+              last_sink_update = now
+              if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+                Sketchup.status_text = ImportDialog.progress_status(snapshot)
+              end
+            end
           end
         end
         if defined?(BatchHostPolicy) &&
