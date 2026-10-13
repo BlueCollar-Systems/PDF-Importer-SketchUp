@@ -5,11 +5,12 @@
 # the pipeline.
 #
 # BCS-ARCH-001 Rule 5 sweep: quality-tier dials (arc_mode, cleanup_level,
-# lineweight_mode, hatch_mode, bezier_segments, merge_tolerance, raster_dpi,
+# hatch_mode, bezier_segments, merge_tolerance, raster_dpi,
 # detect_arcs, map_dashes, force_raster) are no longer
 # UI-adjustable. The MODES table below holds only the per-mode strategy
 # choices; quality parameters are baked into the consolidated defaults
-# applied uniformly in initialize().
+# applied uniformly in initialize(). Line widths remain an explicit output
+# choice: editable centerlines by default, or bounded source-width footprints.
 #
 # Copyright 2024-2026 BlueCollar Systems — BUILT. NOT BOUGHT.
 

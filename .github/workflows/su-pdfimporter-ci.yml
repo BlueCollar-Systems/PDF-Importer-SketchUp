@@ -107,6 +107,8 @@ jobs:
           ruby test/pdf_annotation_normalization_test.rb
           ruby test/pdf_object_tokenizer_test.rb
           ruby test/import_dialog_defaults_test.rb
+          ruby test/import_status_sink_throttle_test.rb
+          ruby test/source_outline_shared_definition_test.rb
           ruby test/default_import_round_cap_sheet_test.rb
           ruby test/import_resume_test.rb
           ruby test/pdf_navigation_link_appearance_test.rb
@@ -150,6 +152,7 @@ jobs:
           ruby test/separation_fill_fidelity_test.rb
           ruby test/stroke_clipping_test.rb
           ruby test/stroke_color_preservation_test.rb
+          ruby test/geometry_builder_lineweight_test.rb
           ruby test/pdf_color_space_test.rb
           ruby test/implicit_fill_close_test.rb
           ruby test/labels_empty_text_group_resume_signature_test.rb
@@ -185,6 +188,8 @@ jobs:
           ruby test/compound_fill_closed_contour_test.rb
           ruby test/planar_white_knockout_test.rb
           ruby test/planar_region_partition_test.rb
+          ruby test/planar_partition_performance_test.rb
+          ruby test/white_mask_composition_control_test.rb
           ruby test/late_pdf_overlays_test.rb
           ruby test/svg_paint_binding_test.rb
           ruby test/svg_region_boundary_test.rb

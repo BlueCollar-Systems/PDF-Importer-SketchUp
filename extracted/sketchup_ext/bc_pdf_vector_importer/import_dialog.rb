@@ -108,6 +108,15 @@ module BlueCollarSystems
       # Workflow choices kept after the Rule 5 sweep
       GROUPING_CHOICES         = 'Single group|Group per page|Group per layer|Group per color|Nested: page > layer|Nested: page > lineweight'
       PAGE_ARRANGEMENT_CHOICES = 'Spread (20% gap)|Compact gap|Touching pages|Overlay pages'
+      LINEWIDTH_CHOICES = [
+        ['Ignore', 'Editable centerlines (fast)'],
+        ['Preserve visually', 'Draw source line widths'],
+        ['Group by lineweight', 'Group centerlines by width'],
+        ['Map to tags', 'Put centerline widths on tags']
+      ].map { |pair| pair.map(&:freeze).freeze }.freeze
+      LINEWIDTH_HINT = 'Centerlines stay editable but do not reproduce PDF line thickness. ' \
+        'Drawing source widths takes longer; dense sheets or work beyond the time limit ' \
+        'retain centerlines and list the limit in the import report. Raster uses the page image.'.freeze
 
       # Closed-region page extrusion is disabled independently of 3D text.
       SHAPE_EXTRUSION_UI_ENABLED = false
@@ -131,9 +140,36 @@ module BlueCollarSystems
           'certified completed pages are kept and can be resumed.'
       end
 
+      PROGRESS_STAGE_LABELS = {
+          'white_mask_scan' => 'checking page content',
+          'white_mask_inventory' => 'reading PDF paint order',
+          'white_mask_inventory_glyphs' => 'reading text outlines',
+          'white_mask_binding' => 'matching fills to PDF',
+          'white_mask_binding_ink' => 'matching text to PDF',
+          'white_mask_ink' => 'reading text outlines',
+          'white_mask_boundaries' => 'processing fill boundaries',
+          'white_mask_intersections' => 'processing fill boundaries',
+          'white_mask_partition' => 'dividing fill regions',
+          'white_mask_cells' => 'building fill cutouts',
+          'white_mask_verify' => 'checking fill cutouts',
+          'white_mask_coverage' => 'checking text coverage',
+          'white_mask_style' => 'finishing fill cutouts',
+          'white_mask' => 'layering fills and text'
+      }.freeze
+
       def self.progress_status(snapshot)
         data = snapshot.is_a?(Hash) ? snapshot : {}
-        stage = data[:stage].to_s.tr('_', ' ')
+        stage_key = data[:stage].to_s
+        stage = PROGRESS_STAGE_LABELS.fetch(stage_key, stage_key.tr('_', ' '))
+        # Fine composition stages repeat for separate masks on the same page.
+        # The controller's page-wide monotonic value/ETA belong to an earlier
+        # mask after a restart; display the current task's real count instead.
+        repeated_mask_stage = stage_key.start_with?('white_mask_')
+        percentage = data[:percentage].to_f
+        if repeated_mask_stage
+          total = data[:total].to_i
+          percentage = total > 0 ? [data[:completed].to_i, total].min * 100.0 / total : 0.0
+        end
         page = data[:page] || data[:page_index]
         page_total = data[:page_total]
         prefix = 'PDF Import'
@@ -143,9 +179,9 @@ module BlueCollarSystems
           prefix += " — page #{page}"
         end
         text = "#{prefix} — #{stage} #{data[:completed].to_i}/" \
-          "#{data[:total].to_i} — #{format('%.1f', data[:percentage].to_f)}% — " \
+          "#{data[:total].to_i} — #{format('%.1f', percentage)}% — " \
           "elapsed #{format('%.1f', data[:elapsed_seconds].to_f)}s"
-        unless data[:eta_seconds].nil?
+        unless data[:eta_seconds].nil? || repeated_mask_stage
           text += " — ETA #{format('%.1f', data[:eta_seconds].to_f)}s"
         end
         text + ' — Esc to cancel'
@@ -193,12 +229,13 @@ module BlueCollarSystems
         text_val    = effective_text_mode(saved)
         itext_val   = saved[:import_text] || 'Yes'
         match_val   = effective_match_pdf_layers(saved)
+        lineweight_val = effective_lineweight_mode(saved)
         # A saved Audit = Yes (or BC_PDF_AUDIT=1) also applies here, so the
         # window says so instead of leaving a slow mode on unseen.
         audit_on    = audit_requested?({})
 
         dlg.set_html(basic_html(filename, mode_val, pages_val, scale_val, text_val, itext_val,
-                                match_val, audit_on))
+                                match_val, audit_on, lineweight_val))
 
         dlg.add_action_callback('on_import') do |_ctx, p|
           begin
@@ -207,12 +244,13 @@ module BlueCollarSystems
             text_mode   = p['text_mode']   || text_val
             import_text = p['import_text'] || 'Yes'
             match_pdf_layers = p['match_pdf_layers'] || match_val
+            lineweight = parse_lineweight_mode(p['lineweight_mode'] || lineweight_val)
             PageSelection.parse(pages_str)
             parse_import_scale(scale_str)
             save_prefs(last_mode: 'Auto', pages: pages_str,
                        scale: scale_str, text_mode: text_mode,
                        import_text: import_text,
-                       match_pdf_layers: match_pdf_layers)
+                       match_pdf_layers: match_pdf_layers, lineweight_mode: lineweight)
             mode_raw = MODES['Auto']
             mode_sym = {}
             mode_raw.each { |k, v| mode_sym[k.to_sym] = v }
@@ -220,7 +258,7 @@ module BlueCollarSystems
                                                scale: scale_str,
                                                text_mode: text_mode,
                                                import_text: import_text,
-                                               match_pdf_layers: match_pdf_layers))
+                                               match_pdf_layers: match_pdf_layers, lineweight_mode: lineweight))
             dlg.close
           rescue ArgumentError => error
             UI.messagebox(error.message)
@@ -254,7 +292,7 @@ module BlueCollarSystems
         result
       end
 
-      # ---- HtmlDialog: Advanced (workflow only — quality dials gone) ---
+      # ---- HtmlDialog: Advanced (workflow and line-width representation) ---
       def self.show_html_advanced(filename, pages_str, scale_str, text_mode_str, saved)
         result = nil
         dlg = UI::HtmlDialog.new(
@@ -274,6 +312,7 @@ module BlueCollarSystems
           match_pdf_layers: effective_match_pdf_layers(saved),
           grouping_mode:    saved[:grouping_mode]                      || 'Group per page',
           page_arrangement: saved[:page_arrangement]                   || 'Spread (20% gap)',
+          lineweight_mode: effective_lineweight_mode(saved),
           extrude_to_3d:    saved[:extrude_to_3d]                      || 'No',
           extrude_depth_mm: saved[:extrude_depth_mm]                   || '',
           audit:            audit_choice(saved[:audit])
@@ -285,12 +324,14 @@ module BlueCollarSystems
           begin
             PageSelection.parse(p['pages'])
             parse_import_scale(p['scale'] || '1.0')
+            lineweight = parse_lineweight_mode(p['lineweight_mode'] || d[:lineweight_mode])
             to_save = {
               last_mode: p['mode'],
               pages: p['pages'], scale: p['scale'],
               text_mode: p['text_mode'], import_text: p['import_text'],
               match_pdf_layers: p['match_pdf_layers'],
               page_arrangement: p['page_arrangement'],
+              lineweight_mode: lineweight,
               extrude_to_3d: p['extrude_to_3d'],
               extrude_depth_mm: p['extrude_depth_mm']
             }
@@ -310,6 +351,7 @@ module BlueCollarSystems
               import_text: p['import_text'],
               match_pdf_layers: p['match_pdf_layers'],
               page_arrangement: p['page_arrangement'],
+              lineweight_mode: lineweight,
               extrude_to_3d: p['extrude_to_3d'],
               extrude_depth_mm: p['extrude_depth_mm'],
               audit: audit_choice(p['audit'])
@@ -377,7 +419,9 @@ module BlueCollarSystems
       CSS
 
       def self.basic_html(filename, _mode, pages, scale, text_mode, import_text, match_pdf_layers,
-                          audit_on = false)
+                          audit_on = false, lineweight_mode = 'Ignore')
+        lineweight_mode = effective_lineweight_mode(:lineweight_mode => lineweight_mode)
+        lineweight_label = LINEWIDTH_CHOICES.assoc(lineweight_mode)[1]
         text_opts = TEXT_MODE_CHOICES.map { |v|
           sel = v == text_mode ? ' selected' : ''
           "<option value=\"#{v}\"#{sel}>#{v}</option>"
@@ -396,6 +440,7 @@ module BlueCollarSystems
           <p class="sub">#{esc(filename)}</p>
           <p class="hint" style="margin-bottom:14px">#{esc(AUTO_MODE_HINT)}</p>
           #{audit_note_html}
+          <p class="hint hint-block" id="line-width-note">Line widths: #{esc(lineweight_label)}. Change in Advanced. #{esc(LINEWIDTH_HINT)}</p>
           <div class="row"><label>Pages</label>
             <input type="text" id="pages" value="#{esc(pages)}" placeholder="All">
             <p class="hint">e.g. All &nbsp;&bull;&nbsp; 1 &nbsp;&bull;&nbsp; 2-5 &nbsp;&bull;&nbsp; 1,3,7</p>
@@ -430,6 +475,7 @@ module BlueCollarSystems
             scale:document.getElementById('scale').value.trim()||'1.0',
             import_text:document.getElementById('import_text').value,
             text_mode:document.getElementById('text_mode').value,
+            lineweight_mode:'#{lineweight_mode}',
             match_pdf_layers:document.getElementById('match_pdf_layers').value};}
           function doImport(){sketchup.on_import(payload());}
           function advanced(){sketchup.on_advanced(payload());}
@@ -462,6 +508,11 @@ module BlueCollarSystems
         page_arrangement_opts = PAGE_ARRANGEMENT_CHOICES.split('|').map{|v|
           sel = d[:page_arrangement] == v ? ' selected' : ''
           "<option value=\"#{esc(v)}\"#{sel}>#{esc(v)}</option>"
+        }.join
+        lineweight_mode = effective_lineweight_mode(d)
+        linewidth_opts = LINEWIDTH_CHOICES.map { |value, label|
+          selected = lineweight_mode == value ? ' selected' : ''
+          "<option value=\"#{esc(value)}\"#{selected}>#{esc(label)}</option>"
         }.join
 
         audit_forced = audit_env_on?
@@ -500,6 +551,11 @@ module BlueCollarSystems
               <select id="text_mode">#{text_opts}</select></div>
           </div>
           #{text_mode_hint_html}
+          <div class="section">Lines</div>
+          <div class="row"><label>Line widths</label>
+            <select id="lineweight_mode">#{linewidth_opts}</select>
+            <p class="hint">#{esc(LINEWIDTH_HINT)}</p>
+          </div>
           <div class="section">Layers</div>
           <div class="row"><label>Match PDF Layers</label>
             <select id="match_pdf_layers">
@@ -525,6 +581,7 @@ module BlueCollarSystems
             scale:document.getElementById('scale').value.trim()||'1.0',
             import_text:document.getElementById('import_text').value,
             text_mode:document.getElementById('text_mode').value,
+            lineweight_mode:document.getElementById('lineweight_mode').value,
             match_pdf_layers:document.getElementById('match_pdf_layers').value,
             page_arrangement:document.getElementById('page_arrangement').value,
             audit:document.getElementById('audit').value,
@@ -545,33 +602,38 @@ module BlueCollarSystems
       # ---- UI.inputbox fallbacks (headless / pre-2017 SU) ----------
       def self.show_inputbox_basic(filename, saved)
         prompts   = ["Pages (1, 1-5, or All):","Scale Factor:",
-                     "Import Text:","Text Rendering:","Match PDF Layers:"]
+                     "Import Text:","Text Rendering:","Match PDF Layers:",
+                     "Line widths (limits use reported centerlines):"]
+        linewidth = effective_lineweight_mode(saved)
         defaults  = ['All', saved[:scale]||'1.0',
                      saved[:import_text]||'Yes', effective_text_mode(saved),
-                     effective_match_pdf_layers(saved)]
-        dropdowns = ['', '', YES_NO, TEXT_MODES, YES_NO]
+                     effective_match_pdf_layers(saved), LINEWIDTH_CHOICES.assoc(linewidth)[1]]
+        dropdowns = ['', '', YES_NO, TEXT_MODES, YES_NO, LINEWIDTH_CHOICES.map(&:last).join('|')]
         result = UI.inputbox(prompts, defaults, dropdowns, "Import PDF \u2014 #{filename}")
         return nil unless result
-        pages_str, scale_str, import_text_str, text_mode_str, match_layers_str = result
+        pages_str, scale_str, import_text_str, text_mode_str, match_layers_str, lineweight_str = result
+        lineweight_str ||= linewidth
         return nil unless valid_page_input?(pages_str)
         return nil unless valid_scale_input?(scale_str)
+        return nil unless valid_lineweight_input?(lineweight_str)
+        linewidth = parse_lineweight_mode(lineweight_str)
         save_prefs(last_mode: 'Auto', pages: pages_str,
                    scale: scale_str, import_text: import_text_str,
-                   text_mode: text_mode_str, match_pdf_layers: match_layers_str)
+                   text_mode: text_mode_str, match_pdf_layers: match_layers_str, lineweight_mode: linewidth)
         mode_raw = MODES['Auto']
         sym_attrs = {}
         mode_raw.each { |k, v| sym_attrs[k.to_sym] = v }
         build_opts(sym_attrs.merge(pages: pages_str, scale: scale_str,
                                    import_text: import_text_str,
                                    text_mode: text_mode_str,
-                                   match_pdf_layers: match_layers_str))
+                                   match_pdf_layers: match_layers_str, lineweight_mode: linewidth))
       end
 
       def self.show_inputbox_advanced(filename, pages_str, scale_str, text_mode_str, saved)
         prompts = [
           "Mode:","Pages:","Scale Factor:",
           "Import Text:","Text Rendering:","Match PDF Layers:",
-          "Page Arrangement:"
+          "Page Arrangement:","Line widths (limits use reported centerlines):"
         ]
         defaults = [
           valid_mode_name(saved[:last_mode]),
@@ -579,21 +641,26 @@ module BlueCollarSystems
           saved[:import_text]||'Yes',
           text_mode_str||effective_text_mode(saved),
           effective_match_pdf_layers(saved),
-          saved[:page_arrangement]||'Spread (20% gap)'
+          saved[:page_arrangement]||'Spread (20% gap)',
+          LINEWIDTH_CHOICES.assoc(effective_lineweight_mode(saved))[1]
         ]
         # A saved 'Hybrid' is the same as Auto, which is what the list offers.
         defaults[0] = dialog_mode_name(defaults[0])
-        dropdowns = [MODE_CHOICES,'','',YES_NO,TEXT_MODES,YES_NO,PAGE_ARRANGEMENT_CHOICES]
+        dropdowns = [MODE_CHOICES,'','',YES_NO,TEXT_MODES,YES_NO,PAGE_ARRANGEMENT_CHOICES,
+          LINEWIDTH_CHOICES.map(&:last).join('|')]
         result = UI.inputbox(prompts, defaults, dropdowns, "Advanced Import \u2014 #{filename}")
         return nil unless result
         p_mode,p_pages,p_scale,p_import_text,p_text_mode,
-        p_match_layers,p_page_arrangement = result
+        p_match_layers,p_page_arrangement,p_lineweight = result
+        p_lineweight ||= effective_lineweight_mode(saved)
         return nil unless valid_page_input?(p_pages)
         return nil unless valid_scale_input?(p_scale)
+        return nil unless valid_lineweight_input?(p_lineweight)
+        linewidth = parse_lineweight_mode(p_lineweight)
         save_prefs(last_mode:p_mode,pages:p_pages,scale:p_scale,
                    import_text:p_import_text,text_mode:p_text_mode,
                    match_pdf_layers:p_match_layers,
-                   page_arrangement:p_page_arrangement)
+                   page_arrangement:p_page_arrangement,lineweight_mode:linewidth)
         mode_raw = MODES[p_mode] || MODES['Auto']
         build_opts(import_mode:mode_raw['import_mode'],
                    pages:p_pages,scale:p_scale,
@@ -602,7 +669,7 @@ module BlueCollarSystems
                    group_by_color:'Yes',
                    import_text:p_import_text,text_mode:p_text_mode,
                    match_pdf_layers:p_match_layers,
-                   page_arrangement:p_page_arrangement)
+                   page_arrangement:p_page_arrangement,lineweight_mode:linewidth)
       end
 
       def self.valid_page_input?(value)
@@ -615,6 +682,14 @@ module BlueCollarSystems
 
       def self.valid_scale_input?(value)
         parse_import_scale(value)
+        true
+      rescue ArgumentError => error
+        UI.messagebox(error.message)
+        false
+      end
+
+      def self.valid_lineweight_input?(value)
+        parse_lineweight_mode(value)
         true
       rescue ArgumentError => error
         UI.messagebox(error.message)
@@ -677,10 +752,9 @@ module BlueCollarSystems
         resumable = !is_raster && import_text && group_per_page &&
           [:text, :labels, :text3d, :glyphs, :geometry].include?(text_mode)
 
-        # Consolidated defaults (BCS-ARCH-001 Rule 5 — every mode targets
-        # identical "indistinguishable from source" quality; quality dials
-        # are never user-adjustable). These values come from the
-        # parameter table in import_config.rb.
+        # Shared sampling defaults from the parameter table in import_config.
+        # Text representation and line-width output are explicit choices;
+        # centerlines and reported bounded step-downs do not claim exact widths.
         {
           scale:            scale,
           pages:            pages,
@@ -713,7 +787,7 @@ module BlueCollarSystems
           # 'Preserve visually' builds a width footprint (about 97 one-face
           # groups) per round-capped line, so it stays an explicit choice. As
           # the default it made a dense sheet run for tens of minutes.
-          lineweight_mode:  is_raster ? 'Ignore' : (raw[:lineweight_mode] || 'Ignore').to_s,
+          lineweight_mode:  is_raster ? 'Ignore' : parse_lineweight_mode(raw[:lineweight_mode]),
           grouping_mode:    (raw[:grouping_mode] || 'Group per page').to_s,
           import_mode:      mode_str,
           match_pdf_layers: (raw[:match_pdf_layers] || 'Yes') == 'Yes',
@@ -798,13 +872,26 @@ module BlueCollarSystems
         FIRST_RUN_MATCH_PDF_LAYERS
       end
 
+      def self.parse_lineweight_mode(value)
+        return 'Ignore' if value.nil?
+        choice = LINEWIDTH_CHOICES.find { |mode, label| value.to_s == mode || value.to_s == label }
+        raise ArgumentError, 'Choose one of the listed Line widths options.' unless choice
+        choice[0]
+      end
+
+      def self.effective_lineweight_mode(prefs)
+        parse_lineweight_mode(prefs[:lineweight_mode])
+      rescue ArgumentError
+        'Ignore'
+      end
+
       def self.load_prefs
         prefs = {}
         begin
           %w[last_mode last_preset scale layer_name
              group_per_page group_by_color
              import_text text_mode match_pdf_layers
-             grouping_mode
+             grouping_mode lineweight_mode
              page_arrangement import_mode extrude_to_3d extrude_depth_mm
              audit
           ].each do |key|
@@ -833,6 +920,8 @@ module BlueCollarSystems
                        effective_text_mode(text_mode: val)
                      when 'match_pdf_layers'
                        effective_match_pdf_layers(match_pdf_layers: val)
+                     when 'lineweight_mode'
+                       effective_lineweight_mode(lineweight_mode: val)
                      else
                        val.to_s
                      end

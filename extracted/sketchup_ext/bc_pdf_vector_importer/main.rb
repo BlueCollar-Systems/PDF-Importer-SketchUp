@@ -298,15 +298,17 @@ module BlueCollarSystems
          BatchHostPolicy.noninteractive?
         return lambda { |_snapshot| true }
       end
-      last_update = 0.0
+      # Every controller checkpoint still publishes and probes Escape. Only
+      # expensive GUI writes are limited, using a clock unaffected by wall time.
+      last_status_at = nil
       lambda do |snapshot|
-        now = Time.now.to_f
-        if (now - last_update) >= 2.0
-          last_update = now
-          if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
-            Sketchup.status_text = ImportDialog.progress_status(snapshot)
-          end
+        if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+          now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          next true if last_status_at && now - last_status_at < 2.0
+          Sketchup.status_text = ImportDialog.progress_status(snapshot)
+          last_status_at = now
         end
+        true
       end
     end
 
@@ -3121,19 +3123,42 @@ module BlueCollarSystems
         source_ids[item.source_span_id.to_s] = true if item.respond_to?(:source_span_id)
       end
       source_units = Array(opts[:source_units])
+      source_units_by_id = {}
+      source_units.each do |unit|
+        id = unit.is_a?(Hash) ? unit[:source_unit_id].to_s : ''
+        if id.empty? || source_units_by_id.key?(id)
+          raise RepresentationFidelity::ContractError,
+                'source-unit identifiers are missing or duplicated before mask composition'
+        end
+        source_units_by_id[id] = unit
+      end
       roots = []
+      found_source_units = {}
+      scanned_groups = 0
+      run_control_checkpoint!(opts, :white_mask_scan,
+        :page => opts[:page_number], :completed => 0, :total => 1)
       walk = lambda do |entities, parent_transform|
         entities.to_a.each do |entity|
           kind = entity.respond_to?(:typename) ? entity.typename.to_s : ''
           next unless ['Group', 'ComponentInstance', 'Image'].include?(kind)
+          scanned_groups += 1
+          if (scanned_groups % 64).zero?
+            run_control_checkpoint!(opts, :white_mask_scan,
+              :page => opts[:page_number], :completed => 0, :total => 1)
+          end
           transform = parent_transform * entity.transformation
           mask = masks_by_id[entity.entityID]
           mask[:transformation] = transform if mask
           source_id = entity.get_attribute('BC_PDF_Importer', 'source_span_id', '').to_s
           unit_id = entity.get_attribute('BC_PDF_Importer', 'source_unit_id', '').to_s
-          unit = unit_id.empty? ? nil : source_units.find { |row| row[:source_unit_id].to_s == unit_id }
+          unit = source_units_by_id[unit_id]
           if source_ids.key?(source_id) || unit
+            if unit && found_source_units.key?(unit_id)
+              raise RepresentationFidelity::ContractError,
+                    'source-unit physical roots are missing or duplicated before mask composition'
+            end
             verify_composition_source_unit!(entity, unit) if unit
+            found_source_units[unit_id] = true if unit
             roots << { :group => entity, :transformation => transform,
               :parent_transform => parent_transform, :verified_source_unit => !!unit }
           elsif kind != 'Image'
@@ -3143,6 +3168,8 @@ module BlueCollarSystems
         end
       end
       walk.call(builder.page_group.entities, Geom::Transformation.new)
+      run_control_checkpoint!(opts, :white_mask_scan,
+        :page => opts[:page_number], :completed => 1, :total => 1)
       unless roots.count { |root| root[:verified_source_unit] } == source_units.length
         raise RepresentationFidelity::ContractError, 'source-unit physical roots are missing or duplicated before mask composition'
       end
@@ -3161,14 +3188,18 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError,
             'source SVG is unavailable for native paint-order verification'
         end
+        source_svg_sha256 = Digest::SHA256.hexdigest(document[:svg].to_s)
         source_units.each do |unit|
           expected = unit[:expected_evidence]
-          unless expected && expected[:source_identity][:svg_sha256] == Digest::SHA256.hexdigest(document[:svg].to_s)
+          unless expected && expected[:source_identity][:svg_sha256] == source_svg_sha256
             raise RepresentationFidelity::ContractError, 'source-unit paint order uses a different source SVG'
           end
         end
         inventory = SvgPaintOrder.build(document[:svg], media_box,
-          :scale => opts[:scale], :svg_page_box => opts[:svg_page_box], :y_offset => 0.0)
+          :scale => opts[:scale], :svg_page_box => opts[:svg_page_box], :y_offset => 0.0,
+          :run_controller => opts[:run_controller], :page_number => opts[:page_number])
+        run_control_checkpoint!(opts, :white_mask_inventory,
+          :page => opts[:page_number], :completed => 1, :total => 1)
         transform = page_representation_transform(media_box, opts[:scale],
           opts[:page_rotation], opts[:y_offset])
         [:white_paths, :opaque_paths, :glyphs].each do |key|
@@ -3184,10 +3215,14 @@ module BlueCollarSystems
           end
         end
       end
-      bound = SvgPaintBinding.prepare(masks, roots, inventory, :scale => opts[:scale])
-      report = PlanarWhiteKnockout.compose!(bound[:masks], roots, :ink_faces => bound[:ink_faces])
+      control_opts = { :run_controller => opts[:run_controller],
+                       :page_number => opts[:page_number] }
+      bound = SvgPaintBinding.prepare(masks, roots, inventory,
+        control_opts.merge(:scale => opts[:scale]))
+      report = PlanarWhiteKnockout.compose!(bound[:masks], roots,
+        control_opts.merge(:ink_faces => bound[:ink_faces]))
       report[:source_binding] = bound[:binding]
-      report[:source_svg_sha256] = Digest::SHA256.hexdigest(document[:svg].to_s) if document
+      report[:source_svg_sha256] = source_svg_sha256 if document
       { :report => report, :highest_text_z => highest_text_z,
         :final_page_crops => bound[:ink_faces].select { |face| face[:final_page_crop] == true } }
     end
@@ -4569,19 +4604,7 @@ module BlueCollarSystems
         identity = ImportRunControl.identity_for(
           source_path, opts, File.dirname(__FILE__)
         )
-        status_sink = opts[:status_sink]
-        unless status_sink
-          last_sink_update = 0.0
-          status_sink = lambda do |snapshot|
-            now = Time.now.to_f
-            if (now - last_sink_update) >= 2.0
-              last_sink_update = now
-              if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
-                Sketchup.status_text = ImportDialog.progress_status(snapshot)
-              end
-            end
-          end
-        end
+        status_sink = import_status_sink(opts)
         if defined?(BatchHostPolicy) &&
            BatchHostPolicy.respond_to?(:noninteractive?) &&
            BatchHostPolicy.noninteractive?
@@ -6401,6 +6424,7 @@ module BlueCollarSystems
         composition = compose_page_white_masks!(builder, text_items, media_box,
           :scale => opts[:scale], :svg_page_box => svg_page_box,
           :page_rotation => page_rotation, :y_offset => page_y_offset,
+          :run_controller => opts[:run_controller], :page_number => page_num,
           :svg_provider => paint_svg_provider,
           :source_units => Array(stats[:source_glyph_physical_deliveries]).select { |row| row[:page] == page_num })
         end

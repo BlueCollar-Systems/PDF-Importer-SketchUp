@@ -23,14 +23,20 @@ millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
 ### Recent fixes (v3.7.166)
+- Imports use editable centerlines by default. Advanced **Line widths → Draw source line widths** is an explicit option, saved for subsequent imports and available in the legacy dialog too. Dense sheets or work beyond the time limit retain centerlines and report the limit instead of claiming preserved widths.
 
-- Imports keep each stroked line as one editable edge by default again, as v3.7.162 did. Since v3.7.163 every import except Raster quietly used "Preserve visually" line widths, which built about 97 small shapes per line, so a sheet of tens of thousands of lines took well over half an hour.
-- When "Preserve visually" is asked for, a dense sheet of round-capped strokes stays on editable centerlines so SketchUp can finish. The status bar keeps counting and says why.
-- Status updates are paced so SketchUp 2017 does not stall redrawing the status bar. Thick strokes that cannot be filled exactly are left as centerlines before the slow width planner runs. Repeated text definitions are walked once.
+- Esc can stop white-mask scanning, source binding, exact intersections and native cell construction. Cancellation removes only the active composition stage before the pipeline rolls back the current page; uncertain cleanup remains a terminal error.
+- White-mask composition merges redundant adjacent cells with the same exact region and source owner. Original contours, ink coverage, material boundaries and construction checks remain intact; requested text modes are unchanged.
+- Source-unit lookup uses an index, and the source SVG is hashed once for all unit comparisons rather than once per unit.
+- Fill/text progress uses plain stage names and the current task's counts; a later mask no longer inherits the earlier mask's 100% or stale ETA.
+- Status-bar drawing is limited to one update every two seconds while every progress and cancellation checkpoint still runs. Final import notices remain immediate.
+- Shared glyph definitions are scanned once when applying source outline styles; each instance keeps its own placement and material behavior.
+- Any failed fill construction verifies removal of its private stage and restoration of source visibility. Uncertain cleanup stops the page commit instead of retaining partial work.
+- Exact Ruby 2.2.4 tests cover bounded stroke batches, cancellation and exact partition coverage. Real-host timing and save/reopen acceptance for this candidate remain pending; earlier r8 native results do not certify these new changes.
 
 ### Earlier fixes (v3.7.165)
 
-- A dense sheet such as a foundation detail keeps real stroke widths, and those width groups are built in batches of 250. SketchUp 2017 no longer stalls while every stroke is added to one parent.
+- Dense sheets keep preserved stroke widths inside batches of 250 rather than attaching every stroke group to one live parent. This removes the unbounded construction path; import time still depends on the PDF and host.
 
 ### Earlier fixes (v3.7.164)
 

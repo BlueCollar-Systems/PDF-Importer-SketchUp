@@ -1,5 +1,6 @@
 require 'timeout'
 require_relative 'stroke_color_preservation_test'
+require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/main'
 
 class GeometryBuilderLineweightTest < Minitest::Test
   IMP=BlueCollarSystems::PDFVectorImporter
@@ -140,6 +141,32 @@ class GeometryBuilderLineweightTest < Minitest::Test
   def test_unknown_lineweight_mode_fails_explicitly
     assert_raises(ArgumentError) { build('10 20 m 30 20 l S','invented') }
   end
+  def test_dense_preserved_width_strokes_keep_source_plans_and_bounded_live_parents
+    count = Subject::GEOMETRY_STAGING_PATH_THRESHOLD + 41
+    stream = count.times.map { |i| "2 w 0 #{i} m 12 #{i} l S" }.join(' ')
+    model = Model.new
+    paths = IMP::ContentStreamParser.new([stream], nil).parse
+    builder = Subject.new(model, paths, [], [0, 0, 400, count + 10],
+      :group_per_page => false, :detect_arcs => false, :import_fills => false,
+      :lineweight_mode => 'Preserve visually')
+    owners = Hash.new(0)
+    plans = []
+    result = IMP::VectorStrokeFootprint.stub(:build!, lambda { |owner, plan, *_rest|
+      owners[owner.object_id] += 1
+      plans << plan
+      owner.add_group # The native builder owns a separate editable stroke group.
+      { :group => Object.new, :face_count => plan[:polygons].length, :edge_count => 4 }
+    }) { builder.build }
+    assert_equal count, plans.length
+    assert_equal count, owners.values.inject(0) { |sum, n| sum + n }
+    assert_equal [250, 250, 41], owners.values
+    assert_equal (0...count).to_a, plans.map { |plan| plan[:source_path_index] }
+    assert_equal [2.0], plans.map { |plan| plan[:source_width_pdf_points] }.uniq
+    assert_equal count, result[:geometry_staging][:stroke_footprints][:represented_path_count]
+    assert_equal true, result[:geometry_staging][:stroke_footprints][:all_source_widths_represented]
+    assert_equal 3, result[:geometry_staging][:retained_group_count]
+    assert_equal 0, result[:geometry_staging][:explode_count]
+  end
   def test_declared_width_groups_are_real_and_reuse_equal_width_without_averaging_ctm
     stream='2 w 10 20 m 30 20 l S 3 w 10 30 m 30 30 l S 2 0 0 3 0 0 cm 2 w 10 15 m 30 15 l S'
     model,result,plans=build(stream,'Group by lineweight',true)
@@ -167,6 +194,119 @@ class GeometryBuilderLineweightTest < Minitest::Test
     assert_equal [[0,255,0],[255,0,0]],edges.map { |e| c=e.material.color; [c.red,c.green,c.blue] }.uniq
     assert_equal names,result[:geometry_staging][:lineweight_organization][:tag_names]
     assert_equal false,result[:geometry_staging][:lineweight_organization][:physical_width_preservation_claimed]
+  end
+
+  def footprint_progress_run(cancel_at = nil)
+    stream = '2 w 10 10 m 20 10 l S ' \
+             '2 w 10 20 m 20 20 l 10 25 m 20 25 l S ' \
+             '2 w 10 30 m 20 30 l S'
+    paths = IMP::ContentStreamParser.new([stream], nil).parse
+    snapshots, probed, details, status, built = [], [], [], [], []
+    now = 0.0
+    stroke_probes = 0
+    controller = nil
+    result, cancelled = nil, nil
+    IMP::BatchHostPolicy.stub(:noninteractive?, false) do
+      Process.stub(:clock_gettime, lambda { |_kind| now }) do
+        Sketchup.stub(:status_text=, lambda { |text| status << text }) do
+          gui_sink = IMP.import_status_sink({})
+          controller = IMP::ImportRunControl::Controller.new(
+            :pages => [7], :requested_mode => :geometry,
+            :clock => lambda { now },
+            :status_sink => lambda { |snapshot|
+              snapshots << snapshot
+              now += 2.0
+              gui_sink.call(snapshot)
+            },
+            :cancel_probe => lambda { |snapshot|
+              probed << snapshot
+              stroke_probes += 1 if snapshot[:stage] == :stroke_footprint
+              !cancel_at.nil? && stroke_probes == cancel_at
+            }
+          )
+          checkpoint = controller.method(:checkpoint!)
+          builder = Subject.new(Model.new, paths, [], [0, 0, 100, 80],
+            :group_per_page => false, :detect_arcs => false, :import_fills => false,
+            :lineweight_mode => 'Preserve visually', :page_number => 7,
+            :run_controller => controller)
+          # These fake two-second status pulses isolate progress/cancellation;
+          # the real three-second native-work threshold is covered below.
+          builder.define_singleton_method(:footprint_time_budget_seconds) { 60.0 }
+          controller.stub(:checkpoint!, lambda { |stage, detail|
+            details << [stage, detail.dup]
+            checkpoint.call(stage, detail)
+          }) do
+            IMP::VectorStrokeFootprint.stub(:build!, lambda { |_owner, plan, *_|
+              built << plan
+              {:group => Object.new, :face_count => 1, :edge_count => 4}
+            }) do
+              begin
+                result = builder.build
+              rescue IMP::ImportRunControl::ImportCancelled => error
+                cancelled = error
+              end
+            end
+          end
+        end
+      end
+    end
+    {:snapshots => snapshots, :probed => probed, :details => details,
+     :status => status, :built => built, :result => result, :cancelled => cancelled}
+  end
+
+  def test_source_width_work_reports_real_zero_based_path_progress_and_page
+    run = footprint_progress_run
+    assert_nil run[:cancelled]
+    footprints = run[:snapshots].select { |snapshot| snapshot[:stage] == :stroke_footprint }
+    assert_equal [0, 1, 1, 2], footprints.map { |snapshot| snapshot[:completed] }
+    assert_equal [3, 3, 3, 3], footprints.map { |snapshot| snapshot[:total] }
+    assert_equal [7, 7, 7, 7], footprints.map { |snapshot| snapshot[:page] }
+    assert_in_delta 100.0 / 3.0, footprints[1][:percentage], 0.001
+    assert_in_delta 200.0 / 3.0, footprints.last[:percentage], 0.001
+    raw = run[:details].select { |stage, _detail| stage == :stroke_footprint }.map { |pair| pair[1] }
+    assert_equal [[0, 0], [1, 0], [1, 1], [2, 0]], raw.map { |detail| [detail[:path], detail[:subpath]] }
+    assert_equal run[:snapshots], run[:probed], 'every footprint still polls cancellation'
+    lines = run[:status].select { |text| text.include?('stroke footprint') }
+    assert_equal 4, lines.length
+    assert_includes lines[1], 'page 7'
+    assert_includes lines[1], 'stroke footprint 1/3'
+    assert_includes lines[1], '33.3%'
+    assert_includes lines.last, 'stroke footprint 2/3'
+    endpoint = run[:snapshots].last
+    assert_equal :geometry_path, endpoint[:stage]
+    assert_equal [3, 3, 100.0], [endpoint[:completed], endpoint[:total], endpoint[:percentage]],
+      'the existing post-loop checkpoint announces completed work, never an in-flight stroke'
+    records = run[:result][:geometry_staging][:stroke_footprints][:records]
+    assert_equal [[0, 0], [1, 0], [1, 1], [2, 0]], records.map { |item| [item[:path_index], item[:subpath_index]] }
+  end
+
+  def test_source_width_progress_still_cancels_before_later_subpath_construction
+    run = footprint_progress_run(3)
+    error = run[:cancelled]
+    assert_instance_of IMP::ImportRunControl::ImportCancelled, error
+    assert_equal 7, error.next_page
+    assert_equal :stroke_footprint, error.snapshot[:stage]
+    assert_equal [1, 3], [error.snapshot[:completed], error.snapshot[:total]]
+    assert_equal 2, run[:built].length, 'the cancelled third subpath must not be built'
+    assert_equal run[:snapshots], run[:probed]
+    assert_includes run[:status].last, 'stroke footprint 1/3'
+    assert_nil run[:result]
+  end
+
+  def test_dense_unresolved_strokes_keep_every_item_in_the_report
+    count = 301
+    stream = count.times.map { |index| "0 w 10 #{index} m 20 #{index} l S" }.join(' ')
+    paths = IMP::ContentStreamParser.new([stream], nil).parse
+    builder = Subject.new(Model.new, paths, [], [0, 0, 100, count + 10],
+      :group_per_page => false, :detect_arcs => false, :import_fills => false,
+      :lineweight_mode => 'Preserve visually')
+    result = builder.build
+    proof = result[:geometry_staging][:stroke_footprints]
+    assert_equal count, proof[:unresolved_path_count]
+    assert_equal count, proof[:records].length
+    assert_equal (0...count).to_a, proof[:records].map { |item| item[:path_index] }
+    assert proof[:records].all? { |item| !item[:reason].to_s.empty? }
+    assert_equal false, proof[:all_source_widths_represented]
   end
 
   def test_round_cap_cell_estimate_flags_a_thirty_thousand_stroke_sheet
@@ -230,18 +370,42 @@ class GeometryBuilderLineweightTest < Minitest::Test
     builder=Subject.new(model,paths,[],[0,0,400,80],:group_per_page=>false,:detect_arcs=>false,
       :import_fills=>false,:lineweight_mode=>'Preserve visually')
     calls=0
+     now=1000.0
     replacement=lambda do |*|
       calls += 1
+       now=1003.0
       {:group=>Object.new,:face_count=>1,:edge_count=>0}
     end
-    builder.define_singleton_method(:footprint_time_budget_seconds) { 0.0 }
-    result=IMP::VectorStrokeFootprint.stub(:build!,replacement) { builder.build }
+     result=Process.stub(:clock_gettime,lambda { |_kind| now }) do
+       IMP::VectorStrokeFootprint.stub(:build!,replacement) { builder.build }
+     end
     proof=result[:geometry_staging][:stroke_footprints]
     assert_equal 1,calls
     assert_equal true,proof[:simplified]
     assert_equal 'time_budget',proof[:simplify_trigger]
+     assert_match(/time limit/, proof[:message])
+     assert_match(/page estimate/, proof[:message])
+     refute_match(/faces were skipped/, proof[:message])
     assert_equal 1,proof[:represented_path_count]
     assert_equal 3,proof[:unresolved_path_count]
     assert_equal 3,result[:edges]
   end
+
+   def test_footprint_budget_uses_monotonic_threshold_despite_wall_clock_changes
+     builder=Subject.new(Model.new,[],[],[0,0,100,80],:lineweight_mode=>'Preserve visually')
+     builder.instance_variable_set(:@footprint_started,1000.0)
+     now=1002.999
+     Process.stub(:clock_gettime,lambda { |kind|
+       assert_equal Process::CLOCK_MONOTONIC,kind
+       now
+     }) do
+       Time.stub(:now,Time.at(1_000_000_000)) do
+         refute builder.send(:footprint_time_exceeded?),'a wall-clock jump must not trip the threshold early'
+       end
+       now=1003.0
+       Time.stub(:now,Time.at(0)) do
+         assert builder.send(:footprint_time_exceeded?),'a wall-clock rollback must not extend the threshold'
+       end
+     end
+   end
 end

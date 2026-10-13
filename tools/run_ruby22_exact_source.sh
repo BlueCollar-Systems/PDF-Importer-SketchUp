@@ -185,6 +185,7 @@ readonly SMOKE_TESTS=(
   test/page_paint_bounds_test.rb
   test/stroke_clipping_test.rb
   test/stroke_color_preservation_test.rb
+  test/geometry_builder_lineweight_test.rb
   test/pdf_color_space_test.rb
   test/implicit_fill_close_test.rb
   test/labels_empty_text_group_resume_signature_test.rb
@@ -202,6 +203,8 @@ readonly SMOKE_TESTS=(
   test/no_mid_import_prompts_test.rb
   test/import_run_control_test.rb
   test/import_run_control_integration_test.rb
+  test/import_status_sink_throttle_test.rb
+  test/source_outline_shared_definition_test.rb
   test/unattended_multipage_import_test.rb
   test/failed_page_outcome_test.rb
   test/retained_page_view_fit_test.rb
@@ -210,6 +213,8 @@ readonly SMOKE_TESTS=(
   test/representation_fidelity_contract_test.rb
   test/batch_host_nonmodal_policy_test.rb
   test/planar_region_partition_test.rb
+  test/planar_partition_performance_test.rb
+  test/white_mask_composition_control_test.rb
   test/planar_white_knockout_test.rb
   test/inline_image_boundary_test.rb
   test/inline_image_composite_test.rb

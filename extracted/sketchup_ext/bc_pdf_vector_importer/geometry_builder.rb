@@ -174,13 +174,12 @@ module BlueCollarSystems
             )
           end
           if path_yield_every > 0 && (path_idx % path_yield_every).zero?
-            now = Time.now.to_f
-            @last_geom_status_time ||= 0.0
-            if (now - @last_geom_status_time) >= 2.0
-              @last_geom_status_time = now
+            now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            if !@last_geom_status_time || now - @last_geom_status_time >= 2.0
               if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
                 note = @footprint_simplify ? ' — centerlines, lineweight faces skipped' : ''
                 Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)#{note}..."
+                @last_geom_status_time = now
               end
             end
           end
@@ -3537,16 +3536,18 @@ module BlueCollarSystems
 
       def footprint_time_exceeded?
         return false unless @footprint_started
-        (Time.now - @footprint_started) >= footprint_time_budget_seconds
+        (Process.clock_gettime(Process::CLOCK_MONOTONIC) - @footprint_started) >= footprint_time_budget_seconds
       end
 
       def note_footprint_simplification!(trigger)
         return if @footprint_simplify
         @footprint_simplify = true
         estimated = @stroke_footprints[:estimated_cells].to_i
-        message = 'This sheet has too many thick strokes to draw as filled lineweights. ' \
-          'Editable centerlines were imported instead so SketchUp would not hang. ' \
-          "About #{estimated} lineweight faces were skipped (limit #{footprint_cell_budget})."
+        limit = trigger == 'time_budget' ? "the #{footprint_time_budget_seconds}s time limit" :
+          "the density limit of #{footprint_cell_budget} estimated faces"
+        message = "Source line-width work reached #{limit}. Remaining strokes use editable centerlines; " \
+          'their PDF line widths are not physically represented. ' \
+          "The page estimate was #{estimated} lineweight faces."
         @stroke_footprints[:simplified] = true
         @stroke_footprints[:simplify_trigger] = trigger
         @stroke_footprints[:message] = message
@@ -3595,7 +3596,7 @@ module BlueCollarSystems
         if path.fill
           return unresolved_source_width_stroke(path_index, 'combined fill/stroke paint is outside this bounded footprint route', path)
         end
-        @footprint_started ||= Time.now
+        @footprint_started ||= Process.clock_gettime(Process::CLOCK_MONOTONIC)
         begin
           plans=path.subpaths.map do |subpath|
             sampled=VectorStrokeFootprint.flatten_subpath(path,subpath)
@@ -3642,12 +3643,10 @@ module BlueCollarSystems
         Logger.warn('GeometryBuilder',"Source-width path #{path_index}: #{reason}; retaining editable centerlines with approximate native line width.") unless reasons[reason]
         reasons[reason]=(reasons[reason] || 0)+1
         @stroke_footprints[:unresolved_path_count] += 1
-        if @stroke_footprints[:records].length < 250
-          @stroke_footprints[:records] << {:path_index=>path_index,:source_page=>@page_number,
-            :source_paint_order=>path && path.source_paint_order,
-            :source_width_pdf_points=>path && path.line_width,:source_width_geometry_verified=>false,
-            :reason=>reason,:whole_page_visual_fidelity_claimed=>false}
-        end
+        @stroke_footprints[:records] << {:path_index=>path_index,:source_page=>@page_number,
+          :source_paint_order=>path && path.source_paint_order,
+          :source_width_pdf_points=>path && path.line_width,:source_width_geometry_verified=>false,
+          :reason=>reason,:whole_page_visual_fidelity_claimed=>false}
         false
       end
 
