@@ -1,3 +1,4 @@
+require 'timeout'
 require_relative 'stroke_color_preservation_test'
 
 class GeometryBuilderLineweightTest < Minitest::Test
@@ -166,5 +167,81 @@ class GeometryBuilderLineweightTest < Minitest::Test
     assert_equal [[0,255,0],[255,0,0]],edges.map { |e| c=e.material.color; [c.red,c.green,c.blue] }.uniq
     assert_equal names,result[:geometry_staging][:lineweight_organization][:tag_names]
     assert_equal false,result[:geometry_staging][:lineweight_organization][:physical_width_preservation_claimed]
+  end
+
+  def test_round_cap_cell_estimate_flags_a_thirty_thousand_stroke_sheet
+    paths=IMP::ContentStreamParser.new(['1 J 2 w 0 0 m 10 0 l S'],nil).parse
+    per=Subject.estimated_footprint_cells(paths.first)
+    assert_equal 1,paths.first.line_cap
+    assert_equal 1+(2*IMP::VectorStrokeFootprint::ROUND_SEGMENTS),per
+    assert (30_000*per) > Subject::FOOTPRINT_CELL_BUDGET
+    butt=IMP::ContentStreamParser.new(['2 w 0 0 m 10 0 l S'],nil).parse
+    assert_equal 1,Subject.estimated_footprint_cells(butt.first)
+  end
+
+  # About 30k separate round-cap strokes made Preserve visually build ~97
+  # faces each (two 48-segment semicircles plus the body) and SketchUp sat
+  # there for more than 45 minutes. A sheet of that shape must stay on
+  # centerlines and finish inside a few seconds.
+  def test_many_round_caps_keep_centerlines_inside_a_few_seconds
+    count=1500
+    parts=['1 J 1 j 2 w']
+    count.times { |i| parts << "#{i} 0 m #{i} 8 l S" }
+    stream=parts.join("\n")
+    parsed=IMP::ContentStreamParser.new([stream],nil).parse
+    assert_equal count,parsed.length
+    assert_equal 1,parsed.first.line_cap
+    messages=[]
+    original=Sketchup.method(:status_text=)
+    Sketchup.define_singleton_method(:status_text=) { |value| messages << value.to_s }
+    started=Time.now
+    result=nil
+    Timeout.timeout(8) do
+      model=Model.new
+      builder=Subject.new(model,parsed,[],[0,0,2000,80],:group_per_page=>false,:detect_arcs=>false,
+        :import_fills=>false,:lineweight_mode=>'Preserve visually')
+      result=builder.build
+    end
+    elapsed=Time.now-started
+    assert elapsed < 8.0, "large round-cap sheet took #{elapsed.round(2)}s"
+    proof=result[:geometry_staging][:stroke_footprints]
+    assert_equal true,proof[:simplified]
+    assert_equal 'cell_budget',proof[:simplify_trigger]
+    assert proof[:estimated_cells] > Subject::FOOTPRINT_CELL_BUDGET
+    assert_equal 0,proof[:represented_path_count]
+    assert_equal count,proof[:unresolved_path_count]
+    assert_equal count,proof[:simplified_path_count]
+    assert_equal false,proof[:all_source_widths_represented]
+    assert_equal 0,result[:faces]
+    assert_equal count,result[:edges]
+    assert messages.any? { |text| text.include?('centerlines') }
+    assert_match(/centerlines/,proof[:message].to_s)
+  ensure
+    if original
+      Sketchup.define_singleton_method(:status_text=) { |value| original.call(value) }
+    end
+  end
+
+  def test_time_budget_stops_further_lineweight_faces
+    parts=['1 J 1 j 2 w']
+    4.times { |i| parts << "#{i*20} 0 m #{i*20+10} 0 l S" }
+    model=Model.new
+    paths=IMP::ContentStreamParser.new([parts.join("\n")],nil).parse
+    builder=Subject.new(model,paths,[],[0,0,400,80],:group_per_page=>false,:detect_arcs=>false,
+      :import_fills=>false,:lineweight_mode=>'Preserve visually')
+    calls=0
+    replacement=lambda do |*|
+      calls += 1
+      {:group=>Object.new,:face_count=>1,:edge_count=>0}
+    end
+    builder.define_singleton_method(:footprint_time_budget_seconds) { 0.0 }
+    result=IMP::VectorStrokeFootprint.stub(:build!,replacement) { builder.build }
+    proof=result[:geometry_staging][:stroke_footprints]
+    assert_equal 1,calls
+    assert_equal true,proof[:simplified]
+    assert_equal 'time_budget',proof[:simplify_trigger]
+    assert_equal 1,proof[:represented_path_count]
+    assert_equal 3,proof[:unresolved_path_count]
+    assert_equal 3,result[:edges]
   end
 end

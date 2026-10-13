@@ -24,7 +24,9 @@ use the same validation.
 
 ### Recent fixes (v3.7.166)
 
-- A dense sheet of round-capped lines imports in seconds again. Since v3.7.163 every import except Raster quietly used "Preserve visually" line widths, which built about 97 small shapes per line, so a sheet of tens of thousands of lines took well over half an hour. Imports now keep each line as one editable edge unless that mode is asked for, and when it is, the status bar counts the paths.
+- Imports keep each stroked line as one editable edge by default again, as v3.7.162 did. Since v3.7.163 every import except Raster quietly used "Preserve visually" line widths, which built about 97 small shapes per line, so a sheet of tens of thousands of lines took well over half an hour.
+- When "Preserve visually" is asked for, a dense sheet of round-capped strokes stays on editable centerlines so SketchUp can finish. The status bar keeps counting and says why.
+- Status updates are paced so SketchUp 2017 does not stall redrawing the status bar. Thick strokes that cannot be filled exactly are left as centerlines before the slow width planner runs. Repeated text definitions are walked once.
 
 ### Earlier fixes (v3.7.165)
 

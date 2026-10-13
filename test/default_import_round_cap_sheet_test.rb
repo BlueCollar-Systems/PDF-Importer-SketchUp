@@ -8,7 +8,8 @@ require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/import_dialog
 # line to VectorStrokeFootprint (about 97 one-face groups per line plus Rational
 # planning): tens of minutes of Ruby on one sheet before SketchUp's own cost.
 # A default import keeps plain one-edge-per-line output for every non-raster
-# dialog mode; width footprints stay an explicit choice.
+# dialog mode; width footprints stay an explicit choice, and an explicit
+# choice on a sheet this dense falls back to centerlines at the cell budget.
 class DefaultImportRoundCapSheetTest < Minitest::Test
   IMP = BlueCollarSystems::PDFVectorImporter
   LT = GeometryBuilderLineweightTest
@@ -17,8 +18,8 @@ class DefaultImportRoundCapSheetTest < Minitest::Test
   MEDIA_BOX = [0, 0, 3456, 2592]
   COLORS = ['0 0 0', '1 0 0', '0 0 1']
 
-  def sheet_stream
-    (0...LINES).map do |i|
+  def sheet_stream(lines = LINES)
+    (0...lines).map do |i|
       "q 0.5 0 0 0.5 0 0 cm #{COLORS[i % COLORS.length]} RG 1 J 1 j 1.5 w " \
         "#{100 + i * 5} 400 m #{260 + i * 5} #{520 + (i % 11)} l S Q"
     end.join("\n")
@@ -41,10 +42,10 @@ class DefaultImportRoundCapSheetTest < Minitest::Test
   # Builds the sheet with the switches main.rb passes for a page and counts
   # footprint planning. Planning is refused so a regression fails fast instead
   # of spending tens of milliseconds per line.
-  def build_sheet(opts)
+  def build_sheet(opts, lines = LINES)
     model = LT::Model.new
-    paths = IMP::ContentStreamParser.new([sheet_stream], nil).parse
-    assert_equal LINES, paths.length
+    paths = IMP::ContentStreamParser.new([sheet_stream(lines)], nil).parse
+    assert_equal lines, paths.length
     assert paths.all? { |p| p.line_cap == 1 && p.line_join == 1 && p.source_stroke_style_proven }
     builder = IMP::GeometryBuilder.new(model, paths, [], MEDIA_BOX,
       :page_clip_box => MEDIA_BOX, :group_per_page => opts[:group_per_page],
@@ -73,12 +74,27 @@ class DefaultImportRoundCapSheetTest < Minitest::Test
     end
   end
 
-  def test_explicit_preserve_visually_still_plans_width_footprints
+  def explicit_preserve_visually_opts
     opts = IMP::ImportDialog.send(:build_opts, :import_mode => 'auto',
       :lineweight_mode => 'Preserve visually')
     assert_equal 'Preserve visually', opts[:lineweight_mode]
-    _model, result, plans = build_sheet(opts)
-    assert_equal LINES, plans
-    assert_equal LINES, result[:geometry_staging][:stroke_footprints][:unresolved_path_count]
+    opts
+  end
+
+  # 40 round-cap lines estimate about 3,900 cells, under the page budget, so
+  # an explicit choice still plans a width footprint for every line.
+  def test_explicit_preserve_visually_still_plans_width_footprints
+    _model, result, plans = build_sheet(explicit_preserve_visually_opts, 40)
+    assert_equal 40, plans
+    refute result[:geometry_staging][:stroke_footprints][:simplified]
+  end
+
+  def test_explicit_preserve_visually_on_a_dense_sheet_falls_back_at_the_cell_budget
+    _model, result, plans = build_sheet(explicit_preserve_visually_opts)
+    footprints = result[:geometry_staging][:stroke_footprints]
+    assert_equal 0, plans
+    assert footprints[:simplified]
+    assert_equal 'cell_budget', footprints[:simplify_trigger]
+    assert_equal LINES, footprints[:simplified_path_count]
   end
 end
