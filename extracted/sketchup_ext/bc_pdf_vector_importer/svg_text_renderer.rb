@@ -328,7 +328,7 @@ module BlueCollarSystems
         # Place instances (fast)
         total = placements.length
         placements.each_with_index do |p, idx|
-          if idx % 500 == 0
+          if idx % 500 == 0 && defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
             Sketchup.status_text = "Placing text: #{idx}/#{total} [#{((idx.to_f/total)*100).round}%]"
           end
 

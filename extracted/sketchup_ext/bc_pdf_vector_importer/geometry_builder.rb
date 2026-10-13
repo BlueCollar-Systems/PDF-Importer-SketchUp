@@ -174,8 +174,15 @@ module BlueCollarSystems
             )
           end
           if path_yield_every > 0 && (path_idx % path_yield_every).zero?
-            note = @footprint_simplify ? ' — centerlines, lineweight faces skipped' : ''
-            Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)#{note}..."
+            now = Time.now.to_f
+            @last_geom_status_time ||= 0.0
+            if (now - @last_geom_status_time) >= 2.0
+              @last_geom_status_time = now
+              if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+                note = @footprint_simplify ? ' — centerlines, lineweight faces skipped' : ''
+                Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)#{note}..."
+              end
+            end
           end
 
           next unless path.subpaths && !path.subpaths.empty?
@@ -3575,6 +3582,19 @@ module BlueCollarSystems
           count_simplified_stroke!(path_index)
           return false
         end
+        return unresolved_source_width_stroke(path_index, bounds[:unsupported], path) if bounds.is_a?(Hash) && bounds[:unsupported]
+        unless path.source_stroke_style_proven == true && path.source_stroke_opacity == 1.0
+          return unresolved_source_width_stroke(path_index, 'stroke style/opacity is unproven or translucent', path)
+        end
+        unless path.respond_to?(:source_stroke_solid_color_proven) && path.source_stroke_solid_color_proven == true
+          return unresolved_source_width_stroke(path_index, 'source solid stroke color is unproven (Pattern or unqualified color space)', path)
+        end
+        unless path.respond_to?(:source_stroke_ctm_proven) && path.source_stroke_ctm_proven == true
+          return unresolved_source_width_stroke(path_index, 'path construction CTM is unproven', path)
+        end
+        if path.fill
+          return unresolved_source_width_stroke(path_index, 'combined fill/stroke paint is outside this bounded footprint route', path)
+        end
         @footprint_started ||= Time.now
         begin
           plans=path.subpaths.map do |subpath|
@@ -3621,10 +3641,12 @@ module BlueCollarSystems
         Logger.warn('GeometryBuilder',"Source-width path #{path_index}: #{reason}; retaining editable centerlines with approximate native line width.") unless reasons[reason]
         reasons[reason]=(reasons[reason] || 0)+1
         @stroke_footprints[:unresolved_path_count] += 1
-        @stroke_footprints[:records] << {:path_index=>path_index,:source_page=>@page_number,
-          :source_paint_order=>path && path.source_paint_order,
-          :source_width_pdf_points=>path && path.line_width,:source_width_geometry_verified=>false,
-          :reason=>reason,:whole_page_visual_fidelity_claimed=>false}
+        if @stroke_footprints[:records].length < 250
+          @stroke_footprints[:records] << {:path_index=>path_index,:source_page=>@page_number,
+            :source_paint_order=>path && path.source_paint_order,
+            :source_width_pdf_points=>path && path.line_width,:source_width_geometry_verified=>false,
+            :reason=>reason,:whole_page_visual_fidelity_claimed=>false}
+        end
         false
       end
 
