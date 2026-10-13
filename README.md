@@ -24,7 +24,7 @@ use the same validation.
 
 ### Recent fixes (v3.7.166)
 
-- A dense sheet of round-capped lines imports in seconds again. Since v3.7.163 every import except Raster quietly used "Preserve visually" line widths, which built about 97 small shapes per line, so a sheet of about 30,000 lines took well over half an hour. Imports now keep each line as one editable edge unless that mode is asked for, and when it is, the status bar counts the paths.
+- A dense sheet of round-capped lines imports in seconds again. Since v3.7.163 every import except Raster quietly used "Preserve visually" line widths, which built about 97 small shapes per line, so a sheet of tens of thousands of lines took well over half an hour. Imports now keep each line as one editable edge unless that mode is asked for, and when it is, the status bar counts the paths.
 
 ### Earlier fixes (v3.7.165)
 
