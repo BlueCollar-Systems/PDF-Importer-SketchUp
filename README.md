@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.165-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.166-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -22,7 +22,11 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.165)
+### Recent fixes (v3.7.166)
+
+- A dense sheet of round-capped lines imports in seconds again. Since v3.7.163 every import quietly used "Preserve visually" line widths, which built about 97 small shapes per line, so a sheet of about 30,000 lines took well over half an hour. Imports now keep each line as one editable edge unless that mode is asked for, and when it is, the status bar counts the paths.
+
+### Earlier fixes (v3.7.165)
 
 - A dense sheet such as a foundation detail keeps real stroke widths, and those width groups are built in batches of 250. SketchUp 2017 no longer stalls while every stroke is added to one parent.
 
