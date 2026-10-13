@@ -169,7 +169,7 @@ module BlueCollarSystems
         # is delivered only when the user explicitly selects Raster.
         @raster_fallback  = 'No'
         @force_raster     = attrs[:force_raster]     || (is_raster ? 'Yes' : 'No')
-        @lineweight_mode  = attrs[:lineweight_mode]  || (is_raster ? 'Ignore' : 'Preserve visually')
+        @lineweight_mode  = attrs[:lineweight_mode]  || 'Ignore'
       end
 
       # Build from a named mode (BCS-ARCH-001: Auto|Vector|Raster|Hybrid)

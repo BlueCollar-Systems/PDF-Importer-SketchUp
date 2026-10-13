@@ -156,8 +156,22 @@ class ImportDialogDefaultsTest < Minitest::Test
 
   def test_explicit_lineweight_choice_survives_config_and_dialog_translation
     assert_equal 'Ignore', BIC.new(:lineweight_mode=>'Ignore').to_opts[:lineweight_mode]
-    assert_equal 'Preserve visually', BID.send(:build_opts,{})[:lineweight_mode]
+    assert_equal 'Preserve visually', BIC.new(:lineweight_mode=>'Preserve visually').to_opts[:lineweight_mode]
+    assert_equal 'Preserve visually', BID.send(:build_opts,:lineweight_mode=>'Preserve visually')[:lineweight_mode]
     assert_equal 'Ignore', BID.send(:build_opts,:import_mode=>'Raster',:lineweight_mode=>'Preserve visually')[:lineweight_mode]
+  end
+
+  # Width footprints cost about 97 native groups per round-capped line, so a
+  # dense sheet must not get them unless they are asked for.
+  def test_default_lineweight_mode_is_ignore_for_every_import_mode
+    %w[auto vector hybrid raster].each do |mode|
+      assert_equal 'Ignore', BID.send(:build_opts,:import_mode=>mode)[:lineweight_mode], mode
+    end
+    assert_equal 'Ignore', BID.send(:build_opts,{})[:lineweight_mode]
+    ['Auto','Vector','Hybrid','Raster'].each do |mode|
+      assert_equal 'Ignore', BIC.from_mode(mode).to_opts[:lineweight_mode], mode
+    end
+    assert_equal 'Ignore', BIC.new.to_opts[:lineweight_mode]
   end
 
   def test_saved_labels_preference_is_preserved
