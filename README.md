@@ -23,6 +23,7 @@ millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
 ### Recent fixes (v3.7.166)
+- Imports use editable centerlines by default. Advanced **Line widths → Draw source line widths** is an explicit option, saved for subsequent imports and available in the legacy dialog too. Dense sheets or work beyond the time limit retain centerlines and report the limit instead of claiming preserved widths.
 
 - Esc can stop white-mask scanning, source binding, exact intersections and native cell construction. Cancellation removes only the active composition stage before the pipeline rolls back the current page; uncertain cleanup remains a terminal error.
 - White-mask composition merges redundant adjacent cells with the same exact region and source owner. Original contours, ink coverage, material boundaries and construction checks remain intact; requested text modes are unchanged.

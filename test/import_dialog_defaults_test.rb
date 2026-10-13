@@ -156,8 +156,133 @@ class ImportDialogDefaultsTest < Minitest::Test
 
   def test_explicit_lineweight_choice_survives_config_and_dialog_translation
     assert_equal 'Ignore', BIC.new(:lineweight_mode=>'Ignore').to_opts[:lineweight_mode]
-    assert_equal 'Preserve visually', BID.send(:build_opts,{})[:lineweight_mode]
+    assert_equal 'Preserve visually', BIC.new(:lineweight_mode=>'Preserve visually').to_opts[:lineweight_mode]
+    assert_equal 'Preserve visually', BID.send(:build_opts,:lineweight_mode=>'Preserve visually')[:lineweight_mode]
     assert_equal 'Ignore', BID.send(:build_opts,:import_mode=>'Raster',:lineweight_mode=>'Preserve visually')[:lineweight_mode]
+  end
+
+  # Width footprints cost about 97 native groups per round-capped line, so a
+  # dense sheet must not get them unless they are asked for.
+  def test_default_lineweight_mode_is_ignore_for_every_import_mode
+    %w[auto vector hybrid raster].each do |mode|
+      assert_equal 'Ignore', BID.send(:build_opts,:import_mode=>mode)[:lineweight_mode], mode
+    end
+    assert_equal 'Ignore', BID.send(:build_opts,{})[:lineweight_mode]
+    ['Auto','Vector','Hybrid','Raster'].each do |mode|
+      assert_equal 'Ignore', BIC.from_mode(mode).to_opts[:lineweight_mode], mode
+    end
+    assert_equal 'Ignore', BIC.new.to_opts[:lineweight_mode]
+  end
+
+  def test_advanced_linewidth_selector_names_the_output_and_reports_limits
+    html = BID.send(:advanced_html, 'sample.pdf', advanced_defaults)
+    assert_includes html, '<select id="lineweight_mode">'
+    assert_includes html, '<option value="Ignore" selected>Editable centerlines (fast)</option>'
+    assert_includes html, '<option value="Preserve visually">Draw source line widths</option>'
+    assert_includes html, "lineweight_mode:document.getElementById('lineweight_mode').value"
+    assert_includes html, 'do not reproduce PDF line thickness'
+    assert_includes html, 'retain centerlines and list the limit in the import report'
+    assert_includes html, 'Raster uses the page image'
+  end
+
+  def test_advanced_linewidth_choice_reaches_geometry_options_and_persists_canonically
+    ['Preserve visually', 'Group by lineweight', 'Map to tags'].each do |choice|
+      UI::HtmlDialog.on_show = lambda { |dialog|
+        dialog.callbacks['on_import'].call(nil, {
+          'mode'=>'Vector','pages'=>'All','scale'=>'1.0','import_text'=>'Yes',
+          'text_mode'=>'3D Text','match_pdf_layers'=>'Yes','lineweight_mode'=>choice
+        })
+      }
+      opts = BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
+      assert_equal choice, opts[:lineweight_mode]
+      assert_equal :text3d, opts[:text_mode], 'line-width choice must not change text representation'
+      assert_equal choice, BID.load_prefs[:lineweight_mode]
+      UI::HtmlDialog.on_show = nil
+      BID.show_html_advanced('next.pdf', 'All', '1.0', '3D Text', BID.load_prefs)
+      assert_includes UI::HtmlDialog.instances.last.html, "<option value=\"#{choice}\" selected>"
+    end
+  end
+
+  def test_basic_import_keeps_and_visibly_announces_the_saved_linewidth_choice
+    BID.save_prefs(:lineweight_mode=>'Preserve visually')
+    UI::HtmlDialog.on_show = lambda { |dialog|
+      dialog.callbacks['on_import'].call(nil, {'pages'=>'All','scale'=>'1.0'})
+    }
+    opts = BID.show_html_basic('next.pdf', BID.load_prefs)
+    assert_equal 'Preserve visually', opts[:lineweight_mode]
+    assert_equal 'Preserve visually', BID.load_prefs[:lineweight_mode]
+    assert_includes UI::HtmlDialog.instances.last.html, 'Line widths: Draw source line widths. Change in Advanced.'
+    assert_includes UI::HtmlDialog.instances.last.html, "lineweight_mode:'Preserve visually'"
+  end
+
+  def test_basic_fast_default_is_visible_and_unknown_saved_choice_cannot_reach_geometry
+    html = BID.send(:basic_html, 'sample.pdf', 'Auto', 'All', '1.0', '3D Text', 'Yes', 'Yes')
+    assert_includes html, 'Line widths: Editable centerlines (fast)'
+    assert_includes html, 'do not reproduce PDF line thickness'
+    assert_equal 'Ignore', BID.effective_lineweight_mode(:lineweight_mode=>'unknown')
+    ['unknown', '', 'Preserve secretly', Object.new].each do |choice|
+      assert_raises(ArgumentError) { BID.send(:build_opts, :lineweight_mode=>choice) }
+    end
+  end
+
+  def test_legacy_dialogs_expose_plain_linewidth_choices_and_preserve_the_selected_option
+    [:show_inputbox_basic, :show_inputbox_advanced].each do |method|
+      seen = nil
+      UI.stub(:inputbox, lambda { |prompts, defaults, choices, _title|
+        index = prompts.index { |prompt| prompt =~ /Line widths/ }
+        assert index
+        assert_equal 'Editable centerlines (fast)', defaults[index]
+        assert_includes choices[index].split('|'), 'Draw source line widths'
+        values = defaults.dup; values[index] = 'Draw source line widths'; seen = values
+        values
+      }) do
+        opts = if method == :show_inputbox_basic
+                 BID.send(method, 'sample.pdf', {})
+               else
+                 BID.send(method, 'sample.pdf', 'All', '1.0', '3D Text', {})
+               end
+        assert seen
+        assert_equal 'Preserve visually', opts[:lineweight_mode]
+        assert_equal 'Preserve visually', BID.load_prefs[:lineweight_mode]
+      end
+    end
+  end
+
+  def test_raster_keeps_its_image_route_with_an_unused_saved_linewidth_preference
+    UI::HtmlDialog.on_show = lambda { |dialog|
+      dialog.callbacks['on_import'].call(nil, {
+        'mode'=>'Raster','pages'=>'All','scale'=>'1.0','import_text'=>'Yes',
+        'text_mode'=>'3D Text','lineweight_mode'=>'Preserve visually'
+      })
+    }
+    opts = BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', {})
+    assert_equal 'raster', opts[:import_mode]
+    assert_equal 'Ignore', opts[:lineweight_mode]
+    assert_equal 'Preserve visually', BID.load_prefs[:lineweight_mode]
+  end
+
+  def test_invalid_advanced_linewidth_does_not_save_or_start_an_import
+    BID.save_prefs(:lineweight_mode=>'Preserve visually')
+    UI::HtmlDialog.on_show = lambda { |dialog|
+      dialog.callbacks['on_import'].call(nil, {
+        'mode'=>'Auto','pages'=>'All','scale'=>'1.0','lineweight_mode'=>'unknown'
+      })
+    }
+    assert_nil BID.show_html_advanced('sample.pdf', 'All', '1.0', '3D Text', BID.load_prefs)
+    assert_equal 'Preserve visually', BID.load_prefs[:lineweight_mode]
+    refute UI::HtmlDialog.instances.last.closed
+    assert_includes UI.messages.last, 'Line widths'
+  end
+
+  def test_invalid_legacy_linewidth_does_not_reset_the_saved_choice
+    BID.save_prefs(:lineweight_mode=>'Preserve visually')
+    UI.stub(:inputbox, lambda { |_prompts, defaults, _choices, _title|
+      values = defaults.dup; values[-1] = 'unknown'; values
+    }) do
+      assert_nil BID.show_inputbox_basic('sample.pdf', BID.load_prefs)
+    end
+    assert_equal 'Preserve visually', BID.load_prefs[:lineweight_mode]
+    assert_includes UI.messages.last, 'Line widths'
   end
 
   def test_saved_labels_preference_is_preserved
