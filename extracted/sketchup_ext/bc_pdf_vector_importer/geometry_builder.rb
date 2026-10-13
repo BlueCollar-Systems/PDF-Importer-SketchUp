@@ -163,7 +163,13 @@ module BlueCollarSystems
             )
           end
           if path_yield_every > 0 && (path_idx % path_yield_every).zero?
-            Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)..."
+            now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            if !@last_geom_status_time || now - @last_geom_status_time >= 2.0
+              if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+                Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)..."
+                @last_geom_status_time = now
+              end
+            end
           end
 
           next unless path.subpaths && !path.subpaths.empty?
@@ -3467,6 +3473,19 @@ module BlueCollarSystems
       # face materials, or the active viewport's edge-color display setting.
       def build_source_width_stroke!(entities,path,path_index,layer,style,bounds,origin_x,origin_y)
         return false unless @lineweight_mode == 'Preserve visually'
+        return unresolved_source_width_stroke(path_index, bounds[:unsupported], path) if bounds.is_a?(Hash) && bounds[:unsupported]
+        unless path.source_stroke_style_proven == true && path.source_stroke_opacity == 1.0
+          return unresolved_source_width_stroke(path_index, 'stroke style/opacity is unproven or translucent', path)
+        end
+        unless path.respond_to?(:source_stroke_solid_color_proven) && path.source_stroke_solid_color_proven == true
+          return unresolved_source_width_stroke(path_index, 'source solid stroke color is unproven (Pattern or unqualified color space)', path)
+        end
+        unless path.respond_to?(:source_stroke_ctm_proven) && path.source_stroke_ctm_proven == true
+          return unresolved_source_width_stroke(path_index, 'path construction CTM is unproven', path)
+        end
+        if path.fill
+          return unresolved_source_width_stroke(path_index, 'combined fill/stroke paint is outside this bounded footprint route', path)
+        end
         begin
           plans=path.subpaths.map do |subpath|
             sampled=VectorStrokeFootprint.flatten_subpath(path,subpath)
