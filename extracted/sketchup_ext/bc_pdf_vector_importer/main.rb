@@ -5754,6 +5754,16 @@ module BlueCollarSystems
             "batches=#{staging_evidence[:batch_count]}, " \
             "explode=#{staging_evidence[:explode_ms]} ms"
           )
+          footprints = staging_evidence[:stroke_footprints]
+          if footprints.is_a?(Hash) && footprints[:simplified]
+            stats[:lineweight_simplified_pages] ||= []
+            stats[:lineweight_simplified_pages] << {
+              :page => page_num,
+              :estimated_cells => footprints[:estimated_cells],
+              :message => footprints[:message]
+            }
+            Logger.warn('Pipeline', "Page #{page_num}: #{footprints[:message]}")
+          end
         end
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
@@ -6720,12 +6730,18 @@ module BlueCollarSystems
                         BatchHostPolicy.respond_to?(:noninteractive?) &&
                         BatchHostPolicy.noninteractive?)
         if interactive && defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+          simplified_pages = stats[:lineweight_simplified_pages]
+          notice = if simplified_pages.is_a?(Array) && !simplified_pages.empty?
+                     ' — thick strokes kept as centerlines so this large sheet could finish'
+                   else
+                     ''
+                   end
           Sketchup.status_text = if import_contract_ready?(stats)
             "PDF Import complete — #{stats[:edges]} edges, #{stats[:text]} text " \
-              "items — #{elapsed}s"
+              "items — #{elapsed}s#{notice}"
           else
             "PDF Import finished, but QA contract is NOT READY — " \
-              "#{stats[:edges]} edges, #{stats[:text]} text items"
+              "#{stats[:edges]} edges, #{stats[:text]} text items#{notice}"
           end
         end
       rescue StandardError

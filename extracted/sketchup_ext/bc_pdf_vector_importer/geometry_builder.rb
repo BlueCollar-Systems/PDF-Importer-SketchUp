@@ -29,6 +29,12 @@ module BlueCollarSystems
       # retain the identity-transform staging groups instead of exploding.
       GEOMETRY_STAGING_PATH_THRESHOLD = 500
       GEOMETRY_STAGING_CHUNK_PATHS = 250
+      # A round cap becomes two 48-segment semicircles plus the stroke body
+      # (97 faces). A 30k-stroke sheet is about 3 million faces and froze
+      # SketchUp for the better part of an hour. Past this budget the page
+      # keeps editable centerlines and says so, instead of building the faces.
+      FOOTPRINT_CELL_BUDGET = 8_000
+      FOOTPRINT_TIME_BUDGET_SECONDS = 3.0
       SMALL_FACE_DIRECT_MAX_EXTENT = 0.002
       SMALL_FACE_CONSTRUCTION_SCALE = 1000.0
 
@@ -100,7 +106,11 @@ module BlueCollarSystems
         @stroke_footprints = { :requested_mode => @lineweight_mode,
           :stroke_path_count => 0, :represented_path_count => 0,
           :represented_subpath_count => 0, :unresolved_path_count => 0,
-          :unresolved_reasons => {}, :records => [] }
+          :unresolved_reasons => {}, :records => [],
+          :simplified => false, :estimated_cells => 0,
+          :simplified_path_count => 0 }
+        @footprint_simplify = false
+        @footprint_started = nil
         @lineweight_groups = {}
         @lineweight_organization = { :requested_mode=>@lineweight_mode,
           :organized_path_count=>0,:group_count=>0,:tag_names=>[],
@@ -152,6 +162,7 @@ module BlueCollarSystems
           :heavy_page => heavy_page
         )
         configure_geometry_staging!(heavy_page)
+        prepare_footprint_budget!
         path_yield_every = heavy_page ? 100 : 0
         @paths.each_with_index do |path, path_idx|
           if (path_idx % 100).zero?
@@ -168,7 +179,8 @@ module BlueCollarSystems
             if (now - @last_geom_status_time) >= 2.0
               @last_geom_status_time = now
               if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
-                Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)..."
+                note = @footprint_simplify ? ' — centerlines, lineweight faces skipped' : ''
+                Sketchup.status_text = "PDF Import — building geometry (#{path_idx}/#{@paths.length} paths)#{note}..."
               end
             end
           end
@@ -3472,8 +3484,104 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Stroke colors belong to the real edges, independent of optional grouping,
       # face materials, or the active viewport's edge-color display setting.
+      # Faces a round-cap stroke would add. One open round cap is
+      # 1 + 2 * ROUND_SEGMENTS. Butt caps are one face. Open strokes with
+      # more than one segment are rejected by the footprint planner before
+      # any cap is built, so they add nothing to this estimate.
+      def self.estimated_footprint_cells(path)
+        return 0 unless path && path.stroke && !path.fill
+        width = path.respond_to?(:line_width) ? path.line_width : nil
+        return 0 unless width.is_a?(Numeric) && width.to_f > 0.0
+        cap = path.respond_to?(:line_cap) ? path.line_cap.to_i : 0
+        join = path.respond_to?(:line_join) ? path.line_join.to_i : 0
+        round_cap_cells = 1 + (2 * VectorStrokeFootprint::ROUND_SEGMENTS)
+        round_join_cells = 1 + VectorStrokeFootprint::ROUND_SEGMENTS
+        total = 0
+        subs = path.respond_to?(:subpaths) ? path.subpaths : nil
+        return 0 unless subs
+        subs.each do |sp|
+          segs = sp.respond_to?(:segments) ? sp.segments : nil
+          next unless segs
+          graphic = 0
+          segs.each { |seg| graphic += 1 unless seg.type == :move }
+          next if graphic <= 0
+          if sp.closed
+            total += graphic * (join == 1 ? round_join_cells : 1)
+          elsif graphic == 1
+            total += cap == 1 ? round_cap_cells : 1
+          end
+        end
+        total
+      end
+
+      def footprint_cell_budget
+        self.class::FOOTPRINT_CELL_BUDGET
+      end
+
+      def footprint_time_budget_seconds
+        self.class::FOOTPRINT_TIME_BUDGET_SECONDS
+      end
+
+      def prepare_footprint_budget!
+        @footprint_simplify = false
+        @footprint_started = nil
+        return unless @lineweight_mode == 'Preserve visually'
+        estimated = 0
+        @paths.each { |path| estimated += self.class.estimated_footprint_cells(path) }
+        @stroke_footprints[:estimated_cells] = estimated
+        @stroke_footprints[:cell_budget] = footprint_cell_budget
+        @stroke_footprints[:time_budget_seconds] = footprint_time_budget_seconds
+        return if estimated <= footprint_cell_budget
+        note_footprint_simplification!('cell_budget')
+      end
+
+      def footprint_time_exceeded?
+        return false unless @footprint_started
+        (Time.now - @footprint_started) >= footprint_time_budget_seconds
+      end
+
+      def note_footprint_simplification!(trigger)
+        return if @footprint_simplify
+        @footprint_simplify = true
+        estimated = @stroke_footprints[:estimated_cells].to_i
+        message = 'This sheet has too many thick strokes to draw as filled lineweights. ' \
+          'Editable centerlines were imported instead so SketchUp would not hang. ' \
+          "About #{estimated} lineweight faces were skipped (limit #{footprint_cell_budget})."
+        @stroke_footprints[:simplified] = true
+        @stroke_footprints[:simplify_trigger] = trigger
+        @stroke_footprints[:message] = message
+        Logger.warn('GeometryBuilder', message)
+        begin
+          if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
+            Sketchup.status_text = "PDF Import — #{message}"
+          end
+        rescue StandardError
+        end
+      end
+
+      def count_simplified_stroke!(_path_index)
+        reason = @stroke_footprints[:message].to_s
+        reasons = @stroke_footprints[:unresolved_reasons]
+        reasons[reason] = reasons[reason].to_i + 1
+        @stroke_footprints[:unresolved_path_count] += 1
+        @stroke_footprints[:simplified_path_count] += 1
+      end
+
+      def footprint_expansion_blocked?
+        if @footprint_simplify
+          return true
+        end
+        return false unless footprint_time_exceeded?
+        note_footprint_simplification!('time_budget')
+        true
+      end
+
       def build_source_width_stroke!(entities,path,path_index,layer,style,bounds,origin_x,origin_y)
         return false unless @lineweight_mode == 'Preserve visually'
+        if footprint_expansion_blocked?
+          count_simplified_stroke!(path_index)
+          return false
+        end
         return unresolved_source_width_stroke(path_index, bounds[:unsupported], path) if bounds.is_a?(Hash) && bounds[:unsupported]
         unless path.source_stroke_style_proven == true && path.source_stroke_opacity == 1.0
           return unresolved_source_width_stroke(path_index, 'stroke style/opacity is unproven or translucent', path)
@@ -3487,6 +3595,7 @@ module BlueCollarSystems
         if path.fill
           return unresolved_source_width_stroke(path_index, 'combined fill/stroke paint is outside this bounded footprint route', path)
         end
+        @footprint_started ||= Time.now
         begin
           plans=path.subpaths.map do |subpath|
             sampled=VectorStrokeFootprint.flatten_subpath(path,subpath)
