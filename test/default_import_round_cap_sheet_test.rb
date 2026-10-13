@@ -3,9 +3,9 @@ require 'minitest/mock'
 require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/import_dialog'
 
 # A dense drawing sheet can hold tens of thousands of separately q/cm/Q-wrapped
-# round-cap (1 J 1 j) two-point lines. From v3.7.163 the dialog's default
-# lineweight_mode was 'Preserve visually', which sent every such line to
-# VectorStrokeFootprint (about 97 one-face groups per line plus Rational
+# round-cap (1 J 1 j) two-point lines. The dialog's default lineweight_mode
+# had long been 'Preserve visually'; from v3.7.163 that default sent every such
+# line to VectorStrokeFootprint (about 97 one-face groups per line plus Rational
 # planning): tens of minutes of Ruby on one sheet before SketchUp's own cost.
 # A default import keeps plain one-edge-per-line output for every non-raster
 # dialog mode; width footprints stay an explicit choice.
