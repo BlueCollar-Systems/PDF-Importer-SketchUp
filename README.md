@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.165-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.166-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -22,7 +22,12 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.165)
+### Recent fixes (v3.7.166)
+
+- A dense sheet of round-capped strokes, the kind that froze SketchUp for about 45 minutes, stays on editable centerlines. The status bar keeps counting and says why. A normal drawing still gets filled lineweights.
+- Status updates are paced so SketchUp 2017 does not stall redrawing the status bar. Thick strokes that cannot be filled exactly are left as centerlines before the slow width planner runs. Repeated text definitions are walked once.
+
+### Earlier fixes (v3.7.165)
 
 - A dense sheet such as a foundation detail keeps real stroke widths, and those width groups are built in batches of 250. SketchUp 2017 no longer stalls while every stroke is added to one parent.
 
