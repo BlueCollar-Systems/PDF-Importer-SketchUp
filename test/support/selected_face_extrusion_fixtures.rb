@@ -25,7 +25,16 @@ module Sketchup
     def visible?; visible; end
   end
   Vertex=Struct.new(:position)
-  Loop=Struct.new(:vertices)
+  Loop=Struct.new(:vertices,:outer) do
+    def outer?; outer; end
+  end
+  Material=Struct.new(:name,:alpha,:texture) do
+    def color
+      # Authored distinct fixture colors, independent of Material identity.
+      values=name.to_s.include?('front') ? [255,0,0,255] : [0,0,255,255]
+      object=Object.new;object.define_singleton_method(:to_a) { values };object
+    end
+  end
   class Entity
     attr_accessor :hidden, :locked, :layer, :valid
     attr_reader :entityID, :model
@@ -85,33 +94,73 @@ module Sketchup
   end
   class Face < Entity
     attr_reader :owner, :loops, :edges, :calls, :normal, :copy_calls
-    attr_accessor :mode, :connected_extras, :peer_to_move
+    attr_accessor :mode, :connected_extras, :peer_to_move, :material, :back_material,
+      :reverse_mode, :uv_front, :uv_back
+    attr_reader :reverse_calls
     def initialize(owner,loops,normal=[0,0,1])
       super(owner.model); @owner=owner; @calls=[]; @copy_calls=[]; @mode=:normal; @connected_extras=[]
       @normal=Geom::Point3d.new(*normal)
-      @loops=loops.map { |points| Loop.new(points.map { |p| Vertex.new(Geom::Point3d.new(*p)) }) }
+      @reverse_calls=0;@reverse_mode=:normal
+      @uv_front=lambda { |p| Geom::Point3d.new(p.x,p.y,1.0) }
+      @uv_back=lambda { |p| Geom::Point3d.new(p.x+3.0,p.y+5.0,1.0) }
+      @loops=loops.each_with_index.map { |points,i| Loop.new(points.map { |p| Vertex.new(Geom::Point3d.new(*p)) },i==0) }
       @edges=[]
       @loops.each do |loop|
         loop.vertices.each_with_index do |v,i|
-          edge=Edge.new(model,v.position,loop.vertices[(i+1)%loop.vertices.length].position)
-          edge.faces=[self]; @edges << edge; owner.items << edge
+          following=loop.vertices[(i+1)%loop.vertices.length].position
+          key=[[v.position.x,v.position.y,v.position.z],[following.x,following.y,following.z]].sort
+          edge=owner.items.find do |candidate|
+            candidate.is_a?(Edge) && [[candidate.start.position.x,candidate.start.position.y,candidate.start.position.z],[candidate.end.position.x,candidate.end.position.y,candidate.end.position.z]].sort==key
+          end
+          unless edge
+            edge=Edge.new(model,v.position,following);owner.items << edge
+          end
+          edge.faces << self;@edges << edge
         end
       end
       owner.items << self
     end
     def all_connected; [self]+@edges+@connected_extras; end
     def positions; @loops.map { |loop| loop.vertices.map { |v| [v.position.x,v.position.y,v.position.z] } }; end
-    def state; [base_state,positions,@normal,@connected_extras.dup]; end
+    def state; [base_state,positions,[@normal.x,@normal.y,@normal.z],@connected_extras.dup,@material,@back_material,@uv_front,@uv_back,@reverse_calls]; end
     def restore(s)
       restore_base(s[0]); @loops.each_with_index do |loop,i|
         loop.vertices.each_with_index { |v,j| v.position.x,v.position.y,v.position.z=s[1][i][j] }
       end
-      @normal,@connected_extras=s[2],s[3]
+      @normal=Geom::Point3d.new(*s[2]);@connected_extras=s[3]
+      @material,@back_material,@uv_front,@uv_back,@reverse_calls=s[4,5]
     end
     def clone_into(owner)
       clone=copy_attributes(Face.new(owner,positions,[@normal.x,@normal.y,@normal.z]))
       clone.mode=@mode
+      clone.material=@material;clone.back_material=@back_material
+      clone.uv_front=@uv_front;clone.uv_back=@uv_back;clone.reverse_mode=@reverse_mode
       clone
+    end
+    def reverse!
+      @reverse_calls+=1
+      raise 'native reverse failed' if reverse_mode==:raise
+      return false if reverse_mode==:false
+      return nil if reverse_mode==:nil
+      return self if reverse_mode==:no_effect
+      @normal=Geom::Point3d.new(-@normal.x,-@normal.y,-@normal.z)
+      unless reverse_mode==:keep_paint
+        @material,@back_material=@back_material,@material
+        @uv_front,@uv_back=@uv_back,@uv_front
+      end
+      @loops.first.vertices.first.position.x+=0.25 if reverse_mode==:move_boundary
+      @loops.first.vertices.first.position.x+=1.0e-8 if reverse_mode==:move_small_boundary
+      if reverse_mode==:uv_drift
+        old=@uv_front;@uv_front=lambda { |point| uv=old.call(point);Geom::Point3d.new(uv.x+1.0,uv.y,uv.z) }
+      end
+      self
+    end
+    def get_UVHelper(*args)
+      face=self
+      helper=Object.new
+      helper.define_singleton_method(:get_front_UVQ) { |point| face.uv_front.call(point) }
+      helper.define_singleton_method(:get_back_UVQ) { |point| face.uv_back.call(point) }
+      helper
     end
     def pushpull(depth,copy=false)
       @calls << depth
@@ -125,9 +174,33 @@ module Sketchup
       if mode != :missing_sides
         bottom.each_with_index do |loop,k|
           top=positions[k]
-          loop.each_with_index { |p,i| Face.new(owner,[[p,loop[(i+1)%loop.length],top[(i+1)%loop.length],top[i]]],[1,0,0]) }
+          origin=loop.first
+          cross=lambda { |a,b| [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]] }
+          area=[0.0,0.0,0.0]
+          loop.each_with_index do |p,i|
+            q=loop[(i+1)%loop.length]
+            value=cross.call(p.zip(origin).map { |a,b| a-b },q.zip(origin).map { |a,b| a-b })
+            area=area.zip(value).map { |a,b| a+b }
+          end
+          sign=(area.zip(delta).inject(0.0) { |sum,(a,b)| sum+a*b }>0.0 ? 1.0 : -1.0)*(k==0 ? 1.0 : -1.0)
+          loop.each_with_index do |p,i|
+            q=loop[(i+1)%loop.length]
+            n=cross.call(q.zip(p).map { |a,b| a-b },delta).map { |value| value*sign }
+            length=Math.sqrt(n.inject(0.0) { |sum,value| sum+value*value });n=n.map { |value| value/length }
+            side=Face.new(owner,[[p,q,top[(i+1)%loop.length],top[i]]],n)
+            side.material=@material;side.back_material=@back_material
+          end
         end
-        Face.new(owner,bottom,[0,0,-1])
+        # Actual SU2017 pushpull(copy=true) leaves the starting cap's original
+        # front direction. The old fixture's always-outward base masked this.
+        base=Face.new(owner,bottom,[@normal.x,@normal.y,@normal.z])
+        base.material=@material;base.back_material=@back_material
+        base.uv_front=@uv_front;base.uv_back=@uv_back;base.reverse_mode=@reverse_mode
+        base.edges.first.faces.pop if mode==:open_skin
+        if mode==:inward_side
+          side=owner.items.grep(Face).find { |face| face!=self && face!=base }
+          side.instance_variable_set(:@normal,Geom::Point3d.new(-side.normal.x,-side.normal.y,-side.normal.z))
+        end
       end
       if @peer_to_move
         @peer_to_move.loops.first.vertices.first.position.x+=1.0

@@ -119,6 +119,14 @@ module BlueCollarSystems
           owned[:targets].each do |target|
             key = [target[:owner].object_id, target[:transform]]
             proof_cache[key] ||= native_polygons(target)
+            orient_native_caps!(target, depth, proof_cache[key])
+          end
+          # Read the final native geometry again after every cap correction;
+          # the first cache describes the pre-reversal construction state.
+          proof_cache = {}
+          owned[:targets].each do |target|
+            key = [target[:owner].object_id, target[:transform]]
+            proof_cache[key] ||= native_polygons(target)
             verify_extrusion!(target, depth, proof_cache[key])
           end
           verify_peers!(peers)
@@ -240,7 +248,12 @@ module BlueCollarSystems
       end
 
       def self.target_for(face, owner, transform, depth)
-        loops = face.loops.to_a.map { |loop| loop.vertices.to_a.map { |v| point(transform, coordinates(v.position)) } }
+        native_loops = face.loops.to_a
+        loops = native_loops.map { |loop| loop.vertices.to_a.map { |v| point(transform, coordinates(v.position)) } }
+        outer_flags = native_loops.map(&:outer?)
+        unless outer_flags.count(true) == 1 && outer_flags.all? { |flag| flag == true || flag == false }
+          raise SelectionError, 'The native profile has an invalid outer boundary.'
+        end
         raise SelectionError, 'A closed face has an invalid boundary.' if loops.empty? || loops.any? { |loop| loop.length < 3 }
         z = loops.first.first[2]
         return nil unless loops.flatten(1).all? { |p| (p[2]-z).abs <= COORDINATE_TOLERANCE }
@@ -263,7 +276,7 @@ module BlueCollarSystems
         raise TransformError, 'The requested depth cannot be represented under this transform.' unless local_depth.finite? && local_depth != 0.0
         loops.flatten(1).each { |p| finite_coordinates!([p[0],p[1],p[2]+depth]) }
         {:face => face, :owner => owner, :transform => transform, :loops => loops,
-          :local_depth => local_depth, :edges => edges}
+          :local_depth => local_depth, :edges => edges, :outer_flags => outer_flags}
       end
 
       # Measure transformed origin/bases through the host, including the
@@ -321,22 +334,201 @@ module BlueCollarSystems
         end
       end
 
+      # Loop.vertices is an ordered boundary, not a promise of front direction.
+      # Measure the actual front normal with the complete inverse transpose.
+      def self.front_normal(transform, face)
+        a, b, c = transform[0, 3]
+        cofactors = [cross(b, c), cross(c, a), cross(a, b)]
+        determinant = dot(a, cofactors[0])
+        unless determinant.finite? && determinant != 0.0
+          raise TransformError, 'The cap normal has a singular transform.'
+        end
+        normal = coordinates(face.normal)
+        result = finite_coordinates!(3.times.map do |axis|
+          3.times.inject(0.0) { |sum, i| sum + cofactors[i][axis]*normal[i] } / determinant
+        end)
+        magnitude = Math.sqrt(dot(result, result))
+        unless magnitude.finite? && magnitude > 0.0
+          raise ProofError, 'The native cap front normal is invalid.'
+        end
+        result.map { |value| value/magnitude }
+      end
+
+      def self.cross(a, b)
+        [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+      end
+      def self.dot(a, b); a.zip(b).inject(0.0) { |sum, (x,y)| sum+x*y }; end
+
+      def self.matching_native_face!(polygons, expected, tolerance, description)
+        matches = polygons.select { |_face, loops| matching_loops?(loops, expected, tolerance) }
+        unless matches.length == 1
+          raise ProofError, "Native extrusion did not retain exactly one #{description}."
+        end
+        matches.first.first
+      end
+
+      def self.orient_native_caps!(target, depth, polygons)
+        tolerance = [COORDINATE_TOLERANCE, depth*1.0e-6].min
+        top = target[:loops].map { |loop| loop.map { |p| [p[0],p[1],p[2]+depth] } }
+        base_face = matching_native_face!(polygons, target[:loops], tolerance, 'starting cap')
+        top_face = matching_native_face!(polygons, top, tolerance, 'top cap')
+        raise ProofError, 'Native extrusion caps are not distinct.' if same_entity?(base_face, top_face)
+        [[base_face, target[:loops], -1.0], [top_face, top, 1.0]].each do |face, expected, direction|
+          normal = front_normal(target[:transform], face)
+          unless normal[0].abs <= AXIS_TOLERANCE && normal[1].abs <= AXIS_TOLERANCE &&
+              (normal[2].abs-1.0).abs <= AXIS_TOLERANCE
+            raise ProofError, 'The native extrusion cap is not horizontal.'
+          end
+          next if normal[2]*direction > 0.0
+          before_boundary = face.loops.to_a.map { |loop| loop.vertices.to_a.map { |v| point(target[:transform], coordinates(v.position)) } }
+          paint = cap_paint(face)
+          returned = face.reverse!
+          unless returned == face && face.valid?
+            raise ProofError, 'SketchUp did not confirm reversing the inward extrusion cap.'
+          end
+          reversed = face.loops.to_a.map { |loop| loop.vertices.to_a.map { |v| point(target[:transform], coordinates(v.position)) } }
+          unless matching_loops?(reversed, before_boundary, 0.0) && matching_loops?(reversed, expected, tolerance)
+            raise ProofError, 'Reversing the native cap changed its source boundary.'
+          end
+          preserve_reversed_cap_paint!(face, paint)
+          after = front_normal(target[:transform], face)
+          unless after[0].abs <= AXIS_TOLERANCE && after[1].abs <= AXIS_TOLERANCE &&
+              (after[2]-direction).abs <= AXIS_TOLERANCE
+            raise ProofError, 'The reversed native cap still faces into the extrusion.'
+          end
+        end
+      end
+
+      def self.cap_paint(face)
+        materials = [face.material, face.back_material]
+        textured = materials.any? { |material| material && material.texture }
+        uv = nil
+        if textured
+          # Older hosts expose UVHelper; no positioned/projected API introduced
+          # after SketchUp2017 is required. Sample both physical painted sides.
+          positions = face.loops.to_a.flat_map { |loop| loop.vertices.to_a.map { |vertex| coordinates(vertex.position) } }.uniq
+          positions = representative_uv_positions(positions)
+          helper = face.get_UVHelper(true, true)
+          uv = [true, false].each_with_index.map do |front, index|
+            next nil unless materials[index] && materials[index].texture
+            homogeneous_uv_samples(helper, positions, front)
+          end
+        end
+        {:materials => materials, :signatures => materials.map { |material| paint_signature(material) }, :uv => uv}
+      end
+
+      def self.paint_signature(material)
+        return nil unless material
+        {:color => material.color.to_a, :alpha => material.alpha.to_f, :texture => material.texture}
+      end
+
+      def self.uv_coordinates(helper, position, front)
+        u,v,q = uvq_coordinates(helper, position, front)
+        finite_coordinates!([u/q, v/q, 1.0])
+      end
+
+      def self.uvq_coordinates(helper, position, front)
+        point = Geom::Point3d.new(*position)
+        uvq = front ? helper.get_front_UVQ(point) : helper.get_back_UVQ(point)
+        u,v,q = coordinates(uvq)
+        raise ProofError, 'The cap texture has invalid UV coordinates.' unless q != 0.0
+        [u,v,q]
+      end
+
+      def self.homogeneous_uv_samples(helper, positions, front)
+        samples = positions.map { |position| [position, uvq_coordinates(helper, position, front)] }
+        scale = samples.first.last[2]
+        # Normalize once for the entire mapping, retaining relative Q weights.
+        # Dividing each sample by its own Q can hide projective interior drift.
+        samples.map { |position, uvq| [position, finite_coordinates!(uvq.map { |value| value/scale })] }
+      end
+
+      def self.representative_uv_positions(positions)
+        anchor = positions.first
+        second = positions.find { |point| point != anchor }
+        third = positions.find do |point|
+          second && cross(second.zip(anchor).map { |a,b| a-b },point.zip(anchor).map { |a,b| a-b }).any? { |value| value != 0.0 }
+        end
+        raise ProofError, 'The textured cap has no noncollinear mapping samples.' unless second && third
+        triangle = [anchor,second,third]
+        additional = [3.times.map { |axis| triangle.inject(0.0) { |sum,point| sum+point[axis]/3.0 } }]
+        triangle.each_with_index do |point,index|
+          next_point = triangle[(index+1)%triangle.length]
+          additional << point.zip(next_point).map { |a,b| a*0.5+b*0.5 }
+        end
+        (positions+additional).uniq
+      end
+
+      def self.preserve_reversed_cap_paint!(face, paint)
+        expected = paint[:materials].reverse
+        actual = [face.material, face.back_material]
+        if paint[:uv]
+          unless actual == expected
+            raise ProofError, 'SketchUp could not preserve the physical texture sides while reversing the cap.'
+          end
+          helper = face.get_UVHelper(true, true)
+          paint[:uv].reverse.each_with_index do |samples, index|
+            next unless samples
+            actual_samples = homogeneous_uv_samples(helper, samples.map(&:first), index == 0)
+            samples.zip(actual_samples).each do |(position, expected_uv),(actual_position,actual_uv)|
+              unless position == actual_position && actual_uv.zip(expected_uv).all? { |a,b| (a-b).abs <= 1.0e-10 }
+                raise ProofError, 'SketchUp could not preserve the positioned or projected cap texture while reversing it.'
+              end
+            end
+          end
+        else
+          # Preserve the old back's physical side as the new front and vice
+          # versa, independent of whether a host reverse! swaps paint itself.
+          face.material = expected[0] unless actual[0] == expected[0]
+          face.back_material = expected[1] unless actual[1] == expected[1]
+          unless [face.material, face.back_material] == expected
+            raise ProofError, 'SketchUp could not preserve the reversed cap paint.'
+          end
+        end
+        unless [face.material, face.back_material].map { |material| paint_signature(material) } == paint[:signatures].reverse
+          raise ProofError, 'The native cap color, opacity or texture changed while reversing it.'
+        end
+        true
+      end
+
       def self.verify_extrusion!(target, depth, polygons)
         tolerance = [COORDINATE_TOLERANCE, depth*1.0e-6].min
         top = target[:loops].map { |loop| loop.map { |p| [p[0],p[1],p[2]+depth] } }
-        unless polygons.any? { |_face, loops| matching_loops?(loops,target[:loops],tolerance) }
-          raise ProofError, 'Native push/pull did not preserve the starting boundary.'
+        base = matching_native_face!(polygons, target[:loops], tolerance, 'starting cap')
+        upper = matching_native_face!(polygons, top, tolerance, 'top cap')
+        unless (front_normal(target[:transform],base)[2]+1.0).abs <= AXIS_TOLERANCE &&
+            (front_normal(target[:transform],upper)[2]-1.0).abs <= AXIS_TOLERANCE
+          raise ProofError, 'The native extrusion caps do not face outward.'
         end
-        unless polygons.any? { |_face, loops| matching_loops?(loops,top,tolerance) }
-          raise ProofError, 'Native push/pull did not produce the requested top boundary and world depth.'
-        end
-        target[:loops].each do |loop|
+        skin = [base, upper]
+        target[:loops].each_with_index do |loop, loop_index|
+          origin = loop.first
+          area = loop.each_with_index.inject(0.0) do |sum, (p,i)|
+            q = loop[(i+1)%loop.length]
+            sum+(p[0]-origin[0])*(q[1]-origin[1])-(q[0]-origin[0])*(p[1]-origin[1])
+          end
+          raise ProofError, 'The native profile loop has no bounded area.' unless area.finite? && area != 0.0
+          direction = (area > 0.0 ? 1.0 : -1.0)*(target[:outer_flags][loop_index] ? 1.0 : -1.0)
           loop.each_with_index do |p,i|
             q = loop[(i+1)%loop.length]
             side = [p,q,[q[0],q[1],q[2]+depth],[p[0],p[1],p[2]+depth]]
-            unless polygons.any? { |_face, loops| loops.length == 1 && matching_points?(loops.first,side,tolerance) }
-              raise ProofError, 'Native push/pull did not produce a complete side boundary.'
+            native_side = matching_native_face!(polygons, [side], tolerance, 'side boundary')
+            length = Math.sqrt((q[0]-p[0])**2+(q[1]-p[1])**2)
+            raise ProofError, 'The native side has a collapsed source edge.' unless length.finite? && length > 0.0
+            expected = [(q[1]-p[1])*direction/length, -(q[0]-p[0])*direction/length, 0.0]
+            normal = front_normal(target[:transform], native_side)
+            unless dot(normal, expected) >= 1.0-AXIS_TOLERANCE && normal[2].abs <= AXIS_TOLERANCE
+              raise ProofError, 'A native extrusion side faces into the solid.'
             end
+            skin << native_side
+          end
+        end
+        ids = skin.map { |face| entity_id(face) }
+        raise ProofError, 'The native extrusion repeats a surface.' unless ids.uniq.length == ids.length
+        skin.flat_map { |face| face.edges.to_a }.uniq { |edge| entity_id(edge) }.each do |edge|
+          faces = edge.faces.to_a.map { |face| entity_id(face) }
+          unless faces.length == 2 && faces.all? { |id| ids.include?(id) }
+            raise ProofError, 'Native extrusion did not produce a closed two-face edge boundary.'
           end
         end
         true

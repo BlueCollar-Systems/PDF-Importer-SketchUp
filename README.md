@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.168-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.169-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -21,6 +21,16 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Recent fixes (v3.7.169)
+
+- The manual **Extrude Selected Planar Faces** tool keeps both profile caps
+  facing outward, including reversed faces and scaled or reflected instances.
+  It preserves the caps' physical front/back paint and checks texture placement;
+  an unpreserved texture cancels the edit with its reason.
+- The tool checks the resulting native cap/side boundaries and closed edge
+  connections before committing the edit. An uncertain native correction rolls
+  back the operation instead of reporting a completed extrusion.
 
 ### Recent fixes (v3.7.168)
 
