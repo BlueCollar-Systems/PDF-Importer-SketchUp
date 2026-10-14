@@ -140,5 +140,15 @@ outlines against a reference face - a TrueType parser in Ruby 2.2.4, not a small
 
 ## Other pointers
 
+- A decoded Unicode space may paint a visible PDF glyph. It is not a no-ink
+  proof. The bounded zero-ink exception requires the original PDF bytes, exact
+  source show operand/code, scoped font program, unambiguous cmap/GID and empty
+  glyf byte range for every character. Preserve the semantic text and full
+  source layout in `BC_PDF_ZERO_INK` on the owned page. A blank-only page needs
+  a hidden nonpainting construction-point carrier to survive save. Report these
+  separately from physical text groups; never manufacture a positive-depth
+  solid or rasterize neighboring page ink. Unsupported proof follows the
+  existing truthful item ladder. Native save/reopen remains an acceptance check.
+
 - Host / text-mode matrix: [`HOST_COMPATIBILITY.md`](HOST_COMPATIBILITY.md), [`COMPATIBILITY.md`](COMPATIBILITY.md), [`README.md`](README.md)
 - Acceptance must cover mixed per-span success/fallback, requested item Raster, requested zero-canonical-text page Raster, rotated Labels, and save/reopen/source-file deletion in SketchUp 2017 and a current SketchUp release. Raster failure remains an allowed truthful terminal result when verification cannot pass.

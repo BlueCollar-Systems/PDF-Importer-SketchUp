@@ -177,7 +177,9 @@ class OutcomeAccountingTest < Minitest::Test
   # --- vocabulary parity with the Python canonical copy ----------------------
 
   def test_vocabularies_match_the_python_core
-    py = File.read(
+    # Isolated worktrees need not sit beside the separately owned core repo.
+    # An explicit path still reads the real canonical source; it never skips parity.
+    py = File.read(ENV['BC_PDFCADCORE_OUTCOME_ACCOUNTING'] ||
       File.expand_path(
         '../../1PDF-Importer-FreeCAD/PDFVectorImporter/pdfcadcore/outcome_accounting.py',
         __dir__

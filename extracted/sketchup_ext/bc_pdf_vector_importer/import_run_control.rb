@@ -990,6 +990,16 @@ module BlueCollarSystems
           end
           row['text'] = entity.text.to_s if entity.respond_to?(:text)
           row['hidden'] = entity.hidden? == true if entity.respond_to?(:hidden?)
+          if row['typename'] == 'Group' && entity.respond_to?(:get_attribute)
+            zero_json = entity.get_attribute('BC_PDF_ZERO_INK', 'ledger_json')
+            zero_sha = entity.get_attribute('BC_PDF_ZERO_INK', 'ledger_sha256')
+            unless zero_json.nil? && zero_sha.nil?
+              row['source_zero_ink_ledger_json'] = zero_json
+              row['source_zero_ink_ledger_sha256'] = zero_sha
+            end
+          elsif row['typename'] == 'ConstructionPoint' && entity.respond_to?(:get_attribute)
+            row['source_zero_ink_carrier'] = entity.get_attribute('BC_PDF_ZERO_INK', 'page_carrier')
+          end
           if entity.respond_to?(:material) && entity.material
             material = entity.material
             row['material'] = material.respond_to?(:name) ? material.name.to_s : material.to_s
@@ -1144,6 +1154,17 @@ module BlueCollarSystems
           payload = {}
           stats.each do |key, value|
             name = key.to_s
+            if name == 'source_provenance_objects'
+              # Blank source spans have a small page-owned ledger instead of
+              # physical glyph evidence to rehydrate. Keep those crosslinks;
+              # retain the established omission of bulky visible glyph trees.
+              zero = Array(value).select do |entry|
+                entry.is_a?(Hash) &&
+                  (entry[:source_kind] || entry['source_kind']) == 'zero_ink_text_span'
+              end
+              payload[name] = zero unless zero.empty?
+              next
+            end
             next if JOURNAL_STATS_OMIT.include?(name)
             payload[name] = value
           end

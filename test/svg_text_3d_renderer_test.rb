@@ -572,6 +572,25 @@ class SvgText3DRendererTest < Minitest::Test
     assert_empty result[:transition_proofs]
   end
 
+  def test_unicode_spaces_with_visible_original_ink_keep_all_positive_depth_glyphs
+    spaces = Svg3DSpan.new('    ', 'BCSyntheticVisibleSpace', 'text_span:1:0',
+      8.0, 18.0, 82.0, 35.0)
+    svg = square_svg.sub('<use href="#glyph-0-0" x="10" y="80"/>',
+      [10,30,50,70].map { |x| "<use href=\"#glyph-0-0\" x=\"#{x}\" y=\"80\"/>" }.join)
+    result = RENDERER.render_svg(Svg3DEntities.new, svg, MEDIA_BOX, [spaces],
+      :depth => 0.05, :source_context => complete_source_context)
+    assert result[:ok], result[:failures].inspect
+    assert_empty result[:transition_proofs]
+    assert_empty result[:failures]
+    assert_equal 1, result[:span_results].length
+    row = result[:span_results].first
+    assert_equal [0,1,2,3], row[:placement_indices]
+    assert row[:identity_verified]
+    assert row[:depth_verified]
+    assert_operator row[:extruded_face_count], :>=, 4
+    assert_in_delta 0.05, row[:depth], 1.0e-9
+  end
+
   def test_source_outline_contour_edges_are_persistently_hidden_and_read_back
     edges = [
       Svg3DVisualStyleEntity.new('Edge'),

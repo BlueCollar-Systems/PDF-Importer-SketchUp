@@ -33,7 +33,9 @@ module BlueCollarSystems
       # true value means every raw character code in this PDF text-show operand
       # was resolved by the selected source font map; nil/false fails closed.
       TextItem.class_eval do
-        attr_accessor :source_decode_complete, :source_paint_order
+        attr_accessor :source_decode_complete, :source_paint_order,
+                      :source_code_tokens, :source_text_matrix, :source_text_state,
+                      :source_show_operand, :source_show_operator
         # Hex glyph codes when this item was drawn from a font whose codes
         # carry no meaning; nil otherwise. Set only when the caller passed
         # :unmapped_font_resources, so an ordinary parse is unaffected.
@@ -74,6 +76,9 @@ module BlueCollarSystems
         end
         @glyph_code_spans = []
         @pending_raw_codes = []
+        @pending_source_code_tokens = []
+        @source_text_state = { :char_spacing => 0.0, :word_spacing => 0.0,
+          :horizontal_scale => 1.0, :rise => 0.0, :render_mode => 0 }
 
         (font_maps || {}).each do |k, v|
           key = k.to_s
@@ -104,6 +109,8 @@ module BlueCollarSystems
         @font_size = 12.0
         @font_name = ""
         @in_text = false
+        @source_text_state = { :char_spacing => 0.0, :word_spacing => 0.0,
+          :horizontal_scale => 1.0, :rise => 0.0, :render_mode => 0 }
 
         @streams.each_with_index do |stream, stream_index|
           next unless stream && !stream.empty?
@@ -249,6 +256,16 @@ module BlueCollarSystems
               @font_size = font_size
               @font_name = font_name
 
+            when 'Tc', 'Tw', 'Tz', 'Ts', 'Tr'
+              if nums.length == 1
+                key = { 'Tc' => :char_spacing, 'Tw' => :word_spacing,
+                  'Tz' => :horizontal_scale, 'Ts' => :rise,
+                  'Tr' => :render_mode }[op]
+                value = nums[0].to_f
+                value /= 100.0 if op == 'Tz'
+                @source_text_state[key] = value
+              end
+
             when 'Tm'
               # Set text matrix directly
               if nums.length >= 6
@@ -287,6 +304,7 @@ module BlueCollarSystems
               if in_text
                 begin_show_operation
                 raw = strs.last || hexs.last
+                @source_show_operand = raw; @source_show_operator = op
                 text = decode_text_operand(raw, font_name)
                 emit_text(
                   text, tm, font_size, font_name, @last_decode_complete
@@ -299,6 +317,7 @@ module BlueCollarSystems
                 begin_show_operation
                 arr_token = operand_stack.find { |t| t[:type] == :array }
                 if arr_token
+                  @source_show_operand = arr_token[:value]; @source_show_operator = op
                   text = extract_tj_text(arr_token[:value], font_name)
                   emit_text(
                     text, tm, font_size, font_name, @last_decode_complete
@@ -313,6 +332,7 @@ module BlueCollarSystems
                 tm = tlm.dup
                 if !strs.empty?
                   begin_show_operation
+                  @source_show_operand = strs.first; @source_show_operator = op
                   text = decode_text_operand(strs.first, font_name)
                   emit_text(
                     text, tm, font_size, font_name, @last_decode_complete
@@ -323,10 +343,15 @@ module BlueCollarSystems
             when '"'
               # Set word/char spacing, move to next line, show text
               if in_text
+                if nums.length >= 2
+                  @source_text_state[:word_spacing] = nums[0].to_f
+                  @source_text_state[:char_spacing] = nums[1].to_f
+                end
                 tlm = multiply_matrix([1, 0, 0, 1, 0, -font_size * 1.2], tlm)
                 tm = tlm.dup
                 if !strs.empty?
                   begin_show_operation
+                  @source_show_operand = strs.first; @source_show_operator = op
                   text = decode_text_operand(strs.first, font_name)
                   emit_text(
                     text, tm, font_size, font_name, @last_decode_complete
@@ -389,6 +414,11 @@ module BlueCollarSystems
         )
         item.source_decode_complete = source_decode_complete == true
         item.source_paint_order = @source_paint_order && @source_paint_order.dup
+        item.source_code_tokens = @pending_source_code_tokens.map(&:dup)
+        item.source_text_matrix = text_matrix.dup
+        item.source_text_state = @source_text_state.merge(:font_size => font_size)
+        item.source_show_operand = @source_show_operand && @source_show_operand.dup
+        item.source_show_operator = @source_show_operator
         @text_items << item
         # One record per drawn item whose codes carry no meaning. The item
         # itself is untouched: this change reports the defect, it does not
@@ -420,6 +450,8 @@ module BlueCollarSystems
       # it - must not leave its codes for the next item to claim.
       def begin_show_operation
         @pending_raw_codes = []
+        @pending_source_code_tokens = []
+        @source_show_operand = nil; @source_show_operator = nil
       end
 
       # True when this font resource's codes are glyph indices the PDF never
@@ -454,6 +486,7 @@ module BlueCollarSystems
                 end
 
         mapped = decode_bytes_with_font_map(bytes, font_name)
+        @pending_source_code_tokens << { :raw_hex => bytes_to_hex(bytes) }
         @last_decode_complete = !mapped.nil? &&
           font_map_covers_all_bytes?(bytes, font_name)
         # Accumulated across one show operation - a TJ array decodes many
@@ -1103,7 +1136,8 @@ module BlueCollarSystems
         @gs_stack << {
           :ctm => @ctm.dup,
           :font_name => font_name,
-          :font_size => font_size
+          :font_size => font_size,
+          :source_text_state => @source_text_state.dup
         }
       end
 
@@ -1114,6 +1148,7 @@ module BlueCollarSystems
           @ctm = saved[:ctm] if saved[:ctm]
           @font_name = saved[:font_name] if saved[:font_name]
           @font_size = saved[:font_size] if saved[:font_size]
+          @source_text_state = saved[:source_text_state].dup if saved[:source_text_state]
           saved
         else
           @ctm = saved
@@ -1270,11 +1305,17 @@ module BlueCollarSystems
       def extract_tj_text(array_str, font_name = nil)
         # TJ arrays contain strings and numbers: [(Hello ) -250 (World)]
         arr = array_str.to_s
-        chunks = arr.scan(/\((?:\\.|[^\\)])*\)|<[^>]*>/)
+        chunks = tokenize(arr[1, arr.length - 2]).select do |token|
+          [:string, :hex_string, :number].include?(token[:type])
+        end
         text = ""
         complete = !chunks.empty?
         chunks.each do |chunk|
-          decoded = decode_text_operand(chunk, font_name)
+          if chunk[:type] == :number
+            @pending_source_code_tokens << { :adjustment => chunk[:value].to_f }
+            next
+          end
+          decoded = decode_text_operand(chunk[:value], font_name)
           complete = false unless @last_decode_complete == true
           text << decoded
         end
