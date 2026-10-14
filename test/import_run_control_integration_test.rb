@@ -204,14 +204,16 @@ class ImportRunControlIntegrationTest < Minitest::Test
       preparation = MAIN[/      salvage_note = nil\n      if opts\[:prepared_parser\].*?(?=      if parser\.page_count == 0)/m]
       guard = MAIN[/    def self\.confirm_large_pdf_once!.*?(?=    def self\.confirm_page_complexity!)/m]
       terminal_guard = MAIN[/    def self\.preserve_terminal_import_error.*?(?=    def self\.import_result_status)/m]
+      retained_items = MAIN[/    def self\.text_step_down_present\?.*?(?=    def self\.pages_kept_with_step_downs\?)/m]
       refute_nil outer
       refute_nil lineage
       refute_nil preparation
       refute_nil guard
       refute_nil terminal_guard
+      refute_nil retained_items
       page_selection = MAIN[/    def self\.normalized_requested_pages.*?(?=    def self\.normalize_page_gap_ratio)/m]
       refute_nil page_selection
-      scope.module_eval(outer + lineage + guard + terminal_guard + page_selection, __FILE__, __LINE__)
+      scope.module_eval(outer + lineage + guard + terminal_guard + retained_items + page_selection, __FILE__, __LINE__)
       scope.module_eval("def self.run_pipeline(model, path, opts)\n" \
         "source_path = path\n" + preparation +
         "stats = {}\nrecord_source_lineage!(stats, source_path, path, salvage_note, opts)\n" \

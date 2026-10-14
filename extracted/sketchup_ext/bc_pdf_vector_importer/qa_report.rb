@@ -13,6 +13,7 @@ require File.join(File.dirname(__FILE__), 'model_3d_extruder')
 require File.join(File.dirname(__FILE__), 'model_3d_intent')
 require File.join(File.dirname(__FILE__), 'parts_bootstrap')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
+require File.join(File.dirname(__FILE__), 'source_zero_ink')
 
 require File.join(File.dirname(__FILE__), 'glyph_code_report')
 
@@ -308,6 +309,7 @@ module BlueCollarSystems
         end
         warnings += degraded_renderers.length
         warnings += lineweight_approximation_block(stats)[:unresolved_path_count]
+        warnings += Array(telemetry_value(stats, :fill_delivery_failures)).length
         version = importer_version
 
         report = {
@@ -651,6 +653,9 @@ module BlueCollarSystems
             stats[:pipeline_performance] || stats['pipeline_performance'] || {}
           ),
           delivered_text_entity_counts: delivered_text_entity_counts(stats),
+          zero_ink_text_deliveries: normalize_json(
+            stats[:zero_ink_text_deliveries] || stats['zero_ink_text_deliveries'] || []
+          ),
           text_delivery_accounting: text_delivery_accounting(stats),
           text_delivery_failures: Array(
             stats[:text_delivery_failures] || stats['text_delivery_failures']
@@ -717,6 +722,7 @@ module BlueCollarSystems
           representation_ownership_group_forced_pages: Array(stats[:representation_ownership_group_forced_pages]).map { |entry| normalize_json(entry) },
           source_glyph_physical_deliveries: Array(stats[:source_glyph_physical_deliveries]).map { |entry| normalize_json(entry) },
           scale_hints: scale_hints_block(stats),
+          fill_delivery_failures: Array(telemetry_value(stats, :fill_delivery_failures)),
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers),
           model_3d_intent: model_3d_intent_block(stats),
           model_3d: model_3d_block(stats, opts),
@@ -746,6 +752,7 @@ module BlueCollarSystems
           stats[:text_source_span_ids] || stats['text_source_span_ids']
         ).map { |value| value.to_s.strip }.reject(&:empty?).uniq
         delivered_ids = []
+        zero_ids = []
         failed_ids = []
         Array(stats[:text_attempts] || stats['text_attempts']).each do |entry|
           next unless entry.is_a?(Hash)
@@ -757,6 +764,17 @@ module BlueCollarSystems
             delivered_ids << source_id
           else
             failed_ids << source_id
+          end
+        end
+        Array(stats[:zero_ink_text_deliveries] || stats['zero_ink_text_deliveries']).each do |entry|
+          begin
+            SourceZeroInk.verify_delivery!(entry,
+              fidelity_zero_ink_source_pdf_sha256(stats), fidelity_requested_mode(stats, {}))
+            id = telemetry_value(entry, :source_span_id)
+            zero_ids << id
+            delivered_ids << id
+          rescue StandardError
+            # Unverified metadata cannot count as retained source content.
           end
         end
         Array(
@@ -785,6 +803,7 @@ module BlueCollarSystems
                           effective.to_s,
           source_count: source_count,
           delivered_count: delivered_count,
+          verified_zero_ink_count: (zero_ids.uniq & source_ids).length,
           failed_count: failed_count,
           unaccounted_count: unaccounted_count,
           counts_reconciled: source_count ==
@@ -994,8 +1013,10 @@ module BlueCollarSystems
         fidelity_ok = fidelity[:ready] == true || fidelity['ready'] == true
         outcome = page_outcome_block(extra)
         pages_ok = outcome.nil? || outcome[:page_outcomes][:ready]
+        fill_failures = Array(telemetry_value(extra, :fill_delivery_failures))
+        fills_ok = fill_failures.empty?
         ready = has_stamp && has_crosscheck && text_ok && fidelity_ok &&
-                host_delivery_ok && pages_ok &&
+                host_delivery_ok && pages_ok && fills_ok &&
                 open_failure.nil?
         {
           ready: ready,
@@ -1005,10 +1026,12 @@ module BlueCollarSystems
             actual_text_entity_types: text_ok,
             host_entity_delivery: host_delivery_ok,
             requested_pages_retained: pages_ok,
+            source_filled_geometry_retained: fills_ok,
             requested_representation_fidelity: fidelity_ok,
             no_open_failure: open_failure.nil?
           },
-          errors: outcome ? outcome[:page_outcomes][:errors] : [],
+          errors: (outcome ? outcome[:page_outcomes][:errors] : []) +
+            (fills_ok ? [] : ["undelivered_source_fills:#{fill_failures.length}"]),
           note: 'diagnostics stub — Report Doctor may recompute client-side'
         }
       end
@@ -1266,6 +1289,12 @@ module BlueCollarSystems
         value = telemetry_value(stats, :normalized_pdf_sha256) if
           value.to_s.strip.empty?
         value.to_s.downcase
+      end
+
+      def fidelity_zero_ink_source_pdf_sha256(stats)
+        original = telemetry_value(stats, :source_input_sha256).to_s.downcase
+        parsed = fidelity_source_pdf_sha256(stats)
+        original =~ /\A[0-9a-f]{64}\z/ && original == parsed ? original : ''
       end
 
       def fidelity_explicit_page_raster_artifact_valid?(artifact, page_number,
@@ -1652,6 +1681,37 @@ module BlueCollarSystems
             end
           end
         end
+
+        # Zero-painted source glyphs use a page-owned semantic ledger, not a
+        # fictitious positive-depth solid or a crop of unrelated visible ink.
+        zero_ids = []
+        zero_deliveries = Array(stats[:zero_ink_text_deliveries] || stats['zero_ink_text_deliveries'])
+        zero_deliveries.each do |entry|
+          begin
+            SourceZeroInk.verify_delivery!(entry, fidelity_zero_ink_source_pdf_sha256(stats), requested_mode)
+            id = telemetry_value(entry, :source_span_id)
+            page = telemetry_value(entry, :page)
+            raise SourceZeroInk::Unavailable, 'source set/page/duplicate mismatch' unless source_ids.include?(id) && !zero_ids.include?(id) && (selected_pages.empty? || selected_pages.include?(page))
+            linked = provenance.select do |row|
+              telemetry_value(row, :source_kind) == 'zero_ink_text_span' &&
+                telemetry_value(row, :span_id) == id
+            end
+            raise SourceZeroInk::Unavailable, 'zero-ink provenance mismatch' unless linked.length == 1 &&
+              SourceZeroInk.canonical(telemetry_value(linked[0], :zero_ink_delivery)) == SourceZeroInk.canonical(entry) &&
+              telemetry_value(linked[0], :object_id) == id && telemetry_value(linked[0], :page) == page &&
+              telemetry_value(linked[0], :resulting_entity_ids) == [] &&
+              telemetry_value(linked[0], :created_entity_type) == 'source_zero_ink' &&
+              telemetry_value(linked[0], :renderer) == 'original_truetype_zero_ink'
+            zero_ids << id
+          rescue StandardError => e
+            errors << "zero_ink_delivery_invalid:#{e.message}"
+          end
+        end
+        zero_provenance_ids = provenance.select { |row| telemetry_value(row, :source_kind) == 'zero_ink_text_span' }.map { |row| telemetry_value(row, :span_id) }
+        errors << 'zero_ink_provenance_set_mismatch' unless zero_provenance_ids.sort == zero_ids.sort
+        # All zero-ink spans were checked above against the complete canonical
+        # source set. The ordinary physical-entity gate covers the remainder.
+        source_ids = source_ids - zero_ids
 
         provenance_by_span = {}
         provenance_types_by_span = {}
@@ -2324,10 +2384,13 @@ module BlueCollarSystems
         cleaned_ids.each_key do |identity|
           errors << "cleaned_entity_is_live:#{identity}" if live_id_owner.key?(identity)
         end
+        fill_failures = Array(telemetry_value(stats, :fill_delivery_failures))
+        errors << "undelivered_source_fills:#{fill_failures.length}" unless fill_failures.empty?
 
         {
           ready: errors.empty?,
           checks: {
+            source_filled_geometry_retained: fill_failures.empty?,
             requested_pages_retained: page_outcome.nil? ||
               page_outcome[:page_outcomes][:ready],
             source_span_set_equality: !errors.include?('source_delivery_set_mismatch') &&
@@ -2399,6 +2462,7 @@ module BlueCollarSystems
         Array(stats[:source_provenance_objects] || stats['source_provenance_objects']).each do |entry|
           next unless entry.respond_to?(:[])
           kind = (entry[:created_entity_type] || entry['created_entity_type']).to_s.strip
+          next if kind == 'source_zero_ink'
           next if kind.empty?
           counts[kind] = counts.fetch(kind, 0).to_i + 1
         end
@@ -2794,7 +2858,20 @@ module BlueCollarSystems
                  else
                    "Created #{outcome.join(', ')}"
                  end
+        blank_spans = Array(extra['zero_ink_text_deliveries'])
+        unless blank_spans.empty?
+          characters = blank_spans.inject(0) do |sum, record|
+            proof = telemetry_value(record, :source_proof) || {}
+            sum + telemetry_value(proof, :source_character_count).to_i
+          end
+          parts << "Retained #{blank_spans.length} blank source text span#{blank_spans.length == 1 ? '' : 's'} (#{characters} space characters) without creating pictures"
+        end
         parts << "in #{format('%.1f', elapsed_s)}s" if elapsed_s > 0
+        fill_failures = Array(extra['fill_delivery_failures'])
+        unless fill_failures.empty?
+          count = fill_failures.length
+          parts << "#{count} filled shape#{count == 1 ? '' : 's'} could not be created; see the import report for locations and reasons"
+        end
 
         scale = extra['resolved_scale']
         if scale.is_a?(Hash) && scale['factor']

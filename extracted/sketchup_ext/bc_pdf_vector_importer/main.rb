@@ -32,6 +32,7 @@ module BlueCollarSystems
     require File.join(dir, 'content_stream_parser')
     require File.join(dir, 'text_parser')
     require File.join(dir, 'text_source_identity')
+    require File.join(dir, 'source_zero_ink')
     require File.join(dir, 'glyph_code_report')
     require File.join(dir, 'glyph_code_join')
     require File.join(dir, 'external_text_extractor')
@@ -319,6 +320,7 @@ module BlueCollarSystems
     def self.run_non_resumable_pipeline(model, source_path, opts)
       inner_opts = opts.dup
       inner_opts[:resumable_page_call] = true
+      inner_opts[:non_resumable_request] = true
       requested_mode = opts[:force_raster] ? :raster : opts[:text_mode]
       # Cancellation/progress do not need a retained-page journal. These
       # modes use one transaction, so Esc rolls back the entire import. No
@@ -885,14 +887,20 @@ module BlueCollarSystems
              stats['text_delivery_failures']).empty?
     end
 
-    # An import whose pages all arrived, but with some text items listed as
-    # not delivered, reports 'incomplete' (the list is in Import Health) and
-    # still counts as an imported file: nothing was lost to a text problem.
+    def self.retained_item_failures_present?(stats)
+      return false unless stats.is_a?(Hash)
+      text_step_down_present?(stats) ||
+        !Array(stats[:fill_delivery_failures] ||
+               stats['fill_delivery_failures']).empty?
+    end
+
+    # Pages retained with listed text/fill omissions report 'incomplete' and
+    # still count as an imported file. A rolled-back page never uses this path.
     def self.pages_kept_with_step_downs?(stats)
       return false unless stats.is_a?(Hash)
       return false if stats[:cancelled] == true
       return false unless Array(stats[:failed_pages]).empty?
-      text_step_down_present?(stats)
+      retained_item_failures_present?(stats)
     end
 
     def self.failed_item_rung_from_transition(proof)
@@ -3315,6 +3323,10 @@ module BlueCollarSystems
       end
       clone.source_paint_order = item.source_paint_order if
         item.respond_to?(:source_paint_order) && clone.respond_to?(:source_paint_order=)
+      [:source_code_tokens, :source_text_matrix, :source_text_state,
+       :source_show_operand, :source_show_operator].each do |name|
+        clone.send("#{name}=", item.send(name)) if item.respond_to?(name)
+      end
       clone
     end
 
@@ -4664,10 +4676,16 @@ module BlueCollarSystems
         # Every page arrived, but some text items are listed as not
         # delivered: the import is incomplete, never failed.
         if stats[:result_status].to_s == 'success' &&
-           !Array(stats[:text_delivery_failures]).empty?
+           retained_item_failures_present?(stats)
           stats[:result_status] = 'incomplete'
         end
         stats[:failed_pages] = Array(result[:failed_pages])
+        stats[:fill_delivery_failures] ||= []
+        stats[:failed_pages].each do |failure|
+          stats[:fill_delivery_failures].concat(
+            Array(failure[:fill_delivery_failures] || failure['fill_delivery_failures'])
+          )
+        end
         stats[:failed_pages].each do |failure|
           Logger.warn(
             'Pipeline',
@@ -4886,6 +4904,7 @@ module BlueCollarSystems
                 import_session_id: new_import_session_id,
                  source_provenance_objects: [], text_source_span_ids: [],
                  text_attempts: [], text_delivery_failures: [],
+                 fill_delivery_failures: [],
                  page_text_delivery_records: [],
                  terminal_text_delivery_records: [],
                  terminal_cleanup_events: [], fallback_transitions: [],
@@ -5193,6 +5212,7 @@ module BlueCollarSystems
 
         stream_bytes = streams.inject(0) { |sum, s| sum + s.length }
         text_items = []
+        page_zero_ink_proofs = []
         if opts[:import_text]
           text_extract_started = Time.now
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Extracting text... [#{(Time.now - import_start).round(1)}s]"
@@ -5402,6 +5422,30 @@ module BlueCollarSystems
           end
         end
 
+        # Empty original glyph byte ranges retain their full semantic/layout
+        # ledger. They need no picture of other page ink and no 3D solid.
+        canonical_text_items = Array(text_items)
+        zero_ink_font_cache = {}
+        zero_ink_ids = {}
+        parsed_zero_ink_sha = cached_source_pdf_sha256!(opts, path)
+        canonical_text_items.each do |item|
+          # A rewritten/salvaged font is not the original PDF font program.
+          # This bounded route requires byte-identical original/parsed input.
+          next unless stats[:source_input_sha256] == parsed_zero_ink_sha
+          next unless item.respond_to?(:text) && item.text.to_s =~ /\A +\z/
+          source_item = ensure_complete_source_text_bbox(item)
+          proof = SourceZeroInk.qualify(
+            parser, streams, source_item, page_num,
+            parsed_zero_ink_sha, zero_ink_font_cache
+          )
+          next unless proof
+          page_zero_ink_proofs << proof
+          zero_ink_ids[proof['source_span_id']] = true
+        end
+        text_items = canonical_text_items.reject do |item|
+          zero_ink_ids.key?(safe_text_source_id(item))
+        end
+
         # A missing text helper turns off this page's helper-based text only.
         # Lines, fills and pictures still build; every text item is listed.
         text_renderer_missing = false
@@ -5420,9 +5464,9 @@ module BlueCollarSystems
 
         explicit_zero_canonical_page_raster =
           requested_zero_canonical_page_raster?(
-            requested_text_mode, opts[:import_text], text_items
+            requested_text_mode, opts[:import_text], canonical_text_items
           )
-        if empty_requested_page_artifacts?(paths, text_items, embedded_assets) ||
+        if empty_requested_page_artifacts?(paths, canonical_text_items, embedded_assets) ||
            explicit_zero_canonical_page_raster
           if svg_renderer_required_for_page?(
             requested_text_mode, opts[:import_text], text_items, true
@@ -5703,6 +5747,8 @@ module BlueCollarSystems
                                     :svg_3d_text
                                   elsif use_svg_text
                                     :svg_text
+                                  elsif !page_zero_ink_proofs.empty?
+                                    :source_zero_ink
                                   end
         group_policy = RepresentationFidelity.owned_page_group_policy(
           opts[:group_per_page], representation_renderer
@@ -5762,6 +5808,35 @@ module BlueCollarSystems
         builder_started = Time.now
         result = builder.build
         page_group_for_certification = builder.page_group
+        unless page_zero_ink_proofs.empty?
+          begin
+            zero_records = SourceZeroInk.persist!(
+              builder.page_group, page_zero_ink_proofs, requested_text_mode,
+              :media_box => media_box, :page_rotation => page_rotation,
+              :scale => opts[:scale], :y_offset => page_y_offset
+            )
+            stats[:zero_ink_text_deliveries] ||= []
+            stats[:zero_ink_text_deliveries].concat(zero_records)
+            zero_records.each do |record|
+              stats[:source_provenance_objects] << {
+                :object_id => record['source_span_id'], :span_id => record['source_span_id'],
+                :page => page_num, :source_kind => 'zero_ink_text_span',
+                :created_entity_type => 'source_zero_ink', :renderer => 'original_truetype_zero_ink',
+                :resulting_entity_ids => [], :zero_ink_delivery => record
+              }
+            end
+          rescue SourceZeroInk::UncertainRollback
+            raise
+          rescue StandardError => e
+            # A carrier failure is reported; never picture neighboring page
+            # ink and call those pixels delivery of this empty source glyph.
+            record_uncertified_text_spans!(stats, page_num,
+              page_zero_ink_proofs.map do |proof|
+                { :source_span_id => proof['source_span_id'],
+                  :reason => 'zero_ink_ledger_unavailable', :detail => e.message }
+              end)
+          end
+        end
         builder_elapsed_ms = ((Time.now - builder_started) * 1000.0).round(3)
         if result[:geometry_staging].is_a?(Hash)
           staging_evidence = result[:geometry_staging].merge(
@@ -5789,6 +5864,7 @@ module BlueCollarSystems
           end
         end
         stats[:edges] += result[:edges]; stats[:faces] += result[:faces]
+        stats[:fill_delivery_failures].concat(Array(result[:fill_delivery_failures]))
         stats[:arcs] += result[:arcs]; stats[:text] += result[:text_objects]
         merge_text_height_samples!(stats, result[:text_height_samples])
         stats[:text_height_fallback_count] =
@@ -6069,9 +6145,12 @@ module BlueCollarSystems
 
           transition_proofs = Array(text3d_result[:transition_proofs])
           if text3d_result[:no_semantic_text] == true
+            # This renderer subset can be empty while canonical source spaces
+            # were retained in the page ledger. Do not call that "no text".
+            no_semantic_source = page_zero_ink_proofs.empty?
             record_text_renderer(
               stats, page_num,
-              :renderer => :no_semantic_text,
+              :renderer => (no_semantic_source ? :no_semantic_text : :source_zero_ink),
               :mode => :text3d,
               :requested_mode => exact_3d_requested_mode,
               :delivered_mode => :text3d,
@@ -6080,7 +6159,8 @@ module BlueCollarSystems
               :affirmative_transition_reason_code =>
                 (exact_3d_requested_mode == :text3d ? nil : :host_representation_unsupported),
               :count => 0,
-              :no_semantic_text => true,
+              :no_semantic_text => no_semantic_source,
+              :source_zero_ink_span_count => page_zero_ink_proofs.length,
               :source_svg_inspected => true
             )
           else
@@ -6724,9 +6804,12 @@ module BlueCollarSystems
 
       stats[:next_y_offset] = running_y_offset
       stats[:log_path] = Logger.log_path
-      if !opts[:resumable_page_call] && stats[:result_status].to_s.empty? &&
-         text_step_down_present?(stats)
+      if (!opts[:resumable_page_call] || opts[:non_resumable_request]) &&
+         stats[:result_status].to_s.empty? &&
+         retained_item_failures_present?(stats)
         stats[:result_status] = 'incomplete'
+        stats[:requested_pages] = Array(stats[:selected_pages]).dup
+        stats[:retained_pages] = Array(stats[:selected_pages]).dup
       end
       unless opts[:defer_final_diagnostics]
         report_pipeline_progress(opts, 'diagnostics_started')

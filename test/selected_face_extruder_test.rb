@@ -333,4 +333,226 @@ class SelectedFaceExtruderTest < Minitest::Test
     wrong=[expected[0],expected[1],expected[3],expected[2],expected[4]]
     refute Tool.matching_points?(wrong,expected,1e-7)
   end
+
+  def test_observed_same_normal_starting_cap_is_corrected_with_distinct_physical_paint
+    face=rectangle
+    front=Sketchup::Material.new('red front',0.4,nil)
+    back=Sketchup::Material.new('blue back',0.8,nil)
+    face.material=front;face.back_material=back;select(face)
+    assert_equal :completed,tool_run[:status]
+    base=@model.entities.to_a.grep(Sketchup::Face).find { |item| item.positions.flatten(1).all? { |p| p[2]==0.0 } }
+    assert_equal -1.0,base.normal.z
+    assert_equal 1,base.reverse_calls
+    assert_same back,base.material
+    assert_same front,base.back_material
+    assert_same front,face.material
+    assert_same back,face.back_material
+    assert_equal 0,face.reverse_calls
+    assert_equal [0.4,0.8],[front.alpha,back.alpha]
+  end
+
+  def test_reversed_source_top_is_corrected_without_reversing_an_already_outward_base
+    face=rectangle(@model.entities,0,[0,0,-1]);select(face)
+    assert_equal :completed,tool_run[:status]
+    base=@model.entities.to_a.grep(Sketchup::Face).find { |item| item.positions.flatten(1).all? { |p| p[2]==0.0 } }
+    assert_equal -1.0,base.normal.z
+    assert_equal 0,base.reverse_calls
+    assert_equal 1.0,face.normal.z
+    assert_equal 1,face.reverse_calls
+  end
+
+  def test_reflected_nonuniform_and_xy_sheared_caps_use_actual_world_front_normals
+    transforms=[Geom::Transformation.scale(-2,3,-4),Geom::Transformation.scale(2,5,0.001),
+      Geom::Transformation.new([2,0,0,0,1,3,0,0,0,0,4,0,50,60,7,1])]
+    transforms.each do |transform|
+      @model=FixtureModel.new
+      d=definition;selected=component(d,transform);select(selected)
+      assert_equal :completed,tool_run[:status]
+      matrix=Tool.affine(transform)
+      faces=selected.definition.entities.to_a.grep(Sketchup::Face)
+      caps=faces.select { |face| Tool.front_normal(matrix,face)[2].abs>0.99 }
+      assert_equal 2,caps.length
+      assert_equal [-1.0,1.0],caps.map { |face| Tool.front_normal(matrix,face)[2] }.sort
+    end
+  end
+
+  def test_inverse_transpose_is_not_forward_normal_under_shear
+    face=rectangle;face.instance_variable_set(:@normal,Geom::Point3d.new(1,0,0))
+    matrix=[[2.0,0,0],[1.0,3.0,0],[0,0,4.0],[0,0,0]]
+    normal=Tool.front_normal(matrix,face)
+    magnitude=Math.sqrt(0.5**2+(1.0/6.0)**2)
+    assert_in_delta 0.5/magnitude,normal[0],1e-14
+    assert_in_delta -(1.0/6.0)/magnitude,normal[1],1e-14
+    assert_equal 0.0,normal[2]
+  end
+
+  def test_failed_unconfirmed_noop_or_moved_native_reverse_aborts_all_changes
+    [:false,:nil,:no_effect,:move_boundary,:move_small_boundary,:raise].each do |mode|
+      @model=FixtureModel.new
+      face=rectangle;face.reverse_mode=mode;select(face)
+      front=Sketchup::Material.new('front',1.0,nil);back=Sketchup::Material.new('back',0.5,nil)
+      face.material=front;face.back_material=back
+      before=face.positions;normal=[face.normal.x,face.normal.y,face.normal.z]
+      count=@model.entities.to_a.length
+      assert_raises(mode==:raise ? RuntimeError : Tool::ProofError,mode.to_s) { tool_run }
+      assert_equal before,face.positions
+      assert_equal normal,[face.normal.x,face.normal.y,face.normal.z]
+      assert_same front,face.material;assert_same back,face.back_material
+      assert_equal count,@model.entities.to_a.length
+      assert_equal [:start,:abort],@model.calls
+      refute @model.open_operation
+    end
+  end
+
+  def test_host_that_does_not_swap_color_materials_is_preserved_explicitly
+    face=rectangle;face.reverse_mode=:keep_paint
+    front=Sketchup::Material.new('front',0.7,nil);back=Sketchup::Material.new('back',0.3,nil)
+    face.material=front;face.back_material=back;select(face)
+    assert_equal :completed,tool_run[:status]
+    base=@model.entities.to_a.grep(Sketchup::Face).find { |item| item.positions.flatten(1).all? { |p| p[2]==0.0 } }
+    assert_same back,base.material;assert_same front,base.back_material
+  end
+
+  def test_textured_cap_uvq_physical_sides_survive_reverse_and_q_normalization
+    face=rectangle
+    front=Sketchup::Material.new('front texture',0.5,Object.new)
+    back=Sketchup::Material.new('back texture',0.9,Object.new)
+    face.material=front;face.back_material=back
+    face.uv_front=lambda { |p| Geom::Point3d.new(2*p.x+4,2*p.y+6,2.0) }
+    face.uv_back=lambda { |p| Geom::Point3d.new(3*p.x+12,3*p.y+15,3.0) }
+    select(face)
+    assert_equal :completed,tool_run[:status]
+    base=@model.entities.to_a.grep(Sketchup::Face).find { |item| item.positions.flatten(1).all? { |p| p[2]==0.0 } }
+    assert_same back,base.material;assert_same front,base.back_material
+    point=Geom::Point3d.new(1,1,0)
+    assert_equal [5.0,6.0,1.0],Tool.uv_coordinates(base.get_UVHelper(true,true),[point.x,point.y,point.z],true)
+    assert_equal [3.0,4.0,1.0],Tool.uv_coordinates(base.get_UVHelper(true,true),[point.x,point.y,point.z],false)
+  end
+
+  def test_unpreserved_texture_side_or_mapping_fails_closed_and_rolls_back
+    [:keep_paint,:uv_drift].each do |mode|
+      @model=FixtureModel.new
+      face=rectangle;face.reverse_mode=mode
+      face.material=Sketchup::Material.new('front texture',1.0,Object.new)
+      face.back_material=Sketchup::Material.new('back texture',0.5,Object.new)
+      select(face);before=face.positions
+      error=assert_raises(Tool::ProofError) { tool_run }
+      assert_match(/physical texture sides|positioned or projected cap texture/,error.message)
+      assert_equal before,face.positions
+      assert_equal [:start,:abort],@model.calls
+      refute @model.open_operation
+    end
+  end
+
+  def test_invalid_uvq_fails_closed_before_reversal_and_rolls_back
+    [0.0,Float::NAN].each do |q|
+      @model=FixtureModel.new
+      face=rectangle;face.material=Sketchup::Material.new('texture',1.0,Object.new)
+      face.uv_front=lambda { |p| Geom::Point3d.new(p.x,p.y,q) }
+      select(face);before=face.positions
+      assert_raises(Tool::ProofError,Tool::TransformError) { tool_run }
+      assert_equal before,face.positions
+      assert_equal [:start,:abort],@model.calls
+    end
+  end
+
+  def test_duplicate_source_cap_is_not_repaired_or_accepted
+    face=rectangle;target=Tool.target_for(face,@model.entities,Tool.affine(Geom::Transformation.new),0.125)
+    duplicate=rectangle(@model.entities)
+    polygons=[[face,target[:loops]],[duplicate,target[:loops]]]
+    assert_raises(Tool::ProofError) { Tool.orient_native_caps!(target,0.125,polygons) }
+    assert_equal 0,face.reverse_calls
+    assert_equal 0,duplicate.reverse_calls
+  end
+
+  def test_authored_short_edge_inverse_scaled_profile_preserves_vertices_paint_and_shared_peer
+    d=Sketchup::Definition.new(@model)
+    points=[[[0,0,0],[0.4,0,0],[2.5,9.7,0],[0,9.7,0]]]
+    original=d.entities.add_face(points)
+    front=Sketchup::Material.new('front',0.7,nil);back=Sketchup::Material.new('back',0.2,nil)
+    original.material=front;original.back_material=back
+    selected=component(d,Geom::Transformation.scale(0.001));unselected=component(d);select(selected)
+    assert_equal :completed,tool_run(0.5)[:status]
+    assert_same d,unselected.definition
+    assert_equal points,original.positions
+    assert_equal 0,original.reverse_calls
+    assert_same front,original.material;assert_same back,original.back_material
+    matrix=Tool.affine(selected.transformation)
+    caps=selected.definition.entities.to_a.grep(Sketchup::Face).select { |face| Tool.front_normal(matrix,face)[2].abs>0.99 }
+    assert_equal 2,caps.length
+    lower=caps.find { |face| Tool.front_normal(matrix,face)[2]<0.0 }
+    upper=caps.find { |face| Tool.front_normal(matrix,face)[2]>0.0 }
+    assert_equal 4,lower.positions[0].length
+    assert_equal 4,upper.positions[0].length
+    assert_in_delta 0.5,Tool.point(matrix,upper.positions[0][0])[2]-Tool.point(matrix,lower.positions[0][0])[2],1e-12
+    assert_same back,lower.material;assert_same front,lower.back_material
+  end
+
+  def test_native_inward_side_or_open_edge_aborts_the_operation
+    [:inward_side,:open_skin].each do |mode|
+      @model=FixtureModel.new
+      face=rectangle;face.mode=mode;select(face)
+      before=face.positions;count=@model.entities.to_a.length
+      error=assert_raises(Tool::ProofError) { tool_run }
+      assert_match(/side faces into|closed two-face edge/,error.message)
+      assert_equal before,face.positions
+      assert_equal count,@model.entities.to_a.length
+      assert_equal [:start,:abort],@model.calls
+    end
+  end
+
+  def test_cap_orientation_failure_with_uncertain_rollback_retains_primary_error
+    face=rectangle;face.reverse_mode=:false;select(face);@model.abort_result=false
+    error=assert_raises(Tool::RollbackFailure) { tool_run }
+    assert_instance_of Tool::ProofError,error.primary_error
+    assert_match(/reversing the inward extrusion cap/,error.primary_error.message)
+    assert @model.open_operation
+    assert_equal [:start,:abort],@model.calls
+  end
+
+  def test_material_object_identity_does_not_hide_changed_opacity
+    face=rectangle
+    front=Sketchup::Material.new('front',0.8,nil);back=Sketchup::Material.new('back',0.4,nil)
+    face.material=front;face.back_material=back
+    recorded=Tool.cap_paint(face)
+    face.reverse!;back.alpha=0.1
+    error=assert_raises(Tool::ProofError) { Tool.preserve_reversed_cap_paint!(face,recorded) }
+    assert_match(/color, opacity or texture changed/,error.message)
+  end
+
+  def test_vertex_normalized_uv_equality_cannot_hide_projective_triangle_drift
+    face=@model.entities.add_face([[[0,0,0],[1,0,0],[0,1,0]]])
+    face.material=Sketchup::Material.new('front texture',1.0,Object.new)
+    face.back_material=Sketchup::Material.new('back texture',0.5,Object.new)
+    face.uv_front=face.uv_back=lambda { |p| Geom::Point3d.new(p.x,p.y,1.0) }
+    saved=Tool.cap_paint(face);face.reverse!
+    face.uv_front=lambda { |p| Geom::Point3d.new(1.5*p.x,p.y,1.0+0.5*p.x) }
+    [[0,0,0],[1,0,0],[0,1,0]].each do |p|
+      assert_equal [p[0].to_f,p[1].to_f,1.0],Tool.uv_coordinates(face.get_UVHelper(true,true),p,true)
+    end
+    uv=Tool.uv_coordinates(face.get_UVHelper(true,true),[1.0/3.0,1.0/3.0,0.0],true)
+    refute_in_delta 1.0/3.0,uv[0],1e-10
+    assert_raises(Tool::ProofError) { Tool.preserve_reversed_cap_paint!(face,saved) }
+  end
+
+  def test_representative_plane_samples_reject_interior_drift_when_host_uvq_is_predivided
+    face=@model.entities.add_face([[[0,0,0],[1,0,0],[0,1,0]]])
+    face.material=Sketchup::Material.new('front texture',1.0,Object.new)
+    face.back_material=Sketchup::Material.new('back texture',0.5,Object.new)
+    face.uv_front=face.uv_back=lambda { |p| Geom::Point3d.new(p.x,p.y,1.0) }
+    saved=Tool.cap_paint(face);face.reverse!
+    face.uv_front=lambda { |p| q=1.0+0.5*p.x;Geom::Point3d.new(1.5*p.x/q,p.y/q,1.0) }
+    assert_raises(Tool::ProofError) { Tool.preserve_reversed_cap_paint!(face,saved) }
+  end
+
+  def test_one_common_uvq_scale_change_retains_the_same_physical_projective_mapping
+    face=@model.entities.add_face([[[0,0,0],[1,0,0],[0,1,0]]])
+    face.material=Sketchup::Material.new('front texture',1.0,Object.new)
+    face.back_material=Sketchup::Material.new('back texture',0.5,Object.new)
+    face.uv_front=face.uv_back=lambda { |p| Geom::Point3d.new(1.5*p.x,p.y,1.0+0.5*p.x) }
+    saved=Tool.cap_paint(face);face.reverse!
+    previous=face.uv_front
+    face.uv_front=lambda { |p| q=previous.call(p);Geom::Point3d.new(q.x*7,q.y*7,q.z*7) }
+    assert Tool.preserve_reversed_cap_paint!(face,saved)
+  end
 end

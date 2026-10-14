@@ -170,6 +170,9 @@ readonly SMOKE_TESTS=(
   test/textmode1_invariant_test.rb
   test/geometry_builder_text_fallback_test.rb
   test/cairo_glyph_source_test.rb
+  test/source_zero_ink_test.rb
+  test/svg_text_3d_renderer_test.rb
+  test/svg_3d_text_whitespace_span_test.rb
   test/command_runner_environment_test.rb
   test/item_raster_page_renderer_test.rb
   test/item_raster_display_test.rb

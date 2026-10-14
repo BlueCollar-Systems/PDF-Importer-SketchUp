@@ -11,12 +11,27 @@ require File.join(File.dirname(__FILE__), 'import_run_control')
 require File.join(File.dirname(__FILE__), 'stroke_clipping')
 require File.join(File.dirname(__FILE__), 'vector_stroke_footprint')
 require 'digest'
+require 'json'
 
 module BlueCollarSystems
   module PDFVectorImporter
     class GeometryBuilder
 
       class StrokeStyleFailure < StandardError; end
+      class FillDeliveryFailure < StandardError
+        attr_reader :fill_delivery_failures
+        def initialize(message, failures)
+          @fill_delivery_failures = Array(failures).map(&:dup)
+          super(message)
+        end
+      end
+      class FillRollbackFailure < ImportRunControl::RollbackFailure
+        attr_reader :fill_delivery_failures
+        def initialize(message, failures)
+          @fill_delivery_failures = Array(failures).map(&:dup)
+          super(message)
+        end
+      end
 
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
@@ -37,9 +52,12 @@ module BlueCollarSystems
       FOOTPRINT_TIME_BUDGET_SECONDS = 3.0
       SMALL_FACE_DIRECT_MAX_EXTENT = 0.002
       SMALL_FACE_CONSTRUCTION_SCALE = 1000.0
+      FILL_CONSTRUCTION_CONTOURS = 16
+      FILL_CAPTURE_ENTITIES = 128
+      FILL_CAPTURE_POINTS = 512
 
       attr_reader :page_group, :text_group, :text_delivery_failures,
-                  :text_attempts, :fill_only_groups
+                  :text_attempts, :fill_only_groups, :fill_delivery_failures
 
       def initialize(model, paths, text_items, media_box, opts = {})
         @model = model
@@ -102,6 +120,8 @@ module BlueCollarSystems
         @text_attempts = []
         @geometry_staging = disabled_geometry_staging
         @deferred_small_face_batches = {}
+        @fill_delivery_failures = []
+        @fill_construction_targets = {}
         @stroke_clipping = { :clipped_subpaths => 0, :unresolved_subpaths => 0, :unresolved_reasons => {} }
         @stroke_footprints = { :requested_mode => @lineweight_mode,
           :stroke_path_count => 0, :represented_path_count => 0,
@@ -258,8 +278,8 @@ module BlueCollarSystems
                 pdf_to_su(sx, sy, page_origin_x, page_origin_y)
               end
             end
-            draw_compound_clip_fill(
-              staged_geometry_target(fill_dest, path_idx), loops,
+            draw_source_compound_fill(
+              staged_geometry_target(fill_dest, path_idx), loops, path, path_idx,
               path.clip_fill_rule, path_layer, path.fill_color
             )
             should_fill = false
@@ -268,12 +288,14 @@ module BlueCollarSystems
             loops = filled_subpath_loops(path, page_origin_x, page_origin_y)
             if loops.length >= 2
               begin
-                draw_compound_clip_fill(
-                  staged_geometry_target(fill_dest, path_idx), loops,
+                draw_source_compound_fill(
+                  staged_geometry_target(fill_dest, path_idx), loops, path, path_idx,
                   source_fill_rule(path), path_layer, path.fill_color,
                   'PDF Compound Fill'
                 )
                 should_fill = false
+              rescue ImportRunControl::RollbackFailure, FillDeliveryFailure
+                raise
               rescue StandardError => e
                 Logger.warn(
                   "GeometryBuilder",
@@ -298,9 +320,14 @@ module BlueCollarSystems
             # route with a counted limitation, so this branch owns stroke only.
             next
           end
-          path.subpaths.each do |subpath|
+          path.subpaths.each_with_index do |subpath, subpath_index|
             points_list = subpath_to_points(subpath)
-            next if points_list.empty?
+            if points_list.empty?
+              if should_fill && subpath_filled?(subpath)
+                draw_source_fill(staged_geometry_target(fill_dest, path_idx), [], path, path_idx, subpath_index, path_layer, path.fill_color, true)
+              end
+              next
+            end
 
             # Convert PDF → SketchUp coordinates
             su_points = points_list.map do |pt|
@@ -308,8 +335,9 @@ module BlueCollarSystems
               pdf_to_su(sx, sy, page_origin_x, page_origin_y)
             end
 
+            fill_points = su_points
             su_points = remove_consecutive_duplicates(su_points)
-            next if su_points.length < 2
+            next if su_points.length < 2 && !should_fill
             draw_dest = staged_geometry_target(dest, path_idx)
 
             # Clip source-space centerlines before any native batch/arc/dash path.
@@ -328,7 +356,7 @@ module BlueCollarSystems
                 style_stroke_edge(edge, stroke_style)
                 @edge_count += 1
               end
-              draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true) if should_fill && subpath_filled?(subpath) && su_points.length >= 3
+              draw_source_fill(staged_geometry_target(fill_dest, path_idx), fill_points, path, path_idx, subpath_index, path_layer, path.fill_color, true) if should_fill && subpath_filled?(subpath)
               next
             end
 
@@ -345,8 +373,8 @@ module BlueCollarSystems
               draw_with_arc_detection(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, should_fill, path.fill_color, stroke_style)
             else
               draw_edges(draw_dest, su_points, path_layer, dash_layer, dash_spec, subpath.closed, stroke_style) if should_stroke
-              if should_fill && subpath_filled?(subpath) && su_points.length >= 3
-                draw_face(staged_geometry_target(fill_dest, path_idx), su_points, path_layer, path.fill_color, true)
+              if should_fill && subpath_filled?(subpath)
+                draw_source_fill(staged_geometry_target(fill_dest, path_idx), fill_points, path, path_idx, subpath_index, path_layer, path.fill_color, true)
               end
             end
           end
@@ -459,6 +487,7 @@ module BlueCollarSystems
           text_delivery_failures: Array(@text_delivery_failures),
           text_attempts: Array(@text_attempts),
           source_provenance_objects: Array(@provenance_bucket),
+          fill_delivery_failures: Array(@fill_delivery_failures),
           geometry_staging: geometry_staging_metrics.merge(:stroke_clipping => @stroke_clipping,
             :lineweight_organization=>@lineweight_organization,
             :stroke_footprints => @stroke_footprints.merge(
@@ -1122,31 +1151,15 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Face creation
       # ---------------------------------------------------------------
-      # Cheap pre-screen for draw_face: a loop with fewer than 3 distinct
-      # vertices or ~zero enclosed area can never become a SketchUp face.
-      # add_face would reject these with "Points are not planar" — but only
-      # after a C-side check + a raised exception we rescue and log, hundreds
-      # of times on dense fabrication fills. Screening here is accuracy-neutral
-      # (these never produced a face) and removes the exception + log cost.
-      #
-      # Returns the cleaned, co-planar, closed loop of points to pass to
-      # entities.add_face, or nil if the loop cannot become a face. The
-      # caller must use the returned loop; passing the original points would
-      # re-introduce the duplicate/degenerate points we just removed.
+      # SketchUp closes a face itself. Remove only a literally identical
+      # closing entry; native Length comparisons and a model merge tolerance
+      # must not delete a real short source edge. Zero signed area is not a
+      # no-ink proof: a self-intersecting even-odd contour can paint lobes.
       def build_face_loop(points)
         return nil if points.nil? || points.length < 3
-        # 1. Remove consecutive near-duplicate points.
-        uniq = []
-        points.each do |p|
-          if uniq.empty? || p.distance(uniq.last) >= @merge_tol
-            uniq << p
-          end
-        end
-        # 2. Remove a closing point that duplicates the start.
-        if uniq.length > 1 && uniq.first.distance(uniq.last) < @merge_tol
-          uniq.pop
-        end
-        return nil if uniq.length < 3
+        uniq = points.dup
+        uniq.pop while uniq.length > 1 && exact_fill_point?(uniq.first, uniq.last)
+        return nil if uniq.length < 3 || proven_collinear_fill?(uniq)
         # 3. Ensure all points are co-planar in the XY plane. Imported geometry
         # is supposed to be z=0, but tolerate tiny numerical drift.
         z_vals = uniq.map { |p| p.z.to_f }
@@ -1161,14 +1174,6 @@ module BlueCollarSystems
               else
                 uniq
               end
-        # 5. Shoelace area in the XY plane.
-        area2 = 0.0
-        n = flat.length
-        n.times do |i|
-          a = flat[i]; b = flat[(i + 1) % n]
-          area2 += (a.x.to_f * b.y.to_f) - (b.x.to_f * a.y.to_f)
-        end
-        return nil if (area2.abs * 0.5) <= 1.0e-6
         flat
       rescue StandardError
         nil
@@ -1176,6 +1181,235 @@ module BlueCollarSystems
 
       def face_buildable?(points)
         !build_face_loop(points).nil?
+      end
+
+      def exact_fill_point?(left, right)
+        [:x, :y, :z].all? do |axis|
+          a = left.public_send(axis).to_f
+          b = right.public_send(axis).to_f
+          a.finite? && b.finite? && a == b
+        end
+      end
+
+      def proven_collinear_fill?(points)
+        return false unless points.is_a?(Array) && !points.empty?
+        xyz = points.map { |point| [point.x.to_f, point.y.to_f, point.z.to_f] }
+        return false unless xyz.flatten.all?(&:finite?) &&
+                            xyz.map { |point| point[2] }.uniq.length == 1
+        xy = points.map { |point| [point.x.to_f, point.y.to_f] }
+        origin = xy.first
+        other = xy.find { |point| point != origin }
+        return true unless other
+        # Exact binary-rational arithmetic avoids certifying a near-collinear
+        # positive contour as empty due to cancellation or a tolerance.
+        dx = other[0].to_r - origin[0].to_r
+        dy = other[1].to_r - origin[1].to_r
+        xy.all? do |point|
+          dx * (point[1].to_r - origin[1].to_r) ==
+            dy * (point[0].to_r - origin[0].to_r)
+        end
+      rescue StandardError
+        false
+      end
+
+      def draw_source_fill(entities, points, path, path_index, subpath_index,
+                           layer, fill_rgb, hide_edges)
+        prior = @source_fill_context
+        @source_fill_context = {
+          :source_kind => 'original_pdf_fill', :page => @page_number,
+          :path_index => path_index, :subpath_index => subpath_index,
+          :source_paint_order => path.respond_to?(:source_paint_order) ?
+            path.source_paint_order : nil,
+          :fill_rule => source_fill_rule(path).to_s,
+          :fill_rgb => Array(fill_rgb),
+          :import_session_id => @import_session_id,
+          :original_source_input_sha256 => Digest::SHA256.hexdigest(
+            JSON.generate(Array(points).map do |point|
+              [point.x.to_f, point.y.to_f, point.z.to_f].map do |number|
+                number.finite? ? number : number.to_s
+              end
+            end)
+          ),
+          :original_source_point_count => Array(points).length
+        }
+        draw_face(bounded_source_fill_target(entities), points, layer, fill_rgb, hide_edges)
+      ensure
+        @source_fill_context = prior
+      end
+
+      def draw_source_compound_fill(entities, loops, path, path_index, rule,
+                                    layer, fill_rgb, group_name = nil)
+        prior = @source_fill_context
+        @source_fill_context = {
+          :source_kind => 'original_pdf_compound_fill', :page => @page_number,
+          :path_index => path_index,
+          :source_subpath_indices => Array(path.subpaths).each_index.to_a,
+          :source_paint_order => path.respond_to?(:source_paint_order) ?
+            path.source_paint_order : nil,
+          :fill_rule => source_fill_rule(path).to_s,
+          :construction_fill_rule => rule.to_s,
+          :construction_contour_count => Array(loops).length,
+          :fill_rgb => Array(fill_rgb), :import_session_id => @import_session_id,
+          :original_source_input_sha256 => Digest::SHA256.hexdigest(
+            JSON.generate(Array(loops).map do |points|
+              points.map { |point| [point.x.to_f, point.y.to_f, point.z.to_f] }
+            end)
+          )
+        }
+        draw_compound_clip_fill(entities, loops, rule, layer, fill_rgb, group_name)
+      rescue ImportRunControl::RollbackFailure => error
+        record_fill_failure(Array(loops).flatten, 'compound_fill_cleanup_uncertain', error.message)
+        raise FillRollbackFailure.new(error.message, @fill_delivery_failures)
+      rescue StandardError => error
+        record_fill_failure(Array(loops).flatten, 'compound_fill_construction_failed', error.message)
+        raise FillDeliveryFailure.new(
+          "source compound fill failed (page #{@page_number}, path #{path_index}, paint #{@source_fill_context[:source_paint_order].inspect}): #{error.message}",
+          @fill_delivery_failures
+        )
+      ensure
+        @source_fill_context = prior
+      end
+
+      def record_fill_failure(points, reason, detail = nil)
+        @fill_delivery_failures ||= []
+        xyz = Array(points).map { |point| [point.x.to_f, point.y.to_f, point.z.to_f] }
+        finite = xyz.flatten.all?(&:finite?)
+        diagnostic_xyz = xyz.map { |point| point.map { |number| number.finite? ? number : number.to_s } }
+        context = (@source_fill_context || {
+          :source_kind => 'unbound_fill', :page => @page_number,
+          :source_binding => 'unresolved'
+        }).dup
+        context.merge!(
+          :schema => 'bcs.sketchup.fill_delivery_failure/1',
+          :reason => reason, :detail => detail.to_s,
+          :source_input_sha256 => Digest::SHA256.hexdigest(JSON.generate(diagnostic_xyz)),
+          :source_point_count => xyz.length,
+          :source_geometry_finite => finite,
+          :source_bounds_inches => xyz.empty? || !finite ? nil :
+            [0, 1, 2].map { |axis| xyz.map { |point| point[axis] }.minmax },
+          :delivered => false
+        )
+        @fill_delivery_failures << context
+        context
+      end
+
+      # Keep successful-path validation bounded even for one paint operation
+      # with thousands of subpaths. Retained identity groups avoid native welds
+      # into earlier batches; exact vertices/style stay below the source owner.
+      def fill_capture_sized?(entities)
+        return false if entities.length > FILL_CAPTURE_ENTITIES
+        points = 0
+        entities.to_a.each do |entity|
+          return false if entity.respond_to?(:entities) || entity.respond_to?(:definition)
+          points += if entity.respond_to?(:vertices)
+                      entity.vertices.length
+                    elsif entity.respond_to?(:points)
+                      entity.points.length
+                    else
+                      0
+                    end
+          return false if points > FILL_CAPTURE_POINTS
+        end
+        true
+      end
+
+      def bounded_source_fill_target(entities)
+        entry = @fill_construction_targets[entities.object_id]
+        entry ||= {:entities => entities, :contours => 0}
+        if entry[:contours] >= FILL_CONSTRUCTION_CONTOURS ||
+           !fill_capture_sized?(entry[:entities])
+          group = entities.add_group
+          group.name = 'Filled shapes'
+          entry = {:entities => group.entities, :contours => 0}
+        end
+        entry[:contours] += 1
+        @fill_construction_targets[entities.object_id] = entry
+        entry[:entities]
+      end
+
+      def fill_peer_state(entity, seen = {}, budget = nil)
+        budget ||= {:entities => 0, :points => 0}
+        budget[:entities] += 1
+        raise ImportRunControl::RollbackFailure, 'fill peer capture exceeds local entity bound' if budget[:entities] > FILL_CAPTURE_ENTITIES
+        identity = entity.object_id
+        return [:reference, identity] if seen[identity]
+        seen[identity] = true
+        point = lambda do |value|
+          budget[:points] += 1
+          raise ImportRunControl::RollbackFailure, 'fill peer capture exceeds local point bound' if budget[:points] > FILL_CAPTURE_POINTS
+          value = value.position if value.respond_to?(:position)
+          [:x, :y, :z].map { |axis| value.public_send(axis).to_f }
+        end
+        material = lambda do |value|
+          next nil unless value
+          color = value.respond_to?(:color) ? value.color : nil
+          [value.object_id, value.respond_to?(:name) ? value.name.to_s : nil,
+           color ? [:red, :green, :blue, :alpha].map { |key| color.respond_to?(key) ? color.public_send(key) : nil } : nil,
+           value.respond_to?(:alpha) ? value.alpha.to_f : nil,
+           value.respond_to?(:texture) && value.texture ? value.texture.object_id : nil]
+        end
+        state = {
+          :identity => identity, :type => entity.respond_to?(:typename) ? entity.typename : entity.class.name,
+          :valid => entity.respond_to?(:valid?) ? entity.valid? : true,
+          :layer => entity.respond_to?(:layer) && entity.layer ?
+            [entity.layer.object_id, entity.layer.respond_to?(:name) ? entity.layer.name : nil,
+             entity.layer.respond_to?(:visible?) ? entity.layer.visible? : nil] : nil,
+          :material => entity.respond_to?(:material) ? material.call(entity.material) : nil,
+          :back_material => entity.respond_to?(:back_material) ? material.call(entity.back_material) : nil
+        }
+        [:hidden?, :soft?, :smooth?].each { |key| state[key] = entity.public_send(key) if entity.respond_to?(key) }
+        if entity.respond_to?(:loops)
+          state[:loops] = entity.loops.map { |loop| loop.vertices.map { |vertex| point.call(vertex) } }
+        elsif entity.respond_to?(:vertices)
+          state[:vertices] = entity.vertices.map { |vertex| point.call(vertex) }
+        elsif entity.respond_to?(:points)
+          state[:points] = entity.points.map { |value| point.call(value) }
+        end
+        if entity.respond_to?(:transformation)
+          state[:transformation] = entity.transformation.to_a.map(&:to_f)
+        end
+        children = if entity.respond_to?(:entities)
+                     entity.entities.to_a
+                   elsif entity.respond_to?(:definition) && entity.definition.respond_to?(:entities)
+                     entity.definition.entities.to_a
+                   else
+                     []
+                   end
+        state[:children] = children.sort_by(&:object_id).map { |child| fill_peer_state(child, seen, budget) } unless children.empty?
+        state
+      end
+
+      def fill_before_inventory(entities)
+        raise ImportRunControl::RollbackFailure, 'fill peer capture requires a bounded local owner' unless fill_capture_sized?(entities)
+        peers = entities.to_a
+        budget = {:entities => 0, :points => 0}
+        {:entities => peers, :peer_state => peers.sort_by(&:object_id).map { |peer| fill_peer_state(peer, {}, budget) }}
+      end
+
+      def remove_failed_fill_artifacts!(entities, before, record)
+        raise ImportRunControl::RollbackFailure,
+              'failed fill has no native before-entity inventory' unless before.is_a?(Hash) && before[:entities].is_a?(Array)
+        peers = before[:entities]
+        ids = {}; peers.each { |entity| ids[entity.object_id] = true }
+        added = entities.to_a.reject { |entity| ids.key?(entity.object_id) }
+        entities.erase_entities(added) unless added.empty?
+        remaining = entities.to_a
+        raise ImportRunControl::RollbackFailure,
+              'failed fill cleanup changed a peer or retained partial geometry' unless
+          remaining.length == peers.length && remaining.all? { |entity| ids.key?(entity.object_id) }
+        raise ImportRunControl::RollbackFailure,
+              'failed fill changed the bounded local peer payload' unless fill_capture_sized?(entities)
+        budget = {:entities => 0, :points => 0}
+        after_state = remaining.sort_by(&:object_id).map { |peer| fill_peer_state(peer, {}, budget) }
+        raise ImportRunControl::RollbackFailure,
+              'failed fill changed existing native peer geometry or style' unless after_state == before[:peer_state]
+        record[:partial_artifact_count_removed] = added.length
+        record[:partial_cleanup_verified] = true
+      rescue ImportRunControl::RollbackFailure
+        raise
+      rescue StandardError => error
+        raise ImportRunControl::RollbackFailure,
+              "failed fill partial cleanup uncertain: #{error.message}"
       end
 
       def self.contour_winding(point, loops)
@@ -1214,6 +1448,7 @@ module BlueCollarSystems
                               (point.y - origin.y) * factor, 0.0)
           end
         end
+        before = fill_before_inventory(entities)
         group = entities.add_group
         group.name = group_name.to_s.empty? ? 'PDF Clipped Fill' : group_name.to_s
         set_layer(group, layer)
@@ -1260,8 +1495,17 @@ module BlueCollarSystems
         end
         @edge_count += edges.length
         group
-      rescue StandardError
-        group.erase! if group && group.valid?
+      rescue StandardError => error
+        if before
+          begin
+            group.erase! if group && group.valid?
+            raise ImportRunControl::RollbackFailure, 'failed compound fill owner remains valid' if group && group.valid?
+            remove_failed_fill_artifacts!(entities, before, {})
+          rescue StandardError => cleanup_error
+            raise ImportRunControl::RollbackFailure,
+                  "compound fill cleanup uncertain after #{error.message}: #{cleanup_error.message}"
+          end
+        end
         raise
       end
 
@@ -1292,12 +1536,20 @@ module BlueCollarSystems
       end
 
       def draw_face(entities, points, layer, fill_rgb = nil, hide_edges = false)
-        return false if points.length < 3
         clean = build_face_loop(points)
-        return false unless clean
-        if face_loop_max_extent(clean) < SMALL_FACE_DIRECT_MAX_EXTENT
+        unless clean
+          record_fill_failure(points, 'source_fill_not_buildable') unless
+            proven_collinear_fill?(points)
+          return false
+        end
+        distances = clean.each_with_index.map do |point, index|
+          point.distance(clean[(index + 1) % clean.length]).to_f
+        end
+        if distances.all? { |distance| distance > 0.0 } &&
+           distances.min < SMALL_FACE_DIRECT_MAX_EXTENT
           return draw_scaled_face_instance(entities, clean, layer, fill_rgb, hide_edges)
         end
+        before = fill_before_inventory(entities)
         begin
           face = entities.add_face(clean)
           if face
@@ -1306,20 +1558,43 @@ module BlueCollarSystems
             @face_count += 1
             return true
           end
+          record = record_fill_failure(points, 'native_fill_returned_no_face')
+          remove_failed_fill_artifacts!(entities, before, record)
           false
+        rescue ImportRunControl::RollbackFailure => error
+          record_fill_failure(points, 'source_fill_cleanup_uncertain', error.message) if
+            @fill_delivery_failures.empty? || @fill_delivery_failures.last[:original_source_input_sha256] != (@source_fill_context || {})[:original_source_input_sha256]
+          raise FillRollbackFailure.new(error.message, @fill_delivery_failures)
         rescue StandardError => e
           if e.message.to_s.include?('Points are not planar') &&
              face_loop_max_extent(clean) < 0.01
+            # A rejected direct add_face can still leave owned native edges
+            # or faces. The enlarged retry must start from the exact before
+            # inventory; its success is not permission to retain those pieces.
+            begin
+              remove_failed_fill_artifacts!(entities, before, {})
+            rescue ImportRunControl::RollbackFailure => cleanup_error
+              record_fill_failure(points, 'source_fill_cleanup_uncertain', cleanup_error.message)
+              raise FillRollbackFailure.new(cleanup_error.message, @fill_delivery_failures)
+            end
             begin
               return true if draw_scaled_face_instance(
                 entities, clean, layer, fill_rgb, hide_edges
               )
+            rescue ImportRunControl::RollbackFailure
+              raise
             rescue StandardError
               # Report the original host rejection below; it is the most
               # actionable error if the exact scaled construction also fails.
             end
           end
           Logger.warn("GeometryBuilder", "draw_face failed: #{e.message}")
+          record = record_fill_failure(points, 'native_fill_exception', e.message)
+          begin
+            remove_failed_fill_artifacts!(entities, before, record)
+          rescue ImportRunControl::RollbackFailure => cleanup_error
+            raise FillRollbackFailure.new(cleanup_error.message, @fill_delivery_failures)
+          end
           false
         end
       end
@@ -1347,13 +1622,15 @@ module BlueCollarSystems
             :layer => layer,
             :fill_rgb => Array(fill_rgb),
             :hide_edges => hide_edges,
-            :loops => []
+            :loops => [],
+            :source_contexts => []
           }
           @deferred_small_face_batches[key] = batch
         end
         batch[:loops] << points.map do |point|
           [point.x.to_f, point.y.to_f, point.z.to_f]
         end
+        batch[:source_contexts] << (@source_fill_context && @source_fill_context.dup)
         @face_count += 1
         true
       end
@@ -1380,12 +1657,18 @@ module BlueCollarSystems
           origin_values[0], origin_values[1], origin_values[2]
         )
         definition = nil
+        before_instance = nil
+        instance_owner = nil
+        instance_entities = entities
+        failures_before = @fill_delivery_failures.length
+        phase = 'scaled_fill_definition_failed'
         begin
           factor = SMALL_FACE_CONSTRUCTION_SCALE
           definition = @model.definitions.add(
             "PDF Micro Fill Batch #{small_face_batch_digest(batch)[0, 12]}"
           )
-          loops.each do |points|
+          loops.each_with_index do |points, loop_index|
+            prior = @source_fill_context
             large = points.map do |point|
               Geom::Point3d.new(
                 (point[0] - origin_values[0]) * factor,
@@ -1393,10 +1676,22 @@ module BlueCollarSystems
                 (point[2] - origin_values[2]) * factor
               )
             end
-            face = definition.entities.add_face(large)
-            raise 'scaled sub-tolerance construction returned no face' unless face
-            style_face(face, batch[:layer], batch[:fill_rgb])
-            hide_fill_edges(face) if batch[:hide_edges]
+            begin
+              face = definition.entities.add_face(large)
+              raise 'scaled sub-tolerance construction returned no face' unless face
+              style_face(face, batch[:layer], batch[:fill_rgb])
+              hide_fill_edges(face) if batch[:hide_edges]
+            rescue StandardError => error
+              @source_fill_context = Array(batch[:source_contexts])[loop_index]
+              source_points = points.map { |point| Geom::Point3d.new(*point) }
+              record = record_fill_failure(source_points, 'scaled_fill_construction_failed', error.message)
+              raise FillDeliveryFailure.new(
+                "source fill batch failed (page #{record[:page]}, path #{record[:path_index]}, subpath #{record[:subpath_index]}, paint #{record[:source_paint_order].inspect}): #{error.message}",
+                @fill_delivery_failures
+              )
+            ensure
+              @source_fill_context = prior
+            end
           end
           inverse_factor = 1.0 / factor
           transformation =
@@ -1404,18 +1699,53 @@ module BlueCollarSystems
             Geom::Transformation.scaling(
               inverse_factor, inverse_factor, inverse_factor
             )
-          instance = entities.add_instance(definition, transformation)
+          phase = 'scaled_fill_instance_failed'
+          unless fill_capture_sized?(entities)
+            instance_owner = entities.add_group
+            instance_owner.name = 'Filled shapes'
+            instance_entities = instance_owner.entities
+          end
+          before_instance = fill_before_inventory(instance_entities)
+          instance = instance_entities.add_instance(definition, transformation)
           raise 'host returned no sub-tolerance fill instance' unless instance
           set_layer(instance, batch[:layer])
           true
-        rescue StandardError
-          begin
-            if definition && @model.definitions.respond_to?(:remove)
-              @model.definitions.remove(definition)
+        rescue StandardError => error
+          # A failed definition/instance affects every queued source contour.
+          # Do not report the deferred request as delivered just because its
+          # earlier queue operation returned true.
+          if @fill_delivery_failures.length == failures_before
+            loops.each_with_index do |points, loop_index|
+              prior = @source_fill_context
+              begin
+                @source_fill_context = Array(batch[:source_contexts])[loop_index]
+                record_fill_failure(points.map { |point| Geom::Point3d.new(*point) },
+                                    phase, error.message)
+              ensure
+                @source_fill_context = prior
+              end
             end
-          rescue StandardError
           end
-          raise
+          begin
+            remove_failed_fill_artifacts!(instance_entities, before_instance, {}) if before_instance
+            if instance_owner
+              instance_owner.erase! if instance_owner.valid?
+              raise 'failed fill instance owner remains valid' if instance_owner.valid?
+            end
+            if definition
+              raise 'host cannot remove the failed fill definition' unless @model.definitions.respond_to?(:remove)
+              @model.definitions.remove(definition)
+              raise 'failed fill definition remains valid' unless definition.respond_to?(:valid?) && definition.valid? == false
+            end
+          rescue StandardError => cleanup_error
+            raise FillRollbackFailure.new(
+              "fill batch cleanup uncertain after #{error.message}: #{cleanup_error.message}",
+              @fill_delivery_failures
+            )
+          end
+          raise if error.is_a?(ImportRunControl::RollbackFailure) ||
+                   error.is_a?(FillDeliveryFailure)
+          raise FillDeliveryFailure.new(error.message, @fill_delivery_failures)
         end
       end
 

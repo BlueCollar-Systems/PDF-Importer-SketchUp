@@ -1009,7 +1009,7 @@ module BlueCollarSystems
       # preference may not silently disable the requested representation.
       def owned_page_group_policy(requested_group_per_page, renderer)
         renderer_name = renderer.to_s.strip
-        requires_owner = ['svg_text', 'svg_3d_text'].include?(renderer_name)
+        requires_owner = ['svg_text', 'svg_3d_text', 'source_zero_ink'].include?(renderer_name)
         forced = requires_owner && requested_group_per_page == false
         {
           :effective_group_per_page => requires_owner ? true :

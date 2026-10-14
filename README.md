@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.166-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.169-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -22,7 +22,38 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.166)
+### Recent fixes (v3.7.169)
+
+- The manual **Extrude Selected Planar Faces** tool keeps both profile caps
+  facing outward, including reversed faces and scaled or reflected instances.
+  It preserves the caps' physical front/back paint and checks texture placement;
+  an unpreserved texture cancels the edit with its reason.
+- The tool checks the resulting native cap/side boundaries and closed edge
+  connections before committing the edit. An uncertain native correction rolls
+  back the operation instead of reporting a completed extrusion.
+
+### Recent fixes (v3.7.168)
+
+- Single filled source contours keep every distinct vertex, including very short
+  edges. An identical closing point is removed before the native face call;
+  short edges use enlarged construction with an exact inverse scale.
+- A filled shape the host cannot create is listed in the report, Import Health
+  and completion notice. Other page content stays, and the import does not
+  claim complete source geometry. Small or self-intersecting contours are
+  never classified as empty just because their signed area is near zero.
+
+### Previous fixes (v3.7.167)
+
+- Empty source TrueType glyphs retain their original text, character positions,
+  advances and font identity in the saved page ledger. Blank spaces no longer
+  create pictures of neighboring drawing ink or false raster warnings.
+- A glyph mapped to a Unicode space keeps its visible source outline and can
+  remain 3D text. Unicode whitespace alone cannot prove that a glyph is blank.
+- Blank-only pages retain one hidden construction point for their page ledger;
+  no visible text solid or picture is claimed. Unsupported or unproved source
+  font mappings continue through the existing reported item fallback path.
+
+### Previous fixes (v3.7.166)
 - Imports use editable centerlines by default. Advanced **Line widths → Draw source line widths** is an explicit option, saved for subsequent imports and available in the legacy dialog too. Dense sheets or work beyond the time limit retain centerlines and report the limit instead of claiming preserved widths.
 
 - Esc can stop white-mask scanning, source binding, exact intersections and native cell construction. Cancellation removes only the active composition stage before the pipeline rolls back the current page; uncertain cleanup remains a terminal error.

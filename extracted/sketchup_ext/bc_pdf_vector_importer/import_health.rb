@@ -35,6 +35,7 @@ module BlueCollarSystems
           requested_pages: stat_value(stats, :requested_pages),
           retained_pages: stat_value(stats, :retained_pages),
           failed_pages: Array(stat_value(stats, :failed_pages)),
+          fill_delivery_failures: Array(stat_value(stats, :fill_delivery_failures)),
           cancelled: stat_value(stats, :cancelled) == true,
           recorded_at: Time.now
         }
@@ -88,6 +89,9 @@ module BlueCollarSystems
                    snap[:result_status]
                  end
         lines << "Result: #{status}" unless status.empty?
+        unless snap[:fill_delivery_failures].empty?
+          lines << "Filled shapes not created: #{snap[:fill_delivery_failures].length} (locations and reasons in the report)"
+        end
         unless snap[:failed_pages].empty?
           numbers = failed_pages.empty? ? 'unknown' : failed_pages.join(', ')
           lines << "Failed pages: #{numbers}"

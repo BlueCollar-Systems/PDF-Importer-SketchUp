@@ -207,21 +207,9 @@ module BlueCollarSystems
             end
           end
 
-          if whitespace_only_item?(item)
-            # A span whose text is entirely whitespace has NO glyph outline: no host
-            # can extrude a space into a 3D solid, so exact 3D-text representation is
-            # affirmatively impossible for this item. Previously it fell through to
-            # build_filled_glyph, raised 'source span produced no filled face', was
-            # classified as the catch-all host_3d_text_exception (a STOP reason), and
-            # the contract -- correctly -- refused to descend and failed the page.
-            # text_heavy_tracemonkey has 5,546 such spans (41%); 1011 has 44. This is
-            # a source-geometry fact, checkable from the item text alone, so it is an
-            # affirmative item-specific impossibility and the ladder may advance.
-            result[:transition_proofs] << whitespace_only_proof(
-              source_id, item, depth, opts[:source_context]
-            )
-            next
-          end
+          # Unicode spaces can reference visible original PDF glyphs. Only the
+          # pipeline's original-program/GID proof may classify zero painted ink;
+          # matched source outlines are rendered regardless of decoded text.
 
           if entries.empty?
             page_failure = source_page_failure(
@@ -1710,9 +1698,8 @@ module BlueCollarSystems
         false
       end
 
-      # Whitespace-only text is decided from the item text alone: strip removes
-      # ASCII whitespace; the explicit class also covers NBSP and the Unicode
-      # space separators PDF producers emit for justified layout.
+      # Matching/filtering hint only. Unicode whitespace never authenticates
+      # absent painted ink; the original source program/GID proof does that.
       WHITESPACE_ONLY = /\A[\s  -​  　]*\z/
 
       def self.whitespace_only_item?(item)
@@ -1723,34 +1710,6 @@ module BlueCollarSystems
         false
       end
 
-      def self.whitespace_only_proof(source_id, item, depth, source_context)
-        binding = RepresentationFidelity.proof_binding(source_id)
-        text = CairoGlyphSource.item_text(item).to_s
-        {
-          :source_span_id => source_id,
-          :importer_id => binding[:importer_id],
-          :page_number => binding[:page_number],
-          :scope => :item,
-          :category => :exact_representation_impossible,
-          :affirmative_impossibility => true,
-          :generic_failure => false,
-          :from_mode => :text3d,
-          :to_mode => :glyphs,
-          :reason_code => :source_vector_geometry_absent,
-          :attempted_renderer => 'svg_source_3d_text',
-          :created_entity_ids => [],
-          :cleaned_entity_ids => [],
-          :cleanup_outcome => :not_required,
-          :evidence => {
-            :source_observation => 'source span text is entirely whitespace; a whitespace glyph has no outline and cannot be extruded into a 3D solid',
-            :source_text_length => text.length,
-            :source_text_codepoints => text.each_char.map { |c| format('U+%04X', c.ord) },
-            :requested_depth => depth,
-            :verification => 'item text inspected before any glyph build; no host call attempted',
-            :source_renderer => (source_context.is_a?(Hash) ? source_context[:renderer].to_s : nil)
-          }
-        }
-      end
 
       def self.unrepresentable_as_3d_text_proof(source_id, item, depth,
                                                 source_context, host_message)

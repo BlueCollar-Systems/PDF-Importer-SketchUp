@@ -3825,7 +3825,7 @@ class RepresentationFidelityContractTest < Minitest::Test
       SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'
     ), :encoding => 'UTF-8')
     assert_match(
-      /empty_requested_page_artifacts\?\(paths, text_items, embedded_assets\)\s*\|\|\s*explicit_zero_canonical_page_raster/,
+      /empty_requested_page_artifacts\?\(paths, canonical_text_items, embedded_assets\)\s*\|\|\s*explicit_zero_canonical_page_raster/,
       main
     )
     assert_match(/delivery_basis\s*=>\s*:verified_zero_canonical_text/, main)

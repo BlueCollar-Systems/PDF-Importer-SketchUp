@@ -180,6 +180,8 @@ jobs:
           ruby test/poppler_active_boundary_validation_test.rb
           ruby test/svg_text_embed_test.rb
           ruby test/svg_text_3d_renderer_test.rb
+          ruby test/source_zero_ink_test.rb
+          ruby test/svg_3d_text_whitespace_span_test.rb
           ruby test/svg_item_representation_renderer_test.rb
           ruby test/svg_item_filled_glyph_faces_test.rb
           ruby test/page_representation_transform_test.rb
