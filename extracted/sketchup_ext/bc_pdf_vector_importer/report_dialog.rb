@@ -32,7 +32,8 @@ module BlueCollarSystems
         time_str = elapsed ? " — #{elapsed}s" : ""
         failed = failed_page_records(stats)
         undelivered = undelivered_text_summary(stats)
-        problems = !failed.empty? || undelivered[:count] > 0
+        fill_failures = Array(stat_value(stats, :fill_delivery_failures))
+        problems = !failed.empty? || undelivered[:count] > 0 || !fill_failures.empty?
         head = problems ? 'PDF import finished with problems' : 'PDF import complete'
         line = "#{head} — #{pg} page#{pg == 1 ? '' : 's'}, " \
                "#{edges} edges, #{text} text#{time_str}."
@@ -64,6 +65,10 @@ module BlueCollarSystems
                   "delivered on page#{pages.length == 1 ? '' : 's'} " \
                   "#{format_page_list(pages)} (#{undelivered[:reasons].join('; ')}); " \
                   'the rest of each page was kept.'
+        end
+        unless fill_failures.empty?
+          count = fill_failures.length
+          line += " #{count} filled shape#{count == 1 ? '' : 's'} could not be created."
         end
         stepped = page_step_down_pages(stats)
         unless stepped.empty?

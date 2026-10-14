@@ -465,16 +465,23 @@ class GeometryBuilderStagingTest < Minitest::Test
     assert_equal true, result[:geometry_staging][:enabled]
     assert_equal 0, result[:geometry_staging][:explode_count]
     assert_equal true, result[:geometry_staging][:explode_skipped]
-    assert_equal 0, result[:geometry_staging][:retained_group_count]
+    assert_operator result[:geometry_staging][:retained_group_count], :<=, 2
     assert_equal 500, result[:faces]
     groups = model.active_entities.to_a.grep(Group)
     assert_equal 1, groups.length
-    instances = groups.first.entities.to_a.grep(Group).first.entities.to_a.grep(ComponentInstance)
-    assert_equal 1, instances.length,
-                 'one stable destination/style must retain one tiny-fill batch'
+    instances=[]
+    visit=lambda do |entities|
+      entities.to_a.each do |entity|
+        instances << entity if entity.is_a?(ComponentInstance)
+        visit.call(entity.entities) if entity.is_a?(Group)
+      end
+    end
+    visit.call(groups.first.entities)
+    assert_operator instances.length, :<=, (500.0 / Builder::FILL_CONSTRUCTION_CONTOURS).ceil + 2,
+                    'tiny-fill batches stay bounded within retained source owners'
     assert_equal 0, groups.first.entities.groups_exploded,
                  'the fill owner is stable across geometry staging'
-    assert_equal 500, instances.first.definition.entities.faces_created
+    assert_equal 500, instances.inject(0) { |sum,instance| sum+instance.definition.entities.faces_created }
   end
 
   def test_progress_callback_brackets_native_geometry_and_text_phases

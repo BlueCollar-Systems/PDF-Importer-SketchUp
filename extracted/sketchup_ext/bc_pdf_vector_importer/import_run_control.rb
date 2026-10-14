@@ -1380,11 +1380,15 @@ module BlueCollarSystems
         end
 
         def page_failure_record(page, error)
-          {
+          record = {
             :page => page.to_i,
             :error_class => error.class.name.to_s,
             :message => error.message.to_s[0, 500]
           }
+          if error.respond_to?(:fill_delivery_failures)
+            record[:fill_delivery_failures] = Array(error.fill_delivery_failures)
+          end
+          record
         end
 
         def merge_stats!(target, source)

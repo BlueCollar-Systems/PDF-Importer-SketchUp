@@ -309,6 +309,7 @@ module BlueCollarSystems
         end
         warnings += degraded_renderers.length
         warnings += lineweight_approximation_block(stats)[:unresolved_path_count]
+        warnings += Array(telemetry_value(stats, :fill_delivery_failures)).length
         version = importer_version
 
         report = {
@@ -721,6 +722,7 @@ module BlueCollarSystems
           representation_ownership_group_forced_pages: Array(stats[:representation_ownership_group_forced_pages]).map { |entry| normalize_json(entry) },
           source_glyph_physical_deliveries: Array(stats[:source_glyph_physical_deliveries]).map { |entry| normalize_json(entry) },
           scale_hints: scale_hints_block(stats),
+          fill_delivery_failures: Array(telemetry_value(stats, :fill_delivery_failures)),
           diagnostics: diagnostics_block(stats, warning_count, degraded_renderers),
           model_3d_intent: model_3d_intent_block(stats),
           model_3d: model_3d_block(stats, opts),
@@ -1011,8 +1013,10 @@ module BlueCollarSystems
         fidelity_ok = fidelity[:ready] == true || fidelity['ready'] == true
         outcome = page_outcome_block(extra)
         pages_ok = outcome.nil? || outcome[:page_outcomes][:ready]
+        fill_failures = Array(telemetry_value(extra, :fill_delivery_failures))
+        fills_ok = fill_failures.empty?
         ready = has_stamp && has_crosscheck && text_ok && fidelity_ok &&
-                host_delivery_ok && pages_ok &&
+                host_delivery_ok && pages_ok && fills_ok &&
                 open_failure.nil?
         {
           ready: ready,
@@ -1022,10 +1026,12 @@ module BlueCollarSystems
             actual_text_entity_types: text_ok,
             host_entity_delivery: host_delivery_ok,
             requested_pages_retained: pages_ok,
+            source_filled_geometry_retained: fills_ok,
             requested_representation_fidelity: fidelity_ok,
             no_open_failure: open_failure.nil?
           },
-          errors: outcome ? outcome[:page_outcomes][:errors] : [],
+          errors: (outcome ? outcome[:page_outcomes][:errors] : []) +
+            (fills_ok ? [] : ["undelivered_source_fills:#{fill_failures.length}"]),
           note: 'diagnostics stub — Report Doctor may recompute client-side'
         }
       end
@@ -2378,10 +2384,13 @@ module BlueCollarSystems
         cleaned_ids.each_key do |identity|
           errors << "cleaned_entity_is_live:#{identity}" if live_id_owner.key?(identity)
         end
+        fill_failures = Array(telemetry_value(stats, :fill_delivery_failures))
+        errors << "undelivered_source_fills:#{fill_failures.length}" unless fill_failures.empty?
 
         {
           ready: errors.empty?,
           checks: {
+            source_filled_geometry_retained: fill_failures.empty?,
             requested_pages_retained: page_outcome.nil? ||
               page_outcome[:page_outcomes][:ready],
             source_span_set_equality: !errors.include?('source_delivery_set_mismatch') &&
@@ -2858,6 +2867,11 @@ module BlueCollarSystems
           parts << "Retained #{blank_spans.length} blank source text span#{blank_spans.length == 1 ? '' : 's'} (#{characters} space characters) without creating pictures"
         end
         parts << "in #{format('%.1f', elapsed_s)}s" if elapsed_s > 0
+        fill_failures = Array(extra['fill_delivery_failures'])
+        unless fill_failures.empty?
+          count = fill_failures.length
+          parts << "#{count} filled shape#{count == 1 ? '' : 's'} could not be created; see the import report for locations and reasons"
+        end
 
         scale = extra['resolved_scale']
         if scale.is_a?(Hash) && scale['factor']

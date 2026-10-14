@@ -62,12 +62,23 @@ class ImplicitFillCloseTest < Minitest::Test
 
   def build(stream, options = {})
     model = options.delete(:model) || Model.new
+    compound_proxy = options.delete(:compound_closure_proxy)
     paths = Parser.new([stream], nil).parse
     builder = Builder.new(
       model, paths, [], MEDIA_BOX,
       { :group_per_page => false, :detect_arcs => false,
         :import_fills => true }.merge(options)
     )
+    if compound_proxy
+      # This fixture has no native mesh/Boolean APIs. Compare only the source
+      # closure handed to that boundary; never rely on a swallowed host error
+      # to paint the hole as a separate fill. Native hole construction is a
+      # different acceptance check.
+      builder.define_singleton_method(:draw_compound_clip_fill) do |entities,loops,_rule,layer,rgb,_name|
+        loops.each { |points| draw_face(entities,points,layer,rgb,true) }
+        true
+      end
+    end
     Built.new(model, builder, builder.build, paths)
   end
 
@@ -212,8 +223,9 @@ class ImplicitFillCloseTest < Minitest::Test
       shapes.each do |name, subpaths|
         open_stream = subpaths.compact.join(' ') + " #{operator}"
         closed_stream = subpaths.compact.map { |subpath| subpath + ' h' }.join(' ') + " #{operator}"
-        open_built = build('0 g ' + open_stream)
-        closed_built = build('0 g ' + closed_stream)
+        options={:compound_closure_proxy=>name=='ring'}
+        open_built = build('0 g ' + open_stream,options.dup)
+        closed_built = build('0 g ' + closed_stream,options.dup)
         assert_equal face_loops(closed_built), face_loops(open_built), "#{name} #{operator}"
         assert_equal closed_built.result[:faces], open_built.result[:faces], "#{name} #{operator}"
         # The shared host fixture cannot subtract holes. Its compound paint
