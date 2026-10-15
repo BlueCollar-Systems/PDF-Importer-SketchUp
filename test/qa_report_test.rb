@@ -7,6 +7,108 @@ require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/qa_report'
 QAReportTextItem = Struct.new(:text, :page_number, :bbox_x0, :bbox_y0, :id)
 
 class QAReportTest < Minitest::Test
+  # Reporting fixtures exercise delivered-kind accounting, not native geometry
+  # or pixel certification. The existing fidelity validator stays independent.
+  def mixed_summary_stats(native_count = 61, raster_count = 7)
+    {
+      pages: 1, primitives: 0, edges: 0, text: native_count + raster_count,
+      layers: [], text_mode: :text3d, raster_fallback_used: raster_count > 0,
+      source_provenance_objects: Array.new(native_count) do
+        { created_entity_type: 'source_glyph_3d_text' }
+      end,
+      terminal_text_delivery_records: Array.new(raster_count) do |index|
+        id = "text_span:1:#{index}"
+        { page: 1, source_span_ids: [id], created_entity_type: 'raster_image',
+          delivered_mode: :raster, delivery_scope: :item_raster,
+          resulting_entity_ids: ["persistent_id:#{index + 1}"],
+          cleanup_outcome: :not_required, real_raster_verified: true,
+          source_crop_binding_verified: true, visual_fidelity_verified: true,
+          artifact_evidence: { source_span_id: id, page_number: 1,
+            source_crop_binding_verified: true } }
+      end,
+      text_renderers: raster_count > 0 ? [{ requested_mode: :text3d,
+        delivered_mode: :raster, degraded: true, count: raster_count,
+        reason: 'source_item_identity_unavailable' }] : []
+    }
+  end
+
+  def test_mixed_native_text_and_item_images_are_not_reported_empty_or_all_raster
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport
+    stats = mixed_summary_stats
+    report = qa.build_from_stats('fictional-source.pdf', {}, stats)
+    diagnostics = report[:extra][:diagnostics]
+    assert_equal 0, report[:result][:primitives]
+    assert_equal 68, report[:result][:text_entities]
+    assert_equal 'review', diagnostics[:quality_level]
+    assert_includes diagnostics[:signals], 'delivered_text_content'
+    refute_includes diagnostics[:signals], 'no_vector_geometry_created'
+    assert_equal({ requested: '3d_text', delivered: 'raster',
+      reason: 'source_item_identity_unavailable', count: 7 }, report[:fallback][:text])
+    assert diagnostics[:recommended_actions].any? { |s| s.include?("7 fallback items requested as '3d_text' were delivered as 'raster'") }
+    assert diagnostics[:recommended_actions].any? { |s| s.include?('other delivered content was kept') }
+    refute diagnostics[:recommended_actions].any? { |s| s.include?('Vector or Hybrid') }
+    summary = report[:extra][:human_summary]
+    assert_includes summary, 'Text delivery: 61 source-outline 3D Text items, 7 raster image items'
+    assert_includes summary, 'Content review: review'
+    refute_includes summary, 'Vector content: empty'
+    assert_equal 61, report[:extra][:actual_text_entity_types]['source_glyph_3d_text']
+    assert_equal 7, report[:extra][:actual_text_entity_types]['raster_image']
+    # Reporting counts cannot turn incomplete fictional provenance into READY.
+    assert_equal false, report[:extra][:representation_fidelity][:ready]
+    assert_equal false, report[:extra][:import_contract_ready][:ready]
+  end
+
+  def test_native_text_without_page_path_primitives_requires_review_not_empty
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport
+    report = qa.build_from_stats('fictional-source.pdf', {}, mixed_summary_stats(1, 0))
+    assert_equal 'review', report[:extra][:diagnostics][:quality_level]
+    refute_includes report[:extra][:diagnostics][:signals], 'no_vector_geometry_created'
+    assert_includes report[:extra][:human_summary], 'Text delivery: 1 source-outline 3D Text item.'
+  end
+
+  def test_verified_item_images_without_embedded_images_are_reported_image_only
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport
+    report = qa.build_from_stats('fictional-source.pdf', {}, mixed_summary_stats(0, 1))
+    diagnostics = report[:extra][:diagnostics]
+    assert_equal 'image_only', diagnostics[:quality_level]
+    assert_includes diagnostics[:signals], 'item_raster_content_created'
+    refute_includes diagnostics[:signals], 'embedded_images_extracted'
+    refute_includes diagnostics[:signals], 'no_vector_geometry_created'
+    assert diagnostics[:recommended_actions].any? { |s| s.include?("1 fallback item requested as '3d_text' was delivered as 'raster'") }
+  end
+
+  def test_page_raster_fallback_is_not_named_a_text_item_when_another_page_has_one_item_image
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport
+    stats = mixed_summary_stats(1, 1)
+    stats[:text_renderers][0][:page] = 1
+    stats[:text_renderers] << { page: 2, requested_mode: :text3d,
+      delivered_mode: :raster, degraded: true, count: 1,
+      reason: 'inline image paint order requires one terminal page image' }
+    fallback = qa.fallback_block(stats, stats[:text_renderers])
+    assert_equal 1, qa.delivered_text_entity_counts(stats)['raster_image']
+    assert_equal 1, fallback[:text][:count]
+    assert_equal 'inline image paint order requires one terminal page image', fallback[:text][:reason]
+    diagnostics = qa.diagnostics_block(stats, 0, stats[:text_renderers])
+    assert diagnostics[:recommended_actions].any? { |s| s.include?("1 fallback item requested as '3d_text' was delivered as 'raster'") }
+    refute diagnostics[:recommended_actions].any? { |s| s.include?('1 text item requested') }
+  end
+
+  def test_unverified_or_absent_delivery_records_do_not_promote_empty_content
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport
+    stats = mixed_summary_stats(0, 1)
+    stats[:terminal_text_delivery_records][0][:real_raster_verified] = false
+    [stats, stats.merge(terminal_text_delivery_records: []),
+      stats.merge(terminal_text_delivery_records: [], source_provenance_objects: [
+        { created_entity_type: 'unrecognized_kind' }
+      ])].each do |candidate|
+      report = qa.build_from_stats('fictional-source.pdf', {}, candidate)
+      assert_equal 'empty', report[:extra][:diagnostics][:quality_level]
+      assert_includes report[:extra][:diagnostics][:signals], 'no_vector_geometry_created'
+      refute_includes report[:extra][:human_summary], 'Text delivery:'
+      refute report[:extra][:diagnostics][:recommended_actions].any? { |s| s.include?('1 text item requested') }
+    end
+  end
+
   def test_unresolved_source_lineweights_count_as_warnings_and_require_review_in_human_summary
     q=BlueCollarSystems::PDFVectorImporter::QAReport
     stage={:page=>2,:stroke_footprints=>{:requested_mode=>'Preserve visually',:unresolved_path_count=>2,
