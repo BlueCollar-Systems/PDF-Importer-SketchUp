@@ -2644,6 +2644,11 @@ module BlueCollarSystems
         primitives = stats[:primitives].to_i
         text_entities = stats[:text].to_i
         embedded_images = stats[:embedded_images].to_i
+        delivered_types = build_actual_text_entity_types_from_delivered_counts(
+          delivered_text_entity_counts(stats)
+        ) || {}
+        raster_items = delivered_types[:raster_image].to_i
+        other_text_items = delivered_types[:count].to_i - raster_items
         layer_count = Array(stats[:layers]).compact.length
         text_mode = stats[:text_mode].to_s
         source_spans = stats[:text_source_spans].to_i
@@ -2661,8 +2666,13 @@ module BlueCollarSystems
           elsif primitives > 0
             signals << 'very_limited_vector_content'
             'low'
-          elsif embedded_images > 0
-            signals << 'embedded_images_extracted'
+          elsif other_text_items > 0
+            # Source-outline text has native geometry even when the page-path
+            # primitive counter is zero. Counts are not a fidelity certificate.
+            signals << 'delivered_text_content'
+            'review'
+          elsif embedded_images > 0 || raster_items > 0
+            signals << (embedded_images > 0 ? 'embedded_images_extracted' : 'item_raster_content_created')
             'image_only'
           else
             signals << 'no_vector_geometry_created'
@@ -2681,7 +2691,11 @@ module BlueCollarSystems
           reason = (fallback[:reason] || fallback['reason']).to_s
           signals << 'fallback_used'
           if reason.downcase.include?('raster')
-            actions << 'If editable geometry is required, retry Vector or Hybrid mode and confirm the PDF contains vector data.'
+            if other_text_items > 0
+              actions << 'Review the item-specific fallback reasons; other delivered content was kept.'
+            else
+              actions << 'If editable geometry is required, retry Vector or Hybrid mode and confirm the PDF contains vector data.'
+            end
           else
             actions << 'Review the fallback reason and attach the import report when requesting support.'
           end
@@ -2692,7 +2706,13 @@ module BlueCollarSystems
         delivered_mode = (text_fallback[:delivered] || text_fallback['delivered']).to_s
         unless requested_mode.empty? || delivered_mode.empty?
           signals << 'text_mode_fallback'
-          actions << "Requested text mode '#{requested_mode}' was delivered as '#{delivered_mode}' — see fallback.text in this report for the reason."
+          count = (text_fallback[:count] || text_fallback['count']).to_i
+          # Compact raster fallback counts can describe whole pages. Aggregate
+          # item-image counts do not establish this selected record's scope.
+          item_kind = delivered_mode == 'raster' ? 'fallback item' : 'text item'
+          subject = count > 0 ? "#{count} #{item_kind}#{count == 1 ? '' : 's'}" : 'Some fallback items'
+          verb = count == 1 ? 'was' : 'were'
+          actions << "#{subject} requested as '#{requested_mode}' #{verb} delivered as '#{delivered_mode}' — see fallback.text and item records for the reasons."
         end
 
         # Round 23 (F-1): Glyphs-mode source telemetry must fail VISIBLE —
@@ -2858,6 +2878,25 @@ module BlueCollarSystems
                  else
                    "Created #{outcome.join(', ')}"
                  end
+        entity_types = extra['actual_text_entity_types'] || {}
+        entity_types = {} unless entity_types.is_a?(Hash)
+        delivery_labels = {
+          'native_label' => 'native label item',
+          'native_3d_text' => 'native 3D Text item',
+          'source_glyph_3d_text' => 'source-outline 3D Text item',
+          'glyph_outline' => 'glyph outline item',
+          'page_path_geometry' => 'page-path geometry item',
+          'outline_curve_or_mesh' => 'outline geometry item',
+          'raw_geometry_edges' => 'edge geometry item',
+          'dxf_text' => 'DXF text item',
+          'fallback_geometry' => 'fallback geometry item',
+          'raster_image' => 'raster image item'
+        }
+        delivery = delivery_labels.map do |kind, label|
+          count = entity_types[kind].to_i
+          "#{count} #{label}#{count == 1 ? '' : 's'}" if count > 0
+        end.compact
+        parts << "Text delivery: #{delivery.join(', ')}" unless delivery.empty?
         blank_spans = Array(extra['zero_ink_text_deliveries'])
         unless blank_spans.empty?
           characters = blank_spans.inject(0) do |sum, record|
@@ -2921,7 +2960,7 @@ module BlueCollarSystems
         end
 
         quality = diagnostics['quality_level'].to_s
-        parts << "Vector content: #{quality}" unless quality.empty?
+        parts << "Content review: #{quality}" unless quality.empty?
         lineweights=extra['lineweight_approximations'] || {}
         if lineweights['unresolved_path_count'].to_i > 0
           count=lineweights['unresolved_path_count'].to_i
