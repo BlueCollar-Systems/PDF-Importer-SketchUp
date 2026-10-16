@@ -117,6 +117,41 @@ class ItemRasterDisplayTest < Minitest::Test
     assert Subject.verify_manifest!(@stats, [row(@page)])
   end
 
+  def test_fractional_media_boundary_requires_exact_whole_device_pixel_derivation
+    media = [-20.25, 30.125, 180.35, 130.475]
+    # Explicit device-grid footprints: these are not fitted back to the page
+    # dimensions. The single fractional boundary pixel changes raw page side
+    # with intrinsic rotation; no arbitrary out-of-page crop is permitted.
+    [[0, [836, 418], [-20.25, 30.125, 180.39, 130.445]],
+     [90, [418, 836], [-20.29, 30.125, 180.35, 130.445]],
+     [180, [836, 418], [-20.29, 30.155, 180.35, 130.475]],
+     [270, [418, 836], [-20.25, 30.155, 180.39, 130.475]]].each do |rotation, size, box|
+      context = @context.merge(:media_box => media, :page_rotation => rotation)
+      display = [0.0, 0.0, size[0] * 72.0 / 300, size[1] * 72.0 / 300]
+      artifact = { :page_rotation => rotation, :raster_dpi => 300,
+        :requested_source_box => media.dup, :page_pixel_size => size,
+        :pixel_crop => [0, 0, *size], :display_box => display, :source_box => box }
+      corners = Subject.source_corners(artifact, context)
+      assert_in_delta display[2] / 72.0, corners[1][0], 1.0e-9
+      assert_in_delta 4.0 + display[3] / 72.0, corners[2][1], 1.0e-9
+      assert_equal corners, Subject.source_corners(JSON.parse(JSON.generate(artifact)), context)
+      [lambda { |a| a[:raster_dpi] = 600 },
+       lambda { |a| a[:pixel_crop][2] -= 1 },
+       lambda { |a| a[:requested_source_box][2] += 0.01 },
+       lambda { |a| a[:source_box][2] += 0.001 },
+       lambda { |a| a[:display_box] = [0.0, 0.0, 200.6, 100.35] },
+       lambda { |a| a[:page_pixel_size][0] += 1 },
+       lambda { |a| a.delete(:raster_dpi) }].each do |mutation|
+        changed = Marshal.load(Marshal.dump(artifact))
+        changed[:source_crop_binding_verified] = true
+        mutation.call(changed)
+        assert_raises(Error) { Subject.source_corners(changed, context) }
+      end
+      unproved = { :page_rotation => rotation, :source_box => box }
+      assert_raises(Error) { Subject.source_corners(unproved, context) }
+    end
+  end
+
   def test_final_page_crop_stays_above_source_ordered_image_without_native_text
     source = Entity.new(8, 'Image', [], 'decorative_source_image' => true)
     source.bounds = Bounds.new(Geom::Point3d.new(0,0,0.001), Geom::Point3d.new(2,2,0.001))

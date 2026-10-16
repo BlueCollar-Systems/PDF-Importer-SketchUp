@@ -67,20 +67,60 @@ module BlueCollarSystems
         true
       end
 
-      def self.source_corners(artifact, context)
+      def self.source_box!(artifact, media, rotation)
         box = value(artifact, :source_box)
-        media = value(context, :media_box)
-        scale = value(context, :scale)
-        offset = value(context, :page_y_offset)
-        rotation = value(context, :page_rotation)
         unless [box, media].all? { |b| b.is_a?(Array) && b.length == 4 && b.all? { |v| number?(v) } && b[2] > b[0] && b[3] > b[1] } &&
-               number?(scale) && scale > 0 && number?(offset) && [0, 90, 180, 270].include?(rotation) &&
+               [0, 90, 180, 270].include?(rotation) &&
                value(artifact, :page_rotation) == rotation
           fail_contract('source page placement metadata is invalid')
         end
-        unless box[0] >= media[0] && box[1] >= media[1] && box[2] <= media[2] && box[3] <= media[3]
-          fail_contract('source crop lies outside its MediaBox')
+        grid_keys = [:requested_source_box, :page_pixel_size, :raster_dpi]
+        unless grid_keys.any? { |key| !value(artifact, key).nil? }
+          unless box[0] >= media[0] && box[1] >= media[1] && box[2] <= media[2] && box[3] <= media[3]
+            fail_contract('source crop lies outside its MediaBox')
+          end
+          return box
         end
+        requested = value(artifact, :requested_source_box)
+        size, dpi, crop = value(artifact, :page_pixel_size), value(artifact, :raster_dpi), value(artifact, :pixel_crop)
+        unless requested.is_a?(Array) && requested.length == 4 && requested.all? { |v| number?(v) } &&
+               requested[2] > requested[0] && requested[3] > requested[1] &&
+               requested[0] >= media[0] && requested[1] >= media[1] && requested[2] <= media[2] && requested[3] <= media[3] &&
+               dpi.is_a?(Integer) && dpi > 0 && size.is_a?(Array) && size.length == 2 && size.all? { |v| v.is_a?(Integer) && v > 0 } &&
+               crop.is_a?(Array) && crop.length == 4 && crop.all? { |v| v.is_a?(Integer) }
+          fail_contract('whole-pixel crop derivation metadata is invalid')
+        end
+        pitch = dpi / 72.0
+        page_w, page_h = PageTransform.effective_width(media, rotation), PageTransform.effective_height(media, rotation)
+        unless (size[0] - page_w * pitch).abs < 1 && (size[1] - page_h * pitch).abs < 1
+          fail_contract('rendered canvas differs by at least one device pixel')
+        end
+        desired = PageTransform.transform_bbox(*requested, media, rotation)
+        x0, y0 = [(desired[0] * pitch).floor, 0].max, [(size[1] - desired[3] * pitch).floor, 0].max
+        x1, y1 = [(desired[2] * pitch).ceil, size[0]].min, [(size[1] - desired[1] * pitch).ceil, size[1]].min
+        unless x1 > x0 && y1 > y0 && crop == [x0, y0, x1 - x0, y1 - y0]
+          fail_contract('crop is not the bounded whole-pixel source rectangle')
+        end
+        expected = [x0 / pitch, (size[1] - y1) / pitch, x1 / pitch, (size[1] - y0) / pitch]
+        [PageTransform.transform_bbox(*box, media, rotation), value(artifact, :display_box)].each do |actual|
+          unless actual.is_a?(Array) && actual.length == 4 && actual.each_with_index.all? { |v, i| number?(v) && (v - expected[i]).abs <= TOLERANCE }
+            fail_contract('source/display crop differs from the device-pixel footprint')
+          end
+        end
+        # Only an independently derived whole boundary pixel can cross the
+        # fractional MediaBox; never stretch or clip its recorded footprint.
+        unless (media[0] - box[0]) * pitch < 1 && (media[1] - box[1]) * pitch < 1 &&
+               (box[2] - media[2]) * pitch < 1 && (box[3] - media[3]) * pitch < 1
+          fail_contract('whole-pixel crop extends by at least one device pixel')
+        end
+        box
+      end
+
+      def self.source_corners(artifact, context)
+        media, rotation = value(context, :media_box), value(context, :page_rotation)
+        box = source_box!(artifact, media, rotation)
+        scale, offset = value(context, :scale), value(context, :page_y_offset)
+        fail_contract('source page scale/offset is invalid') unless number?(scale) && scale > 0 && number?(offset)
         displayed = PageTransform.transform_bbox(*box, media, rotation)
         x0, y0, x1, y1 = displayed.map { |v| v * scale / 72.0 }
         [[x0, y0 + offset, 0.0], [x1, y0 + offset, 0.0],

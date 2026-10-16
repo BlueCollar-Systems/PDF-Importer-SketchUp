@@ -1525,7 +1525,7 @@ module BlueCollarSystems
     end
 
     def self.item_raster_crop_geometry(item, media_box, page_rotation, dpi,
-                                       padding_points = 1.5)
+                                       padding_points = 1.5, page_pixel_size = nil)
       unless media_box.is_a?(Array) && media_box.length >= 4
         raise RepresentationFidelity::ContractError,
               'item raster MediaBox is unavailable'
@@ -1560,16 +1560,51 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError,
               'item raster source bbox is empty'
       end
+      page_width = PageTransform.effective_width(media_box, page_rotation)
       page_height = PageTransform.effective_height(media_box, page_rotation)
       pixels_per_point = dpi.to_f / 72.0
       raise RepresentationFidelity::ContractError,
             'item raster DPI must be positive' unless pixels_per_point > 0.0
-      pixel_x0 = (display_box[0] * pixels_per_point).floor
-      pixel_y0 = ((page_height - display_box[3]) * pixels_per_point).floor
-      pixel_x1 = (display_box[2] * pixels_per_point).ceil
-      pixel_y1 = ((page_height - display_box[1]) * pixels_per_point).ceil
+      page_pixel_size ||= [
+        (page_width * pixels_per_point).round,
+        (page_height * pixels_per_point).round
+      ]
+      unless page_pixel_size.is_a?(Array) && page_pixel_size.length == 2 &&
+             page_pixel_size.all? { |value| value.is_a?(Integer) && value > 0 }
+        raise RepresentationFidelity::ContractError,
+              'item raster rendered page dimensions are invalid'
+      end
+      pixel_width, pixel_height = page_pixel_size
+      pixel_x0 = [(display_box[0] * pixels_per_point).floor, 0].max
+      pixel_y0 = [(pixel_height - display_box[3] * pixels_per_point).floor, 0].max
+      pixel_x1 = [(display_box[2] * pixels_per_point).ceil, pixel_width].min
+      pixel_y1 = [(pixel_height - display_box[1] * pixels_per_point).ceil, pixel_height].min
+      unless pixel_x1 > pixel_x0 && pixel_y1 > pixel_y0
+        raise RepresentationFidelity::ContractError,
+              'item raster source bbox is outside the rendered canvas'
+      end
+
+      # The PNG contains whole page pixels. Place those exact pixel boundaries,
+      # preserving the renderer's DPI pitch and decoded-height Y origin. Never
+      # fit the rounded device canvas back into a fractional-point MediaBox.
+      requested_source_box = source_box
+      display_box = [pixel_x0 / pixels_per_point,
+                     (pixel_height - pixel_y1) / pixels_per_point,
+                     pixel_x1 / pixels_per_point,
+                     (pixel_height - pixel_y0) / pixels_per_point]
+      corners = [[display_box[0], display_box[1]],
+                 [display_box[2], display_box[3]]].map do |x, y|
+        PageTransform.inverse_transform_point(x, y, media_box, page_rotation)
+      end
+      xs, ys = corners.map { |point| point[0] }, corners.map { |point| point[1] }
+      source_box = [xs.min, ys.min, xs.max, ys.max]
+      display_width = display_box[2] - display_box[0]
+      display_height = display_box[3] - display_box[1]
       {
         :source_box => source_box,
+        :media_box => media_box.dup,
+        :requested_source_box => requested_source_box,
+        :page_pixel_size => page_pixel_size.dup,
         :display_box => display_box,
         :display_width => display_width,
         :display_height => display_height,
@@ -7141,7 +7176,7 @@ module BlueCollarSystems
           entity.get_attribute(dictionary, 'raster_visual_pixel_sha256', '') == artifact[:visual_pixel_sha256] &&
           box.is_a?(Array) && box.length == 4 && box.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } &&
           box[0] < box[2] && box[1] < box[3] &&
-          box[0] >= media_box[0] && box[1] >= media_box[1] && box[2] <= media_box[2] && box[3] <= media_box[3]
+          ItemRasterDisplay.source_box!(artifact, media_box, opts[:page_rotation] || 0) == box
           raise RepresentationFidelity::ContractError, 'final-page crop native/source binding differs'
         end
         { :source_span_id => sid, :resulting_entity_id => id, :source_box => box.dup,
@@ -7529,7 +7564,7 @@ module BlueCollarSystems
       unless content_sha =~ /\A[0-9a-f]{64}\z/
         content_sha = Digest::SHA256.file(png_path).hexdigest
       end
-      {
+      artifact = {
         :png_path => png_path.to_s,
         :content_sha256 => content_sha,
         :content_byte_size => File.size(png_path).to_i,
@@ -7540,6 +7575,9 @@ module BlueCollarSystems
         :source_pdf_binding_verified => true,
         :page_rotation => crop_geometry[:page_rotation].to_i,
         :source_box => Array(crop_geometry[:source_box]).map { |value| value.to_f },
+        :requested_source_box => Array(crop_geometry[:requested_source_box]).map { |value| value.to_f },
+        :page_pixel_size => Array(crop_geometry[:page_pixel_size]).map { |value| value.to_i },
+        :raster_dpi => crop_geometry[:dpi].to_i,
         :display_box => Array(crop_geometry[:display_box]).map { |value| value.to_f },
         :pixel_crop => expected_crop,
         :pixel_width => pixel_width.to_i,
@@ -7556,6 +7594,10 @@ module BlueCollarSystems
         :visual_pixel_binding_verified => true,
         :visible_pixel_verified => proof[:visible_pixel_verified] == true
       }
+      if crop_geometry[:media_box]
+        ItemRasterDisplay.source_box!(artifact, crop_geometry[:media_box], artifact[:page_rotation])
+      end
+      artifact
     rescue RepresentationFidelity::ContractError
       raise
     rescue StandardError => e
@@ -7874,7 +7916,8 @@ module BlueCollarSystems
         pdf_path, page_num, media_box, page_rotation, opts
       )
       crop = item_raster_crop_geometry(
-        item, media_box, page_rotation, page_render[:dpi]
+        item, media_box, page_rotation, page_render[:dpi], 1.5,
+        [page_render[:pixel_width], page_render[:pixel_height]]
       )
       owned_crop_dir = SafeTemp.mktmpdir("bc_item_crop_p#{page_num}_")
       png_path = File.join(owned_crop_dir, 'crop.png')
