@@ -6616,6 +6616,7 @@ module BlueCollarSystems
           display_plan = prepare_embedded_image_display_plans(
             builder.page_group, source_image_records, paint_svg_provider.call,
             media_box, :scale => opts[:scale], :svg_page_box => svg_page_box,
+            :page_rotation => page_rotation,
             :parsed_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
             :page_number => page_num,
             :raster_delivery_records => stats[:raster_delivery_records])
@@ -7180,9 +7181,9 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError, 'final-page crop native/source binding differs'
         end
         { :source_span_id => sid, :resulting_entity_id => id, :source_box => box.dup,
+          :page_rotation => opts[:page_rotation] || 0,
           :page_number => context[:page], :source_pdf_sha256 => context[:source_pdf_sha256],
-          :bounds_svg => [box[0]-page_box[0]+viewbox[0], viewbox[3]+viewbox[1]+page_box[1]-box[3],
-            box[2]-page_box[0]+viewbox[0], viewbox[3]+viewbox[1]+page_box[1]-box[1]] }
+          :bounds_svg => SourceImagePaintOrder.pdf_box_to_svg(box, page_box, viewbox, opts[:page_rotation] || 0) }
       end
     end
 
@@ -7243,13 +7244,14 @@ module BlueCollarSystems
         # bottom-left. Reverse the vertical ordering without changing pixels.
         svg_corners = [3,2,1,0].map do |index|
           x,y = corners[index]
-          [x - page_box[0] + viewbox[0], viewbox[3] + viewbox[1] + page_box[1] - y]
+          SourceImagePaintOrder.pdf_point_to_svg(x, y, page_box, viewbox, opts[:page_rotation] || 0)
         end
         binding = pixels.merge(:id => image_id, :corners_svg => svg_corners,
           :parsed_pdf_sha256 => opts[:parsed_pdf_sha256], :page_number => opts[:page_number],
           :image_object_number => asset.obj_num, :placement_index => asset.placement_index,
           :ctm => asset.ctm, :corners_pts => corners,
           :svg_page_box => page_box, :svg_viewbox => viewbox,
+          :page_rotation => opts[:page_rotation] || 0,
           :original_clip_proof => (asset.respond_to?(:original_clip_proof) ? asset.original_clip_proof : nil))
         begin
           proof = inventory.qualify(binding, source_roots, final_page_crops)

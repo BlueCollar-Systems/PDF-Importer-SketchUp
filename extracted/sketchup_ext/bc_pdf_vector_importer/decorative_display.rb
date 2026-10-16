@@ -2,6 +2,7 @@
 # image above earlier paint and its source-owned later text above that image.
 require_relative 'item_raster_display'
 require_relative 'embedded_image_placement'
+require_relative 'source_image_paint_order'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -138,8 +139,9 @@ module BlueCollarSystems
             value(crop,:source_box) == box && value(crop,:page_number) == value(context,:page) &&
             value(crop,:source_pdf_sha256) == value(context,:source_pdf_sha256)
           page_box, view = value(context,:svg_page_box), value(context,:svg_viewbox)
-          expected = [box[0]-page_box[0]+view[0],view[3]+view[1]+page_box[1]-box[3],
-                      box[2]-page_box[0]+view[0],view[3]+view[1]+page_box[1]-box[1]]
+          rotation = value(context,:page_rotation) || 0
+          fail_contract('later crop rotation differs from its page') unless (value(crop,:page_rotation) || 0) == rotation
+          expected = SourceImagePaintOrder.pdf_box_to_svg(box,page_box,view,rotation)
           glyph = value(crop,:glyph_bounds_svg)
           fail_contract('later glyph is not fully contained in its final-page crop') unless
             value(crop,:bounds_svg) == expected && glyph.is_a?(Array) && glyph.length == 4 &&
@@ -167,6 +169,8 @@ module BlueCollarSystems
           Math3.close_points!(actual,canonical.map { |p| [p[0],p[1],depth] },'later final-page crop footprint')
         end
         true
+      rescue SourceImagePaintOrder::Unproven => error
+        fail_contract(error.message)
       end
 
       def validate_source!(record, context)
@@ -206,7 +210,9 @@ module BlueCollarSystems
         raw = value(record,:corners_pdf)
         fail_contract('source image corners missing') unless raw.is_a?(Array) && raw.length == 4 &&
           raw.all? { |p| p.is_a?(Array) && p.length == 2 && p.all? { |n| Math3.number?(n) } }
-        projected = [3,2,1,0].map { |i| [raw[i][0]-box[0]+view[0],view[3]+view[1]+box[1]-raw[i][1]] }
+        projected = [3,2,1,0].map do |i|
+          SourceImagePaintOrder.pdf_point_to_svg(raw[i][0],raw[i][1],box,view,value(context,:page_rotation) || 0)
+        end
         event_corners = value(event,:corners)
         fail_contract('source image affine differs from its actual source occurrence') unless
           event_corners.is_a?(Array) && event_corners.length == 4 &&
@@ -215,6 +221,8 @@ module BlueCollarSystems
           end
         verify_original_clip!(record,context,projected)
         source_corners(record, context)
+      rescue SourceImagePaintOrder::Unproven => error
+        fail_contract(error.message)
       end
 
       def apply!(page_group, stats, plans, context)
