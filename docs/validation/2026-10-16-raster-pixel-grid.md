@@ -31,6 +31,32 @@ Both Ruby 2.2.4 and 3.4 passed the affected checks: representation contracts
 also parsed all 94 shipped Ruby files. These checks do not replace a native
 import/save/reopen/Undo test.
 
+## Current local r19 test candidate
+
+| Field | Bound value |
+|---|---|
+| Version / candidate | 3.7.171 / r19 |
+| Product source commit | `6cdefa76c510db8b27a2e55e57c06232cc3bb864` |
+| Source tree | `8a5b35cffee2d81abad13bcccba66b9f392e46d1` |
+| RBZ | `SketchUp-PDF-Importer-TEST_v3.7.171_2026-10-16-r19.rbz` |
+| RBZ SHA-256 | `848f18f95d4699da232f9c5578ba38312d3cec3e10007a377af9ea1095d15473` |
+| Files / bytes | 650 / 27,692,213 |
+
+All 650 archive and extracted files match that committed source. All 94 shipped
+Ruby files parse under actual Ruby 2.2.4, and all 31 runtime binaries match r17.
+Bundled Poppler and relocated transparent Ghostscript smokes passed. Independent
+package verification repeated the file comparisons. The exact r19 installation
+preserves the 650-file r18 backup and all 340 unrelated plugin files, without
+changing preferences. The older v3.7.170 backup remains preserved separately.
+
+The new request at `C:/TMP/su171-rm-mode-raster-20261016-r3/request.json`, SHA-256
+`5486a76e377c9fae81426c016c2cb0ac66f6e46d3233f01c293699bfc2e5ea52`,
+passed read-only preflight against the exact installed package. It has **not**
+launched a native session. Windows' unrelated permission prompt still requires
+manual handling. CAD programs remain closed and no native ownership lease is
+held. The r19 guide and master package list explicitly retain pending acceptance;
+all other-host sections of the master list remain byte-identical.
+
 ## Preserved r18 candidate, superseded before native testing
 
 | Field | Bound value |
@@ -52,8 +78,8 @@ Further review found that the embedded-image display-plan caller did not forward
 page rotation into the new guard. This would reject the combined Raster/source-
 image path on intrinsically rotated pages. The runtime correction explicitly
 forwards rotation, with a caller regression and a complete source-check rerun.
-A separate r19 candidate must bind the corrected source before native testing;
-r18 is preserved and is not the acceptance candidate.
+This required the separate r19 candidate above before native testing. The r18
+package and its unexecuted request remain preserved as historical evidence.
 
 Actual bundled `pdftocairo` output confirmed that its SVG already contains
 intrinsic page rotation. The correction therefore maps source-image corners and
