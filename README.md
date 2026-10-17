@@ -27,6 +27,9 @@ use the same validation.
 - Successful Glyphs and Geometry deliveries no longer carry a misleading
   impossibility reason when they match the requested mode. Actual step-downs
   keep their reason and transition records. This changes reporting only.
+- Distinct page simplifications now count as warnings. When a page has these
+  limitations, abundant vector content no longer produces a misleading high
+  review classification; the report requests comparison with the PDF.
 
 ### Recent fixes (v3.7.174)
 
