@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.174-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.175-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -21,6 +21,12 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Recent fixes (v3.7.175)
+
+- Successful Glyphs and Geometry deliveries no longer carry a misleading
+  impossibility reason when they match the requested mode. Actual step-downs
+  keep their reason and transition records. This changes reporting only.
 
 ### Recent fixes (v3.7.174)
 

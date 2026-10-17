@@ -1278,7 +1278,8 @@ module BlueCollarSystems
         :requested_mode => requested,
         :delivered_mode => delivered_mode,
         :degraded => requested != delivered_mode,
-        :reason => 'affirmative item-specific requested-representation impossibility',
+        :reason => requested == delivered_mode ? nil :
+          'affirmative item-specific requested-representation impossibility',
         :count => 1,
         :resulting_entity_ids => [entity_id],
         :physical_entity_ids => Array(result[:physical_entity_ids]),

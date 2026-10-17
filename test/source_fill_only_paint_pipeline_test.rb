@@ -89,3 +89,72 @@ class SourceFillOnlyPaintPipelineTest < Minitest::Test
     assert_equal 1,@stats[:source_fill_only_paint_pages].length
   end
 end
+
+class VectorDeliveryReasonTest < Minitest::Test
+  I=BlueCollarSystems::PDFVectorImporter
+  REASON='affirmative item-specific requested-representation impossibility'.freeze
+  # Metadata recording must never invoke or mutate the supplied native group.
+  class NativeGroupMustNotBeTouched
+    def method_missing(name,*_args)
+      raise "delivery reporting touched native geometry: #{name}"
+    end
+  end
+  def record(requested,delivered)
+    item=I::TextParser::TextItem.new
+    item.text='AB';item.source_span_id='text_span:1:0'
+    item.bbox_x0,item.bbox_y0,item.bbox_x1,item.bbox_y1=1.0,2.0,3.0,4.0
+    evidence={:source_text_sha256=>Digest::SHA256.hexdigest(item.text),
+      :source_bbox_pdf=>[1.0,2.0,3.0,4.0],:source_anchor=>[1.0,2.0,0.0],
+      :source_rotation_radians=>0.0,:expected_width=>2.0/72.0,
+      :expected_height=>2.0/72.0,:expected_depth=>0.0}
+    native_group=NativeGroupMustNotBeTouched.new
+    item_before=Marshal.dump(item)
+    result={:group=>native_group,:mode=>delivered,:source_span_id=>item.source_span_id,
+      :group_entity_id=>'persistent_id:101',:renderer=>:fictional_vector_metadata_test,
+      :physical_entity_ids=>['persistent_id:102'],:expected_evidence=>evidence,
+      :edge_count=>4,:face_count=>1,:placement_indices=>[0],:glyph_ids=>['glyph-0-0']}
+    [:visual_fidelity_verified,:identity_verified,:placement_verified,:rotation_verified,
+      :size_verified,:entity_type_verified,:visibility_verified,:content_verified,
+      :physical_geometry_verified,:physical_style_verified,:transform_verified].each { |key|result[key]=true }
+    transitions=requested==delivered ? [] : [{:source_span_id=>item.source_span_id,
+      :from_mode=>requested,:to_mode=>delivered,:reason_code=>:fixture_affirmative_item_proof}]
+    result_before=Marshal.dump(result.reject { |key,_value|key==:group })
+    stats={:text=>0,:edges=>0,:faces=>0};history=[]
+    assert I.record_item_vector_delivery!(stats,1,item,requested,result,history,transitions)
+    assert_equal result_before,Marshal.dump(result.reject { |key,_value|key==:group })
+    assert_equal item_before,Marshal.dump(item)
+    assert_same native_group,result[:group]
+    [stats,history,transitions]
+  end
+
+  def test_direct_requested_vector_delivery_does_not_report_impossibility
+    [:glyphs,:geometry].each do |mode|
+      stats,history,transitions=record(mode,mode)
+      row=stats[:text_renderers].last
+      assert_equal mode,row[:requested_mode]
+      assert_equal mode,row[:delivered_mode]
+      assert_equal false,row[:degraded]
+      assert_nil row[:reason]
+      assert_empty stats[:fallback_transitions]
+      assert_empty transitions
+      assert_equal :complete,history.last[:outcome]
+      assert_equal 1,stats[:text]
+      assert_equal 4,stats[:edges]
+      assert_equal 1,stats[:faces]
+    end
+  end
+
+  def test_actual_mode_step_down_keeps_reason_and_transition_ledger
+    [[:glyphs,:geometry],[:text3d,:glyphs]].each do |requested,delivered|
+      stats,history,transitions=record(requested,delivered)
+      row=stats[:text_renderers].last
+      assert_equal requested,row[:requested_mode]
+      assert_equal delivered,row[:delivered_mode]
+      assert_equal true,row[:degraded]
+      assert_equal REASON,row[:reason]
+      assert_equal [transitions.first.merge(:page=>1)],stats[:fallback_transitions]
+      assert_equal delivered,history.last[:mode]
+      assert_equal ['persistent_id:101'],row[:resulting_entity_ids]
+    end
+  end
+end
