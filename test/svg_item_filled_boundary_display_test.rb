@@ -190,7 +190,11 @@ class SvgItemFilledBoundaryDisplayTest < Minitest::Test
       edges,face=filled
       edges.first.failure=failure
       group=Group.new(12,edges+[face])
-      assert_raises(StandardError) { govern(group,SID,true) }
+      expected_error = failure == :raise ? RuntimeError : ContractError
+      error = assert_raises(expected_error) { govern(group,SID,true) }
+      expected_message = failure == :raise ? 'native hidden setter failed' :
+        'host ignored filled glyph contour hidden state'
+      assert_equal expected_message, error.message
       assert_nil group.get_attribute(DICT,'filled_contour_edge_policy')
     end
   end
