@@ -139,6 +139,9 @@ jobs:
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_source_bounds_test.rb
+          ruby test/source_fill_only_paint_test.rb
+          ruby test/source_fill_only_paint_pipeline_test.rb
+          ruby test/svg_item_filled_boundary_display_test.rb
           ruby test/item_raster_display_test.rb
           ruby test/source_image_paint_order_test.rb
           ruby test/original_image_clip_test.rb
@@ -247,6 +250,9 @@ jobs:
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_source_bounds_test.rb
+          ruby test/source_fill_only_paint_test.rb
+          ruby test/source_fill_only_paint_pipeline_test.rb
+          ruby test/svg_item_filled_boundary_display_test.rb
           ruby test/item_raster_display_test.rb
           ruby test/pdf_navigation_link_appearance_test.rb
           ruby test/source_round_annotation_ink_test.rb

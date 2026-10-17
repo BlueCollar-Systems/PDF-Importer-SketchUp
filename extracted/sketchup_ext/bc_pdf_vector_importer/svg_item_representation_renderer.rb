@@ -13,9 +13,309 @@ require File.join(File.dirname(__FILE__), 'cairo_glyph_source')
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'svg_3d_text_renderer')
 require 'digest'
+require 'json'
+require File.join(File.dirname(__FILE__), 'item_raster_source_bounds')
 
 module BlueCollarSystems
   module PDFVectorImporter
+    module SourceFillOnlyPaint
+      SCHEMA = 'bcs.source_fill_only_paint/1'.freeze
+      QUALIFIED = 'original_page_and_svg_fill_only'.freeze
+      PRESERVED = 'source_strokes_or_unknown_paint_preserved'.freeze
+      LIMIT = 8 * 1024 * 1024
+      class Unqualified < StandardError; end
+
+      # This lexical subset is deliberately smaller than PDF. Unsupported
+      # syntax preserves the old display policy; it never triggers a fallback.
+      # Unlike extraction's tokenizer, BI/Form/gs cannot disappear unnoticed.
+      def self.tokens(data, depth = 0, start = 0, stop = nil)
+        raise Unqualified, 'operand nesting bound' if depth > 16
+        stop ||= data.bytesize
+        out, i = [], start
+        while i < stop
+          byte = data.getbyte(i)
+          if byte == 0 || byte == 32 || (byte >= 9 && byte <= 13)
+            i += 1; next
+          end
+          char = data[i]
+          if char == '%'
+            i = [data.index(/[\r\n]/, i) || stop,stop].min; next
+          elsif char == '('
+            start, level = i, 1
+            i += 1
+            while i < stop && level > 0
+              if data[i] == '\\'
+                i += 2; next
+              end
+              level += 1 if data[i] == '('
+              level -= 1 if data[i] == ')'
+              i += 1
+            end
+            raise Unqualified, 'unterminated string' unless level == 0
+            out << [:string, data[start...i]]
+          elsif char == '<'
+            raise Unqualified, 'dictionary/inline syntax unsupported' if data[i, 2] == '<<'
+            hex_stop = data.index('>', i)
+            raise Unqualified, 'unterminated hex string' unless hex_stop && hex_stop < stop
+            raw = data[(i + 1)...hex_stop]
+            raise Unqualified, 'invalid hex string' unless raw =~ /\A[\s0-9A-Fa-f]*\z/
+            out << [:string, data[i..hex_stop]]; i = hex_stop + 1
+          elsif char == '['
+            # Find the end with the same lexer, so brackets inside strings
+            # never change array nesting or make a later Tr disappear.
+            values, consumed = array_tokens(data, i + 1, stop, depth + 1)
+            out << [:array, values]; i = consumed
+          elsif char == ']'
+            raise Unqualified, 'unexpected array end'
+          else
+            part = /\G\/?[^\s\x00\[\]<>(){}%\/]+/.match(data, i)
+            raise Unqualified, 'unsupported delimiter' unless part
+            word = part[0]; i += word.bytesize
+            if word =~ /\A[+-]?(?:\d+\.?\d*|\.\d+)\z/
+              value = word.to_f
+              raise Unqualified, 'nonfinite operand' unless value.finite?
+              out << [:number, value]
+            elsif word.start_with?('/')
+              out << [:name, word]
+            else
+              out << [:operator, word]
+            end
+          end
+          raise Unqualified, 'token bound' if out.length > 250000
+        end
+        out
+      end
+
+      def self.array_tokens(data, start, stop, depth)
+        # The subset accepts only flat TJ/d arrays, whose strings may contain
+        # brackets. Reject nested arrays/dictionaries instead of guessing.
+        i, literal, escaped = start, 0, false
+        while i < stop
+          char = data[i]
+          if literal > 0
+            if escaped
+              escaped = false
+            elsif char == '\\'
+              escaped = true
+            elsif char == '('
+              literal += 1
+            elsif char == ')'
+              literal -= 1
+            end
+          elsif char == '('
+            literal = 1
+          elsif char == '['
+            raise Unqualified, 'nested array unsupported'
+          elsif char == ']'
+            return [tokens(data, depth, start, i), i + 1]
+          end
+          i += 1
+        end
+        raise Unqualified, 'unterminated array'
+      end
+
+      NUMERIC_ARITY = {
+        'cm'=>6, 'Tm'=>6, 'm'=>2, 'l'=>2, 'c'=>6, 'v'=>4, 'y'=>4,
+        're'=>4, 'w'=>1, 'J'=>1, 'j'=>1, 'M'=>1, 'i'=>1,
+        'g'=>1, 'G'=>1, 'rg'=>3, 'RG'=>3, 'k'=>4, 'K'=>4,
+        'Tc'=>1, 'Tw'=>1, 'Tz'=>1, 'TL'=>1, 'Tr'=>1, 'Ts'=>1,
+        'Td'=>2, 'TD'=>2
+      }.freeze
+      ZERO_ARITY = %w[q Q BT ET T* h S s f F f* B B* b b* n].freeze
+      TEXT_STATE = %w[Tm Tc Tw Tz TL Tr Ts Td TD T*].freeze
+      TEXT_OPERATORS = (TEXT_STATE + ['Tf','Tj','TJ',"'",'"']).freeze
+
+      def self.original_page(streams, fonts, annotations)
+        raise Unqualified, 'original stream evidence absent' unless streams.is_a?(Array) && !streams.empty? && streams.all? { |s| s.is_a?(String) }
+        raise Unqualified, 'source stream bound' if streams.inject(0) { |n,s| n + s.bytesize } > LIMIT
+        raise Unqualified, 'original annotation evidence absent' unless annotations == true || annotations == false
+        raise Unqualified, 'original annotations unsupported' if annotations
+        raise Unqualified, 'font evidence absent' unless fonts.is_a?(Array) && !fonts.empty?
+        allowed_fonts = {}
+        fonts.each do |row|
+          unless row.is_a?(Hash) && %w[/Type1 /TrueType /Type0].include?(row[:subtype]) && !row[:resource].to_s.empty?
+            raise Unqualified, 'unknown or Type3 font paint'
+          end
+          allowed_fonts[row[:resource]] = true
+        end
+        stack, operands, state = [], [], { :mode=>0, :font=>nil }
+        in_text, show_count, operators = false, 0, 0
+        show_digest = Digest::SHA256.new
+        remaining_tokens = 250000
+        streams.each_with_index do |stream, stream_index|
+          raise Unqualified, 'page token bound' if remaining_tokens <= 0
+          stream_tokens = tokens(stream.dup.force_encoding(Encoding::BINARY))
+          remaining_tokens -= stream_tokens.inject(0) { |sum,token|
+            sum + 1 + (token[0] == :array ? token[1].length : 0) }
+          raise Unqualified, 'page token bound' if remaining_tokens < 0
+          stream_tokens.each do |type, value|
+            if type != :operator
+              operands << [type, value]
+              raise Unqualified, 'operand bound' if operands.length > 64
+              next
+            end
+            operators += 1
+            numeric = operands.all? { |t,_v| t == :number }
+            if NUMERIC_ARITY.key?(value)
+              raise Unqualified, 'invalid numeric operator operands' unless operands.length == NUMERIC_ARITY[value] && numeric
+            elsif ZERO_ARITY.include?(value)
+              raise Unqualified, 'unexpected operator operands' unless operands.empty?
+            elsif value == 'Tf'
+              raise Unqualified, 'unknown source font' unless operands.length == 2 && operands[0][0] == :name && operands[1][0] == :number && allowed_fonts[operands[0][1]] && operands[1][1] > 0
+            elsif ['Tj', "'"].include?(value)
+              raise Unqualified, 'invalid string show' unless operands.length == 1 && operands[0][0] == :string
+            elsif value == '"'
+              raise Unqualified, 'invalid quote show' unless operands.length == 3 && operands[0][0] == :number && operands[1][0] == :number && operands[2][0] == :string
+            elsif value == 'TJ'
+              raise Unqualified, 'invalid array show' unless operands.length == 1 && operands[0][0] == :array && operands[0][1].all? { |t,_v| [:number,:string].include?(t) }
+            elsif value == 'd'
+              raise Unqualified, 'invalid dash state' unless operands.length == 2 && operands[0][0] == :array && operands[0][1].all? { |t,_v| t == :number } && operands[1][0] == :number
+            else
+              raise Unqualified, "unsupported original operator #{value}"
+            end
+            raise Unqualified, 'text operator outside BT' if TEXT_OPERATORS.include?(value) && !in_text
+            case value
+            when 'q'
+              raise Unqualified, 'graphics stack bound' if stack.length >= 64
+              stack << state.dup
+            when 'Q'
+              raise Unqualified, 'unbalanced graphics state' if stack.empty?
+              state = stack.pop
+            when 'BT'
+              raise Unqualified, 'nested BT' if in_text
+              in_text = true
+            when 'ET'
+              raise Unqualified, 'unbalanced ET' unless in_text
+              in_text = false
+            when 'Tf'
+              state[:font] = operands[0][1]
+            when 'Tr'
+              candidate = operands[0][1]
+              raise Unqualified, 'invalid Tr' unless candidate == candidate.to_i && candidate >= 0 && candidate <= 7
+              state[:mode] = candidate.to_i
+            when 'Tj','TJ',"'",'"'
+              raise Unqualified, 'source text stroke/nonfill paint' unless state[:mode] == 0 && allowed_fonts[state[:font]]
+              show_count += 1
+              show_digest.update(JSON.generate([stream_index,operators,state[:mode],state[:font]])).update("\n")
+            end
+            operands.clear
+          end
+        end
+        raise Unqualified, 'incomplete original page state' unless !in_text && stack.empty? && operands.empty? && show_count > 0
+        { :text_show_count=>show_count, :text_show_ledger_sha256=>show_digest.hexdigest, :operator_count=>operators,
+          :stream_sha256=>streams.map { |s| Digest::SHA256.hexdigest(s) } }
+      end
+
+      def self.svg_fill_only(svg)
+        raise Unqualified, 'SVG bound/absence' unless svg.is_a?(String) && !svg.empty? && svg.bytesize <= LIMIT
+        raise Unqualified, 'unsupported SVG stylesheet/entity/paint effects' if svg =~ /<!DOCTYPE|<!ENTITY|<\s*(?:style|script|filter|mask|pattern|linearGradient|radialGradient)\b|\b(?:class|filter|mask)\s*=/i
+        frames, definitions, references = [], {}, []
+        svg.scan(/<\/?\s*[A-Za-z][A-Za-z0-9:_-]*\b[^>]*>/m) do |tag|
+          name = tag[/\A<\s*\/?\s*([A-Za-z][A-Za-z0-9:_-]*)/,1].to_s.downcase
+          if tag =~ /\A<\s*\//
+            raise Unqualified, 'unbalanced SVG' unless !frames.empty? && frames.last[:name] == name
+            frames.pop; next
+          end
+          raise Unqualified, 'unsupported SVG element' unless %w[svg defs g path use clippath rect].include?(name)
+          attrs = SvgTextRenderer.svg_tag_attribute_map(tag)
+          raise Unqualified, 'SVG visibility override' if attrs.key?('visibility') || attrs.key?('display')
+          style = SvgTextRenderer.svg_style_property_map(attrs['style'])
+          raise Unqualified, 'unknown SVG paint style' unless (style.keys - %w[fill fill-rule fill-opacity stroke stroke-width stroke-opacity stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity]).empty?
+          parent = frames.last || { :paint=>{}, :glyph=>nil }
+          paint = parent[:paint].dup
+          %w[fill fill-opacity opacity stroke stroke-width stroke-opacity].each do |key|
+            paint[key] = style.key?(key) ? style[key] : attrs[key] if style.key?(key) || attrs.key?(key)
+          end
+          %w[opacity fill-opacity].each do |key|
+            raw = style.key?(key) ? style[key] : attrs[key]
+            raise Unqualified, 'SVG opacity ancestry unqualified' if raw && raw.strip !~ /\A(?:1(?:\.0*)?|100%)\z/
+          end
+          glyph = parent[:glyph]
+          if attrs['id'] && SvgTextRenderer.glyph_reference_id?(attrs['id'])
+            raise Unqualified, 'duplicate SVG glyph definition' if definitions.key?(attrs['id'])
+            glyph = attrs['id']; definitions[glyph] = []
+          end
+          # Preserve path-local fill evidence; it may override a filled <use>.
+          definitions[glyph] << paint.dup if glyph && name == 'path'
+          if name == 'use'
+            href = attrs['xlink:href'] || attrs['href']
+            raise Unqualified, 'unknown SVG use' unless href && href.start_with?('#') && SvgTextRenderer.glyph_reference_id?(href[1..-1])
+            references << [href[1..-1], paint.dup]
+          end
+          frames << { :name=>name, :paint=>paint, :glyph=>glyph }
+          frames.pop if tag =~ /\/\s*>\s*\z/
+          raise Unqualified, 'SVG traversal bound' if frames.length > 64 || references.length > 100000
+        end
+        raise Unqualified, 'incomplete SVG source' unless frames.empty? && !references.empty?
+        # A stroke in any referenced use/definition protects every instance on
+        # this page, including shared-definition peers. No local hiding occurs.
+        raise Unqualified, 'SVG glyph stroke paint' unless ItemRasterSourceBounds.stroked_placement_indices(svg).empty?
+        references.each do |glyph, use|
+          paths = definitions[glyph]
+          raise Unqualified, 'SVG glyph definition absent' unless paths && !paths.empty?
+          paths.each do |definition|
+            paint = use.merge(definition)
+            fill = paint.fetch('fill', 'black')
+            rgb = SvgTextRenderer.parse_svg_color(fill)
+            raise Unqualified, 'SVG glyph fill absent/unknown' unless rgb.is_a?(Array) && rgb.length == 3 && rgb.all? { |v| v.is_a?(Numeric) && v.to_f.finite? }
+            %w[opacity fill-opacity].each do |key|
+              raw = paint.fetch(key,'1').strip
+              raise Unqualified, 'SVG glyph opacity not opaque' unless raw =~ /\A(?:1(?:\.0*)?|100%)\z/
+            end
+          end
+        end
+        { :placement_count=>references.length, :glyph_ids=>references.map(&:first).uniq.sort }
+      end
+
+      def self.prepare(streams, fonts, annotations, svg, source_sha, page)
+        base = { :schema=>SCHEMA, :status=>PRESERVED,
+          :source_pdf_sha256=>source_sha, :page=>page,
+          :source_svg_sha256=>Digest::SHA256.hexdigest(svg.to_s) }
+        raise Unqualified, 'source binding absent' unless source_sha.to_s =~ /\A[0-9a-f]{64}\z/ && page.is_a?(Integer) && page > 0
+        original = original_page(streams,fonts,annotations)
+        source_svg = svg_fill_only(svg)
+        finalize(base.merge(:status=>QUALIFIED, :reason=>'finite_original_text_shows_and_svg_paint',
+          :original=>original, :svg=>source_svg))
+      rescue Unqualified => error
+        finalize(base.merge(:reason=>error.message))
+      rescue StandardError => error
+        finalize(base.merge(:reason=>'source_paint_inspection_failed',
+          :inspection_error=>"#{error.class}: #{error.message}"[0,200]))
+      end
+
+      def self.canonical(value)
+        if value.is_a?(Hash)
+          value.keys.sort_by(&:to_s).inject({}) { |out,key| out[key.to_s]=canonical(value[key]); out }
+        elsif value.is_a?(Array)
+          value.map { |entry| canonical(entry) }
+        else
+          value
+        end
+      end
+
+      def self.deep_freeze(value)
+        value.each { |key,entry| deep_freeze(key); deep_freeze(entry) } if value.is_a?(Hash)
+        value.each { |entry| deep_freeze(entry) } if value.is_a?(Array)
+        value.freeze
+      end
+
+      # One immutable page proof and one canonical digest. Per-item policy
+      # readback copies this compact digest; it never reserializes the ledger.
+      def self.finalize(proof)
+        proof[:proof_sha256]=Digest::SHA256.hexdigest(JSON.generate(canonical(proof)))
+        deep_freeze(proof)
+      end
+
+      def self.qualified?(proof, source_sha, page, svg_sha)
+        proof.is_a?(Hash) && proof.frozen? && proof[:proof_sha256].to_s =~ /\A[0-9a-f]{64}\z/ && proof[:schema] == SCHEMA && proof[:status] == QUALIFIED &&
+          proof[:source_pdf_sha256] == source_sha && proof[:page] == page &&
+          proof[:source_svg_sha256] == svg_sha && proof[:original].is_a?(Hash) &&
+          proof[:original][:text_show_count].is_a?(Integer) && proof[:original][:text_show_count] > 0 &&
+          proof[:original][:text_show_ledger_sha256].to_s =~ /\A[0-9a-f]{64}\z/ &&
+          proof[:svg].is_a?(Hash) && proof[:svg][:placement_count].is_a?(Integer) && proof[:svg][:placement_count] > 0
+      end
+    end
+
     module SvgItemRepresentationRenderer
       SIZE_TOLERANCE_INCHES = 0.001
       COLLINEAR_DISTANCE_TOLERANCE_INCHES = 1.0e-9
@@ -129,6 +429,19 @@ module BlueCollarSystems
           "source_id=#{source_id}; placements=#{entries.length}; mode=#{mode}"
         )
 
+        paint_proof = opts[:source_fill_only_paint]
+        source_svg_sha256 = Digest::SHA256.hexdigest(svg.to_s)
+        supplied_binding = opts[:source_fill_only_paint_binding]
+        supplied_binding = {} unless supplied_binding.is_a?(Hash)
+        paint_binding = supplied_binding.merge(:source_svg_sha256=>source_svg_sha256,
+          :page=>opts[:source_context][:page_number])
+        paint_qualified = SourceFillOnlyPaint.qualified?(paint_proof,
+          paint_binding[:source_pdf_sha256], paint_binding[:page],
+          paint_binding[:source_svg_sha256])
+        contour_cache_policy = paint_qualified ? FILLED_CONTOUR_EDGE_POLICY :
+          SourceFillOnlyPaint::PRESERVED
+        entries = entries.map { |entry| entry.merge(:source_paint_contour_policy=>contour_cache_policy) }
+
         group = create_owned_group!(entities, source_id, mode, opts[:layer],
                                     indices,
                                     (opts[:keep_id_names] == true ? nil : item))
@@ -173,6 +486,8 @@ module BlueCollarSystems
           opts[:progress_callback], 'svg_item_structure_verified',
           "source_id=#{source_id}; mode=#{mode}"
         )
+        filled_contour_policy = govern_filled_glyph_contours!(
+          group, source_id, build[:ink_applied] == true, paint_proof, paint_binding)
         verify_visible_tree!(group, source_id)
         physical = physical_entities(group, mode)
         physical_ids = RepresentationFidelity.stable_ids(physical)
@@ -198,7 +513,7 @@ module BlueCollarSystems
           :source_span_id => source_unit ? nil : source_id,
           :source_unit_id => source_unit,
           :source_kind => source_unit ? :svg_glyph_placement : :text_span,
-          :source_svg_sha256 => Digest::SHA256.hexdigest(svg.to_s),
+          :source_svg_sha256 => source_svg_sha256,
           :source_item => item,
           :group => group,
           :group_entity_id => group_id,
@@ -220,6 +535,19 @@ module BlueCollarSystems
           :ink_applied => build[:ink_applied] == true,
           :source_ink_rgb => build[:source_ink_rgb],
           :source_ink_material_name => build[:source_ink_material_name],
+          :filled_contour_edge_policy => filled_contour_policy[:filled_contour_edge_policy],
+          :source_fill_only_paint_status => filled_contour_policy[:source_fill_only_paint_status],
+          :source_fill_only_paint_reason => filled_contour_policy[:source_fill_only_paint_reason],
+          :source_fill_only_paint_sha256 => filled_contour_policy[:source_fill_only_paint_sha256],
+          :source_fill_only_original_pdf_sha256 => filled_contour_policy[:source_fill_only_original_pdf_sha256],
+          :source_fill_only_svg_sha256 => filled_contour_policy[:source_fill_only_svg_sha256],
+          :source_fill_only_page => filled_contour_policy[:source_fill_only_page],
+          :hidden_filled_contour_edge_count => filled_contour_policy[:hidden_filled_contour_edge_count],
+          :hidden_attached_filled_contour_edge_count => filled_contour_policy[:hidden_attached_filled_contour_edge_count],
+          :hidden_duplicate_filled_contour_edge_count => filled_contour_policy[:hidden_duplicate_filled_contour_edge_count],
+          :preserved_unqualified_contour_edge_count => filled_contour_policy[:preserved_unqualified_contour_edge_count],
+          :preserved_unfaced_source_edge_count => filled_contour_policy[:preserved_unfaced_source_edge_count],
+          :filled_contour_shared_definition_count => filled_contour_policy[:filled_contour_shared_definition_count],
           :glyph_group_count => build[:glyph_group_count],
           :glyph_component_definition_builds =>
             build[:glyph_component_definition_builds].to_i,
@@ -287,6 +615,7 @@ module BlueCollarSystems
                 'transformed item vector delivery is missing its owned group'
         end
         group = result[:group]
+        source_id = result[:source_span_id] || result[:source_unit_id]
         unless RepresentationFidelity.stable_entity_id(group) ==
                result[:group_entity_id].to_s
           raise RepresentationFidelity::ContractError,
@@ -294,13 +623,13 @@ module BlueCollarSystems
         end
         verify_structure!(
           group, result[:mode], result[:placement_indices].length,
-          result[:edge_count], result[:source_span_id]
+          result[:edge_count], source_id
         )
-        verify_visible_tree!(group, result[:source_span_id])
+        verify_visible_tree!(group, source_id)
         if result[:mode] == :geometry && result[:source_outline_segments]
           verify_source_edges!(
             group, result[:source_outline_segments],
-            result[:source_page_transformation], result[:source_span_id]
+            result[:source_page_transformation], source_id
           )
         end
         box = bounds_hash(group)
@@ -1165,7 +1494,8 @@ module BlueCollarSystems
                 'Glyphs canonical component geometry is unavailable'
         end
         Digest::SHA256.hexdigest(
-          "#{entry[:glyph_id]}\0#{serialized}\0#{GLYPH_CONSTRUCTION_SCALE}"
+          "#{entry[:glyph_id]}\0#{serialized}\0#{GLYPH_CONSTRUCTION_SCALE}\0" +
+            (entry[:source_paint_contour_policy] || SourceFillOnlyPaint::PRESERVED).to_s
         )
       end
 
@@ -1742,20 +2072,282 @@ module BlueCollarSystems
         }
       end
 
-      def self.verify_visible_tree!(entity, source_id)
-        unless entity_visible?(entity)
+      FILLED_CONTOUR_EDGE_POLICY =
+        'source_owned_filled_glyph_boundaries_hidden'.freeze
+
+      def self.contour_source_identity(entity)
+        return nil unless entity.respond_to?(:get_attribute)
+        dictionary = 'BC_PDF_Importer'
+        entity.get_attribute(dictionary, 'source_span_id', nil) ||
+          entity.get_attribute(dictionary, 'source_unit_id', nil)
+      end
+
+      def self.contour_glyph_signature(entity, mode, shared = false)
+        dictionary = 'BC_PDF_Importer'
+        glyph = entity.get_attribute(dictionary,'source_glyph_id',nil)
+        placements = entity.get_attribute(dictionary,'source_placement_indices',nil)
+        return nil unless glyph.is_a?(String) && !glyph.empty?
+        if placements.is_a?(String)
+          return nil unless placements.bytesize <= 16384 && placements =~ /\A(?:0|[1-9]\d*)(?:,(?:0|[1-9]\d*))*\z/
+          placements = placements.split(',').map(&:to_i)
+        end
+        unless mode == 'glyphs' && shared && placements.nil?
+          return nil unless placements.is_a?(Array) && !placements.empty? &&
+            placements.all? { |value| value.is_a?(Integer) && value >= 0 } &&
+            placements.uniq.length == placements.length
+        end
+        [glyph,placements]
+      end
+
+      def self.contour_edge_coordinates(edge)
+        return nil unless edge.respond_to?(:start) && edge.respond_to?(:end)
+        points = [edge.start,edge.end].map do |vertex|
+          return nil unless vertex && vertex.respond_to?(:position)
+          point = vertex.position
+          return nil unless [:x,:y,:z].all? { |axis| point.respond_to?(axis) }
+          values = [:x,:y,:z].map { |axis| point.send(axis).to_f }
+          return nil unless values.all?(&:finite?)
+          values
+        end
+        return nil if points[0] == points[1]
+        points.sort
+      rescue StandardError
+        nil
+      end
+
+      def self.contour_edge_style(edge)
+        return nil unless [:material,:soft?,:smooth?,:curve,:casts_shadows?].all? do |name|
+          edge.respond_to?(name)
+        end
+        return nil unless edge.curve.nil? && entity_visible?(edge,true)
+        soft,smooth,shadows = edge.soft?,edge.smooth?,edge.casts_shadows?
+        return nil unless [soft,smooth,shadows].all? { |value| value == true || value == false }
+        [edge.material && edge.material.object_id,soft,smooth,shadows]
+      rescue StandardError
+        nil
+      end
+
+      def self.contour_anonymous_edge?(edge)
+        return false unless edge.respond_to?(:attribute_dictionaries)
+        dictionaries = edge.attribute_dictionaries
+        dictionaries.nil? || (dictionaries.respond_to?(:length) && dictionaries.length == 0)
+      rescue StandardError
+        false
+      end
+
+      def self.contour_face_loop_edge_ids(face)
+        return nil unless face.respond_to?(:loops)
+        loops = face.loops
+        return nil unless loops.is_a?(Array) && !loops.empty?
+        ids = {}
+        loops.each do |loop|
+          return nil unless loop.respond_to?(:edges)
+          edges = loop.edges
+          return nil unless edges.is_a?(Array)
+          edges.each { |edge| ids[edge.object_id] = true }
+        end
+        ids
+      rescue StandardError
+        nil
+      end
+
+      # Native add_face may create an anonymous closure plus an exact loose
+      # source-edge duplicate. Neither is erased or relabelled. Only exact,
+      # same-collection source/Face-loop/paint evidence permits hiding either.
+      # Unknown ownership/coverage remains visible, without changing rung.
+      def self.filled_glyph_contour_inventory!(root, source_id)
+        dictionary = 'BC_PDF_Importer'
+        mode = root.get_attribute(dictionary,'representation','').to_s
+        unless ['glyphs','geometry'].include?(mode) && contour_source_identity(root).to_s == source_id.to_s
+          raise RepresentationFidelity::ContractError,'filled-contour root ownership unavailable'
+        end
+        pending = [[root,nil,0,root.object_id,true]]
+        definitions,rows = {},[]
+        while !pending.empty?
+          entity,shared,depth,scope,parent_owned = pending.pop
+          raise RepresentationFidelity::ContractError,'filled-contour traversal bound' if depth > 64 || rows.length >= 100000
+          type = entity_type(entity)
+          kind = entity.get_attribute(dictionary,'source_kind','').to_s
+          own_glyph = entity.get_attribute(dictionary,'source_glyph_id','').to_s
+          shared_owned = mode == 'glyphs' && !shared.to_s.empty? && kind == 'shared_glyph_outline' && own_glyph == shared
+          owned = parent_owned && entity.get_attribute(dictionary,'representation','').to_s == mode &&
+            (contour_source_identity(entity).to_s == source_id.to_s || shared_owned)
+          rows << { :entity=>entity,:type=>type,:owned=>owned,:scope=>scope,
+            :signature=>owned ? contour_glyph_signature(entity,mode,shared_owned) : nil }
+          members = entity_members(entity)
+          if type == 'ComponentInstance'
+            unless owned && !own_glyph.empty? && entity.respond_to?(:definition) && entity.definition
+              # The original visibility/structure checks still inspect this
+              # unqualified subtree, but this optional policy may not hide it.
+              owned = false
+            else
+              key = entity.definition.object_id
+              if definitions.key?(key)
+                raise RepresentationFidelity::ContractError,'conflicting shared glyph identities' unless definitions[key] == own_glyph
+                next
+              end
+              definitions[key] = own_glyph
+              shared = own_glyph
+              scope = key
+            end
+          elsif type == 'Group'
+            scope = entity.respond_to?(:entities) ? entity.entities.object_id : entity.object_id
+          end
+          members.reverse_each { |child| pending << [child,shared,depth+1,scope,owned] }
+        end
+        faces,tagged,edges = {},{},[]
+        rows.each do |row|
+          entity = row[:entity]
+          if row[:type] == 'Face' && row[:owned] && row[:signature] && entity_visible?(entity)
+            row[:loop_edge_ids] = contour_face_loop_edge_ids(entity)
+            faces[entity.object_id] = row if row[:loop_edge_ids]
+          elsif row[:type] == 'Edge'
+            row[:coordinates] = contour_edge_coordinates(entity)
+            row[:style] = contour_edge_style(entity)
+            row[:faces] = entity.respond_to?(:faces) && entity.faces.is_a?(Array) ? entity.faces : nil
+            edges << row
+            if row[:owned] && row[:signature] && row[:coordinates] && row[:style]
+              key = [row[:scope],row[:coordinates],row[:signature],row[:style]]
+              (tagged[key] ||= []) << row
+            end
+          end
+        end
+        attached,covered = [],{}
+        edges.each do |row|
+          entity,actual_faces = row[:entity],row[:faces]
+          next unless actual_faces && !actual_faces.empty? && row[:coordinates] && row[:style]
+          face_rows = actual_faces.map { |face| faces[face.object_id] }
+          next if face_rows.any?(&:nil?) || face_rows.any? { |face_row| face_row[:scope] != row[:scope] || !face_row[:loop_edge_ids][entity.object_id] }
+          signatures = face_rows.map { |face_row| face_row[:signature] }.uniq
+          next unless signatures.length == 1
+          signature = signatures.first
+          key = [row[:scope],row[:coordinates],signature,row[:style]]
+          source_matches = tagged[key]
+          tagged_boundary = row[:owned] && row[:signature] == signature
+          anonymous_boundary = contour_anonymous_edge?(entity) && source_matches && !source_matches.empty?
+          next unless tagged_boundary || anonymous_boundary
+          attached << entity
+          covered[key] = true
+        end
+        duplicates,uncovered,protected = [],[],[]
+        attached_ids = {};attached.each { |edge| attached_ids[edge.object_id]=true }
+        edges.each do |row|
+          next if attached_ids[row[:entity].object_id]
+          key = [row[:scope],row[:coordinates],row[:signature],row[:style]]
+          if row[:faces] && row[:faces].empty? && row[:owned] && row[:signature] && covered[key]
+            duplicates << row[:entity]
+          else
+            uncovered << row[:entity] if row[:faces] && row[:faces].empty?
+            protected << row[:entity]
+          end
+        end
+        { :eligible=>attached+duplicates,:attached=>attached,:duplicates=>duplicates,
+          :unfaced=>uncovered,:protected=>protected,
+          :shared_definition_count=>definitions.length }
+      end
+
+      def self.govern_filled_glyph_contours!(root, source_id, source_ink_verified,
+                                            proof = nil, binding = {})
+        qualified = SourceFillOnlyPaint.qualified?(proof,
+          binding[:source_pdf_sha256], binding[:page], binding[:source_svg_sha256])
+        policy = qualified ? FILLED_CONTOUR_EDGE_POLICY : SourceFillOnlyPaint::PRESERVED
+        inventory = filled_glyph_contour_inventory!(root, source_id)
+        unless !qualified || inventory[:eligible].empty? || source_ink_verified == true
+          raise RepresentationFidelity::ContractError,
+                'source ink readback must be verified before hiding filled contours'
+        end
+        (qualified ? inventory[:eligible] : []).each do |edge|
+          unless edge.respond_to?(:hidden=) && edge.respond_to?(:hidden?)
+            raise RepresentationFidelity::ContractError,
+                  'filled glyph contour visibility is not readable/writable'
+          end
+          edge.hidden = true unless edge.hidden? == true
+          unless edge.hidden? == true
+            raise RepresentationFidelity::ContractError,
+                  'host ignored filled glyph contour hidden state'
+          end
+        end
+        dictionary = 'BC_PDF_Importer'
+        values = {
+          :filled_contour_edge_policy => policy,
+          :source_fill_only_paint_status => (qualified ? SourceFillOnlyPaint::QUALIFIED : SourceFillOnlyPaint::PRESERVED),
+          :source_fill_only_paint_reason => qualified ? proof[:reason] :
+            (proof.is_a?(Hash) && proof[:status] != SourceFillOnlyPaint::QUALIFIED ? proof[:reason].to_s : 'original_source_paint_or_binding_unqualified'),
+          :source_fill_only_paint_sha256 => proof.is_a?(Hash) ? proof[:proof_sha256].to_s : '',
+          :source_fill_only_original_pdf_sha256 => binding[:source_pdf_sha256].to_s,
+          :source_fill_only_svg_sha256 => binding[:source_svg_sha256].to_s,
+          :source_fill_only_page => binding[:page].to_i,
+          :hidden_filled_contour_edge_count => qualified ? inventory[:eligible].length : 0,
+          :hidden_attached_filled_contour_edge_count => qualified ? inventory[:attached].length : 0,
+          :hidden_duplicate_filled_contour_edge_count => qualified ? inventory[:duplicates].length : 0,
+          :preserved_unqualified_contour_edge_count => inventory[:protected].length,
+          :preserved_unfaced_source_edge_count => inventory[:unfaced].length + (qualified ? 0 : inventory[:duplicates].length),
+          :filled_contour_shared_definition_count => inventory[:shared_definition_count]
+        }
+        values.each do |key, value|
+          root.set_attribute(dictionary, key.to_s, value)
+          unless root.get_attribute(dictionary, key.to_s, nil) == value
+            raise RepresentationFidelity::ContractError,
+                  'filled glyph contour policy attribute readback failed'
+          end
+        end
+        verify_filled_glyph_contour_policy!(root, source_id)
+        values
+      end
+
+      def self.verify_filled_glyph_contour_policy!(root, source_id)
+        inventory = filled_glyph_contour_inventory!(root, source_id)
+        dictionary = 'BC_PDF_Importer'
+        policy = root.get_attribute(dictionary, 'filled_contour_edge_policy', nil)
+        qualified = policy == FILLED_CONTOUR_EDGE_POLICY
+        unless [FILLED_CONTOUR_EDGE_POLICY, SourceFillOnlyPaint::PRESERVED].include?(policy) &&
+               root.get_attribute(dictionary, 'source_fill_only_paint_status', nil) == (qualified ? SourceFillOnlyPaint::QUALIFIED : SourceFillOnlyPaint::PRESERVED) &&
+               root.get_attribute(dictionary, 'hidden_filled_contour_edge_count', nil) == (qualified ? inventory[:eligible].length : 0) &&
+               root.get_attribute(dictionary, 'hidden_attached_filled_contour_edge_count', nil) == (qualified ? inventory[:attached].length : 0) &&
+               root.get_attribute(dictionary, 'hidden_duplicate_filled_contour_edge_count', nil) == (qualified ? inventory[:duplicates].length : 0) &&
+               root.get_attribute(dictionary, 'preserved_unqualified_contour_edge_count', nil) == inventory[:protected].length &&
+               root.get_attribute(dictionary, 'preserved_unfaced_source_edge_count', nil) == inventory[:unfaced].length + (qualified ? 0 : inventory[:duplicates].length) &&
+               root.get_attribute(dictionary, 'filled_contour_shared_definition_count', nil) == inventory[:shared_definition_count]
+          raise RepresentationFidelity::ContractError,
+                'persisted filled glyph contour policy is incomplete'
+        end
+        allowed = {}
+        inventory[:eligible].each do |edge|
+          unless edge.respond_to?(:hidden?) && edge.hidden? == qualified
+            raise RepresentationFidelity::ContractError,
+                  'filled glyph contour unexpectedly became visible'
+          end
+          allowed[RepresentationFidelity.stable_entity_id(edge)] = true if qualified
+        end
+        inventory[:protected].each do |edge|
+          unless edge.respond_to?(:hidden?) && edge.hidden? == false
+            raise RepresentationFidelity::ContractError,
+                  'standalone source edge unexpectedly became hidden'
+          end
+        end
+        allowed
+      end
+
+      def self.verify_visible_tree!(entity, source_id, allowed_hidden = nil)
+        allowed_hidden ||= verify_filled_glyph_contour_policy!(entity, source_id)
+        allowed = entity_type(entity) == 'Edge' &&
+          allowed_hidden[RepresentationFidelity.stable_entity_id(entity)] == true
+        unless entity_visible?(entity, allowed)
           raise RepresentationFidelity::ContractError,
                 "#{source_id}: item vector artifact is hidden"
         end
         entity_members(entity).each do |child|
-          verify_visible_tree!(child, source_id)
+          verify_visible_tree!(child, source_id, allowed_hidden)
         end
         true
       end
 
-      def self.entity_visible?(entity)
-        return false if entity.respond_to?(:hidden?) && entity.hidden? == true
-        return false if entity.respond_to?(:visible?) && entity.visible? == false
+      def self.entity_visible?(entity, allowed_hidden_contour = false)
+        hidden = entity.respond_to?(:hidden?) && entity.hidden? == true
+        return false if hidden && !allowed_hidden_contour
+        if entity.respond_to?(:visible?) && entity.visible? == false
+          return false unless hidden && allowed_hidden_contour
+        end
         layer = entity.respond_to?(:layer) ? entity.layer : nil
         if layer
           return false if layer.respond_to?(:visible?) && layer.visible? == false

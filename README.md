@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.173-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.174-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -21,6 +21,20 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Recent fixes (v3.7.174)
+
+- Glyphs and Geometry suppress extra SketchUp contour ink when the original
+  page and source SVG establish fill-only text. Filled letter faces, counters,
+  edges and vertices remain editable. Genuine strokes and uncertain paint
+  retain their contours; the import report records that choice.
+- Host-created closure edges and exact duplicate fill boundaries use their
+  actual source-owned faces and native coordinates. The repair preserves
+  topology and the model's display settings. View > Hidden Geometry reveals
+  hidden boundaries for editing.
+- The [v3.7.173 other-mode checks](docs/validation/2026-10-17-other-text-modes.md)
+  document the ordinary-menu lifecycle results and the display issue that led
+  to this repair. New package results are recorded separately.
 
 ### Recent fixes (v3.7.173)
 

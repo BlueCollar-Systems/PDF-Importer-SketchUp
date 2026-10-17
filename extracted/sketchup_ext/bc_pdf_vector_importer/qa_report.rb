@@ -643,6 +643,9 @@ module BlueCollarSystems
           decorative_display_placements: normalize_json(
             stats[:decorative_display_placements] || stats['decorative_display_placements'] || []
           ),
+          source_fill_only_paint_pages: normalize_json(
+            stats[:source_fill_only_paint_pages] || stats['source_fill_only_paint_pages'] || []
+          ),
           original_annotation_ink: normalize_json(
             stats[:original_annotation_ink] || stats['original_annotation_ink'] || []
           ),
@@ -2976,6 +2979,13 @@ module BlueCollarSystems
           pages=Array(lineweights['pages'])
           note += " on page#{pages.length == 1 ? '' : 's'} #{pages.join(', ')}" unless pages.empty?
           parts << note
+        end
+
+        preserved_paint_pages = Array(extra['source_fill_only_paint_pages']).select do |row|
+          row.is_a?(Hash) && row['status'] == 'source_strokes_or_unknown_paint_preserved'
+        end
+        unless preserved_paint_pages.empty?
+          parts << "Source contour strokes kept visible on #{preserved_paint_pages.length} page(s); fill-only text paint was not established"
         end
 
         if warnings > 0

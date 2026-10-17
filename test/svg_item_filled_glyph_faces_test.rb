@@ -78,7 +78,7 @@ class FilledGlyphNormal
 end
 
 class FilledGlyphEdge
-  attr_accessor :layer
+  attr_accessor :layer, :owner
   attr_reader :persistent_id, :attributes, :points
 
   def initialize(id, first, last)
@@ -90,6 +90,22 @@ class FilledGlyphEdge
   def typename; 'Edge'; end
   def bounds; FilledGlyphBounds.new(@points); end
   def hidden?; false; end
+  def faces
+    return [] unless @owner
+    @owner.to_a.select do |face|
+      next false unless face.is_a?(FilledGlyphFace)
+      points=face.points+[face.points.first]
+      points.each_cons(2).any? do |a,b|
+        @points.all? do |point|
+          ((a.distance(point)+point.distance(b))-a.distance(b)).abs < 1.0e-8
+        end
+      end
+    end
+  end
+
+  def get_attribute(dictionary,key,default=nil)
+    @attributes.fetch([dictionary,key],default)
+  end
 
   def set_attribute(dictionary, key, value)
     @attributes[[dictionary, key]] = value
@@ -126,6 +142,10 @@ class FilledGlyphFace
   def erase!
     @owner.erase_entities(self)
     true
+  end
+
+  def get_attribute(dictionary,key,default=nil)
+    @attributes.fetch([dictionary,key],default)
   end
 
   def set_attribute(dictionary, key, value)
@@ -210,6 +230,10 @@ class FilledGlyphInstance
   def hidden?; false; end
   def model; @options[:model]; end
 
+  def get_attribute(dictionary,key,default=nil)
+    @attributes.fetch([dictionary,key],default)
+  end
+
   def set_attribute(dictionary, key, value)
     @attributes[[dictionary, key]] = value
   end
@@ -262,6 +286,7 @@ class FilledGlyphEntities
     created = []
     Array(points).each_cons(2) do |first, last|
       edge = FilledGlyphEdge.new(next_id, first, last)
+      edge.owner = self
       @items << edge
       created << edge
     end
@@ -362,6 +387,10 @@ class FilledGlyphGroup
   def typename; 'Group'; end
   def hidden?; false; end
   def model; @options[:model]; end
+
+  def get_attribute(dictionary,key,default=nil)
+    @attributes.fetch([dictionary,key],default)
+  end
 
   def set_attribute(dictionary, key, value)
     @attributes[[dictionary, key]] = value

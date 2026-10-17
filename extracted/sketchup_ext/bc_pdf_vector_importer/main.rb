@@ -1244,6 +1244,19 @@ module BlueCollarSystems
         :face_fill_failures => Array(result[:face_fill_failures]),
         :ink_applied => result[:ink_applied] == true,
         :source_ink_material_name => result[:source_ink_material_name],
+          :filled_contour_edge_policy => result[:filled_contour_edge_policy],
+          :source_fill_only_paint_status => result[:source_fill_only_paint_status],
+          :source_fill_only_paint_reason => result[:source_fill_only_paint_reason],
+          :source_fill_only_paint_sha256 => result[:source_fill_only_paint_sha256],
+          :source_fill_only_original_pdf_sha256 => result[:source_fill_only_original_pdf_sha256],
+          :source_fill_only_svg_sha256 => result[:source_fill_only_svg_sha256],
+          :source_fill_only_page => result[:source_fill_only_page],
+          :hidden_filled_contour_edge_count => result[:hidden_filled_contour_edge_count],
+          :hidden_attached_filled_contour_edge_count => result[:hidden_attached_filled_contour_edge_count],
+          :hidden_duplicate_filled_contour_edge_count => result[:hidden_duplicate_filled_contour_edge_count],
+          :preserved_unqualified_contour_edge_count => result[:preserved_unqualified_contour_edge_count],
+          :preserved_unfaced_source_edge_count => result[:preserved_unfaced_source_edge_count],
+          :filled_contour_shared_definition_count => result[:filled_contour_shared_definition_count],
         :placement_verified => true,
         :rotation_verified => true,
         :width_verified => true,
@@ -1275,6 +1288,19 @@ module BlueCollarSystems
         :face_fill_failures => Array(result[:face_fill_failures]),
         :ink_applied => result[:ink_applied] == true,
         :source_ink_material_name => result[:source_ink_material_name],
+          :filled_contour_edge_policy => result[:filled_contour_edge_policy],
+          :source_fill_only_paint_status => result[:source_fill_only_paint_status],
+          :source_fill_only_paint_reason => result[:source_fill_only_paint_reason],
+          :source_fill_only_paint_sha256 => result[:source_fill_only_paint_sha256],
+          :source_fill_only_original_pdf_sha256 => result[:source_fill_only_original_pdf_sha256],
+          :source_fill_only_svg_sha256 => result[:source_fill_only_svg_sha256],
+          :source_fill_only_page => result[:source_fill_only_page],
+          :hidden_filled_contour_edge_count => result[:hidden_filled_contour_edge_count],
+          :hidden_attached_filled_contour_edge_count => result[:hidden_attached_filled_contour_edge_count],
+          :hidden_duplicate_filled_contour_edge_count => result[:hidden_duplicate_filled_contour_edge_count],
+          :preserved_unqualified_contour_edge_count => result[:preserved_unqualified_contour_edge_count],
+          :preserved_unfaced_source_edge_count => result[:preserved_unfaced_source_edge_count],
+          :filled_contour_shared_definition_count => result[:filled_contour_shared_definition_count],
         :visual_fidelity_verified => true
       )
       stats[:text] = stats[:text].to_i + 1
@@ -1410,6 +1436,7 @@ module BlueCollarSystems
       context = svg_source_context(svg_document, page_num, {})
       while [:glyphs, :geometry].include?(controller.current_mode)
         mode = controller.current_mode
+        paint = source_fill_only_paint_for_page!(stats,opts,page_num,svg_document)
         result = SvgItemRepresentationRenderer.render_svg(
           target_entities, svg_document[:svg], media_box, item, mode,
           :scale => opts[:scale],
@@ -1418,6 +1445,8 @@ module BlueCollarSystems
           :layer => text_layer,
           :peer_items => peer_items,
            :source_context => context,
+           :source_fill_only_paint => paint[:proof],
+           :source_fill_only_paint_binding => paint[:binding],
            :precomputed_match => precomputed_match,
            :precomputed_peer_boxes => precomputed_peer_boxes,
            :precomputed_placed => precomputed_placed,
@@ -4820,14 +4849,7 @@ module BlueCollarSystems
       cache.clear
     end
 
-    # The prepared PDF remains the normal import input. This optional, bounded
-    # repair reads original annotation appearances and never infers their
-    # geometry or blend state from a normalized stream.
-    def self.apply_original_annotation_microstrokes!(builder, model, stats, opts,
-                                                    source_path, prepared_path,
-                                                    prepared_parser, page_number,
-                                                    y_offset, layer)
-      return unless builder.page_group
+    def self.original_source_parser_cache!(opts, source_path, prepared_path, prepared_parser)
       cache = opts[:original_annotation_cache] ||= {}
       digest = cached_source_pdf_sha256!(opts,source_path)
       unless cache[:source_path] == source_path && cache[:source_sha256] == digest
@@ -4846,6 +4868,59 @@ module BlueCollarSystems
           end
         end
       end
+      cache
+    end
+
+    # Paint qualification is optional and finite. A missing/unsupported source
+    # keeps existing contours visible, never changes the requested text mode.
+    # Exactly one compact immutable proof is retained per page/SVG document.
+    def self.source_fill_only_paint_for_page!(stats, opts, page_number, document)
+      page_cache = opts[:source_fill_only_paint_cache] ||= {}
+      svg = document.is_a?(Hash) ? document[:svg] : nil
+      key = [page_number, document.object_id, svg.object_id]
+      return page_cache[key] if page_cache.key?(key)
+      context = opts[:source_fill_only_original_context] || {}
+      source_path = context[:source_path]
+      prepared_path = context[:prepared_path]
+      cache = original_source_parser_cache!(opts,source_path,prepared_path,context[:parser])
+      original = cache[:parser]
+      raw = if original && original.equal?(context[:parser])
+              context[:raw]
+            elsif original
+              original.page_data(page_number)
+            end
+      proof = SourceFillOnlyPaint.prepare(
+        raw.is_a?(Hash) ? raw[:source_content_streams] : nil,
+        original ? original.page_font_glyph_code_status(page_number) : nil,
+        original ? original.page_has_annotations?(page_number) : nil,
+        svg, cache[:source_sha256],page_number)
+      binding = { :source_pdf_sha256=>cache[:source_sha256], :page=>page_number,
+        :source_svg_sha256=>proof[:source_svg_sha256] }
+      page_cache[key] = { :proof=>proof, :binding=>binding }
+      stats[:source_fill_only_paint_pages] ||= []
+      stats[:source_fill_only_paint_pages] << proof
+      page_cache[key]
+    rescue StandardError => error
+      proof = SourceFillOnlyPaint.finalize({ :schema=>SourceFillOnlyPaint::SCHEMA,
+        :status=>SourceFillOnlyPaint::PRESERVED, :reason=>'original_source_paint_unavailable',
+        :page=>page_number, :inspection_error=>"#{error.class}: #{error.message}"[0,200] })
+      value = { :proof=>proof, :binding=>{} }
+      page_cache[key] = value if page_cache && key
+      stats[:source_fill_only_paint_pages] ||= []
+      stats[:source_fill_only_paint_pages] << proof
+      value
+    end
+
+    # The prepared PDF remains the normal import input. This optional, bounded
+    # repair reads original annotation appearances and never infers their
+    # geometry or blend state from a normalized stream.
+    def self.apply_original_annotation_microstrokes!(builder, model, stats, opts,
+                                                    source_path, prepared_path,
+                                                    prepared_parser, page_number,
+                                                    y_offset, layer)
+      return unless builder.page_group
+      cache = original_source_parser_cache!(opts,source_path,prepared_path,prepared_parser)
+      digest = cache[:source_sha256]
       original = cache[:parser]
       unless original && original.respond_to?(:page_annotation_entries)
         stats[:original_annotation_ink] ||= []
@@ -5794,7 +5869,10 @@ module BlueCollarSystems
 
         # Only pages with supported embedded assets need a reserved display
         # parent. The source claim is born inside it; it is never regrouped.
-        page_text_opts = opts.merge(:decorative_text_containers => !embedded_assets.empty?)
+        page_text_opts = opts.merge(:decorative_text_containers => !embedded_assets.empty?,
+          :source_fill_only_paint_cache => {},
+          :source_fill_only_original_context => { :source_path=>source_input_path,
+            :prepared_path=>path, :parser=>parser, :raw=>raw })
 
         # Geometry text uses raw transformed path edges in one owned group;
         # Glyphs uses reusable component instances in a different owned group.
@@ -6525,12 +6603,15 @@ module BlueCollarSystems
             :parent => representation_parent, :owner => :source_unit,
             :items => [], :reason_code => 'text_stage_failed'
           ) do
+          source_unit_paint = source_fill_only_paint_for_page!(stats,page_text_opts,page_num,svg_document)
           source_unit = SvgItemRepresentationRenderer.render_unmatched_svg(
             representation_parent, svg_document[:svg], media_box, text_items,
             requested_text_mode, :scale => opts[:scale], :svg_page_box => svg_page_box,
             :y_offset => 0.0, :page_number => page_num, :model => model,
             :layer => text_layer, :glyph_component_cache => glyph_component_cache,
-            :source_context => svg_source_context(svg_document,page_num,svg_failure))
+            :source_context => svg_source_context(svg_document,page_num,svg_failure),
+            :source_fill_only_paint => source_unit_paint[:proof],
+            :source_fill_only_paint_binding => source_unit_paint[:binding])
           if source_unit
             transformed = apply_and_verify_page_representation_transform(
               source_unit[:group],media_box,opts[:scale],page_rotation,page_y_offset,source_unit)
