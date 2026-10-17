@@ -310,6 +310,9 @@ module BlueCollarSystems
         warnings += degraded_renderers.length
         warnings += lineweight_approximation_block(stats)[:unresolved_path_count]
         warnings += Array(telemetry_value(stats, :fill_delivery_failures)).length
+        # Repeated copies of one page warning do not count as new warnings.
+        # Raw step-down rows remain untouched in the detailed report.
+        warnings += Array(telemetry_value(stats, :page_step_downs)).uniq.length
         version = importer_version
 
         report = {
@@ -2682,6 +2685,13 @@ module BlueCollarSystems
             'empty'
           end
         signals << 'embedded_images_extracted' if embedded_images > 0
+        page_step_downs = Array(telemetry_value(stats, :page_step_downs))
+        unless page_step_downs.empty?
+          # Vector abundance is not proof that uncertain page paint is right.
+          quality_level = 'review' if %w[high moderate].include?(quality_level)
+          signals << 'page_items_stepped_down'
+          actions << 'Some page items were kept without all visual checks; compare the listed pages with the PDF. See extra.page_step_downs for details.'
+        end
         lineweights=lineweight_approximation_block(stats)
         if lineweights[:unresolved_path_count] > 0
           quality_level='review'

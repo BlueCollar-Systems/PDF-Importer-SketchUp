@@ -1403,3 +1403,91 @@ class QAReportTest < Minitest::Test
                'no width reconciliation happened — block stays absent'
   end
 end
+
+# Reporting-only fixtures mirror two independently listed page limitations;
+# they do not certify native geometry, source paint order or visual fidelity.
+class QAReportTest
+  def page_step_warning_rows
+    [
+      { page: 1, item: 'white_areas', reason_code: 'white_area_check_failed',
+        detail: 'Some white areas were left as plain white shapes; text drawn over them may be hidden',
+        page_kept: true },
+      { page: 1, item: 'final_vector_annotations', reason_code: 'text_inventory_unavailable',
+        detail: 'Marks drawn last in the PDF were placed without the text height check',
+        page_kept: true }
+    ]
+  end
+
+  def page_step_warning_stats(rows = page_step_warning_rows)
+    { pages: 1, primitives: 31_983, edges: 31_983, text: 286,
+      embedded_images: 1, layers: ['PDF'], text_mode: :glyphs,
+      peak_mb: 1.0, ownership_bookkeeping: {}, page_step_downs: rows }
+  end
+
+  def test_page_step_down_warning_distinct_rows_count_once_without_erasing_raw_history
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    rows = page_step_warning_rows
+    repeated = rows + [rows.first.dup]
+    original = Marshal.dump(repeated)
+    report = q.build_from_stats('fictional-page-warning.pdf', {}, page_step_warning_stats(repeated))
+    assert_equal 2, report[:result][:warnings]
+    assert_equal 'review', report[:extra][:diagnostics][:quality_level]
+    assert_includes report[:extra][:diagnostics][:signals], 'good_vector_content'
+    assert_includes report[:extra][:diagnostics][:signals], 'page_items_stepped_down'
+    assert_equal original, Marshal.dump(repeated)
+    assert_equal JSON.parse(JSON.generate(repeated)), report[:extra][:page_step_downs]
+    assert_equal true, report[:fallback][:used]
+    assert_equal 'page_items_stepped_down', report[:fallback][:reason]
+    assert_equal 3, report[:fallback][:page_step_downs]
+    assert_equal 0, report[:fallback][:text_items_not_delivered]
+    assert_includes report[:extra][:human_summary], rows.first[:detail]
+    assert_includes report[:extra][:human_summary], '2 warnings recorded'
+    assert report[:extra][:diagnostics][:recommended_actions].any? { |s| s.include?('extra.page_step_downs') }
+  end
+
+  def test_page_step_down_warning_string_key_telemetry_is_supported
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    rows = JSON.parse(JSON.generate(page_step_warning_rows))
+    stats = page_step_warning_stats([])
+    stats.delete(:page_step_downs)
+    stats['page_step_downs'] = rows
+    report = q.build_from_stats('fictional-page-warning.pdf', {}, stats)
+    assert_equal 2, report[:result][:warnings]
+    assert_equal 'review', report[:extra][:diagnostics][:quality_level]
+    assert_equal rows, report[:extra][:page_step_downs]
+  end
+
+  def test_page_step_down_warning_other_warning_categories_are_not_recounted
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    renderer = { page: 1, renderer: :fictional_metadata, requested_mode: :glyphs,
+      delivered_mode: :geometry, degraded: true, reason: 'affirmative item proof' }
+    baseline_stats = page_step_warning_stats([]).merge(layer_warning: true, text_renderers: [renderer])
+    baseline = q.build_from_stats('fictional-page-warning.pdf', {}, baseline_stats)
+    report = q.build_from_stats('fictional-page-warning.pdf', {}, baseline_stats.merge(page_step_downs: page_step_warning_rows))
+    assert_equal 2, baseline[:result][:warnings]
+    assert_equal 4, report[:result][:warnings]
+    assert_equal baseline[:fallback][:text], report[:fallback][:text]
+    assert_equal baseline[:fallback][:reason], report[:fallback][:reason]
+    assert_equal true, report[:fallback][:used]
+  end
+
+  def test_page_step_down_warning_absent_keeps_clean_abundant_vector_classification
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    report = q.build_from_stats('fictional-page-warning.pdf', {}, page_step_warning_stats([]))
+    assert_equal 0, report[:result][:warnings]
+    assert_equal 'high', report[:extra][:diagnostics][:quality_level]
+    assert_includes report[:extra][:diagnostics][:signals], 'good_vector_content'
+    refute_includes report[:extra][:diagnostics][:signals], 'page_items_stepped_down'
+  end
+
+  def test_page_step_down_warning_does_not_promote_empty_image_only_or_low_content
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    [ ['empty', 0, 0], ['image_only', 0, 1], ['low', 1, 0] ].each do |expected, primitives, images|
+      stats = page_step_warning_stats.merge(primitives: primitives, edges: primitives, text: 0, embedded_images: images)
+      report = q.build_from_stats('fictional-page-warning.pdf', {}, stats)
+      assert_equal 2, report[:result][:warnings]
+      assert_equal expected, report[:extra][:diagnostics][:quality_level]
+      assert_includes report[:extra][:diagnostics][:signals], 'page_items_stepped_down'
+    end
+  end
+end
