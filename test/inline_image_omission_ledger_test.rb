@@ -137,27 +137,27 @@ class InlineImageOmissionLedgerTest < Minitest::Test
   end
 
   def test_harness_refuses_unplaced_unproven_or_short_composites
-    error = assert_raises(StandardError) do
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.send(:verify_inline_image_page_raster_fallbacks!,
                                 harness_stats(2175, [], [composite(5, 2175, 1, :placed => false)]))
     end
     assert_match(/placed inline_images_composited/, error.message)
     short_artifact = composite(5)
     short_artifact[:artifacts][0][:instance_count] = 2000
-    error = assert_raises(StandardError) do
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.send(:verify_inline_image_page_raster_fallbacks!, harness_stats(2175, [], [short_artifact]))
     end
     assert_match(/artifact instance counts/, error.message)
-    error = assert_raises(StandardError) do
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.send(:verify_inline_image_page_raster_fallbacks!, harness_stats(2175, [], [composite(5, 2000)]))
     end
     assert_match(/plus composites plus recorded omissions/, error.message)
     missing_entity = composite(5, 2175, 2, :resulting_entity_ids => ['persistent_id:1'])
-    error = assert_raises(StandardError) do
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.send(:verify_inline_image_page_raster_fallbacks!, harness_stats(2175, [], [missing_entity]))
     end
     assert_match(/region entity proof/, error.message)
-    error = assert_raises(StandardError) do
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.send(:verify_inline_image_page_raster_fallbacks!,
                                 harness_stats(2175, [], [composite(5, 2000), composite(5, 175)]))
     end
@@ -175,11 +175,11 @@ class InlineImageOmissionLedgerTest < Minitest::Test
   end
 
   def test_harness_refuses_a_silent_drop_and_a_mislabelled_record
-    error = assert_raises(StandardError) do
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.send(:verify_inline_image_page_raster_fallbacks!, harness_stats(2175, []))
     end
     assert_match(/plus recorded omissions/, error.message)
-    error = assert_raises(StandardError) do
+    error = assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.send(:verify_inline_image_page_raster_fallbacks!,
                                 harness_stats(2175, [omission(5, 2175, 15_012, :editable_geometry)]))
     end
@@ -187,11 +187,11 @@ class InlineImageOmissionLedgerTest < Minitest::Test
   end
 
   def test_harness_refuses_an_omission_without_vector_paths_or_with_a_short_count
-    assert_raises(StandardError) do
+    assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.send(:verify_inline_image_page_raster_fallbacks!,
                                 harness_stats(2175, [omission(5, 2175, 0)]))
     end
-    assert_raises(StandardError) do
+    assert_raises(SketchupHostEvidence::EvidenceError) do
       SketchupHostEvidence.send(:verify_inline_image_page_raster_fallbacks!,
                                 harness_stats(2175, [omission(5, 2000)]))
     end

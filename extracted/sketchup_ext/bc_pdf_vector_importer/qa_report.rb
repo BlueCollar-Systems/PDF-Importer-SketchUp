@@ -2897,6 +2897,14 @@ module BlueCollarSystems
           "#{count} #{label}#{count == 1 ? '' : 's'}" if count > 0
         end.compact
         parts << "Text delivery: #{delivery.join(', ')}" unless delivery.empty?
+        unchecked_raster_ink = Array(extra['raster_delivery_records']).select do |row|
+          artifact = telemetry_value(row, :artifact_evidence)
+          evidence = telemetry_value(artifact, :source_bounds_evidence)
+          telemetry_value(evidence, :status).to_s == 'extractor_bbox_only'
+        end
+        unless unchecked_raster_ink.empty?
+          parts << "Source-ink coverage could not be checked for #{unchecked_raster_ink.length} Raster text item(s); their original text boxes were retained and may clip overhanging ink. See raster delivery records for reasons"
+        end
         blank_spans = Array(extra['zero_ink_text_deliveries'])
         unless blank_spans.empty?
           characters = blank_spans.inject(0) do |sum, record|

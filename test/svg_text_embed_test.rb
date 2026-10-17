@@ -41,6 +41,7 @@ class SvgTextEmbedTest < Minitest::Test
     assert_equal 'gs', args[0]
     assert_includes args, '-sDEVICE=pdfwrite'
     assert_includes args, '-dEmbedAllFonts=true'
+    assert_includes args, '-dAutoRotatePages=/None'
     assert_includes args, '-dSAFER'
     refute_includes args, '-dNOSAFER'
     assert_includes args, '<</NeverEmbed []>> setdistillerparams'

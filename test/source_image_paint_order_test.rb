@@ -92,8 +92,8 @@ class SourceImagePaintOrderTest < Minitest::Test
     end
   end
 
-  def crop_native_fixture
-    artifact = { :source_span_id=>'text_span:1:4', :page_number=>1, :source_pdf_sha256=>DIGEST,
+  def crop_native_fixture(rotation = 0)
+    artifact = { :source_span_id=>'text_span:1:4', :page_number=>1, :page_rotation=>rotation, :source_pdf_sha256=>DIGEST,
       :source_box=>[22,106,24,108], :visual_pixel_sha256=>'b'*64, :page_render_content_sha256=>'c'*64 }
     [:source_crop_binding_verified,:source_pdf_binding_verified,:page_binding_verified,
       :alpha_channel_verified,:transparent_background_verified,:visible_pixel_verified,
@@ -106,7 +106,7 @@ class SourceImagePaintOrderTest < Minitest::Test
     native.define_singleton_method(:typename) { 'Image' }
     native.define_singleton_method(:get_attribute) { |_dict,key,default| attrs.fetch(key,default) }
     roots = [{:id=>'persistent_id:45', :source_span_id=>'text_span:1:4', :entity=>native}]
-    options = { :page_number=>1, :parsed_pdf_sha256=>DIGEST, :raster_delivery_records=>[record] }
+    options = { :page_number=>1, :page_rotation=>rotation, :parsed_pdf_sha256=>DIGEST, :raster_delivery_records=>[record] }
     [roots,options,attrs]
   end
 
@@ -120,8 +120,65 @@ class SourceImagePaintOrderTest < Minitest::Test
     assert_equal before, Marshal.dump(options)
   end
 
+  def test_intrinsic_rotation_maps_raw_crop_and_image_points_into_the_selected_svg_box
+    page_box = [10,20,210,120]
+    [[0,[3,7,200,100],[15,19,17,21]],
+     [90,[3,7,100,200],[89,19,91,21]],
+     [180,[3,7,200,100],[189,93,191,95]],
+     [270,[3,7,100,200],[15,193,17,195]]].each do |rotation,viewbox,expected|
+      roots, options, _attrs = crop_native_fixture(rotation)
+      before = Marshal.dump(options)
+      rows = Importer.embedded_image_final_page_crops(roots,page_box,page_box,viewbox,options)
+      assert_equal expected, rows.first[:bounds_svg]
+      assert_equal rotation, rows.first[:page_rotation]
+      assert_equal before, Marshal.dump(options)
+      assert_equal expected, Subject.box([[22,106],[24,106],[24,108],[22,108]].map do |x,y|
+        Subject.pdf_point_to_svg(x,y,page_box,viewbox,rotation)
+      end)
+      # A crop rendered through a nonzero CropBox rotates about that box,
+      # even though its certified raw source box belongs to the MediaBox.
+      crop_box = [20,100,70,120]
+      cropped = Importer.embedded_image_final_page_crops(roots,page_box,crop_box,
+        [3,7,*([90,270].include?(rotation) ? [20,50] : [50,20])],options)
+      refute_equal expected, cropped.first[:bounds_svg]
+    end
+    assert_raises(Subject::Unproven) { Subject.pdf_point_to_svg(22,106,page_box,[0,0,200,100],45) }
+  end
+
+  def test_rotated_crop_coverage_rejects_unrotated_coordinates_and_mismatched_page_rotation
+    # At Rotate90, raw PDF [86,12,88,14] becomes SVG [12,86,14,88].
+    binding = crop_image_binding.merge(:page_rotation=>90)
+    crop = final_crop([86,12,88,14]).merge(:page_rotation=>90,:bounds_svg=>[12,86,14,88])
+    subject = inventory(document(IMAGE_USE+GLYPH))
+    # The later glyph is at [12,12,14,14], so the rotated crop does not cover it.
+    assert_raises(Subject::Unproven) { subject.qualify(binding,[],[crop]) }
+    crop[:source_box] = [12,12,14,14]
+    crop[:bounds_svg] = [12,12,14,14]
+    assert_equal 1, subject.qualify(binding,[],[crop])[:later_final_page_crops].length
+    assert_raises(Subject::Unproven) do
+      subject.qualify(binding,[],[crop.merge(:page_rotation=>0)])
+    end
+    assert_raises(Subject::Unproven) do
+      subject.qualify(binding,[],[crop.merge(:bounds_svg=>[12,86,14,88])])
+    end
+  end
+
+  def test_unrotated_fractional_saved_ledger_keeps_original_exact_arithmetic
+    page_box = [-20.25,-12.745349,180.35,70.207687]
+    viewbox = [3.0,6.049475,200.6,82.953036]
+    source_box = [22.123456,32.123456,24.123456,44.822594]
+    expected = [source_box[0]-page_box[0]+viewbox[0],viewbox[3]+viewbox[1]+page_box[1]-source_box[3],
+      source_box[2]-page_box[0]+viewbox[0],viewbox[3]+viewbox[1]+page_box[1]-source_box[1]]
+    assert_equal expected, Subject.pdf_box_to_svg(source_box,page_box,viewbox,0)
+    assert_equal expected, Subject.pdf_box_to_svg(JSON.parse(JSON.generate(source_box)),page_box,viewbox,0)
+    # Reassociation looks equivalent but differs by one ULP for this source;
+    # accepting the old exact ledger requires keeping its original order.
+    refute_equal expected[1], viewbox[3]+viewbox[1]-(source_box[3]-page_box[1])
+  end
+
   def test_main_rejects_missing_or_changed_native_crop_and_unproved_page_pixels
-    [:missing,:duplicate,:native_hash,:native_box,:artifact_hash,:unverified_pixels].each do |fault|
+    [:missing,:duplicate,:native_hash,:native_box,:artifact_hash,:unverified_pixels,
+     :missing_rotation,:wrong_rotation].each do |fault|
       roots, options, attrs = crop_native_fixture
       roots.clear if fault == :missing
       roots << roots.first.dup if fault == :duplicate
@@ -130,6 +187,8 @@ class SourceImagePaintOrderTest < Minitest::Test
       artifact = options[:raster_delivery_records].first[:artifact_evidence]
       artifact[:source_pdf_sha256] = 'b'*64 if fault == :artifact_hash
       artifact[:visual_pixel_binding_verified] = false if fault == :unverified_pixels
+      artifact.delete(:page_rotation) if fault == :missing_rotation
+      artifact[:page_rotation] = 90 if fault == :wrong_rotation
       assert_raises(Importer::RepresentationFidelity::ContractError) do
         Importer.embedded_image_final_page_crops(roots,[10,20,110,120],[10,20,110,120],[0,0,100,100],options)
       end

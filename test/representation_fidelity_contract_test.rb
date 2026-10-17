@@ -1896,6 +1896,76 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_in_delta 63.0, crop[:display_height], 1.0e-9
   end
 
+  def test_item_raster_overlapping_crops_share_the_exact_page_pixel_grid
+    boxes = [
+      [106.946377, 496.472001, 116.188596, 511.271996],
+      [116.188596, 501.808001, 126.192917, 516.607996]
+    ]
+    items = boxes.each_with_index.map do |box, index|
+      BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+        'SLANT', box[0], box[1], 14, -30, 'F1', 14,
+        *box, nil, "text_span:1:#{index}"
+      )
+    end
+    before = Marshal.dump(items)
+    crops = items.map do |source|
+      IMP.item_raster_crop_geometry(source, [0, 0, 612, 792], 0, 300)
+    end
+    # The same pixel in both overlapping crops must have one PDF position.
+    [[477, 1163], [490, 1215]].each do |px, py|
+      crops.each do |crop|
+        x, y, width, height = crop[:pixel_crop]
+        assert px >= x && px < x + width && py >= y && py < y + height
+        box = crop[:display_box]
+        actual_x = box[0] + (px - x) * crop[:display_width] / width
+        actual_y = box[3] - (py - y) * crop[:display_height] / height
+        assert_in_delta px * 72.0 / 300, actual_x, 1.0e-9
+        assert_in_delta 792 - py * 72.0 / 300, actual_y, 1.0e-9
+      end
+    end
+    crops.each_with_index do |crop, index|
+      box = boxes[index]
+      assert_equal [box[0] - 1.5, box[1] - 1.5, box[2] + 1.5, box[3] + 1.5],
+                   crop[:requested_source_box]
+      assert_equal [2550, 3300], crop[:page_pixel_size]
+    end
+    assert_equal before, Marshal.dump(items)
+  end
+
+  def test_item_raster_pixel_grid_keeps_rotated_offset_page_edges_and_render_size
+    media = [-20.25, 30.125, 180.35, 130.475]
+    source = BlueCollarSystems::PDFVectorImporter::TextParser::TextItem.new(
+      'EDGE', -19.9, 30.4, 12, 0, 'F1', 12,
+      -19.9, 30.4, 7.123, 49.876, nil, 'text_span:1:0'
+    )
+    before = Marshal.dump(source)
+    [0, 90, 180, 270].each do |rotation|
+      crop = IMP.item_raster_crop_geometry(source, media, rotation, 300)
+      page_w = IMP::PageTransform.effective_width(media, rotation)
+      page_h = IMP::PageTransform.effective_height(media, rotation)
+      pixel_w, pixel_h = [page_w, page_h].map { |size| (size * 300 / 72).round }
+      x, y, width, height = crop[:pixel_crop]
+      assert x >= 0 && y >= 0 && x + width <= pixel_w && y + height <= pixel_h
+      expected = [x * 72.0 / 300, (pixel_h - y - height) * 72.0 / 300,
+                  (x + width) * 72.0 / 300, (pixel_h - y) * 72.0 / 300]
+      expected.zip(crop[:display_box]).each { |a, b| assert_in_delta a, b, 1.0e-9 }
+      transformed = IMP::PageTransform.transform_bbox(*crop[:source_box], media, rotation)
+      transformed.zip(crop[:display_box]).each { |a, b| assert_in_delta a, b, 1.0e-9 }
+      assert crop[:source_box][0] > media[0] - 0.24 && crop[:source_box][1] > media[1] - 0.24
+      assert crop[:source_box][2] < media[2] + 0.24 && crop[:source_box][3] < media[3] + 0.24
+      assert crop[:requested_source_box][0] >= media[0] && crop[:requested_source_box][1] >= media[1]
+      assert crop[:requested_source_box][2] <= media[2] && crop[:requested_source_box][3] <= media[3]
+    end
+    # The real renderer's decoded dimensions take precedence over DPI rounding.
+    crop = IMP.item_raster_crop_geometry(source, media, 0, 300, 1.5, [835, 419])
+    x, y, width, height = crop[:pixel_crop]
+    assert_in_delta width * 72.0 / 300, crop[:display_width], 1.0e-9
+    assert_in_delta height * 72.0 / 300, crop[:display_height], 1.0e-9
+    assert_in_delta (419 - y) * 72.0 / 300, crop[:display_box][3], 1.0e-9
+    assert x >= 0 && y >= 0 && x + width <= 835 && y + height <= 419
+    assert_equal before, Marshal.dump(source)
+  end
+
   def test_item_vector_fallback_uses_a_real_distinct_renderer
     main = File.read(
       File.join(SRC_ROOT, 'bc_pdf_vector_importer', 'main.rb'), encoding: 'UTF-8'
@@ -2726,6 +2796,9 @@ class RepresentationFidelityContractTest < Minitest::Test
     assert_equal true, proof[:source_crop_binding_verified]
     assert_equal true, proof[:page_binding_verified]
     assert_equal [397, 197, 46, 126], proof[:pixel_crop]
+    assert_equal crop[:requested_source_box], proof[:requested_source_box]
+    assert_equal crop[:page_pixel_size], proof[:page_pixel_size]
+    assert_equal 144, proof[:raster_dpi]
     assert_equal true, proof[:alpha_channel_verified]
     assert_equal true, proof[:transparent_background_verified]
     assert_equal true, proof[:page_render_once_verified]
@@ -3287,7 +3360,11 @@ class RepresentationFidelityContractTest < Minitest::Test
         transition_proof: valid_transition_proof(mode, next_mode)
       }
     end
-    raster = lambda do |_model, target, *_args|
+    raster = lambda do |_model, target, *args|
+      bounds = args.last
+      assert_equal 'extractor_bbox_only', bounds[:status]
+      assert_equal 'text_span:1:0', bounds[:source_span_id]
+      assert_equal Digest::SHA256.hexdigest('A'), bounds[:source_text_sha256]
       image = target.add_test_entity(1.0, 0.5, 'Image')
       {
         entity: image,
@@ -3319,11 +3396,13 @@ class RepresentationFidelityContractTest < Minitest::Test
 
     IMP::SvgItemRepresentationRenderer.stub(:render_svg, vector) do
       IMP.stub(:verified_item_raster_entity!, raster) do
-        IMP.complete_text3d_item_fallbacks!(
-          stats, model, entities, 'fixture.pdf', 1, [source],
-          [0, 0, 100, 100], [0, 0, 100, 100], 0, {}, Time.now,
-          0.0, document, [valid_transition_proof(:text3d, :glyphs)]
-        )
+        IMP.stub(:cached_source_pdf_sha256!, 'a' * 64) do
+          IMP.complete_text3d_item_fallbacks!(
+            stats, model, entities, 'fixture.pdf', 1, [source],
+            [0, 0, 100, 100], [0, 0, 100, 100], 0, {}, Time.now,
+            0.0, document, [valid_transition_proof(:text3d, :glyphs)]
+          )
+        end
       end
     end
     assert_equal [:glyphs, :geometry], modes
