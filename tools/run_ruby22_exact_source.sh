@@ -199,6 +199,7 @@ readonly SMOKE_TESTS=(
   test/default_import_round_cap_sheet_test.rb
   test/import_resume_test.rb
   test/geometry_cleanup_collinear_coverage_test.rb
+  test/geometry_cleanup_final_duplicates_test.rb
   test/cleanup_selected_operation_test.rb
   test/embedded_image_affine_test.rb
   test/embedded_image_extractor_test.rb
