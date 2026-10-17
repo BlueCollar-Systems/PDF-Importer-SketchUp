@@ -106,6 +106,10 @@ class ItemVectorEdge
   def bounds; ItemVectorBounds.new(@points); end
   def hidden?; false; end
 
+  def get_attribute(dictionary,key,default=nil)
+    @attributes.fetch([dictionary,key],default)
+  end
+
   def set_attribute(dictionary, key, value)
     @attributes[[dictionary, key]] = value
   end
@@ -157,6 +161,10 @@ class ItemVectorComponentInstance
 
   def typename; 'ComponentInstance'; end
   def hidden?; false; end
+
+  def get_attribute(dictionary,key,default=nil)
+    @attributes.fetch([dictionary,key],default)
+  end
 
   def set_attribute(dictionary, key, value)
     @attributes[[dictionary, key]] = value
@@ -361,6 +369,27 @@ class SvgItemRepresentationRendererTest < Minitest::Test
     ]
   end
 
+  def test_paint_proof_binds_actual_current_svg_bytes_and_verified_source_page
+    q=BlueCollarSystems::PDFVectorImporter::SourceFillOnlyPaint
+    svg=square_svg
+    proof=q.prepare(['BT /F1 16 Tf (A) Tj ET'],[{:resource=>'/F1',:subtype=>'/Type1'}],false,svg,'1'*64,1)
+    assert_equal q::QUALIFIED,proof[:status]
+    binding={:source_pdf_sha256=>'1'*64,:source_svg_sha256=>proof[:source_svg_sha256],:page=>1}
+    options={:scale=>1.0,:svg_page_box=>MEDIA_BOX,:source_context=>source_context,
+      :source_fill_only_paint=>proof,:source_fill_only_paint_binding=>binding}
+    original=RENDERER.render_svg(ItemVectorEntities.new,svg,MEDIA_BOX,item,:geometry,options)
+    assert_equal RENDERER::FILLED_CONTOUR_EDGE_POLICY,original[:filled_contour_edge_policy]
+    svg.replace(svg.sub('<use ','<use stroke="black" stroke-width="2" '))
+    stale=RENDERER.render_svg(ItemVectorEntities.new,svg,MEDIA_BOX,item,:geometry,options)
+    assert stale[:ok]
+    assert_equal q::PRESERVED,stale[:filled_contour_edge_policy]
+    assert_equal Digest::SHA256.hexdigest(svg),stale[:source_fill_only_svg_sha256]
+    source=item.dup;source.source_span_id='text_span:2:0'
+    page_two=RENDERER.render_svg(ItemVectorEntities.new,square_svg,MEDIA_BOX,source,:geometry,
+      options.merge(:source_context=>source_context.merge(:page_number=>2)))
+    assert_equal q::PRESERVED,page_two[:filled_contour_edge_policy]
+  end
+
   def mixed_page_svg
     square_svg.sub('</g></svg>', '<use href="#glyph-0-0" x="95" y="20"/></g></svg>')
   end
@@ -414,6 +443,7 @@ class SvgItemRepresentationRendererTest < Minitest::Test
         :source_context=>source_context,:page_number=>1)
       result[:source_page_transformation] = [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
       result[:page_transform_verified] = true
+      assert RENDERER.verify_transformed_delivery!(result), 'real unmatched render survives transformed source-unit visibility verification'
       RENDERER.finalize_source_unit_evidence!(result)
       expected = result[:expected_evidence]
       assert_equal mode,expected[:representation]
