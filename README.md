@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.170-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.173-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -22,7 +22,21 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.169)
+### Recent fixes (v3.7.173)
+
+- Geometry cleanup finishes by removing redundant loose edges only when they
+  share the same native vertices, exact coordinates and appearance. Face edges,
+  curves, attributed edges and disconnected coincident strokes stay intact.
+  This addresses duplicate edges that SketchUp 2017 removed during Save,
+  adding a separate Check Validity operation ahead of Undo.
+
+### Recent fixes (v3.7.172)
+
+- Item Raster crops include matched source glyph outlines, preserving
+  overhanging and slanted letter strokes. Unqualified source bounds are
+  explicitly reported. Font embedding preserves the PDF page orientation.
+
+### Previous fixes (v3.7.169)
 
 - The manual **Extrude Selected Planar Faces** tool keeps both profile caps
   facing outward, including reversed faces and scaled or reflected instances.

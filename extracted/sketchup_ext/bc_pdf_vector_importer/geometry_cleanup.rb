@@ -118,6 +118,12 @@ module BlueCollarSystems
         # Phase 5: Close tiny face gaps
         stats[:closed_gaps] += close_face_gaps(entities, merge_tol * 2)
 
+        # Joining/bridging can leave redundant native edges after Phase 3.
+        # SketchUp 2017 repaired shared-vertex duplicates on the first Save,
+        # inserting a separate Check Validity Undo step. Remove only exact,
+        # equally styled loose duplicates inside the caller's import operation.
+        stats[:removed_dupes] += remove_exact_duplicate_loose_edges(entities)
+
         stats
       end
 
@@ -267,6 +273,56 @@ module BlueCollarSystems
         end
 
         count
+      end
+
+      def self.exact_loose_edge_signature(edge)
+        return nil unless edge.valid? && edge.faces.empty?
+        style = joinable_edge_style(edge)
+        return nil unless style
+        endpoints = [edge.start, edge.end].map do |vertex|
+          return nil unless vertex.respond_to?(:entityID)
+          identity = vertex.entityID
+          return nil unless identity.is_a?(Integer) && identity > 0
+          position = vertex.position
+          coordinates = [position.x.to_f, position.y.to_f, position.z.to_f]
+          return nil unless coordinates.all? { |value| value.finite? }
+          [identity, coordinates]
+        end.sort_by { |endpoint| endpoint[0] }
+        return nil if endpoints[0][0] == endpoints[1][0]
+        [endpoints, style]
+      end
+
+      # Unlike the earlier rounded cleanup, this final sweep must preserve
+      # distinct coincident vertices, nearby strokes, faces, curves, attributes
+      # and every style property. A matching source segment must survive erase.
+      def self.remove_exact_duplicate_loose_edges(entities)
+        return 0 if source_width_ancestor?(entities)
+        count = 0
+        survivors = {}
+        entities.grep(Sketchup::Edge).each do |edge|
+          signature = exact_loose_edge_signature(edge)
+          next unless signature
+          endpoints, _style = signature
+          bucket = (survivors[endpoints] ||= [])
+          kept = bucket.find { |candidate| exact_loose_edge_signature(candidate) == signature }
+          unless kept
+            bucket << edge
+            next
+          end
+
+          edge.erase!
+          unless !edge.valid? && exact_loose_edge_signature(kept) == signature
+            raise CleanupFailure, 'exact duplicate cleanup did not preserve its native source edge'
+          end
+          count += 1
+        end
+        count
+      rescue CleanupFailure
+        raise
+      rescue StandardError => error
+        # An erase may already have changed native topology. The caller must
+        # roll back its operation rather than commit an uncertain cleanup.
+        raise CleanupFailure, "exact duplicate cleanup failed (#{error.class}): #{error.message}"
       end
 
       # ---------------------------------------------------------------

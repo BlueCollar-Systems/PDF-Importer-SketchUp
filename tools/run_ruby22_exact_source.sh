@@ -175,6 +175,7 @@ readonly SMOKE_TESTS=(
   test/svg_3d_text_whitespace_span_test.rb
   test/command_runner_environment_test.rb
   test/item_raster_page_renderer_test.rb
+  test/item_raster_source_bounds_test.rb
   test/item_raster_display_test.rb
   test/source_image_paint_order_test.rb
   test/original_image_clip_test.rb
@@ -198,6 +199,7 @@ readonly SMOKE_TESTS=(
   test/default_import_round_cap_sheet_test.rb
   test/import_resume_test.rb
   test/geometry_cleanup_collinear_coverage_test.rb
+  test/geometry_cleanup_final_duplicates_test.rb
   test/cleanup_selected_operation_test.rb
   test/embedded_image_affine_test.rb
   test/embedded_image_extractor_test.rb

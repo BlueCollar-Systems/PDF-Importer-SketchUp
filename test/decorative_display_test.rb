@@ -94,6 +94,29 @@ class DecorativeDisplayTest < Minitest::Test
     assert_nil @crop_image[:representation_evidence][:source_placement_indices]
   end
 
+  def test_rotated_saved_image_and_final_crop_keep_source_frames_and_pixel_proofs
+    [[0,[[0,0],[72,0],[72,72],[0,72]]],
+     [90,[[72,0],[72,72],[0,72],[0,0]]],
+     [180,[[72,72],[0,72],[0,0],[72,0]]],
+     [270,[[0,72],[0,0],[72,0],[72,72]]]].each do |rotation,corners_svg|
+      setup
+      add_final_crop
+      @proof[:page_rotation] = rotation
+      @crop_artifact[:page_rotation] = rotation
+      @crop[:page_rotation] = rotation
+      @source[:source_image_event][:corners] = corners_svg
+      canonical = BlueCollarSystems::PDFVectorImporter::EmbeddedImagePlacement.affine(
+        @placement[:corners_pdf],[0,0,72,72],1.0,0.0,rotation)[:matrix]
+      @placement[:canonical_transformation] = canonical
+      @placement[:expected_display_transformation] = Math3.multiply(Subject.translation(0.030),canonical)
+      @image[:transformation] = @placement[:expected_display_transformation].dup
+      assert verify
+      assert Subject.verify_manifest!(JSON.parse(JSON.generate(@stats)),JSON.parse(JSON.generate([@page])))
+      @crop[:page_rotation] = (rotation + 90) % 360
+      rejects
+    end
+  end
+
   def test_rejects_final_crop_coplanar_with_embedded_image
     add_final_crop
     @crop_image[:transformation][14] = 0.030

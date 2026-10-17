@@ -6,6 +6,7 @@ require 'digest'
 require_relative 'safe_temp'
 require_relative 'svg_paint_order'
 require_relative 'png_cropper'
+require_relative 'page_transform'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -30,6 +31,35 @@ module BlueCollarSystems
         return nil if points.empty?
         [points.map { |p| p[0] }.min, points.map { |p| p[1] }.min,
          points.map { |p| p[0] }.max, points.map { |p| p[1] }.max]
+      end
+
+      # Cairo's SVG already contains the intrinsic page rotation. Map raw PDF
+      # coordinates around the actual SVG render box (CropBox when selected),
+      # then invert SVG Y. This leaves the source/native coordinates unchanged.
+      def self.pdf_point_to_svg(x, y, page_box, viewbox, rotation = 0)
+        unless [0, 90, 180, 270].include?(rotation) &&
+          [page_box, viewbox].all? { |b| b.is_a?(Array) && b.length == 4 && b.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } } &&
+          page_box[2] > page_box[0] && page_box[3] > page_box[1] && viewbox[2] > 0 && viewbox[3] > 0
+          raise Unproven, 'invalid source PDF to SVG coordinate frame'
+        end
+        x, y = number(x), number(y)
+        # Existing unrotated saved ledgers use exact bounds equality. Preserve
+        # their original floating-point evaluation order, including its ULPs.
+        return [x-page_box[0]+viewbox[0],viewbox[3]+viewbox[1]+page_box[1]-y] if rotation == 0
+        point = PageTransform.transform_point(x, y, page_box, rotation)
+        [point[0] + viewbox[0], viewbox[3] + viewbox[1] - point[1]]
+      end
+
+      def self.pdf_box_to_svg(source_box, page_box, viewbox, rotation = 0)
+        unless source_box.is_a?(Array) && source_box.length == 4 &&
+          source_box.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } &&
+          source_box[2] > source_box[0] && source_box[3] > source_box[1]
+          raise Unproven, 'invalid source PDF crop bounds'
+        end
+        x0, y0, x1, y1 = source_box
+        box([[x0,y0],[x1,y0],[x1,y1],[x0,y1]].map do |x,y|
+          pdf_point_to_svg(x, y, page_box, viewbox, rotation)
+        end)
       end
 
       def self.overlap?(a, b)
@@ -680,8 +710,9 @@ module BlueCollarSystems
               source_box[0] < source_box[2] && source_box[1] < source_box[3]
               raise Unproven, 'final-page crop source bounds are invalid'
             end
-            expected = [source_box[0]-page_box[0]+viewbox[0], viewbox[3]+viewbox[1]+page_box[1]-source_box[3],
-              source_box[2]-page_box[0]+viewbox[0], viewbox[3]+viewbox[1]+page_box[1]-source_box[1]]
+            rotation = image.fetch(:page_rotation, 0)
+            raise Unproven, 'final-page crop rotation differs from its SVG page' unless crop.fetch(:page_rotation, 0) == rotation
+            expected = SourceImagePaintOrder.pdf_box_to_svg(source_box, page_box, viewbox, rotation)
             raise Unproven, 'final-page crop SVG bounds differ from its PDF source box' unless bounds == expected
             SourceImagePaintOrder.covers?(bounds, paint[:bounds])
           end

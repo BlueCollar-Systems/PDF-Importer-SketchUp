@@ -24,6 +24,7 @@ module BlueCollarSystems
     require File.join(dir, 'command_runner')
     require File.join(dir, 'png_cropper')
     require File.join(dir, 'item_raster_page_renderer')
+    require File.join(dir, 'item_raster_source_bounds')
     require File.join(dir, 'dependency_resolver')
     require File.join(dir, 'batch_host_policy')
     require File.join(dir, 'pdf_open_gate')
@@ -1469,9 +1470,13 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError,
               "#{source_id}: item representation ladder did not reach Raster"
       end
+      source_bounds = item_raster_source_bounds!(
+        pdf_path, page_num, item, peer_items, media_box, render_box,
+        page_rotation, opts, svg_document
+      )
       raster = verified_item_raster_entity!(
         model, target_entities, pdf_path, page_num, item, media_box, opts,
-        import_start, y_offset, page_rotation
+        import_start, y_offset, page_rotation, source_bounds
       )
       begin
         record_item_raster_delivery!(
@@ -1525,7 +1530,8 @@ module BlueCollarSystems
     end
 
     def self.item_raster_crop_geometry(item, media_box, page_rotation, dpi,
-                                       padding_points = 1.5)
+                                       padding_points = 1.5, page_pixel_size = nil,
+                                       source_bounds = nil)
       unless media_box.is_a?(Array) && media_box.length >= 4
         raise RepresentationFidelity::ContractError,
               'item raster MediaBox is unavailable'
@@ -1550,6 +1556,14 @@ module BlueCollarSystems
         [x0 - pad, min_x].max, [y0 - pad, min_y].max,
         [x1 + pad, max_x].min, [y1 + pad, max_y].min
       ]
+      if source_bounds
+        ItemRasterSourceBounds.validate!(source_bounds,
+          :canonical_source_box => [x0, y0, x1, y1],
+          :source_span_id => RepresentationFidelity.source_span_id(item),
+          :source_text_sha256 => Digest::SHA256.hexdigest(item.text.to_s))
+        source_box = ItemRasterSourceBounds.requested_box!(
+          source_bounds, media_box, page_rotation, pad)
+      end
       display_box = PageTransform.transform_bbox(
         source_box[0], source_box[1], source_box[2], source_box[3],
         media_box, page_rotation
@@ -1560,16 +1574,51 @@ module BlueCollarSystems
         raise RepresentationFidelity::ContractError,
               'item raster source bbox is empty'
       end
+      page_width = PageTransform.effective_width(media_box, page_rotation)
       page_height = PageTransform.effective_height(media_box, page_rotation)
       pixels_per_point = dpi.to_f / 72.0
       raise RepresentationFidelity::ContractError,
             'item raster DPI must be positive' unless pixels_per_point > 0.0
-      pixel_x0 = (display_box[0] * pixels_per_point).floor
-      pixel_y0 = ((page_height - display_box[3]) * pixels_per_point).floor
-      pixel_x1 = (display_box[2] * pixels_per_point).ceil
-      pixel_y1 = ((page_height - display_box[1]) * pixels_per_point).ceil
-      {
+      page_pixel_size ||= [
+        (page_width * pixels_per_point).round,
+        (page_height * pixels_per_point).round
+      ]
+      unless page_pixel_size.is_a?(Array) && page_pixel_size.length == 2 &&
+             page_pixel_size.all? { |value| value.is_a?(Integer) && value > 0 }
+        raise RepresentationFidelity::ContractError,
+              'item raster rendered page dimensions are invalid'
+      end
+      pixel_width, pixel_height = page_pixel_size
+      pixel_x0 = [(display_box[0] * pixels_per_point).floor, 0].max
+      pixel_y0 = [(pixel_height - display_box[3] * pixels_per_point).floor, 0].max
+      pixel_x1 = [(display_box[2] * pixels_per_point).ceil, pixel_width].min
+      pixel_y1 = [(pixel_height - display_box[1] * pixels_per_point).ceil, pixel_height].min
+      unless pixel_x1 > pixel_x0 && pixel_y1 > pixel_y0
+        raise RepresentationFidelity::ContractError,
+              'item raster source bbox is outside the rendered canvas'
+      end
+
+      # The PNG contains whole page pixels. Place those exact pixel boundaries,
+      # preserving the renderer's DPI pitch and decoded-height Y origin. Never
+      # fit the rounded device canvas back into a fractional-point MediaBox.
+      requested_source_box = source_box
+      display_box = [pixel_x0 / pixels_per_point,
+                     (pixel_height - pixel_y1) / pixels_per_point,
+                     pixel_x1 / pixels_per_point,
+                     (pixel_height - pixel_y0) / pixels_per_point]
+      corners = [[display_box[0], display_box[1]],
+                 [display_box[2], display_box[3]]].map do |x, y|
+        PageTransform.inverse_transform_point(x, y, media_box, page_rotation)
+      end
+      xs, ys = corners.map { |point| point[0] }, corners.map { |point| point[1] }
+      source_box = [xs.min, ys.min, xs.max, ys.max]
+      display_width = display_box[2] - display_box[0]
+      display_height = display_box[3] - display_box[1]
+      geometry = {
         :source_box => source_box,
+        :media_box => media_box.dup,
+        :requested_source_box => requested_source_box,
+        :page_pixel_size => page_pixel_size.dup,
         :display_box => display_box,
         :display_width => display_width,
         :display_height => display_height,
@@ -1581,6 +1630,42 @@ module BlueCollarSystems
           [pixel_y1 - pixel_y0, 1].max
         ]
       }
+      if source_bounds
+        geometry[:source_bounds_evidence] = source_bounds
+        geometry[:source_crop_padding_points] = pad
+      end
+      geometry
+    end
+
+    def self.item_raster_source_bounds!(pdf_path, page_num, item, peers,
+                                         media_box, render_box, rotation,
+                                         opts, svg_document)
+      source_sha = cached_source_pdf_sha256!(opts, pdf_path)
+      cache = opts[:item_raster_source_bounds_cache] ||= {}
+      key = [source_sha, page_num.to_i, media_box, render_box,
+             PageTransform.normalize_rotation(rotation)]
+      unless cache.key?(key)
+        items = {}
+        ([item] + Array(peers)).each do |source|
+          sid = RepresentationFidelity.source_span_id(source)
+          items[sid] ||= source
+        end
+        cache[key] = ItemRasterSourceBounds.prepare(
+          svg_document, items.values, media_box, render_box, rotation,
+          page_num, source_sha)
+      end
+      sid = RepresentationFidelity.source_span_id(item)
+      evidence = cache[key][sid]
+      begin
+        ItemRasterSourceBounds.validate!(evidence,
+          :canonical_source_box => ItemRasterSourceBounds.canonical_box(item, media_box),
+          :source_span_id => sid,
+          :source_text_sha256 => Digest::SHA256.hexdigest(item.text.to_s))
+        evidence
+      rescue RepresentationFidelity::ContractError
+        ItemRasterSourceBounds.base(item, media_box, render_box, rotation,
+          page_num, source_sha, 'source_bounds_cache_item_mismatch')
+      end
     end
 
     def self.complete_text3d_item_fallbacks!(
@@ -1912,14 +1997,14 @@ module BlueCollarSystems
     def self.verified_item_raster_entity!(model, target_entities, pdf_path,
                                           page_num, item, media_box, opts,
                                           import_start, y_offset,
-                                          page_rotation = 0)
+                                          page_rotation = 0, source_bounds = nil)
       parent = target_entities
       delivery = nil
       before = RepresentationFidelity.snapshot(parent)
       opts.delete(:item_raster_failure_evidence)
       delivery = import_item_as_raster(
         model, parent, pdf_path, page_num, item, media_box, opts,
-        import_start, y_offset, page_rotation
+        import_start, y_offset, page_rotation, source_bounds
       )
       unless delivery.is_a?(Hash) && delivery[:entity] &&
              delivery[:artifact_evidence].is_a?(Hash)
@@ -5990,6 +6075,21 @@ module BlueCollarSystems
           raster_parent = builder.page_group ?
             builder.page_group.entities : model.active_entities
           raster_delivery_started = Time.now
+          unless source_svg_document && !source_svg_document[:svg].to_s.empty?
+            # One optional page inspection, never one renderer per text item.
+            # Missing/ambiguous outlines retain bounded extractor-box delivery
+            # with an explicit unqualified coverage reason in the report.
+            source_binding = begin_source_pdf_render_binding!(opts, path)
+            begin
+              source_svg_document = CairoGlyphSource.render_page_svg(
+                path, page_num, :use_cropbox => crop_box &&
+                  crop_box.zip(media_box).any? { |a, b| (a.to_f - b.to_f).abs > 0.01 })
+            rescue StandardError => error
+              Logger.warn('Raster', "source ink inspection unavailable: #{error.message}")
+              source_svg_document = nil
+            end
+            verify_source_pdf_render_binding!(source_binding)
+          end
           Array(text_items).each_with_index do |source_item, item_index|
             run_control_checkpoint!(
               opts, :text_item, :completed => item_index,
@@ -6009,7 +6109,8 @@ module BlueCollarSystems
             complete_item_representation_ladder!(
               stats, model, raster_parent, path, page_num, source_item,
               :raster, controller, [], media_box, svg_page_box,
-              page_rotation, opts, import_start, page_y_offset, {},
+              page_rotation, opts, import_start, page_y_offset,
+              source_svg_document || {},
               layer_mgr.text_fallback_layer, text_items
             )
             end
@@ -6581,6 +6682,7 @@ module BlueCollarSystems
           display_plan = prepare_embedded_image_display_plans(
             builder.page_group, source_image_records, paint_svg_provider.call,
             media_box, :scale => opts[:scale], :svg_page_box => svg_page_box,
+            :page_rotation => page_rotation,
             :parsed_pdf_sha256 => cached_source_pdf_sha256!(opts, path),
             :page_number => page_num,
             :raster_delivery_records => stats[:raster_delivery_records])
@@ -7141,13 +7243,13 @@ module BlueCollarSystems
           entity.get_attribute(dictionary, 'raster_visual_pixel_sha256', '') == artifact[:visual_pixel_sha256] &&
           box.is_a?(Array) && box.length == 4 && box.all? { |v| v.is_a?(Numeric) && v.to_f.finite? } &&
           box[0] < box[2] && box[1] < box[3] &&
-          box[0] >= media_box[0] && box[1] >= media_box[1] && box[2] <= media_box[2] && box[3] <= media_box[3]
+          ItemRasterDisplay.source_box!(artifact, media_box, opts[:page_rotation] || 0) == box
           raise RepresentationFidelity::ContractError, 'final-page crop native/source binding differs'
         end
         { :source_span_id => sid, :resulting_entity_id => id, :source_box => box.dup,
+          :page_rotation => opts[:page_rotation] || 0,
           :page_number => context[:page], :source_pdf_sha256 => context[:source_pdf_sha256],
-          :bounds_svg => [box[0]-page_box[0]+viewbox[0], viewbox[3]+viewbox[1]+page_box[1]-box[3],
-            box[2]-page_box[0]+viewbox[0], viewbox[3]+viewbox[1]+page_box[1]-box[1]] }
+          :bounds_svg => SourceImagePaintOrder.pdf_box_to_svg(box, page_box, viewbox, opts[:page_rotation] || 0) }
       end
     end
 
@@ -7208,13 +7310,14 @@ module BlueCollarSystems
         # bottom-left. Reverse the vertical ordering without changing pixels.
         svg_corners = [3,2,1,0].map do |index|
           x,y = corners[index]
-          [x - page_box[0] + viewbox[0], viewbox[3] + viewbox[1] + page_box[1] - y]
+          SourceImagePaintOrder.pdf_point_to_svg(x, y, page_box, viewbox, opts[:page_rotation] || 0)
         end
         binding = pixels.merge(:id => image_id, :corners_svg => svg_corners,
           :parsed_pdf_sha256 => opts[:parsed_pdf_sha256], :page_number => opts[:page_number],
           :image_object_number => asset.obj_num, :placement_index => asset.placement_index,
           :ctm => asset.ctm, :corners_pts => corners,
           :svg_page_box => page_box, :svg_viewbox => viewbox,
+          :page_rotation => opts[:page_rotation] || 0,
           :original_clip_proof => (asset.respond_to?(:original_clip_proof) ? asset.original_clip_proof : nil))
         begin
           proof = inventory.qualify(binding, source_roots, final_page_crops)
@@ -7529,7 +7632,7 @@ module BlueCollarSystems
       unless content_sha =~ /\A[0-9a-f]{64}\z/
         content_sha = Digest::SHA256.file(png_path).hexdigest
       end
-      {
+      artifact = {
         :png_path => png_path.to_s,
         :content_sha256 => content_sha,
         :content_byte_size => File.size(png_path).to_i,
@@ -7540,6 +7643,9 @@ module BlueCollarSystems
         :source_pdf_binding_verified => true,
         :page_rotation => crop_geometry[:page_rotation].to_i,
         :source_box => Array(crop_geometry[:source_box]).map { |value| value.to_f },
+        :requested_source_box => Array(crop_geometry[:requested_source_box]).map { |value| value.to_f },
+        :page_pixel_size => Array(crop_geometry[:page_pixel_size]).map { |value| value.to_i },
+        :raster_dpi => crop_geometry[:dpi].to_i,
         :display_box => Array(crop_geometry[:display_box]).map { |value| value.to_f },
         :pixel_crop => expected_crop,
         :pixel_width => pixel_width.to_i,
@@ -7556,6 +7662,21 @@ module BlueCollarSystems
         :visual_pixel_binding_verified => true,
         :visible_pixel_verified => proof[:visible_pixel_verified] == true
       }
+      if crop_geometry[:source_bounds_evidence]
+        bounds = crop_geometry[:source_bounds_evidence]
+        ItemRasterSourceBounds.validate!(bounds,
+          :source_span_id => source_id, :page_number => requested_page,
+          :source_pdf_sha256 => exact_source_sha,
+          :source_text_sha256 => Digest::SHA256.hexdigest(item.text.to_s))
+        artifact[:source_bounds_evidence] = bounds
+        artifact[:source_crop_padding_points] = crop_geometry[:source_crop_padding_points]
+        artifact[:source_ink_coverage_verified] =
+          ItemRasterSourceBounds.value(bounds, :status) == ItemRasterSourceBounds::QUALIFIED
+      end
+      if crop_geometry[:media_box]
+        ItemRasterDisplay.source_box!(artifact, crop_geometry[:media_box], artifact[:page_rotation])
+      end
+      artifact
     rescue RepresentationFidelity::ContractError
       raise
     rescue StandardError => e
@@ -7585,12 +7706,14 @@ module BlueCollarSystems
         opts.delete(:item_raster_page_cache)
         opts.delete(:source_pdf_digest_cache)
         opts.delete(:item_raster_cache_persistent)
+        opts.delete(:item_raster_source_bounds_cache)
         return opts
       end
       # Every finite text-representation ladder can legitimately terminate at
       # Raster. Own one cache for the entire import regardless of the requested
       # starting rung so a terminal fallback cannot render the same page twice.
       opts[:item_raster_page_cache] = {}
+      opts[:item_raster_source_bounds_cache] = {}
       opts[:source_pdf_digest_cache] = {}
       opts[:item_raster_cache_persistent] = true
       opts
@@ -7727,6 +7850,8 @@ module BlueCollarSystems
       end
       cleanup_owned_temp_artifacts!(paths, directories)
       cache.clear if cache.respond_to?(:clear)
+      bounds_cache = opts[:item_raster_source_bounds_cache]
+      bounds_cache.clear if bounds_cache.respond_to?(:clear)
       true
     end
 
@@ -7864,7 +7989,8 @@ module BlueCollarSystems
 
     def self.import_item_as_raster(model, target_entities, pdf_path, page_num,
                                    item, media_box, opts, import_start,
-                                   y_offset = 0.0, page_rotation = 0)
+                                   y_offset = 0.0, page_rotation = 0,
+                                   source_bounds = nil)
       image = nil
       owned_crop_dir = nil
       standalone_cache = opts[:item_raster_cache_persistent] != true
@@ -7873,8 +7999,12 @@ module BlueCollarSystems
       page_render = prepare_item_raster_page!(
         pdf_path, page_num, media_box, page_rotation, opts
       )
+      source_bounds ||= ItemRasterSourceBounds.base(item, media_box, media_box,
+        page_rotation, page_num, page_render[:source_pdf_sha256],
+        'source_svg_unavailable')
       crop = item_raster_crop_geometry(
-        item, media_box, page_rotation, page_render[:dpi]
+        item, media_box, page_rotation, page_render[:dpi], 1.5,
+        [page_render[:pixel_width], page_render[:pixel_height]], source_bounds
       )
       owned_crop_dir = SafeTemp.mktmpdir("bc_item_crop_p#{page_num}_")
       png_path = File.join(owned_crop_dir, 'crop.png')

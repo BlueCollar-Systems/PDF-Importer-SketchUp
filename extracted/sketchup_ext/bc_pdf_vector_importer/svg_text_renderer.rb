@@ -1294,6 +1294,9 @@ module BlueCollarSystems
           gs.to_s,
           '-dSAFER', '-dBATCH', '-dNOPAUSE', '-dQUIET',
           '-sDEVICE=pdfwrite',
+          # Font embedding may bake intrinsic PDF rotation into the content,
+          # but must not auto-rotate that displayed page again from its text.
+          '-dAutoRotatePages=/None',
           '-dEmbedAllFonts=true',
           '-dSubsetFonts=true',
           '-dCompatibilityLevel=1.7',
