@@ -31,7 +31,7 @@ Both Ruby 2.2.4 and 3.4 passed the affected checks: representation contracts
 also parsed all 94 shipped Ruby files. These checks do not replace a native
 import/save/reopen/Undo test.
 
-## Current local r19 test candidate
+## Local r19 test candidate (historical preparation)
 
 | Field | Bound value |
 |---|---|
@@ -104,6 +104,24 @@ The r18 private ordinary-menu request was prepared and passed read-only prefligh
 No v3.7.171 native session has been launched for that request. Windows currently
 has an unrelated permission prompt awaiting the user; security prompts require
 manual handling. CAD programs remain closed and no native lease is held.
+
+## Subsequent interrupted r19 test and evidence availability
+
+After the permission prompt was dismissed, the exact r19 candidate completed an
+ordinary-menu Raster import in SketchUp 2017 Make. Slanted-text white cutouts
+remained visible. The user interrupted for a restart before Save As; that attempt
+does not establish save, Undo, or fresh-reopen acceptance. Its earlier pending
+statements above describe preparation at the time, rather than the later attempt.
+
+On October 17 the former `C:/TMP` diagnostic directories were absent. The source,
+test packages, and original user PDFs remained available. Historical hashes and
+observations are retained here; the missing temporary files cannot presently be
+independently inspected. New diagnostics use `C:/BlueCollar-Validation/` and are
+separate evidence, without replacing or relabeling the interrupted attempt.
+
+The subsequent source-renderer check reproduced the cutouts outside SketchUp:
+extractor boxes omitted glyph ink even with the existing padding. See the
+[source-owned crop correction](2026-10-17-raster-owned-ink.md).
 
 ## Required native acceptance
 

@@ -58,6 +58,19 @@ class QAReportTest < Minitest::Test
     assert_equal false, report[:extra][:import_contract_ready][:ready]
   end
 
+  def test_unqualified_raster_source_ink_coverage_is_plain_in_human_summary
+    qa = BlueCollarSystems::PDFVectorImporter::QAReport
+    stats = mixed_summary_stats(0, 1)
+    stats[:raster_delivery_records] = [{ :artifact_evidence => {
+      :source_bounds_evidence => { :status => 'extractor_bbox_only',
+        :reason => 'source_ink_ownership_unqualified' } } }]
+    report = qa.build_from_stats('fictional-source.pdf', {}, stats)
+    assert_includes report[:extra][:human_summary], 'Source-ink coverage could not be checked for 1 Raster text item(s)'
+    assert_includes report[:extra][:human_summary], 'may clip overhanging ink'
+    records = JSON.parse(JSON.generate(report[:extra][:raster_delivery_records]))
+    assert_equal 'source_ink_ownership_unqualified', records[0]['artifact_evidence']['source_bounds_evidence']['reason']
+  end
+
   def test_native_text_without_page_path_primitives_requires_review_not_empty
     qa = BlueCollarSystems::PDFVectorImporter::QAReport
     report = qa.build_from_stats('fictional-source.pdf', {}, mixed_summary_stats(1, 0))

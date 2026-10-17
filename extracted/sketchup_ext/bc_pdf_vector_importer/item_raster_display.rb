@@ -1,5 +1,6 @@
 require_relative 'page_transform'
 require_relative 'representation_fidelity'
+require_relative 'item_raster_source_bounds'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -82,6 +83,20 @@ module BlueCollarSystems
           return box
         end
         requested = value(artifact, :requested_source_box)
+        bounds = value(artifact, :source_bounds_evidence)
+        if bounds
+          expected_requested = ItemRasterSourceBounds.requested_box!(bounds,
+            media, rotation, value(artifact, :source_crop_padding_points))
+          unless ItemRasterSourceBounds.same_box?(requested, expected_requested)
+            fail_contract('requested crop differs from canonical/source-owned ink bounds')
+          end
+          binding = {}
+          [:source_span_id, :source_pdf_sha256, :page_number].each do |key|
+            actual = value(artifact, key)
+            binding[key] = actual unless actual.nil?
+          end
+          ItemRasterSourceBounds.validate!(bounds, binding)
+        end
         size, dpi, crop = value(artifact, :page_pixel_size), value(artifact, :raster_dpi), value(artifact, :pixel_crop)
         unless requested.is_a?(Array) && requested.length == 4 && requested.all? { |v| number?(v) } &&
                requested[2] > requested[0] && requested[3] > requested[1] &&

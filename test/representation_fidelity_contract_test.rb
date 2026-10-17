@@ -3360,7 +3360,11 @@ class RepresentationFidelityContractTest < Minitest::Test
         transition_proof: valid_transition_proof(mode, next_mode)
       }
     end
-    raster = lambda do |_model, target, *_args|
+    raster = lambda do |_model, target, *args|
+      bounds = args.last
+      assert_equal 'extractor_bbox_only', bounds[:status]
+      assert_equal 'text_span:1:0', bounds[:source_span_id]
+      assert_equal Digest::SHA256.hexdigest('A'), bounds[:source_text_sha256]
       image = target.add_test_entity(1.0, 0.5, 'Image')
       {
         entity: image,
@@ -3392,11 +3396,13 @@ class RepresentationFidelityContractTest < Minitest::Test
 
     IMP::SvgItemRepresentationRenderer.stub(:render_svg, vector) do
       IMP.stub(:verified_item_raster_entity!, raster) do
-        IMP.complete_text3d_item_fallbacks!(
-          stats, model, entities, 'fixture.pdf', 1, [source],
-          [0, 0, 100, 100], [0, 0, 100, 100], 0, {}, Time.now,
-          0.0, document, [valid_transition_proof(:text3d, :glyphs)]
-        )
+        IMP.stub(:cached_source_pdf_sha256!, 'a' * 64) do
+          IMP.complete_text3d_item_fallbacks!(
+            stats, model, entities, 'fixture.pdf', 1, [source],
+            [0, 0, 100, 100], [0, 0, 100, 100], 0, {}, Time.now,
+            0.0, document, [valid_transition_proof(:text3d, :glyphs)]
+          )
+        end
       end
     end
     assert_equal [:glyphs, :geometry], modes

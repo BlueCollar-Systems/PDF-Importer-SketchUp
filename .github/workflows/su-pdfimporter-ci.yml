@@ -138,6 +138,7 @@ jobs:
           ruby test/ghostscript_runtime_resolver_test.rb
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
+          ruby test/item_raster_source_bounds_test.rb
           ruby test/item_raster_display_test.rb
           ruby test/source_image_paint_order_test.rb
           ruby test/original_image_clip_test.rb
@@ -244,6 +245,7 @@ jobs:
         run: |
           ruby test/command_runner_environment_test.rb
           ruby test/item_raster_page_renderer_test.rb
+          ruby test/item_raster_source_bounds_test.rb
           ruby test/item_raster_display_test.rb
           ruby test/pdf_navigation_link_appearance_test.rb
           ruby test/source_round_annotation_ink_test.rb
