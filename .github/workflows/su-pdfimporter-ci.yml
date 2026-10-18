@@ -11,7 +11,7 @@ on:
 
 jobs:
   ruby22-exact-parse:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - name: Install exact-Ruby source build prerequisites
@@ -21,7 +21,7 @@ jobs:
 
   syntax-check:
     needs: ruby22-exact-parse
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       matrix:
         ruby: ['2.7', '3.2']
@@ -44,7 +44,7 @@ jobs:
           done
 
   version-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - name: Version consistency check
@@ -63,7 +63,7 @@ jobs:
 
   smoke:
     needs: ruby22-exact-parse
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -206,7 +206,7 @@ jobs:
           ruby test/synthetic_public_corpus_test.rb
 
   poppler-prune:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python

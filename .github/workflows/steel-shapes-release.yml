@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       STEEL_TAG: ${{ inputs.tag || github.ref_name }}
     steps:

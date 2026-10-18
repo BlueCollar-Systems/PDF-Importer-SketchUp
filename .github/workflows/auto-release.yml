@@ -34,7 +34,7 @@ concurrency:
 
 jobs:
   release-plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ steps.version.outputs.version }}
       action: ${{ steps.plan.outputs.action }}
@@ -138,7 +138,7 @@ jobs:
 
   ruby22-exact-parse:
     needs: release-plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -225,7 +225,7 @@ jobs:
   release:
     needs: [release-plan, ruby22-exact-parse, source-only-build-windows]
     if: "github.event_name == 'workflow_dispatch' && inputs.publish_release == true && needs.source-only-build-windows.outputs.publication_ready == 'true' && !startsWith(github.event.head_commit.message, 'chore: bump version to') && !contains(github.event.head_commit.message, 'automation/version-bump') && !contains(github.event.head_commit.message, '[skip release]')"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout current release control plane
         uses: actions/checkout@v7

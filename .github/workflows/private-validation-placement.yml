@@ -10,7 +10,7 @@ on:
 
 jobs:
   private-validation-placement:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       PRIVATE_VALIDATION_CI_STRICT: '1'
     steps:
