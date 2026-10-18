@@ -11,7 +11,7 @@ on:
 
 jobs:
   ruby22-exact-parse:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Install exact-Ruby source build prerequisites
@@ -21,7 +21,7 @@ jobs:
 
   syntax-check:
     needs: ruby22-exact-parse
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         ruby: ['2.7', '3.2']
@@ -63,7 +63,7 @@ jobs:
 
   smoke:
     needs: ruby22-exact-parse
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
