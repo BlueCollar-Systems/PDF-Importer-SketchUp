@@ -67,6 +67,7 @@ module BlueCollarSystems
             lines[y_at(edge, middle)] ||= edge
           end
           levels = lines.keys.sort
+          membership = slab_membership_state(prepared_white, prepared_ink, middle) if levels.length >= 2
           runs = []
           active = nil
           levels.each_cons(2).with_index do |heights, level_index|
@@ -79,12 +80,12 @@ module BlueCollarSystems
               raise Error, 'exact planar partition predicate budget exceeded'
             end
             probe = [middle, (lower + upper) / 2]
-            owner = filled_region_index(prepared_white, probe)
+            owner, filled_ink = advance_slab_membership!(membership, probe[1])
             if owner.nil?
               active = nil
               next
             end
-            region = filled_with_bounds?(prepared_ink, probe) ? :ink : :white
+            region = filled_ink ? :ink : :white
             low_edge, high_edge = lines[lower], lines[upper]
             cell = exact_cell(region, left, right, low_edge, high_edge)
             next unless cell
@@ -135,6 +136,69 @@ module BlueCollarSystems
         cells
       rescue ArgumentError, TypeError, ZeroDivisionError, RangeError => error
         raise Error, 'invalid arithmetic in exact planar partition: ' + error.class.to_s
+      end
+
+      # Membership uses every complete prepared source contour, not clipped
+      # arrangement atoms. At fixed slab x, crossing a directed source edge
+      # upward changes that loop's winding by sign(dx). Half-open x intervals
+      # handle original vertices whose x is absent from the clipped x cuts.
+      # All coincident events are consumed before any open-cell probe is read.
+      def self.slab_membership_state(white, ink, middle)
+        events = []
+        regions = [white, ink]
+        windings = regions.map do |records|
+          records.map { |record| Array.new(record[:loops].length, 0) }
+        end
+        regions.each_with_index do |records, kind|
+          records.each_with_index do |record, region_index|
+            record[:loops].each_with_index do |loop, loop_index|
+              loop.each_index do |index|
+                a, b = loop[index], loop[(index + 1) % loop.length]
+                dx = b[0] - a[0]
+                next if dx == 0
+                left, right = [a[0], b[0]].minmax
+                next unless left <= middle && middle < right
+                events << [y_at([a, b], middle), kind, region_index,
+                           loop_index, dx > 0 ? 1 : -1]
+              end
+            end
+          end
+        end
+        { :events => events.sort_by { |event| event[0] }, :cursor => 0,
+          :windings => windings,
+          :holes => regions.map { |records| Array.new(records.length, 0) },
+          :white_bits => 0, :ink_count => 0 }
+      end
+
+      def self.advance_slab_membership!(state, height)
+        events = state[:events]
+        cursor = state[:cursor]
+        while cursor < events.length && events[cursor][0] <= height
+          _y, kind, region_index, loop_index, delta = events[cursor]
+          counts = state[:windings][kind][region_index]
+          holes = state[:holes][kind]
+          was_filled = counts[0] != 0 && holes[region_index] == 0
+          previous = counts[loop_index]
+          current = previous + delta
+          counts[loop_index] = current
+          if loop_index > 0
+            holes[region_index] += (current == 0 ? 0 : 1) - (previous == 0 ? 0 : 1)
+          end
+          filled = counts[0] != 0 && holes[region_index] == 0
+          if filled != was_filled
+            if kind == 0
+              bit = 1 << region_index
+              state[:white_bits] = filled ? state[:white_bits] | bit : state[:white_bits] & ~bit
+            else
+              state[:ink_count] += filled ? 1 : -1
+            end
+          end
+          cursor += 1
+        end
+        state[:cursor] = cursor
+        bits = state[:white_bits]
+        owner = bits == 0 ? nil : (bits & -bits).bit_length - 1
+        [owner, state[:ink_count] > 0]
       end
 
       # These contours are fresh Rational copies made by prepare_regions. Keep

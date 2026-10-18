@@ -196,3 +196,158 @@ class PlanarRegionPartitionTest < Minitest::Test
     assert_equal 1, Subject.partition(source, []).inject(0.to_r) { |sum, cell| sum + cell[:area] }
   end
 end
+
+# The original Rational winding oracle remains independent of slab events.
+class PlanarRegionPartitionTest
+  def rect(x0,y0,x1,y1)
+    [[x0,y0,0],[x1,y0,0],[x1,y1,0],[x0,y1,0]]
+  end
+  def face(*loops); { :loops => loops }; end
+  def partition(white, ink, options = {})
+    Subject.partition(white, ink, options)
+  end
+  def check_area(cells, white, ink)
+    assert_equal white, cells.select { |c| c[:region] == :white }.inject(0.to_r) { |sum,c| sum+c[:area] }
+    assert_equal ink, cells.select { |c| c[:region] == :ink }.inject(0.to_r) { |sum,c| sum+c[:area] }
+  end
+  def prepared(records)
+    Subject.with_exact_loop_bounds(Boundary.prepare_regions(records, :native_union))
+  end
+  def boundary_point?(records, point)
+    records.any? do |record|
+      record[:loops].any? do |loop|
+        loop.each_index.any? { |i| Boundary.on_segment?(point, loop[i], loop[(i+1)%loop.length]) }
+      end
+    end
+  end
+  def compare_queries(white, ink, xs, ys)
+    white, ink = prepared(white), prepared(ink)
+    xs.each do |x|
+      state = Subject.slab_membership_state(white, ink, x.to_r)
+      assert_operator state[:events].length, :<=, Subject.region_edges(white).length + Subject.region_edges(ink).length
+      assert state[:events].all? { |e| e[0].is_a?(Rational) }
+      ys.sort.each do |y|
+        point = [x.to_r, y.to_r]
+        # Cell probes are open arrangement interiors. Boundary membership is
+        # intentionally outside this private sweep helper's contract.
+        next if boundary_point?(white + ink, point)
+        expected = [Subject.filled_region_index(white, point), Subject.filled_with_bounds?(ink, point)]
+        assert_equal expected, Subject.advance_slab_membership!(state, point[1]), point.inspect
+      end
+    end
+  end
+  def test_slab_surrounding_ink_original_monotone_vertex_at_clipped_slab_middle
+    white = [face(rect(0,0,2,2))]
+    # No ink edge enters the white box. The original vertex x=1 is exactly
+    # the sole clipped slab midpoint; strict source x tests lose its crossing.
+    ink = [face([[-2,-4,0],[1,-3,0],[4,-4,0],[4,4,0],[-2,4,0]])]
+    check_area(partition(white, ink), 0, 4)
+    check_area(partition(white, [face(ink[0][:loops][0].reverse)]), 0, 4)
+    compare_queries(white, ink, [1], [-5,-2,1,3,5])
+  end
+  def test_slab_counters_native_union_and_coincident_opposite_direction_events
+    white = [face(rect(0,0,8,8), rect(2,2,6,6)), face(rect(3,3,5,5))]
+    ink = [face(rect(-1,-1,9,9), rect(1,1,7,7).reverse),
+           face(rect(0,0,4,4)), face(rect(0,0,4,4).reverse),
+           face(rect(4,0,8,4))]
+    partition(white, ink)
+    compare_queries(white, ink, [-1,0,1,2,3,4,5,6,7,8,9],
+                    [-2,-1,0,Rational(1,2),1,2,Rational(5,2),3,4,5,6,7,8,9,10])
+  end
+  def test_slab_first_white_owner_retained_through_union_transitions
+    white = [face(rect(1,1,5,5), rect(2,2,4,4)),
+             face(rect(0,0,6,6)), face(rect(2,2,4,4))]
+    ink = [face(rect(3,-1,4,7))]
+    partition(white, ink)
+    compare_queries(white, ink, [Rational(3,2),3,Rational(9,2)],
+                    [-2,Rational(1,2),Rational(3,2),Rational(5,2),Rational(7,2),Rational(9,2),Rational(11,2),7])
+  end
+  def test_slab_tiny_rational_features_reflections_and_nested_regions
+    epsilon = Rational(1,10**30)
+    white = [face(rect(0,0,3,3))]
+    ink = [face([[0,0,0],[3,0,0],[3,epsilon*2,0],[0,epsilon,0]]),
+           face(rect(1,1,2,2), rect(1+epsilon,1+epsilon,2-epsilon,2-epsilon))]
+    cells = partition(white, ink)
+    assert cells.any? { |c| c[:area] > 0 && c[:area] < epsilon*10 }
+    change = lambda do |records|
+      records.reverse.map { |r| face(*r[:loops].map { |loop| loop.reverse.map { |p| [2*p[0]+p[1]+100, p[0]-3*p[1]-80, 0] } }) }
+    end
+    partition(change.call(white), change.call(ink))
+  end
+  def test_slab_self_crossing_and_overlapping_holes_match_existing_native_union
+    white = [face(rect(-3,-3,3,3))]
+    ink = [face([[-2,-2,0],[2,2,0],[-2,2,0],[2,-2,0]]),
+           face(rect(-2,-2,2,2),rect(-1,-1,1,1),rect(0,0,3,3))]
+    partition(white, ink)
+    compare_queries(white, ink, [-2,Rational(-3,2),Rational(-1,2),Rational(1,2),Rational(3,2),2],
+                    [-4,Rational(-5,2),Rational(-3,2),Rational(-1,2),Rational(1,2),Rational(3,2),Rational(5,2),4])
+  end
+  def test_slab_many_regions_owner_bitset_exceeds_legacy_machine_word
+    white = 80.times.map { |i| face(rect(i*2,0,i*2+1,1)) }
+    ink = [face(rect(-1,-1,161,2))]
+    state = Subject.slab_membership_state(prepared(white), prepared(ink), Rational(317,2))
+    assert_equal [79,true], Subject.advance_slab_membership!(state, Rational(1,2))
+    partition(white, ink)
+  end
+  def test_slab_deterministic_tiny_fixtures_match_original_winding_oracle
+    random = Random.new(178)
+    completed=0
+    white,ink=nil,nil
+    16.times do
+      white = [face(rect(-3,-3,3,3)), face(rect(0,0,4,4),rect(1,1,2,2))]
+      ink = 3.times.map do
+        x = Rational(random.rand(-8..6),2)
+        y = Rational(random.rand(-8..6),2)
+        face(rect(x,y,x+Rational(random.rand(1..6),2),y+Rational(random.rand(1..6),2)))
+      end
+      partition(white, ink)
+      compare_queries(white, ink, [Rational(-5,2),Rational(-1,2),Rational(3,2)],
+        (-13..17).map { |value| Rational(value,4) })
+      completed+=1
+    end
+    assert_equal 16, completed
+  end
+  class Progress
+    attr_reader :calls
+    def initialize(cancel_at = nil); @calls=[]; @cancel_at=cancel_at; end
+    def checkpoint!(stage, metadata)
+      @calls << [stage,metadata]
+      raise RuntimeError, 'one-shot cancel' if @cancel_at && @calls.length == @cancel_at
+    end
+  end
+  def test_slab_original_budget_failures_and_one_shot_terminal_checkpoint
+    white=[face(rect(0,0,4,4))];ink=[face(rect(1,1,3,3))]
+    progress=Progress.new
+    partition(white,ink,:run_controller=>progress,:page_number=>1)
+    assert_equal [:white_mask_intersections,:white_mask_partition],progress.calls.map(&:first).uniq
+    assert_equal [:white_mask_partition,{:completed=>3,:total=>3,:page=>1}],progress.calls.last
+    controller=Progress.new(3)
+    error=assert_raises(RuntimeError) { partition(white,ink,:run_controller=>controller,:page_number=>1) }
+    assert_equal 'one-shot cancel',error.message
+    assert_equal 3,controller.calls.length
+    [:input_edges,:atomic_edges,:slabs,:cells,:predicate_edges].each do |budget|
+      assert_raises(Subject::Error) { partition(white,ink,budget=>1) }
+    end
+  end
+  def test_slab_membership_avoids_repeated_winding_but_matches_original_source_oracle
+    white=[face(rect(0,0,12,12))]
+    ink=6.times.map { |i|face(rect(i+1,i+1,i+Rational(3,2),12-i)) }
+    original=Boundary.method(:winding);calls=0
+    Boundary.stub(:winding,lambda { |point,loop|calls+=1;original.call(point,loop) }) do
+      partition(white,ink)
+      assert_equal 0,calls
+      compare_queries(white,ink,[Rational(3,2),Rational(9,2),Rational(15,2)],
+        (0..49).map { |value|Rational(value,4) })
+      assert_operator calls,:>,0
+    end
+  end
+
+  def test_slab_known_literal_source_cells_keep_order_coordinates_classes_and_areas
+    white=[face(rect(0,0,4,4))];ink=[face(rect(1,1,3,3))]
+    expected=[[:white,rect(0,0,1,4),4],[:white,rect(1,0,3,1),2],
+      [:ink,rect(1,1,3,3),4],[:white,rect(1,3,3,4),2],[:white,rect(3,0,4,4),4]].map do |region,loop,area|
+      {:region=>region,:loop=>loop.map { |point|point.map(&:to_r) },:area=>area.to_r}
+    end
+    assert_equal expected,partition(white,ink)
+  end
+end

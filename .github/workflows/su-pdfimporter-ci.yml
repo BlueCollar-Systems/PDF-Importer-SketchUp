@@ -197,6 +197,7 @@ jobs:
           ruby test/planar_region_partition_test.rb
           ruby test/planar_partition_performance_test.rb
           ruby test/white_mask_composition_control_test.rb
+          ruby test/white_mask_progress_test.rb
           ruby test/late_pdf_overlays_test.rb
           ruby test/svg_paint_binding_test.rb
           ruby test/svg_region_boundary_test.rb

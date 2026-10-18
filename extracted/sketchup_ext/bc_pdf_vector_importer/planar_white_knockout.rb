@@ -29,12 +29,75 @@ module BlueCollarSystems
         end
       end
 
+      # Diagnostic output only. Flush selected attempt/outcome records and at
+      # most one coarse checkpoint every ten seconds; never flush each cell.
+      # A blocked host call cannot emit a heartbeat until control returns.
+      # Only the binding/composition options receive this narrow proxy.
+      # Delegate first: return values and terminal exception objects are owned
+      # by the original controller, and logging never replaces those decisions.
+      class CheckpointProgressProxy
+        def initialize(controller, opts)
+          @controller = controller
+          @opts = opts
+        end
+
+        def checkpoint!(stage, detail = {})
+          result = @controller.checkpoint!(stage, detail)
+          begin
+            sampled = detail.is_a?(Hash) ? detail.merge(:phase => stage) : { :phase => stage }
+            PlanarWhiteKnockout.log_progress!(@opts, :progress, sampled)
+          rescue StandardError
+            # Only diagnostic preparation is guarded; delegation above is not.
+          end
+          result
+        end
+      end
+
+      def self.progress_controller(controller, opts)
+        return controller unless opts[:mask_progress].is_a?(Hash) &&
+          controller && controller.respond_to?(:checkpoint!)
+        CheckpointProgressProxy.new(controller, opts)
+      end
+
+      def self.white_mask_progress_clock
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      rescue StandardError
+        Time.now.to_f
+      end
+
+      def self.log_progress!(opts, event, detail = {}, force = false)
+        state = opts[:mask_progress]
+        return false unless state.is_a?(Hash) && defined?(Logger)
+        now = white_mask_progress_clock
+        last = state[:last_record_at]
+        return false unless force || last.nil? || now - last >= 10.0
+        elapsed = [now - state[:started_at], 0.0].max.round(3)
+        fields = ["page=#{opts[:page_number]}", "event=#{event}", "elapsed_s=#{elapsed}"]
+        [:mask_index, :mask_total, :pdf_paint_order, :svg_paint_order].each do |key|
+          fields << "#{key}=#{state[key].inspect}" if state.key?(key)
+        end
+        if state[:mask_started_at]
+          fields << "mask_elapsed_s=#{[now - state[:mask_started_at], 0.0].max.round(3)}"
+        end
+        detail.each { |key, value| fields << "#{key}=#{safe_error_detail(value.inspect)}" }
+        Logger.info('WhiteMaskProgress', fields.join('; '))
+        Logger.flush_log # Ruby-buffer flush, not fsync or a durable write claim.
+        state[:last_record_at] = now
+        true
+      rescue StandardError
+        false # Logging failure never changes delivery or cancellation.
+      end
+
       def self.run_checkpoint!(opts, stage, completed, total)
         controller = opts[:run_controller]
-        return false unless controller && controller.respond_to?(:checkpoint!)
-        controller.checkpoint!(stage, :completed => completed, :total => total,
-          :page => opts[:page_number])
-        true
+        controlled = controller && controller.respond_to?(:checkpoint!)
+        if controlled
+          controller.checkpoint!(stage, :completed => completed, :total => total,
+            :page => opts[:page_number])
+        end
+        log_progress!(opts, :progress,
+          :phase => stage, :completed => completed, :total => total)
+        !!controlled
       end
 
       # All transformations map to the same page coordinate system. A record's
@@ -46,11 +109,18 @@ module BlueCollarSystems
         fail_contract('prebound physical ink faces must be an array') unless ink.is_a?(Array)
         result = { :white_groups => 0, :opaque_groups => 0, :composed_groups => 0,
                    :ink_faces => ink.length, :removed_area => 0.0,
+                   :removed_area_basis => 'exact_source_partition',
                    :skipped_unproven_order => 0, :skipped_nonwhite => 0,
                    :unchanged_no_ink_groups => 0, :failed_groups => 0,
                    :mask_failures => [], :mask_failure_details_omitted => 0 }
         masks = Array(fill_only_groups)
         masks.each_with_index do |record, mask_index|
+          if opts[:mask_progress].is_a?(Hash)
+            opts[:mask_progress].merge!(:mask_index => mask_index,
+              :mask_total => masks.length, :mask_started_at => nil,
+              :pdf_paint_order => (record.is_a?(Hash) ? record[:pdf_paint_order] || record[:paint_order] : nil),
+              :svg_paint_order => (record.is_a?(Hash) ? record[:paint_order] : nil))
+          end
           run_checkpoint!(opts, :white_mask, mask_index, masks.length)
           unless opaque_fill?(record)
             result[:skipped_nonwhite] += 1
@@ -74,6 +144,12 @@ module BlueCollarSystems
           candidates = overlaps.select { |face| earlier_mask?(record, face, opts) }
           result[:skipped_unproven_order] += overlaps.length - candidates.length
           next if candidates.empty?
+          if opts[:mask_progress].is_a?(Hash)
+            opts[:mask_progress][:mask_started_at] = white_mask_progress_clock
+          end
+          log_progress!(opts, :mask_attempt,
+            { :phase => :exact_partition, :source_faces => white.length,
+              :candidate_ink_faces => candidates.length }, true)
           begin
             removed_area = compose_group!(group, transform, white, candidates,
               opts.merge(:preserve_source => record[:preserve_source] == true,
@@ -81,6 +157,9 @@ module BlueCollarSystems
                   :pdf_paint_order => record[:pdf_paint_order] || record[:paint_order],
                   :svg_paint_order => record[:paint_order] }))
           rescue RestoredMaskFailure => error
+            log_progress!(opts, :mask_restored_failure,
+              { :error_class => error.details[:error_class],
+                :detail => error.details[:detail] }, true)
             raise unless opts[:continue_mask_failures] == true
             result[:failed_groups] += 1
             if result[:mask_failures].length < MAX_MASK_FAILURE_DETAILS
@@ -90,6 +169,9 @@ module BlueCollarSystems
             end
             next
           end
+          log_progress!(opts, :mask_completed,
+            { :outcome => removed_area.nil? ? :unchanged_exact_no_ink : :composed,
+              :removed_area => removed_area }, true)
           if removed_area.nil?
             result[:unchanged_no_ink_groups] += 1
             next
@@ -460,12 +542,35 @@ module BlueCollarSystems
             source_cells = rotated_construction_partition(white, ink, source_cells, opts)
             scale = partition_construction_scale(source_cells)
           end
+          # Retain the complete exact partition/clearance proof even though
+          # ink cells need not become temporary native geometry. Area is still
+          # certified against the original physical mask, not the kept subset.
+          source_areas = { :white => 0.to_r, :ink => 0.to_r }
+          source_cells.each_with_index do |cell, index|
+            run_checkpoint!(opts, :white_mask_partition, index, source_cells.length) if (index % 64).zero?
+            unless source_areas.key?(cell[:region]) && cell[:area].is_a?(Rational) && cell[:area] > 0 &&
+                SvgRegionBoundary.signed_area2(cell[:loop]) == cell[:area] * 2
+              fail_contract('exact white-mask partition has invalid source class or area')
+            end
+            source_areas[cell[:region]] += cell[:area]
+          end
+          expected = source_area(white)
+          source_partition_area = source_areas.values.inject(0.to_r, :+).to_f
+          tolerance = [expected.abs * 1.0e-7, 1.0e-10].max
+          unless expected.finite? && expected > 0.0 && source_partition_area.finite? &&
+              (source_partition_area - expected).abs <= tolerance
+            fail_contract('exact white-mask partition changed source white area')
+          end
+          white_cells = source_cells.select { |cell| cell[:region] == :white }
+          kept_only = !white_cells.empty?
+          construction_cells = kept_only ? white_cells : source_cells
           stage = entities.add_group
           stage.name = 'PDF planar white composition' if stage.respond_to?(:name=)
           origin, scale, point_map = partition_construction_frame!(
             stage, source_cells, origin, scale, transform)
-          source_cells.each_with_index do |cell, index|
-            run_checkpoint!(opts, :white_mask_cells, index, source_cells.length) if (index % 64).zero?
+          created_faces = {}
+          construction_cells.each_with_index do |cell, index|
+            run_checkpoint!(opts, :white_mask_cells, index, construction_cells.length) if (index % 64).zero?
             # A convex source cell has no holes and cannot cross a source
             # boundary. Keep cells in separate identity groups so legacy host
             # face discovery cannot merge adjacent regions across that boundary.
@@ -474,23 +579,49 @@ module BlueCollarSystems
             face = container.entities.add_face(points)
             fail_contract('native exact white-mask cell construction failed') unless face
             verify_partition_face!(face, points)
+            if kept_only
+              identity = face.respond_to?(:entityID) ? face.entityID : nil
+              unless identity.is_a?(Integer) && identity > 0 && !created_faces.key?(identity)
+                fail_contract('native kept white-mask cell has no unique entity identity')
+              end
+              created_faces[identity] = face
+            end
           end
-          run_checkpoint!(opts, :white_mask_cells, source_cells.length, source_cells.length)
+          run_checkpoint!(opts, :white_mask_cells, construction_cells.length, construction_cells.length)
           cells = partition_faces(stage.entities)
           fail_contract('native white-mask subdivision produced no faces') if cells.empty?
+          if kept_only
+            actual_ids = {}
+            unless created_faces.length == construction_cells.length &&
+                created_faces.values.all?(&:valid?) && cells.length == created_faces.length &&
+                cells.all? do |face|
+                  identity = face.respond_to?(:entityID) ? face.entityID : nil
+                  retained = created_faces[identity]
+                  unique = !actual_ids.key?(identity)
+                  actual_ids[identity] = true
+                  unique && retained && face == retained
+                end
+              fail_contract('native kept white-mask cell roster changed during construction')
+            end
+          end
           white_index = spatial_index(white)
           ink_index = spatial_index(ink)
           plan = classify_cells(cells, origin, white_index, ink_index, scale, opts)
-          expected = source_area(white)
+          if kept_only && !plan.all? { |cell| cell[:region] == :white }
+            fail_contract('native kept white-mask cell changed exact source class')
+          end
+          if kept_only && !plan.all? { |cell| cell[:area].finite? && cell[:area] > 0.0 }
+            fail_contract('native kept white-mask cell has invalid area')
+          end
+          expected_native = kept_only ? source_areas[:white].to_f : expected
           partition_area = plan.inject(0.0) do |sum, cell|
             cell[:region] == :outside ? sum : sum + cell[:area]
           end
-          tolerance = [expected.abs * 1.0e-7, 1.0e-10].max
-          if (partition_area - expected).abs > tolerance
+          if !partition_area.finite? || !expected_native.finite? ||
+              (partition_area - expected_native).abs > tolerance
             fail_contract('native white-mask partition changed source white area')
           end
           kept = plan.select { |cell| cell[:region] == :white }
-          removed = plan.select { |cell| cell[:region] == :ink }
           verify_ink_samples!(ink, white_index, spatial_index(kept), origin, ink_index, opts)
           plan.each_with_index do |cell, index|
             run_checkpoint!(opts, :white_mask_style, index, plan.length) if (index % 64).zero?
@@ -523,7 +654,9 @@ module BlueCollarSystems
             stage.set_attribute(DICTIONARY, 'planar_white_knockout', true)
             stage.set_attribute(DICTIONARY, 'source_fill_composed_visible', true)
           end
-          removed.inject(0.0) { |sum, cell| sum + cell[:area] }
+          # Public numeric result is the exact source-partition ink area;
+          # compose! labels this basis explicitly, including the ink-only path.
+          source_areas[:ink].to_f
         rescue StandardError => error
           terminal = error.is_a?(ImportRunControl::ImportCancelled) ||
                      error.is_a?(ImportRunControl::ResumeMismatch) ||

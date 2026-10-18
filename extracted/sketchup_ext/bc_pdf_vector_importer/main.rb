@@ -3315,6 +3315,9 @@ module BlueCollarSystems
     end
 
     def self.compose_page_white_masks!(builder, text_items, media_box, opts = {})
+      opts = opts.merge(:mask_progress => {
+        :started_at => PlanarWhiteKnockout.white_mask_progress_clock })
+      PlanarWhiteKnockout.log_progress!(opts, :page_started, {}, true)
       context = opts[:composition_inventory] ||
         collect_page_composition_inventory!(builder, text_items, opts)
       return nil unless context
@@ -3344,6 +3347,7 @@ module BlueCollarSystems
             raise RepresentationFidelity::ContractError, 'source-unit paint order uses a different source SVG'
           end
         end
+        PlanarWhiteKnockout.log_progress!(opts, :source_inventory_started, {}, true)
         inventory = SvgPaintOrder.build(document[:svg], media_box,
           :scale => opts[:scale], :svg_page_box => opts[:svg_page_box], :y_offset => 0.0,
           :run_controller => opts[:run_controller], :page_number => opts[:page_number])
@@ -3365,15 +3369,29 @@ module BlueCollarSystems
         end
       end
       control_opts = { :run_controller => opts[:run_controller],
-                       :page_number => opts[:page_number] }
+                       :page_number => opts[:page_number], :mask_progress => opts[:mask_progress] }
+      control_opts[:run_controller] = PlanarWhiteKnockout.progress_controller(
+        opts[:run_controller], control_opts)
+      PlanarWhiteKnockout.log_progress!(opts, :source_binding_started,
+        { :source_masks => masks.length, :text_roots => roots.length }, true)
       bound = SvgPaintBinding.prepare(masks, roots, inventory,
         control_opts.merge(:scale => opts[:scale]))
+      PlanarWhiteKnockout.log_progress!(opts, :source_binding_completed,
+        { :bound_masks => bound[:masks].length, :ink_faces => bound[:ink_faces].length }, true)
       report = PlanarWhiteKnockout.compose!(bound[:masks], roots,
         control_opts.merge(:ink_faces => bound[:ink_faces], :continue_mask_failures => true))
       report[:source_binding] = bound[:binding]
       report[:source_svg_sha256] = source_svg_sha256 if document
+      PlanarWhiteKnockout.log_progress!(opts, :page_completed,
+        { :composed_groups => report[:composed_groups],
+          :unchanged_no_ink_groups => report[:unchanged_no_ink_groups],
+          :failed_groups => report[:failed_groups] }, true)
       { :report => report, :highest_text_z => highest_text_z,
         :final_page_crops => bound[:ink_faces].select { |face| face[:final_page_crop] == true } }
+    rescue StandardError => error
+      PlanarWhiteKnockout.log_progress!(opts, :page_interrupted,
+        { :error_class => error.class.name, :detail => error.message }, true)
+      raise # Preserve cancellation/rollback/mismatch identity and propagation.
     end
 
     def self.record_page_white_mask_composition!(stats, page_num, composition)
@@ -3382,12 +3400,8 @@ module BlueCollarSystems
       stats[:planar_white_knockout] << report.merge(:page => page_num)
       failed = report[:failed_groups].to_i
       return report if failed == 0
-      detail = "#{failed} source fill(s) were left unchanged; text drawn over them may be hidden"
-      first = Array(report[:mask_failures]).first
-      if first
-        detail += "; first PDF order=#{first[:pdf_paint_order].inspect}: " \
-                  "#{first[:error_class]}: #{first[:detail]}"
-      end
+      detail = "#{failed} source fill(s) were left unchanged; text drawn over them may be hidden. " \
+               'Compare these areas with the PDF.'
       record_page_step_down!(stats, page_num, 'white_areas',
         'white_area_check_failed', detail)
       report

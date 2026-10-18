@@ -223,6 +223,7 @@ readonly SMOKE_TESTS=(
   test/planar_region_partition_test.rb
   test/planar_partition_performance_test.rb
   test/white_mask_composition_control_test.rb
+  test/white_mask_progress_test.rb
   test/planar_white_knockout_test.rb
   test/inline_image_boundary_test.rb
   test/inline_image_composite_test.rb

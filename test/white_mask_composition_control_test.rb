@@ -154,8 +154,10 @@ class WhiteMaskCompositionControlTest < Minitest::Test
     assert_equal 'white_areas', warning[:item]
     assert_equal 'white_area_check_failed', warning[:reason_code]
     assert_includes warning[:detail], '1 source fill(s) were left unchanged'
-    assert_includes warning[:detail], '[0, 100]'
-    assert_includes warning[:detail], 'exact cell budget exceeded'
+    assert_includes warning[:detail], 'Compare these areas with the PDF.'
+    refute_includes warning[:detail], '[0, 100]'
+    refute_includes warning[:detail], 'PlanarRegionPartition::Error'
+    refute_includes warning[:detail], 'exact cell budget exceeded'
     refute stats.key?(:text_step_downs)
     context = IMP::PlanarWhiteKnockout.stub(:collect_text_faces,
       lambda { |*_args| raise 'partial report caused an extra inventory scan' }) do

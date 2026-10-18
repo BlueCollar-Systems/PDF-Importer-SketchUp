@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.178-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.179-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -21,6 +21,21 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Recent fixes (v3.7.179)
+
+- Exact white-area classification sweeps the complete source contours once per
+  partition slab instead of repeatedly testing every contour for each cell.
+  Existing limits, paint ownership, holes and exact cell boundaries remain.
+- Partially retained fills construct only the visible native cells. Full source
+  coverage, construction clearance, native boundaries and rollback stay checked.
+- Import logs flush sparse mask progress records, including the current phase,
+  to make a long refinement diagnosable. The user-facing warning explains the
+  remaining visual limitation; technical details stay in the structured report.
+- The preceding v3.7.178 foundation test passed the 3D Text import, save, Undo and
+  reopen lifecycle and the scoped annotation-height checks. Its flat Glyphs test
+  expired at the unchanged 30-minute stage limit. Native v3.7.179 acceptance is
+  still pending; source-kernel improvements are not a host-import speed claim.
 
 ### Recent fixes (v3.7.178)
 
