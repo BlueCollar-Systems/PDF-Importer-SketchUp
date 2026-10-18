@@ -746,6 +746,141 @@ RUBY
     { :loop => points.map { |p| p.map(&:to_r) } }
   end
 
+  def alternate_partition_fixture
+    delta = 2.0**-52
+    original = Face.new([rect(0, 0, 4, 4)])
+    original.attributes['source_fill_original'] = true
+    white = Group.new(Entities.new([original]))
+    white.entities.native_tolerance = Subject::NATIVE_VERTEX_TOLERANCE
+    ink = [Face.new([rect(1, 0.5, 2, 1.5)]), Face.new([rect(1 + delta, 2, 3, 3)])]
+    text = Group.new(Entities.new(ink))
+    text.owner = true
+    [white, text, original, ink]
+  end
+
+  def test_exact_quarter_turn_removes_only_artificial_skinny_partition_seams
+    white, text, original, ink = alternate_partition_fixture
+    sources = Subject.snapshots(white, white.transformation, false)
+    physical_ink = Subject.collect_text_faces([text])
+    before = Marshal.dump([sources, physical_ink])
+    cells = BlueCollarSystems::PDFVectorImporter::PlanarRegionPartition.partition(sources, physical_ink)
+    assert_raises(Subject::ConstructionScaleBudgetError) { Subject.partition_construction_scale(cells) }
+    restored = Subject.rotated_construction_partition(sources, physical_ink, cells)
+    assert_equal Subject::CONSTRUCTION_SCALE, Subject.partition_construction_scale(restored)
+    [:white, :ink].each do |kind|
+      assert_equal cells.select { |cell| cell[:region] == kind }.inject(0) { |sum, cell| sum + cell[:area] },
+                   restored.select { |cell| cell[:region] == kind }.inject(0) { |sum, cell| sum + cell[:area] }
+    end
+    restored.each do |cell|
+      assert_equal cell[:area] * 2,
+        BlueCollarSystems::PDFVectorImporter::SvgRegionBoundary.signed_area2(cell[:loop])
+      assert cell[:loop].flatten.all? { |value| value.is_a?(Rational) }
+    end
+    assert_equal before, Marshal.dump([sources, physical_ink])
+    source_geometry = Marshal.dump(ink.map(&:raw))
+    result = Subject.compose!([{ :group => white, :fill_rgb => [1,1,1],
+      :before_text => true, :preserve_source => true }], [text])
+    assert_equal 1, result[:composed_groups]
+    assert original.hidden?
+    refute original.erased
+    assert_equal source_geometry, Marshal.dump(ink.map(&:raw))
+    stage = white.entities.stage
+    retained = Subject.snapshots(stage, stage.transformation, false)
+    assert retained.any? { |record| record[:loops].flatten(1).include?([1 + 2.0**-52, 2.0, 0.0]) },
+      'the original one-ULP source boundary coordinate is retained, not snapped'
+    refute retained.any? { |record| Subject.contains?(record, [1.5, 1, 0]) }
+    assert retained.any? { |record| Subject.contains?(record, [1.5, 1.75, 0]) }
+  end
+
+  def test_ordinary_partition_does_not_use_an_alternate_projection
+    white, text, original, _ink = fixture
+    Subject.stub(:rotated_construction_partition, lambda { |*_args| raise 'unexpected alternate partition' }) do
+      result = Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }], [text])
+      assert_equal 1, result[:composed_groups]
+    end
+    assert original.erased
+  end
+
+  def test_other_contract_failures_cannot_trigger_projection_even_with_the_same_message
+    white, text, original, ink = alternate_partition_fixture
+    error = nil
+    Subject.stub(:partition_construction_scale, lambda { |_cells|
+      raise ContractError, 'exact white-mask construction scale budget exceeded'
+    }) do
+      Subject.stub(:rotated_construction_partition, lambda { |*_args| raise 'unexpected alternate partition' }) do
+        error = assert_raises(ContractError) do
+          Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }], [text])
+        end
+      end
+    end
+    assert_includes error.message, 'scale budget exceeded'
+    refute original.erased
+    assert ink.none?(&:erased)
+    assert_nil white.entities.stage
+  end
+
+  def test_scale_exhaustion_tries_at_most_one_alternate_and_keeps_originals_on_failure
+    white, text, original, ink = alternate_partition_fixture
+    scale_calls, alternate_calls = 0, 0
+    Subject.stub(:partition_construction_scale, lambda { |_cells|
+      scale_calls += 1
+      raise Subject::ConstructionScaleBudgetError, 'exact white-mask construction scale budget exceeded'
+    }) do
+      Subject.stub(:rotated_construction_partition, lambda { |_white, _ink, cells, _opts|
+        alternate_calls += 1
+        cells
+      }) do
+        assert_raises(ContractError) do
+          Subject.compose!([{ :group => white, :fill_rgb => [1,1,1], :before_text => true }], [text])
+        end
+      end
+    end
+    assert_equal 2, scale_calls
+    assert_equal 1, alternate_calls
+    refute original.erased
+    assert ink.none?(&:erased)
+    assert_nil white.entities.stage
+  end
+
+  def test_alternate_projection_does_not_discard_a_real_unconstructible_white_feature
+    epsilon = 2.0**-70
+    white = [record(rect(0,0,1,1))]
+    ink = [record(rect(epsilon,0,1,1))]
+    cells = BlueCollarSystems::PDFVectorImporter::PlanarRegionPartition.partition(white, ink)
+    assert_raises(Subject::ConstructionScaleBudgetError) { Subject.partition_construction_scale(cells) }
+    restored = Subject.rotated_construction_partition(white, ink, cells)
+    assert_raises(Subject::ConstructionScaleBudgetError) { Subject.partition_construction_scale(restored) }
+    assert_equal epsilon.to_r, restored.select { |cell| cell[:region] == :white }.inject(0) { |sum, cell| sum + cell[:area] }
+    assert restored.any? { |cell| cell[:loop].any? { |point| point[0] == epsilon.to_r } }
+  end
+
+  def test_alternate_projection_cancellation_and_exact_coverage_failure_propagate
+    white, text, _original, _ink = alternate_partition_fixture
+    sources = Subject.snapshots(white, white.transformation, false)
+    ink = Subject.collect_text_faces([text])
+    partition = BlueCollarSystems::PDFVectorImporter::PlanarRegionPartition
+    cells = partition.partition(sources, ink)
+    controller = BlueCollarSystems::PDFVectorImporter::ImportRunControl::Controller.new(
+      :pages => [1], :requested_mode => :glyphs, :cancel_probe => lambda { true })
+    assert_raises(BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled) do
+      Subject.rotated_construction_partition(sources, ink, cells, :run_controller => controller, :page_number => 1)
+    end
+    restored = Subject.rotated_construction_partition(sources, ink, cells)
+    rotated = restored.map do |cell|
+      cell.merge(:loop => cell[:loop].map { |point| [point[1], -point[0], point[2]] })
+    end
+    partition.stub(:partition, rotated[0...-1]) do
+      error = assert_raises(ContractError) { Subject.rotated_construction_partition(sources, ink, cells) }
+      assert_includes error.message, 'changed exact source coverage'
+    end
+    reversed = rotated.map(&:dup)
+    reversed.first[:loop] = reversed.first[:loop].reverse
+    partition.stub(:partition, reversed) do
+      error = assert_raises(ContractError) { Subject.rotated_construction_partition(sources, ink, cells) }
+      assert_includes error.message, 'changed exact cell area or orientation'
+    end
+  end
+
   def test_adaptive_scale_keeps_a_real_white_sliver_that_native_tolerance_would_merge
     delta = 2.0**-35
     original = Face.new([rect(0, 0, 4, 4)])
@@ -839,7 +974,7 @@ RUBY
       assert_raises(ContractError) { Subject.partition_construction_points([], [0,0,0], scale) }
     end
     too_thin = exact_cell(rect(0,0,2.0**-70,1))
-    error = assert_raises(ContractError) { Subject.partition_construction_scale([too_thin]) }
+    error = assert_raises(Subject::ConstructionScaleBudgetError) { Subject.partition_construction_scale([too_thin]) }
     assert_match(/scale budget/, error.message)
     far = exact_cell(rect(2**20,0,2**20 + 1,1))
     error = assert_raises(ContractError) do

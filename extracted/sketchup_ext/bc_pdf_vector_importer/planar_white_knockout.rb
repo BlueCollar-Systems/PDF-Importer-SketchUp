@@ -398,7 +398,14 @@ module BlueCollarSystems
           box = union_bounds(white)
           origin = [(box[0] + box[2]) * 0.5, (box[1] + box[3]) * 0.5, 0.0]
           source_cells = PlanarRegionPartition.partition(white, ink, opts)
-          scale = partition_construction_scale(source_cells)
+          begin
+            scale = partition_construction_scale(source_cells)
+          rescue ConstructionScaleBudgetError
+            # One exact alternate slab direction can remove artificial skinny
+            # decomposition cells without changing any source contour or limit.
+            source_cells = rotated_construction_partition(white, ink, source_cells, opts)
+            scale = partition_construction_scale(source_cells)
+          end
           stage = entities.add_group
           stage.name = 'PDF planar white composition' if stage.respond_to?(:name=)
           origin, scale, point_map = partition_construction_frame!(
@@ -548,6 +555,8 @@ module BlueCollarSystems
         minimum
       end
 
+      ConstructionScaleBudgetError = Class.new(RepresentationFidelity::ContractError)
+
       def self.partition_construction_scale(cells)
         clearance = partition_clearance_squared(cells)
         return CONSTRUCTION_SCALE unless clearance
@@ -557,7 +566,40 @@ module BlueCollarSystems
           return scale if clearance * scale.to_r**2 >= target
           scale *= 2.0
         end
-        fail_contract('exact white-mask construction scale budget exceeded')
+        raise ConstructionScaleBudgetError,
+              'exact white-mask construction scale budget exceeded'
+      end
+
+      def self.rotated_construction_partition(white, ink, original_cells, opts = {})
+        rotate = lambda do |regions|
+          regions.map do |region|
+            region.merge(:loops => region[:loops].map do |loop|
+              loop.map do |point|
+                [point[1].to_r, -point[0].to_r, point.length > 2 ? point[2].to_r : 0.to_r]
+              end
+            end)
+          end
+        end
+        alternate = PlanarRegionPartition.partition(rotate.call(white), rotate.call(ink), opts)
+        restored = alternate.each_with_index.map do |cell, index|
+          run_checkpoint!(opts, :white_mask_partition, index, alternate.length) if (index % 64).zero?
+          copy = cell.merge(:loop => cell[:loop].map { |point| [-point[1], point[0], point[2]] })
+          unless SvgRegionBoundary.signed_area2(copy[:loop]) / 2 == cell[:area]
+            fail_contract('alternate white-mask partition changed exact cell area or orientation')
+          end
+          copy
+        end
+        areas = lambda do |cells|
+          cells.inject(Hash.new(0)) do |totals, cell|
+            totals[cell[:region]] += cell[:area]
+            totals
+          end
+        end
+        unless areas.call(restored) == areas.call(original_cells)
+          fail_contract('alternate white-mask partition changed exact source coverage')
+        end
+        run_checkpoint!(opts, :white_mask_partition, restored.length, restored.length)
+        restored
       end
 
       # Only exact frame-roundtrip rejection permits the one bounded alternate
