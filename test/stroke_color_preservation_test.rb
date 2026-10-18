@@ -159,6 +159,7 @@ class StrokeColorPreservationTest < Minitest::Test
     points=[Geom::Point3d.new(0,0,0),Geom::Point3d.new(2,0,0)]
     model.active_entities.batch_failure=true
     builder.send(:draw_edges,model.active_entities,points,nil,nil,nil,false,style)
+    builder.send(:flush_stroke_edge_batches!)
     assert_equal [[0,0,255]],all_edges(model.active_entities).map{|e|rgb(e)}
     model.active_entities.batch_failure=false
     builder.send(:draw_edges,model.active_entities,points,nil,nil,{:pattern=>[0.25,0.25],:phase=>0},false,style)
@@ -194,6 +195,7 @@ class StrokeColorPreservationTest < Minitest::Test
           case route
           when :batch
             builder.send(:draw_edges,model.active_entities,points,nil,nil,nil,false,style)
+            builder.send(:flush_stroke_edge_batches!)
           when :line
             builder.send(:safe_add_line,model.active_entities,*points,nil,nil,nil,style)
           when :dash
