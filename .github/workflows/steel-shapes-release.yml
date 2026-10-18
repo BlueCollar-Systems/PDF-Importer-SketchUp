@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "steel-v*"
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -22,13 +23,13 @@ jobs:
   release:
     runs-on: ubuntu-26.04
     env:
-      STEEL_TAG: ${{ inputs.tag || github.ref_name }}
+      STEEL_TAG: ${{ github.event_name == 'pull_request' && 'steel-v1.0.2' || inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'pull_request' && 'steel-v1.0.2' || inputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v6

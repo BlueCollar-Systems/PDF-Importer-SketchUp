@@ -14,6 +14,7 @@ on:
       - "dist/_archived/**"
       - "dev_logs/**"
       - "steel_shapes/**"
+  pull_request:
   workflow_dispatch:
     inputs:
       publish_release:
@@ -29,7 +30,8 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: auto-release
+  # Probe-only group so this run cannot queue behind or block a real release.
+  group: auto-release-ubuntu2604-probe-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -224,7 +226,20 @@ jobs:
 
   release:
     needs: [release-plan, ruby22-exact-parse, source-only-build-windows]
-    if: "github.event_name == 'workflow_dispatch' && inputs.publish_release == true && needs.source-only-build-windows.outputs.publication_ready == 'true' && !startsWith(github.event.head_commit.message, 'chore: bump version to') && !contains(github.event.head_commit.message, 'automation/version-bump') && !contains(github.event.head_commit.message, '[skip release]')"
+    # Probe: run the release job's build and test steps on pull_request.
+    # Publishing stays impossible here; the mint step below is if: false.
+    if: >-
+      needs.source-only-build-windows.outputs.publication_ready == 'true' &&
+      (
+        github.event_name == 'pull_request' ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.publish_release == true &&
+          !startsWith(github.event.head_commit.message, 'chore: bump version to') &&
+          !contains(github.event.head_commit.message, 'automation/version-bump') &&
+          !contains(github.event.head_commit.message, '[skip release]')
+        )
+      )
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout current release control plane
@@ -436,6 +451,7 @@ jobs:
 
       - name: Complete or verify immutable release
         id: mint
+        if: false
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -549,7 +565,7 @@ jobs:
             --output "$RUNNER_TEMP/verified-published-assets.json"
 
       - name: Check website dispatch token secret
-        if: steps.mint.outputs.published_now == 'true'
+        if: false
         id: website_dispatch_token
         env:
           WEBSITE_DISPATCH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN || secrets.BLUECOLLAR_WEBSITE_DISPATCH_TOKEN || secrets.REPO_DISPATCH_TOKEN }}
@@ -561,7 +577,7 @@ jobs:
           fi
 
       - name: Dispatch website release update
-        if: steps.mint.outputs.published_now == 'true' && steps.website_dispatch_token.outputs.has_token == 'true'
+        if: false
         uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.WEBSITE_DISPATCH_TOKEN || secrets.BLUECOLLAR_WEBSITE_DISPATCH_TOKEN || secrets.REPO_DISPATCH_TOKEN }}
@@ -587,7 +603,7 @@ jobs:
             core.info('Dispatched product-release to BlueCollar-Website');
 
       - name: Warn when website dispatch token is missing
-        if: steps.mint.outputs.published_now == 'true' && steps.website_dispatch_token.outputs.has_token != 'true'
+        if: false
         run: |
           echo "::warning::Skipping website dispatch because no valid dispatch token secret is configured."
           echo "Set WEBSITE_DISPATCH_TOKEN (or BLUECOLLAR_WEBSITE_DISPATCH_TOKEN / REPO_DISPATCH_TOKEN) to enable cross-repo dispatch."
