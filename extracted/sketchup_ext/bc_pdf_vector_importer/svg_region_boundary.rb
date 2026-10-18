@@ -37,6 +37,9 @@ module BlueCollarSystems
         end
         run_checkpoint!(opts, :white_mask_boundaries, atoms.length, atoms.length)
         loops = closed_loops(boundary)
+        if loops.nil? && opts[:allow_point_touches] == true
+          loops = point_touch_loops(boundary, edges, opts)
+        end
         return nil unless loops
         # A new rational intersection can be smaller than the host's Float
         # coordinate representation. Reject a collapsed topology instead of
@@ -245,6 +248,74 @@ module BlueCollarSystems
           loops << loop
         end
         loops.sort_by { |loop| [signed_area2(loop) > 0 ? 0 : 1, loop.min] }
+      end
+
+      # Optional paint-binding proof for distinct filled components that meet
+      # only at existing contour vertices. The ordinary normalizer still rejects
+      # branching. Exact filled-left atomic edges already establish every local
+      # side; alternating incoming/outgoing rays identify separate cycles without
+      # joining islands or losing a counter. No coordinate tolerance is used.
+      def self.point_touch_loops(edges, original_edges, opts = {})
+        return nil if edges.length > MAX_ATOMIC_EDGES || edges.uniq.length != edges.length
+        outgoing, incoming = {}, {}
+        edges.each do |edge|
+          a, b = edge
+          return nil if a == b
+          (outgoing[a] ||= []) << edge
+          (incoming[b] ||= []) << edge
+        end
+        return nil unless outgoing.keys.sort == incoming.keys.sort
+        successor = {}
+        vertices = outgoing.keys.sort
+        vertices.each_with_index do |point, index|
+          run_checkpoint!(opts, :white_mask_point_touches, index, vertices.length) if index % 16 == 0
+          exits, entries = outgoing[point], incoming[point]
+          return nil unless exits.length == entries.length
+          if exits.length > 1
+            # A crossing or a vertex in the middle of another source segment
+            # needs a different topology proof. Only explicit endpoint contacts
+            # are covered by this narrow extension.
+            return nil if original_edges.any? do |a, b|
+              point != a && point != b && on_segment?(point, a, b)
+            end
+          end
+          rays = exits.map { |edge| [minus(edge[1], point), true, edge] } +
+                 entries.map { |edge| [minus(edge[0], point), false, edge] }
+          rays.sort! do |first, second|
+            first_half, second_half = direction_half(first[0]), direction_half(second[0])
+            first_half == second_half ? -(cross(first[0], second[0]) <=> 0) : first_half <=> second_half
+          end
+          rays.each_with_index do |ray, ray_index|
+            previous = rays[(ray_index - 1) % rays.length]
+            # Coincident directions or adjacent equal roles make the angular
+            # pairing ambiguous. Opposite collinear rays remain distinct.
+            return nil if cross(previous[0], ray[0]) == 0 && dot(previous[0], ray[0]) > 0
+            return nil if previous[1] == ray[1]
+            successor[ray[2]] = previous[2] unless ray[1]
+          end
+        end
+        run_checkpoint!(opts, :white_mask_point_touches, vertices.length, vertices.length)
+        return nil unless successor.length == edges.length && successor.values.uniq.length == edges.length
+        remaining = {}
+        edges.each { |edge| remaining[edge] = true }
+        loops = []
+        until remaining.empty?
+          start = remaining.keys.min
+          edge, loop = start, []
+          loop do
+            return nil unless remaining.delete(edge)
+            loop << edge[0]
+            edge = successor[edge]
+            break if edge == start
+          end
+          return nil if loop.length < 3 || loop.uniq.length != loop.length || signed_area2(loop) == 0
+          loops << loop
+        end
+        loops.sort_by { |loop| [signed_area2(loop) > 0 ? 0 : 1, loop.min] }
+      end
+
+      def self.direction_half(vector)
+        vector[1] > 0 || (vector[1] == 0 && vector[0] >= 0) ? 0 : 1
       end
     end
   end

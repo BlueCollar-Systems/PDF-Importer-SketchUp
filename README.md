@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.175-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.180-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -21,6 +21,70 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Recent fixes (v3.7.180)
+
+- White-area refinement can build retained cells together while checking every
+  cell boundary, source area and shared edge. A rejected mesh is removed and
+  checked before isolated construction is retried. Original fills stay editable;
+  requested text modes and construction limits are unchanged.
+- Picture clipping or overlap concerns already recorded in detailed diagnostics
+  now appear in the import summary and Import Health. The white-area warning
+  also uses the correct punctuation.
+- The full foundation drawing completed ordinary import, Save As, one Undo,
+  fresh Open and resave in SketchUp Make 2017: 939.1 seconds for Glyphs and
+  171.1 seconds for 3D Text. Glyphs retained the selected 505 white faces
+  and their shared boundaries; both modes retained all 16 final annotations.
+  The 3D text census retained 286 owners with positive 1/64-inch depth, caps
+  and side walls.
+- Two Glyphs white-area checks and picture clipping remain unresolved and are
+  reported. Its full graph/census exceeded the existing diagnostic limit;
+  strict derived Face measurements also differed after 3D Text was reopened.
+  The [completed validation notes](docs/validation/2026-10-18-mask-performance-and-text-height.md#completed-v37180-host-checks)
+  separate these limits from the successful lifecycle and selected source checks.
+
+### Recent fixes (v3.7.179)
+
+- Exact white-area classification sweeps the complete source contours once per
+  partition slab instead of repeatedly testing every contour for each cell.
+  Existing limits, paint ownership, holes and exact cell boundaries remain.
+- Partially retained fills construct only the visible native cells. Full source
+  coverage, construction clearance, native boundaries and rollback stay checked.
+- Import logs flush sparse mask progress records, including the current phase,
+  to make a long refinement diagnosable. The user-facing warning explains the
+  remaining visual limitation; technical details stay in the structured report.
+- The preceding v3.7.178 foundation test passed the 3D Text import, save, Undo and
+  reopen lifecycle and the scoped annotation-height checks. Its flat Glyphs test
+  expired at the unchanged 30-minute stage limit. The v3.7.179 follow-up also
+  expired in Glyphs; its 3D Text lifecycle and 16 final-annotation height checks
+  passed within their stated scope. Strict recomputed Face measurements still
+  differed after reopening. See the dated validation notes for the exact limits.
+
+### Recent fixes (v3.7.178)
+
+- A verified white-area partition with no ink to remove keeps the original
+  editable shapes without constructing replacement faces.
+- A white-area failure whose local cleanup succeeds is reported while later
+  areas continue. Cancellation, changed resume data and uncertain cleanup
+  remain terminal. Earlier successful repairs and independent annotation
+  height checks remain intact.
+
+### Recent fixes (v3.7.177)
+
+- When a planar fill needs an excessive construction scale, one perpendicular
+  partition attempt can avoid unnecessarily thin internal cells. It maps every
+  cell back to the original coordinates and retains the existing native
+  geometry, coverage and rollback checks. It does not round away source detail
+  or raise the construction limits.
+
+### Recent fixes (v3.7.176)
+
+- Opaque-fill matching can now verify separate filled regions that touch at an
+  exact corner. It retains every component and counter, and keeps the existing
+  shape, colour and paint-order checks.
+- Final annotations retain the measured native text height when a later
+  opaque-fill check fails. Verified raster crop exclusions also remain checked;
+  incomplete inventories are still reported explicitly.
 
 ### Recent fixes (v3.7.175)
 

@@ -66,3 +66,42 @@ class ImportHealthTest < Minitest::Test
     assert_includes UI.last_message, 'source_delivery_set_mismatch'
   end
 end
+
+# Import Health displays the actual report summary. A visual-review warning
+# stays separate from the native delivery contract and requested text mode.
+class ImportHealthTest
+  def test_embedded_image_display_warning_actual_report_summary_reaches_import_health
+    require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/qa_report'
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    stats = { :pages=>1,:primitives=>100,:edges=>100,:text=>1,:embedded_images=>1,
+      :layers=>['PDF'],:text_mode=>:text3d,:peak_mb=>1.0,:ownership_bookkeeping=>{},
+      :result_status=>'success',:requested_pages=>[1],:retained_pages=>[1],
+      :embedded_image_paint_order=>[{ :page=>1,:qualified_count=>0,
+        :unqualified=>[{ :image_id=>'persistent_id:42',:reason=>'clip is not one four-corner contour' }] }] }
+    report = q.build_from_stats('fictional-picture.pdf',{},stats)
+    # This fixture declares a separate delivery contract for UI rendering only;
+    # it does not claim fictional geometry or image pixels were certified.
+    stats[:import_contract_ready] = { :ready=>true }
+    stats[:human_summary] = report[:extra][:human_summary]
+    H.record!(stats,'fictional-picture.pdf')
+    H.show
+    assert_includes UI.last_message,'QA contract: READY'
+    assert_includes UI.last_message,'Picture clipping or overlap remains unverified for 1 picture on page 1'
+    assert_includes UI.last_message,'Content review: review'
+    assert_includes UI.last_message,'1 warning recorded'
+    refute_includes UI.last_message,'four-corner'
+    refute_includes UI.last_message,'persistent_id:'
+    assert_equal 'text3d',H.snapshot[:text_mode]
+    assert_equal 'success',H.snapshot[:result_status]
+  end
+
+  def test_embedded_image_display_warning_older_health_snapshot_without_field_is_graceful
+    H.record!({ :pages=>1,:edges=>100,:text=>1,:layers=>[],
+      :text_mode=>:text3d,:result_status=>'success',
+      :import_contract_ready=>{ :ready=>true },:human_summary=>'Imported the retained page.' },'older.pdf')
+    H.show
+    assert_includes UI.last_message,'QA contract: READY'
+    assert_includes UI.last_message,'Imported the retained page.'
+    refute_includes UI.last_message,'Picture clipping or overlap remains unverified'
+  end
+end

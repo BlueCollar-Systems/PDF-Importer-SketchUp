@@ -1,5 +1,6 @@
 # Exact planar composition for earlier, opaque PDF fills and flat text.
-# The caller owns the import operation and must abort it if this module raises.
+# The caller owns the import operation. Optional per-mask continuation accepts
+# only failures whose private stage and source visibility were safely restored.
 # No text geometry, representation, identity, or depth is changed here.
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'import_run_control')
@@ -18,13 +19,85 @@ module BlueCollarSystems
       DICTIONARY = 'BC_PDF_Importer'.freeze
       GRID_SIZE = 0.25
       MAX_INDEX_CELLS = 4096
+      MAX_MASK_FAILURE_DETAILS = 32
+
+      class RestoredMaskFailure < StandardError
+        attr_reader :details
+        def initialize(details)
+          @details = details
+          super(details[:detail])
+        end
+      end
+
+      # Diagnostic output only. Flush selected attempt/outcome records and at
+      # most one coarse checkpoint every ten seconds; never flush each cell.
+      # A blocked host call cannot emit a heartbeat until control returns.
+      # Only the binding/composition options receive this narrow proxy.
+      # Delegate first: return values and terminal exception objects are owned
+      # by the original controller, and logging never replaces those decisions.
+      class CheckpointProgressProxy
+        def initialize(controller, opts)
+          @controller = controller
+          @opts = opts
+        end
+
+        def checkpoint!(stage, detail = {})
+          result = @controller.checkpoint!(stage, detail)
+          begin
+            sampled = detail.is_a?(Hash) ? detail.merge(:phase => stage) : { :phase => stage }
+            PlanarWhiteKnockout.log_progress!(@opts, :progress, sampled)
+          rescue StandardError
+            # Only diagnostic preparation is guarded; delegation above is not.
+          end
+          result
+        end
+      end
+
+      def self.progress_controller(controller, opts)
+        return controller unless opts[:mask_progress].is_a?(Hash) &&
+          controller && controller.respond_to?(:checkpoint!)
+        CheckpointProgressProxy.new(controller, opts)
+      end
+
+      def self.white_mask_progress_clock
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      rescue StandardError
+        Time.now.to_f
+      end
+
+      def self.log_progress!(opts, event, detail = {}, force = false)
+        state = opts[:mask_progress]
+        return false unless state.is_a?(Hash) && defined?(Logger)
+        now = white_mask_progress_clock
+        last = state[:last_record_at]
+        return false unless force || last.nil? || now - last >= 10.0
+        elapsed = [now - state[:started_at], 0.0].max.round(3)
+        fields = ["page=#{opts[:page_number]}", "event=#{event}", "elapsed_s=#{elapsed}"]
+        [:mask_index, :mask_total, :pdf_paint_order, :svg_paint_order].each do |key|
+          fields << "#{key}=#{state[key].inspect}" if state.key?(key)
+        end
+        if state[:mask_started_at]
+          fields << "mask_elapsed_s=#{[now - state[:mask_started_at], 0.0].max.round(3)}"
+        end
+        detail.each { |key, value| fields << "#{key}=#{safe_error_detail(value.inspect)}" }
+        Logger.info('WhiteMaskProgress', fields.join('; '))
+        Logger.flush_log # Ruby-buffer flush, not fsync or a durable write claim.
+        state[:last_record_at] = now
+        true
+      rescue StandardError
+        false # Logging failure never changes delivery or cancellation.
+      end
 
       def self.run_checkpoint!(opts, stage, completed, total)
         controller = opts[:run_controller]
-        return false unless controller && controller.respond_to?(:checkpoint!)
-        controller.checkpoint!(stage, :completed => completed, :total => total,
-          :page => opts[:page_number])
-        true
+        controlled = controller && controller.respond_to?(:checkpoint!)
+        if controlled
+          controller.checkpoint!(stage, :completed => completed, :total => total,
+            :page => opts[:page_number])
+        end
+        log_progress!(opts, :progress,
+          :phase => stage, :completed => completed, :total => total)
+        !!controlled
       end
 
       # All transformations map to the same page coordinate system. A record's
@@ -36,9 +109,18 @@ module BlueCollarSystems
         fail_contract('prebound physical ink faces must be an array') unless ink.is_a?(Array)
         result = { :white_groups => 0, :opaque_groups => 0, :composed_groups => 0,
                    :ink_faces => ink.length, :removed_area => 0.0,
-                   :skipped_unproven_order => 0, :skipped_nonwhite => 0 }
+                   :removed_area_basis => 'exact_source_partition',
+                   :skipped_unproven_order => 0, :skipped_nonwhite => 0,
+                   :unchanged_no_ink_groups => 0, :failed_groups => 0,
+                   :mask_failures => [], :mask_failure_details_omitted => 0 }
         masks = Array(fill_only_groups)
         masks.each_with_index do |record, mask_index|
+          if opts[:mask_progress].is_a?(Hash)
+            opts[:mask_progress].merge!(:mask_index => mask_index,
+              :mask_total => masks.length, :mask_started_at => nil,
+              :pdf_paint_order => (record.is_a?(Hash) ? record[:pdf_paint_order] || record[:paint_order] : nil),
+              :svg_paint_order => (record.is_a?(Hash) ? record[:paint_order] : nil))
+          end
           run_checkpoint!(opts, :white_mask, mask_index, masks.length)
           unless opaque_fill?(record)
             result[:skipped_nonwhite] += 1
@@ -62,8 +144,39 @@ module BlueCollarSystems
           candidates = overlaps.select { |face| earlier_mask?(record, face, opts) }
           result[:skipped_unproven_order] += overlaps.length - candidates.length
           next if candidates.empty?
-          result[:removed_area] += compose_group!(group, transform, white, candidates,
-            opts.merge(:preserve_source => record[:preserve_source] == true))
+          if opts[:mask_progress].is_a?(Hash)
+            opts[:mask_progress][:mask_started_at] = white_mask_progress_clock
+          end
+          log_progress!(opts, :mask_attempt,
+            { :phase => :exact_partition, :source_faces => white.length,
+              :candidate_ink_faces => candidates.length }, true)
+          begin
+            removed_area = compose_group!(group, transform, white, candidates,
+              opts.merge(:preserve_source => record[:preserve_source] == true,
+                :mask_context => { :mask_index => mask_index,
+                  :pdf_paint_order => record[:pdf_paint_order] || record[:paint_order],
+                  :svg_paint_order => record[:paint_order] }))
+          rescue RestoredMaskFailure => error
+            log_progress!(opts, :mask_restored_failure,
+              { :error_class => error.details[:error_class],
+                :detail => error.details[:detail] }, true)
+            raise unless opts[:continue_mask_failures] == true
+            result[:failed_groups] += 1
+            if result[:mask_failures].length < MAX_MASK_FAILURE_DETAILS
+              result[:mask_failures] << error.details
+            else
+              result[:mask_failure_details_omitted] += 1
+            end
+            next
+          end
+          log_progress!(opts, :mask_completed,
+            { :outcome => removed_area.nil? ? :unchanged_exact_no_ink : :composed,
+              :removed_area => removed_area }, true)
+          if removed_area.nil?
+            result[:unchanged_no_ink_groups] += 1
+            next
+          end
+          result[:removed_area] += removed_area
           group.erase! if child_entities(group).to_a.empty?
           result[:composed_groups] += 1
         end
@@ -398,38 +511,125 @@ module BlueCollarSystems
           box = union_bounds(white)
           origin = [(box[0] + box[2]) * 0.5, (box[1] + box[3]) * 0.5, 0.0]
           source_cells = PlanarRegionPartition.partition(white, ink, opts)
-          scale = partition_construction_scale(source_cells)
+          if !source_cells.empty? && source_cells.all? { |cell| cell[:region] == :white }
+            unless source_cells.all? do |cell|
+              loop = cell[:loop]
+              cell[:area].is_a?(Rational) && cell[:area] > 0 &&
+                loop.is_a?(Array) && loop.length >= 3 && loop.all? { |point|
+                  point.is_a?(Array) && point.length == 3 &&
+                    point.all? { |value| value.is_a?(Rational) && value.to_f.finite? } && point[2] == 0
+                } && SvgRegionBoundary.signed_area2(loop) == cell[:area] * 2
+            end
+              fail_contract('exact no-op white-mask partition has invalid source cells')
+            end
+            partition_clearance_squared(source_cells) # Topology only; unchanged cells need no host scale.
+            expected = source_area(white)
+            area = source_cells.inject(0.to_r) { |sum, cell| sum + cell[:area] }.to_f
+            tolerance = [expected.abs * 1.0e-7, 1.0e-10].max
+            unless expected.finite? && expected > 0.0 && area.finite? && (area - expected).abs <= tolerance
+              fail_contract('native white-mask partition changed source white area')
+            end
+            verify_mask_owner!(group)
+            verify_preserved_source!(originals) if opts[:preserve_source] == true
+            run_checkpoint!(opts, :white_mask_verify, source_cells.length, source_cells.length)
+            return nil # Exact unchanged outcome, never a rounded numeric zero.
+          end
+          begin
+            scale = partition_construction_scale(source_cells)
+          rescue ConstructionScaleBudgetError
+            # One exact alternate slab direction can remove artificial skinny
+            # decomposition cells without changing any source contour or limit.
+            source_cells = rotated_construction_partition(white, ink, source_cells, opts)
+            scale = partition_construction_scale(source_cells)
+          end
+          # Retain the complete exact partition/clearance proof even though
+          # ink cells need not become temporary native geometry. Area is still
+          # certified against the original physical mask, not the kept subset.
+          source_areas = { :white => 0.to_r, :ink => 0.to_r }
+          source_cells.each_with_index do |cell, index|
+            run_checkpoint!(opts, :white_mask_partition, index, source_cells.length) if (index % 64).zero?
+            unless source_areas.key?(cell[:region]) && cell[:area].is_a?(Rational) && cell[:area] > 0 &&
+                SvgRegionBoundary.signed_area2(cell[:loop]) == cell[:area] * 2
+              fail_contract('exact white-mask partition has invalid source class or area')
+            end
+            source_areas[cell[:region]] += cell[:area]
+          end
+          expected = source_area(white)
+          source_partition_area = source_areas.values.inject(0.to_r, :+).to_f
+          tolerance = [expected.abs * 1.0e-7, 1.0e-10].max
+          unless expected.finite? && expected > 0.0 && source_partition_area.finite? &&
+              (source_partition_area - expected).abs <= tolerance
+            fail_contract('exact white-mask partition changed source white area')
+          end
+          white_cells = source_cells.select { |cell| cell[:region] == :white }
+          kept_only = !white_cells.empty?
+          construction_cells = kept_only ? white_cells : source_cells
           stage = entities.add_group
           stage.name = 'PDF planar white composition' if stage.respond_to?(:name=)
           origin, scale, point_map = partition_construction_frame!(
             stage, source_cells, origin, scale, transform)
-          source_cells.each_with_index do |cell, index|
-            run_checkpoint!(opts, :white_mask_cells, index, source_cells.length) if (index % 64).zero?
-            # A convex source cell has no holes and cannot cross a source
-            # boundary. Keep cells in separate identity groups so legacy host
-            # face discovery cannot merge adjacent regions across that boundary.
-            container = stage.entities.add_group
-            points = cell[:loop].map { |point| point_map.fetch(point) }
-            face = container.entities.add_face(points)
-            fail_contract('native exact white-mask cell construction failed') unless face
-            verify_partition_face!(face, points)
+          created_faces = nil
+          if kept_only && white.length == 1 && defined?(Geom::PolygonMesh) &&
+              stage.entities.respond_to?(:fill_from_mesh)
+            created_faces = try_bulk_partition_cells!(group, entities, stage,
+              originals, construction_cells, point_map, scale, tolerance, white.first, opts)
           end
-          run_checkpoint!(opts, :white_mask_cells, source_cells.length, source_cells.length)
+          unless created_faces
+            created_faces = {}
+            construction_cells.each_with_index do |cell, index|
+              run_checkpoint!(opts, :white_mask_cells, index, construction_cells.length) if (index % 64).zero?
+              # A convex source cell has no holes and cannot cross a source
+              # boundary. Keep cells in separate identity groups so legacy host
+              # face discovery cannot merge adjacent regions across that boundary.
+              container = stage.entities.add_group
+              points = cell[:loop].map { |point| point_map.fetch(point) }
+              face = container.entities.add_face(points)
+              fail_contract('native exact white-mask cell construction failed') unless face
+              verify_partition_face!(face, points)
+              if kept_only
+                identity = face.respond_to?(:entityID) ? face.entityID : nil
+                unless identity.is_a?(Integer) && identity > 0 && !created_faces.key?(identity)
+                  fail_contract('native kept white-mask cell has no unique entity identity')
+                end
+                created_faces[identity] = face
+              end
+            end
+          end
+          run_checkpoint!(opts, :white_mask_cells, construction_cells.length, construction_cells.length)
           cells = partition_faces(stage.entities)
           fail_contract('native white-mask subdivision produced no faces') if cells.empty?
+          if kept_only
+            actual_ids = {}
+            unless created_faces.length == construction_cells.length &&
+                created_faces.values.all?(&:valid?) && cells.length == created_faces.length &&
+                cells.all? do |face|
+                  identity = face.respond_to?(:entityID) ? face.entityID : nil
+                  retained = created_faces[identity]
+                  unique = !actual_ids.key?(identity)
+                  actual_ids[identity] = true
+                  unique && retained && face == retained
+                end
+              fail_contract('native kept white-mask cell roster changed during construction')
+            end
+          end
           white_index = spatial_index(white)
           ink_index = spatial_index(ink)
           plan = classify_cells(cells, origin, white_index, ink_index, scale, opts)
-          expected = source_area(white)
+          if kept_only && !plan.all? { |cell| cell[:region] == :white }
+            fail_contract('native kept white-mask cell changed exact source class')
+          end
+          if kept_only && !plan.all? { |cell| cell[:area].finite? && cell[:area] > 0.0 }
+            fail_contract('native kept white-mask cell has invalid area')
+          end
+          expected_native = kept_only ? source_areas[:white].to_f : expected
           partition_area = plan.inject(0.0) do |sum, cell|
             cell[:region] == :outside ? sum : sum + cell[:area]
           end
-          tolerance = [expected.abs * 1.0e-7, 1.0e-10].max
-          if (partition_area - expected).abs > tolerance
+          if !partition_area.finite? || !expected_native.finite? ||
+              (partition_area - expected_native).abs > tolerance
             fail_contract('native white-mask partition changed source white area')
           end
           kept = plan.select { |cell| cell[:region] == :white }
-          removed = plan.select { |cell| cell[:region] == :ink }
           verify_ink_samples!(ink, white_index, spatial_index(kept), origin, ink_index, opts)
           plan.each_with_index do |cell, index|
             run_checkpoint!(opts, :white_mask_style, index, plan.length) if (index % 64).zero?
@@ -448,13 +648,7 @@ module BlueCollarSystems
           # Cancel before changing source visibility or erasing originals.
           run_checkpoint!(opts, :white_mask_style, plan.length, plan.length)
           if opts[:preserve_source] == true
-            unless originals.all? do |entity|
-              entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?) &&
-                entity.respond_to?(:get_attribute) &&
-                entity.get_attribute(DICTIONARY, 'source_fill_original', false) == true
-            end
-              fail_contract('opaque mask lacks separately owned editable source fill')
-            end
+            verify_preserved_source!(originals)
             originals.each { |entity| entity.hidden = true }
             fail_contract('native host did not hide composed source fill') unless originals.all?(&:hidden?)
           else
@@ -468,15 +662,19 @@ module BlueCollarSystems
             stage.set_attribute(DICTIONARY, 'planar_white_knockout', true)
             stage.set_attribute(DICTIONARY, 'source_fill_composed_visible', true)
           end
-          removed.inject(0.0) { |sum, cell| sum + cell[:area] }
+          # Public numeric result is the exact source-partition ink area;
+          # compose! labels this basis explicitly, including the ink-only path.
+          source_areas[:ink].to_f
         rescue StandardError => error
           terminal = error.is_a?(ImportRunControl::ImportCancelled) ||
-                     error.is_a?(ImportRunControl::ResumeMismatch)
+                     error.is_a?(ImportRunControl::ResumeMismatch) ||
+                     error.is_a?(ImportRunControl::RollbackFailure)
           begin
             stage.erase! if stage && stage.valid?
             if stage && stage.valid?
               raise ImportRunControl::RollbackFailure, 'white-mask stage remains live after erase'
             end
+            verify_mask_owner!(group)
             unless originals.all? { |entity| entity.respond_to?(:valid?) && entity.valid? }
               raise ImportRunControl::RollbackFailure, 'original white-mask source was destroyed'
             end
@@ -498,6 +696,10 @@ module BlueCollarSystems
           end
           raise error if terminal
           partition_diagnostic(opts, white, ink, origin, error)
+          if opts[:continue_mask_failures] == true
+            raise RestoredMaskFailure.new(restored_mask_failure_details(
+              group, white, ink, error, opts[:mask_context] || {}))
+          end
           if error.is_a?(RepresentationFidelity::ContractError)
             bounds = union_bounds(white).map { |value| format('%.8g', value) }.join(',')
             owners = ink.map { |face| face[:source_span_id] }.compact.uniq.first(6).join(',')
@@ -506,6 +708,204 @@ module BlueCollarSystems
           end
           raise
         end
+      end
+
+      # Bulk emission changes only the private native staging representation.
+      # Every exact cell still owns one verified Face; shared boundary Edges
+      # are allowed, merged/split Faces and newly rounded points are not.
+      # A rejected private mesh may use the existing isolated constructor only
+      # after its own container is erased and source ownership/visibility plus
+      # the empty, already-verified construction frame are read back unchanged.
+      def self.try_bulk_partition_cells!(group, entities, stage, originals, cells,
+                                         point_map, scale, tolerance, style, opts)
+        visibility = originals.map { |entity| [entity, entity.respond_to?(:hidden?) ? entity.hidden? : nil] }
+        frame = stage.transformation.to_a
+        container = nil
+        begin
+          fail_contract('bulk white-mask frame is not empty') unless stage.entities.to_a.empty?
+          container = stage.entities.add_group
+          container.transformation = Geom::Transformation.new
+          mesh = Geom::PolygonMesh.new(point_map.length, cells.length)
+          indices, native_points = {}, {}
+          cells.each_with_index do |cell, index|
+            run_checkpoint!(opts, :white_mask_cells, index, cells.length) if (index % 64).zero?
+            cell[:loop].each do |source|
+              next if indices.key?(source)
+              point = point_map.fetch(source)
+              expected = [point.x.to_f, point.y.to_f, point.z.to_f]
+              transformed = point.transform(container.transformation)
+              unless [transformed.x.to_f, transformed.y.to_f, transformed.z.to_f] == expected
+                fail_contract('bulk white-mask child frame changed source points')
+              end
+              native = mesh.add_point(point)
+              unless native.is_a?(Integer) && native > 0 && !native_points.key?(native)
+                fail_contract('bulk white-mask mesh collapsed source points')
+              end
+              actual = mesh.point_at(native)
+              unless [actual.x.to_f, actual.y.to_f, actual.z.to_f] == expected
+                fail_contract('bulk white-mask mesh changed source points')
+              end
+              native_points[native] = expected
+              indices[source] = native
+            end
+          end
+          polygons, expected_cells = {}, {}
+          cells.each_with_index do |cell, index|
+            run_checkpoint!(opts, :white_mask_cells, index, cells.length) if (index % 64).zero?
+            points = cell[:loop].map { |source| point_map.fetch(source) }
+            key = canonical_loop(points.map { |point| [point.x.to_f, point.y.to_f, point.z.to_f] })
+            fail_contract('bulk white-mask source cell is duplicated') if expected_cells.key?(key)
+            expected_cells[key] = cell
+            polygon = mesh.add_polygon(cell[:loop].map { |source| indices.fetch(source) })
+            unless polygon.is_a?(Integer) && polygon > 0 && !polygons.key?(polygon)
+              fail_contract('bulk white-mask mesh rejected a source cell')
+            end
+            polygons[polygon] = true
+            loop = mesh.polygon_at(polygon)
+            unless loop.all? { |native| native.is_a?(Integer) && native_points.key?(native) } &&
+                canonical_loop(loop.map { |native| native_points.fetch(native) }) == key
+              fail_contract('bulk white-mask mesh changed a source cell')
+            end
+          end
+          unless mesh.count_points == indices.length && mesh.count_polygons == cells.length
+            fail_contract('bulk white-mask mesh roster changed')
+          end
+          run_checkpoint!(opts, :white_mask_cells, 0, cells.length)
+          unless container.entities.fill_from_mesh(mesh, true, 0, style[:material], style[:back_material]) == true
+            fail_contract('bulk white-mask native construction failed')
+          end
+          run_checkpoint!(opts, :white_mask_cells, cells.length, cells.length)
+          unless stage.transformation.to_a == frame
+            fail_contract('bulk white-mask construction frame changed')
+          end
+          indices.each_key do |source|
+            point = point_map.fetch(source)
+            actual = point.transform(container.transformation)
+            unless [actual.x.to_f, actual.y.to_f, actual.z.to_f] == [point.x.to_f, point.y.to_f, point.z.to_f]
+              fail_contract('bulk white-mask child frame changed during construction')
+            end
+          end
+          created, matched, boundaries = {}, {}, {}
+          native_entities = container.entities.to_a
+          native_entities.each_with_index do |face, index|
+            next unless face.typename.to_s == 'Face'
+            run_checkpoint!(opts, :white_mask_cells, index, native_entities.length) if (index % 64).zero?
+            unless face.valid? && face.loops.to_a.length == 1
+              fail_contract('bulk white-mask native cell changed topology')
+            end
+            key = canonical_loop(face.outer_loop.vertices.map { |v| p = v.position; [p.x.to_f, p.y.to_f, p.z.to_f] })
+            cell = expected_cells[key]
+            identity = face.respond_to?(:entityID) ? face.entityID : nil
+            unless cell && !matched.key?(key) && identity.is_a?(Integer) && identity > 0 && !created.key?(identity)
+              fail_contract('bulk white-mask native cells merged, split or changed identity')
+            end
+            verify_partition_face!(face, cell[:loop].map { |source| point_map.fetch(source) })
+            area = face.area.to_f / (scale * scale)
+            unless area.finite? && area > 0.0 && (area - cell[:area].to_f).abs <= tolerance
+              fail_contract('bulk white-mask native cell area changed')
+            end
+            matched[key] = true
+            created[identity] = face
+            key.each_with_index do |point, index|
+              edge = [point, key[(index + 1) % key.length]].sort
+              (boundaries[edge] ||= {})[identity] = face
+            end
+          end
+          fail_contract('bulk white-mask native cell is missing') unless created.length == cells.length
+          actual_edges, edge_ids = {}, {}
+          native_entities.each do |entity|
+            next if entity.typename.to_s == 'Face'
+            unless entity.valid? && entity.typename.to_s == 'Edge' &&
+                !entity.soft? && !entity.smooth? && entity.vertices.length == 2
+              fail_contract('bulk white-mask native edge ownership changed')
+            end
+            edge = entity.vertices.map { |v| p = v.position; [p.x.to_f, p.y.to_f, p.z.to_f] }.sort
+            expected = boundaries[edge]
+            identity = entity.respond_to?(:entityID) ? entity.entityID : nil
+            actual = entity.faces.to_a
+            unless expected && !actual_edges.key?(edge) && identity.is_a?(Integer) && identity > 0 &&
+                !edge_ids.key?(identity) && actual.length >= 1 && actual.length <= 2 &&
+                actual.map(&:entityID).sort == expected.keys.sort &&
+                actual.all? { |face| created[face.entityID] == face }
+              fail_contract('bulk white-mask native edge boundary changed')
+            end
+            actual_edges[edge] = true
+            edge_ids[identity] = true
+          end
+          fail_contract('bulk white-mask native edge is missing') unless actual_edges.length == boundaries.length
+          created
+        rescue StandardError => error
+          # Terminal stops never retry another native representation.
+          raise error if error.is_a?(ImportRunControl::ImportCancelled) ||
+            error.is_a?(ImportRunControl::ResumeMismatch) || error.is_a?(ImportRunControl::RollbackFailure)
+          begin
+            container.erase! if container && container.valid?
+            if (container && container.valid?) || !stage.valid? || !stage.entities.to_a.empty? ||
+                stage.transformation.to_a != frame
+              raise ImportRunControl::RollbackFailure, 'bulk white-mask private container was not erased'
+            end
+            verify_mask_owner!(group)
+            current, expected_ids = {}, {}
+            (originals + [stage]).each do |entity|
+              identity = entity.respond_to?(:entityID) ? entity.entityID : nil
+              unless entity.valid? && identity.is_a?(Integer) && identity > 0 && !expected_ids.key?(identity)
+                raise ImportRunControl::RollbackFailure, 'bulk white-mask fallback original identity is unavailable'
+              end
+              expected_ids[identity] = entity
+            end
+            entities.to_a.each do |entity|
+              identity = entity.respond_to?(:entityID) ? entity.entityID : nil
+              if current.key?(identity) || !expected_ids.key?(identity) || entity != expected_ids[identity]
+                raise ImportRunControl::RollbackFailure, 'bulk white-mask fallback source roster changed'
+              end
+              current[identity] = true
+            end
+            unless current.length == expected_ids.length &&
+                visibility.all? { |entity, hidden| hidden.nil? || entity.hidden? == hidden }
+              raise ImportRunControl::RollbackFailure, 'bulk white-mask fallback source roster or visibility changed'
+            end
+          rescue StandardError => cleanup_error
+            raise ImportRunControl::RollbackFailure,
+              'bulk white-mask fallback cleanup failed: ' + cleanup_error.message.to_s
+          end
+          nil # Source and frame are unchanged; the isolated path remains available.
+        end
+      end
+
+      def self.verify_mask_owner!(group)
+        unless group.respond_to?(:valid?) && group.valid?
+          raise ImportRunControl::RollbackFailure, 'original white-mask owner was destroyed'
+        end
+      end
+
+      def self.verify_preserved_source!(originals)
+        unless originals.all? do |entity|
+          entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?) &&
+            entity.respond_to?(:get_attribute) &&
+            entity.get_attribute(DICTIONARY, 'source_fill_original', false) == true
+        end
+          fail_contract('opaque mask lacks separately owned editable source fill')
+        end
+      end
+
+      # Emitted only after compose_group! has proved its local cleanup. Detail
+      # strings and retained records are bounded; totals never imply success.
+      def self.restored_mask_failure_details(group, white, ink, error, context)
+        identity = begin
+          group.respond_to?(:persistent_id) ? group.persistent_id :
+            (group.respond_to?(:entityID) ? group.entityID : nil)
+        rescue StandardError
+          nil
+        end
+        { :local_cleanup_verified => true, :mask_index => context[:mask_index],
+          :source_group_id => identity,
+          :pdf_paint_order => context[:pdf_paint_order],
+          :svg_paint_order => context[:svg_paint_order],
+          :white_bbox => union_bounds(white), :ink_faces => ink.length,
+          :source_span_ids => ink.map { |face| face[:source_span_id].to_s }.
+            reject(&:empty?).uniq.first(6).map { |id| id[0, 120] },
+          :error_class => error.class.to_s[0, 120],
+          :detail => safe_error_detail(error.message) }
       end
 
       def self.verify_partition_face!(face, points)
@@ -548,6 +948,8 @@ module BlueCollarSystems
         minimum
       end
 
+      ConstructionScaleBudgetError = Class.new(RepresentationFidelity::ContractError)
+
       def self.partition_construction_scale(cells)
         clearance = partition_clearance_squared(cells)
         return CONSTRUCTION_SCALE unless clearance
@@ -557,7 +959,40 @@ module BlueCollarSystems
           return scale if clearance * scale.to_r**2 >= target
           scale *= 2.0
         end
-        fail_contract('exact white-mask construction scale budget exceeded')
+        raise ConstructionScaleBudgetError,
+              'exact white-mask construction scale budget exceeded'
+      end
+
+      def self.rotated_construction_partition(white, ink, original_cells, opts = {})
+        rotate = lambda do |regions|
+          regions.map do |region|
+            region.merge(:loops => region[:loops].map do |loop|
+              loop.map do |point|
+                [point[1].to_r, -point[0].to_r, point.length > 2 ? point[2].to_r : 0.to_r]
+              end
+            end)
+          end
+        end
+        alternate = PlanarRegionPartition.partition(rotate.call(white), rotate.call(ink), opts)
+        restored = alternate.each_with_index.map do |cell, index|
+          run_checkpoint!(opts, :white_mask_partition, index, alternate.length) if (index % 64).zero?
+          copy = cell.merge(:loop => cell[:loop].map { |point| [-point[1], point[0], point[2]] })
+          unless SvgRegionBoundary.signed_area2(copy[:loop]) / 2 == cell[:area]
+            fail_contract('alternate white-mask partition changed exact cell area or orientation')
+          end
+          copy
+        end
+        areas = lambda do |cells|
+          cells.inject(Hash.new(0)) do |totals, cell|
+            totals[cell[:region]] += cell[:area]
+            totals
+          end
+        end
+        unless areas.call(restored) == areas.call(original_cells)
+          fail_contract('alternate white-mask partition changed exact source coverage')
+        end
+        run_checkpoint!(opts, :white_mask_partition, restored.length, restored.length)
+        restored
       end
 
       # Only exact frame-roundtrip rejection permits the one bounded alternate

@@ -94,4 +94,55 @@ class SvgRegionBoundaryTest < Minitest::Test
     assert_nil svg([[[0, 0, 0], [Float::NAN, 0, 0], [1, 1, 0]]])
     assert_nil svg([[[0, 0, 0], [1, 1, 0]]])
   end
+
+  def point_touch_svg(loops, rule = :nonzero)
+    Subject.normalize([{ :loops => loops, :fill_rule => rule }], :svg,
+                      :allow_point_touches => true)
+  end
+
+  def test_point_contact_is_opt_in_and_keeps_two_distinct_filled_cycles
+    first, second = rect(0, 0, 1, 1), rect(1, 1, 2, 2)
+    regions = [{ :loops => [first, second], :fill_rule => :evenodd }]
+    before = Marshal.dump(regions)
+    assert_nil Subject.normalize(regions, :svg)
+    assert_nil Subject.normalize(regions, :svg, :allow_point_touches => 'true')
+    result = Subject.normalize(regions, :svg, :allow_point_touches => true)
+    assert_equal [1.0, 1.0], areas(result)
+    assert_equal [4, 4], result.map(&:length)
+    assert_equal before, Marshal.dump(regions)
+  end
+
+  def test_point_contacts_preserve_holes_and_separate_islands
+    loops = [rect(0, 0, 4, 4), rect(1, 1, 2, 2).reverse,
+             rect(4, 4, 5, 5), rect(8, 0, 9, 1)]
+    result = point_touch_svg(loops)
+    assert_equal [16.0, 1.0, 1.0, -1.0], areas(result)
+    assert_equal 4, result.length
+  end
+
+  def test_point_contact_extension_rejects_crossings_and_unsplit_vertex_contacts
+    first, second = rect(0, 0, 3, 2), rect(2, -1, 4, 3)
+    assert_nil point_touch_svg([first, second], :evenodd)
+    side_touch = [[1, 2, 0], [2, 3, 0], [0, 3, 0]]
+    assert_nil point_touch_svg([rect(0, 0, 2, 2), side_touch])
+  end
+
+  def test_point_contact_tracer_rejects_open_duplicate_and_ambiguous_rays
+    a, b, c = [[0, 0], [1, 0], [0, 1]].map { |p| p.map(&:to_r) }
+    triangle = [[a, b], [b, c], [c, a]]
+    assert_nil Subject.point_touch_loops(triangle[0, 2], triangle)
+    assert_nil Subject.point_touch_loops(triangle + [triangle.first], triangle)
+    # Two outgoing rays in the same direction cannot identify separate cycles.
+    long = [2.to_r, 0.to_r]
+    lower = [0.to_r, -1.to_r]
+    ambiguous = triangle + [[a, long], [long, lower], [lower, a]]
+    assert_equal ambiguous.length, ambiguous.uniq.length
+    assert_nil Subject.point_touch_loops(ambiguous, ambiguous)
+  end
+
+  def test_point_contact_extension_keeps_the_existing_atomic_edge_limit
+    loop = rect(0, 0, 1, 1).map { |p| p.first(2).map(&:to_r) }
+    edges = loop.each_index.map { |i| [loop[i], loop[(i + 1) % loop.length]] }
+    assert_nil Subject.point_touch_loops(edges * (Subject::MAX_ATOMIC_EDGES + 1), edges)
+  end
 end

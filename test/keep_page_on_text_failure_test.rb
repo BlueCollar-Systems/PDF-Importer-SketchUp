@@ -455,7 +455,12 @@ class KeepPageOnTextFailureTest < Minitest::Test
     assert_operator compose - opener, :<, 400
     refute_match(/raise RepresentationFidelity::ContractError,\s*'final vector annotations require the complete page text inventory'/,
                  pipeline)
-    assert_match(/overlay_top = 0\.0\s*\n\s*record_page_step_down!/, pipeline)
+    annotation_context = pipeline.index('overlay_context = late_overlay_composition_context!(')
+    refute_nil annotation_context
+    annotation_guard = pipeline.rindex('keep_page_on_page_stage_failure(', annotation_context)
+    refute_nil annotation_guard, 'incomplete annotation checks keep and report the page'
+    assert_operator annotation_context - annotation_guard, :<, 400
+    assert_match(/overlay_top = overlay_context \? overlay_context\[:highest_text_z\] : 0\.0/, pipeline)
   end
 
   # ---- report: fallback_used and human_summary ---------------------------
