@@ -1491,3 +1491,125 @@ class QAReportTest
     end
   end
 end
+
+# These fixtures exercise image-display reporting only. They do not establish
+# source image pixels, native clipping, geometry, or text fallback delivery.
+class QAReportTest
+  def image_display_warning_rows
+    [{ :page => 1, :source_svg_sha256 => 'c' * 64, :qualified_count => 0,
+       :unqualified => [{ :image_id => 'persistent_id:42',
+         :reason => 'clip is not one four-corner contour' }] }]
+  end
+
+  def image_display_warning_stats(rows = image_display_warning_rows)
+    { :pages => 1, :primitives => 100, :edges => 100, :text => 1,
+      :embedded_images => 1, :layers => ['PDF'], :text_mode => :text3d,
+      :peak_mb => 1.0, :ownership_bookkeeping => {},
+      :requested_pages => [1], :retained_pages => [1], :result_status => 'success',
+      :embedded_image_paint_order => rows }
+  end
+
+  def test_embedded_image_display_warning_is_visible_without_inventing_fallback_or_changing_raw_evidence
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    rows = image_display_warning_rows
+    before = Marshal.dump(rows)
+    report = q.build_from_stats('fictional-picture.pdf', {}, image_display_warning_stats(rows))
+    assert_equal 1, report[:result][:warnings]
+    assert_equal 'review', report[:extra][:diagnostics][:quality_level]
+    assert_includes report[:extra][:diagnostics][:signals], 'embedded_image_display_unqualified'
+    assert report[:extra][:diagnostics][:recommended_actions].any? { |text| text.include?('extra.embedded_image_paint_order') }
+    assert_includes report[:extra][:human_summary], 'Picture clipping or overlap remains unverified for 1 picture on page 1; compare with the PDF'
+    assert_includes report[:extra][:human_summary], 'Content review: review'
+    refute_includes report[:extra][:human_summary], 'four-corner'
+    refute_includes report[:extra][:human_summary], 'persistent_id:'
+    assert_equal false, report[:fallback][:used]
+    refute report[:fallback].key?(:text)
+    assert_empty report[:extra][:page_step_downs]
+    assert_empty report[:extra][:text_step_downs]
+    assert_equal 'success', report[:result_status]
+    assert_equal before, Marshal.dump(rows)
+    assert_equal JSON.parse(JSON.generate(rows)), report[:extra][:embedded_image_paint_order]
+    warning = q.embedded_image_display_warnings(image_display_warning_stats).first
+    assert_equal 'persistent_id:42', warning[:image_id]
+    assert_equal 'clip is not one four-corner contour', warning[:reason]
+    assert_equal 'c' * 64, warning[:source_svg_sha256]
+  end
+
+  def test_embedded_image_display_warning_deduplicates_same_item_reason_but_preserves_raw_rows
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    rows = image_display_warning_rows
+    repeated = rows + Marshal.load(Marshal.dump(rows))
+    report = q.build_from_stats('fictional-picture.pdf', {}, image_display_warning_stats(repeated))
+    assert_equal 1, report[:result][:warnings]
+    assert_equal 2, report[:extra][:embedded_image_paint_order].length
+    assert_equal repeated.map { |row| row[:unqualified].length }, [1,1]
+    assert_includes report[:extra][:human_summary], '1 picture on page 1'
+  end
+
+  def test_embedded_image_display_warning_accepts_string_keys_and_counts_distinct_images_and_reasons
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    rows = image_display_warning_rows
+    rows.first[:unqualified] << { :image_id => 'persistent_id:42', :reason => 'source order is unproven' }
+    rows << { :page => 2, :source_svg_sha256 => 'd' * 64, :qualified_count => 1,
+      :unqualified => [{ :image_id => 'persistent_id:77', :reason => 'clip contour is unsupported' }] }
+    stats = image_display_warning_stats([])
+    stats.delete(:embedded_image_paint_order)
+    stats['embedded_image_paint_order'] = JSON.parse(JSON.generate(rows))
+    report = q.build_from_stats('fictional-picture.pdf', {}, stats)
+    assert_equal 3, report[:result][:warnings]
+    assert_equal 'review', report[:extra][:diagnostics][:quality_level]
+    assert_includes report[:extra][:human_summary], '2 pictures on pages 1, 2'
+    assert_equal JSON.parse(JSON.generate(rows)), report[:extra][:embedded_image_paint_order]
+  end
+
+  def test_embedded_image_display_warning_absent_or_all_qualified_keeps_clean_classification
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    missing = image_display_warning_stats
+    missing.delete(:embedded_image_paint_order)
+    qualified = image_display_warning_stats([{ :page => 1, :qualified_count => 2, :unqualified => [] }])
+    [missing, image_display_warning_stats([]), qualified].each do |stats|
+      report = q.build_from_stats('fictional-picture.pdf', {}, stats)
+      assert_equal 0, report[:result][:warnings]
+      assert_equal 'high', report[:extra][:diagnostics][:quality_level]
+      refute_includes report[:extra][:diagnostics][:signals], 'embedded_image_display_unqualified'
+      refute_includes report[:extra][:human_summary], 'Picture clipping or overlap remains unverified'
+      assert_equal false, report[:fallback][:used]
+    end
+  end
+
+  def test_embedded_image_display_warning_does_not_promote_lower_content_severity
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    [['empty',0,0],['image_only',0,1],['low',1,0],['review',10,0]].each do |quality, primitives, images|
+      stats = image_display_warning_stats.merge(:primitives=>primitives,:edges=>primitives,:text=>0,:embedded_images=>images)
+      report = q.build_from_stats('fictional-picture.pdf', {}, stats)
+      assert_equal 1, report[:result][:warnings]
+      assert_equal quality, report[:extra][:diagnostics][:quality_level]
+      assert_includes report[:extra][:diagnostics][:signals], 'embedded_image_display_unqualified'
+    end
+  end
+
+  def test_embedded_image_display_warning_adds_only_its_own_count_to_existing_page_warning
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    stats = image_display_warning_stats([]).merge(:page_step_downs => [
+      { :page=>1,:item=>'white_areas',:reason_code=>'white_area_check_failed',
+        :detail=>'A source fill was retained',:page_kept=>true }])
+    baseline = q.build_from_stats('fictional-picture.pdf', {}, stats)
+    report = q.build_from_stats('fictional-picture.pdf', {}, stats.merge(:embedded_image_paint_order=>image_display_warning_rows))
+    assert_equal 1, baseline[:result][:warnings]
+    assert_equal 2, report[:result][:warnings]
+    assert_equal baseline[:fallback], report[:fallback]
+    assert_equal baseline[:extra][:page_step_downs], report[:extra][:page_step_downs]
+    assert_equal baseline[:extra][:text_step_downs], report[:extra][:text_step_downs]
+  end
+
+  def test_embedded_image_display_warning_does_not_change_independent_delivery_contract
+    q = BlueCollarSystems::PDFVectorImporter::QAReport
+    baseline = q.build_from_stats('fictional-picture.pdf', {}, image_display_warning_stats([]))
+    report = q.build_from_stats('fictional-picture.pdf', {}, image_display_warning_stats)
+    assert_equal baseline[:result_status], report[:result_status]
+    assert_equal baseline[:fallback], report[:fallback]
+    assert_equal baseline[:extra][:representation_fidelity], report[:extra][:representation_fidelity]
+    assert_equal baseline[:extra][:import_contract_ready], report[:extra][:import_contract_ready]
+    assert_equal baseline[:extra][:text_delivery_accounting], report[:extra][:text_delivery_accounting]
+  end
+end

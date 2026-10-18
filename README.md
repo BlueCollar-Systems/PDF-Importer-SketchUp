@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.179-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.180-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -22,6 +22,20 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
+### Recent fixes (v3.7.180)
+
+- White-area refinement can build retained cells together while checking every
+  cell boundary, source area and shared edge. A rejected mesh is removed and
+  checked before the existing isolated construction is retried. Original fills
+  stay editable; requested text modes and construction limits are unchanged.
+- Picture clipping or overlap concerns already recorded in detailed diagnostics
+  now appear in the import summary and Import Health. The white-area warning
+  also uses the correct punctuation.
+- A bounded SketchUp 2017 sample retained all 505 expected white faces through
+  ordinary Save As, one Undo, fresh Open and resave. This establishes the sample's
+  source geometry and lifecycle; full importer acceptance is recorded separately
+  for each test package.
+
 ### Recent fixes (v3.7.179)
 
 - Exact white-area classification sweeps the complete source contours once per
@@ -34,8 +48,10 @@ use the same validation.
   remaining visual limitation; technical details stay in the structured report.
 - The preceding v3.7.178 foundation test passed the 3D Text import, save, Undo and
   reopen lifecycle and the scoped annotation-height checks. Its flat Glyphs test
-  expired at the unchanged 30-minute stage limit. Native v3.7.179 acceptance is
-  still pending; source-kernel improvements are not a host-import speed claim.
+  expired at the unchanged 30-minute stage limit. The v3.7.179 follow-up also
+  expired in Glyphs; its 3D Text lifecycle and 16 final-annotation height checks
+  passed within their stated scope. Strict recomputed Face measurements still
+  differed after reopening. See the dated validation notes for the exact limits.
 
 ### Recent fixes (v3.7.178)
 

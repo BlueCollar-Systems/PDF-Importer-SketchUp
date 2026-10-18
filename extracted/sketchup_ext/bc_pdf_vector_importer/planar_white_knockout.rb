@@ -568,23 +568,31 @@ module BlueCollarSystems
           stage.name = 'PDF planar white composition' if stage.respond_to?(:name=)
           origin, scale, point_map = partition_construction_frame!(
             stage, source_cells, origin, scale, transform)
-          created_faces = {}
-          construction_cells.each_with_index do |cell, index|
-            run_checkpoint!(opts, :white_mask_cells, index, construction_cells.length) if (index % 64).zero?
-            # A convex source cell has no holes and cannot cross a source
-            # boundary. Keep cells in separate identity groups so legacy host
-            # face discovery cannot merge adjacent regions across that boundary.
-            container = stage.entities.add_group
-            points = cell[:loop].map { |point| point_map.fetch(point) }
-            face = container.entities.add_face(points)
-            fail_contract('native exact white-mask cell construction failed') unless face
-            verify_partition_face!(face, points)
-            if kept_only
-              identity = face.respond_to?(:entityID) ? face.entityID : nil
-              unless identity.is_a?(Integer) && identity > 0 && !created_faces.key?(identity)
-                fail_contract('native kept white-mask cell has no unique entity identity')
+          created_faces = nil
+          if kept_only && white.length == 1 && defined?(Geom::PolygonMesh) &&
+              stage.entities.respond_to?(:fill_from_mesh)
+            created_faces = try_bulk_partition_cells!(group, entities, stage,
+              originals, construction_cells, point_map, scale, tolerance, white.first, opts)
+          end
+          unless created_faces
+            created_faces = {}
+            construction_cells.each_with_index do |cell, index|
+              run_checkpoint!(opts, :white_mask_cells, index, construction_cells.length) if (index % 64).zero?
+              # A convex source cell has no holes and cannot cross a source
+              # boundary. Keep cells in separate identity groups so legacy host
+              # face discovery cannot merge adjacent regions across that boundary.
+              container = stage.entities.add_group
+              points = cell[:loop].map { |point| point_map.fetch(point) }
+              face = container.entities.add_face(points)
+              fail_contract('native exact white-mask cell construction failed') unless face
+              verify_partition_face!(face, points)
+              if kept_only
+                identity = face.respond_to?(:entityID) ? face.entityID : nil
+                unless identity.is_a?(Integer) && identity > 0 && !created_faces.key?(identity)
+                  fail_contract('native kept white-mask cell has no unique entity identity')
+                end
+                created_faces[identity] = face
               end
-              created_faces[identity] = face
             end
           end
           run_checkpoint!(opts, :white_mask_cells, construction_cells.length, construction_cells.length)
@@ -699,6 +707,168 @@ module BlueCollarSystems
                           "ink_faces=#{ink.length}; spans=#{owners}")
           end
           raise
+        end
+      end
+
+      # Bulk emission changes only the private native staging representation.
+      # Every exact cell still owns one verified Face; shared boundary Edges
+      # are allowed, merged/split Faces and newly rounded points are not.
+      # A rejected private mesh may use the existing isolated constructor only
+      # after its own container is erased and source ownership/visibility plus
+      # the empty, already-verified construction frame are read back unchanged.
+      def self.try_bulk_partition_cells!(group, entities, stage, originals, cells,
+                                         point_map, scale, tolerance, style, opts)
+        visibility = originals.map { |entity| [entity, entity.respond_to?(:hidden?) ? entity.hidden? : nil] }
+        frame = stage.transformation.to_a
+        container = nil
+        begin
+          fail_contract('bulk white-mask frame is not empty') unless stage.entities.to_a.empty?
+          container = stage.entities.add_group
+          container.transformation = Geom::Transformation.new
+          mesh = Geom::PolygonMesh.new(point_map.length, cells.length)
+          indices, native_points = {}, {}
+          cells.each_with_index do |cell, index|
+            run_checkpoint!(opts, :white_mask_cells, index, cells.length) if (index % 64).zero?
+            cell[:loop].each do |source|
+              next if indices.key?(source)
+              point = point_map.fetch(source)
+              expected = [point.x.to_f, point.y.to_f, point.z.to_f]
+              transformed = point.transform(container.transformation)
+              unless [transformed.x.to_f, transformed.y.to_f, transformed.z.to_f] == expected
+                fail_contract('bulk white-mask child frame changed source points')
+              end
+              native = mesh.add_point(point)
+              unless native.is_a?(Integer) && native > 0 && !native_points.key?(native)
+                fail_contract('bulk white-mask mesh collapsed source points')
+              end
+              actual = mesh.point_at(native)
+              unless [actual.x.to_f, actual.y.to_f, actual.z.to_f] == expected
+                fail_contract('bulk white-mask mesh changed source points')
+              end
+              native_points[native] = expected
+              indices[source] = native
+            end
+          end
+          polygons, expected_cells = {}, {}
+          cells.each_with_index do |cell, index|
+            run_checkpoint!(opts, :white_mask_cells, index, cells.length) if (index % 64).zero?
+            points = cell[:loop].map { |source| point_map.fetch(source) }
+            key = canonical_loop(points.map { |point| [point.x.to_f, point.y.to_f, point.z.to_f] })
+            fail_contract('bulk white-mask source cell is duplicated') if expected_cells.key?(key)
+            expected_cells[key] = cell
+            polygon = mesh.add_polygon(cell[:loop].map { |source| indices.fetch(source) })
+            unless polygon.is_a?(Integer) && polygon > 0 && !polygons.key?(polygon)
+              fail_contract('bulk white-mask mesh rejected a source cell')
+            end
+            polygons[polygon] = true
+            loop = mesh.polygon_at(polygon)
+            unless loop.all? { |native| native.is_a?(Integer) && native_points.key?(native) } &&
+                canonical_loop(loop.map { |native| native_points.fetch(native) }) == key
+              fail_contract('bulk white-mask mesh changed a source cell')
+            end
+          end
+          unless mesh.count_points == indices.length && mesh.count_polygons == cells.length
+            fail_contract('bulk white-mask mesh roster changed')
+          end
+          run_checkpoint!(opts, :white_mask_cells, 0, cells.length)
+          unless container.entities.fill_from_mesh(mesh, true, 0, style[:material], style[:back_material]) == true
+            fail_contract('bulk white-mask native construction failed')
+          end
+          run_checkpoint!(opts, :white_mask_cells, cells.length, cells.length)
+          unless stage.transformation.to_a == frame
+            fail_contract('bulk white-mask construction frame changed')
+          end
+          indices.each_key do |source|
+            point = point_map.fetch(source)
+            actual = point.transform(container.transformation)
+            unless [actual.x.to_f, actual.y.to_f, actual.z.to_f] == [point.x.to_f, point.y.to_f, point.z.to_f]
+              fail_contract('bulk white-mask child frame changed during construction')
+            end
+          end
+          created, matched, boundaries = {}, {}, {}
+          native_entities = container.entities.to_a
+          native_entities.each_with_index do |face, index|
+            next unless face.typename.to_s == 'Face'
+            run_checkpoint!(opts, :white_mask_cells, index, native_entities.length) if (index % 64).zero?
+            unless face.valid? && face.loops.to_a.length == 1
+              fail_contract('bulk white-mask native cell changed topology')
+            end
+            key = canonical_loop(face.outer_loop.vertices.map { |v| p = v.position; [p.x.to_f, p.y.to_f, p.z.to_f] })
+            cell = expected_cells[key]
+            identity = face.respond_to?(:entityID) ? face.entityID : nil
+            unless cell && !matched.key?(key) && identity.is_a?(Integer) && identity > 0 && !created.key?(identity)
+              fail_contract('bulk white-mask native cells merged, split or changed identity')
+            end
+            verify_partition_face!(face, cell[:loop].map { |source| point_map.fetch(source) })
+            area = face.area.to_f / (scale * scale)
+            unless area.finite? && area > 0.0 && (area - cell[:area].to_f).abs <= tolerance
+              fail_contract('bulk white-mask native cell area changed')
+            end
+            matched[key] = true
+            created[identity] = face
+            key.each_with_index do |point, index|
+              edge = [point, key[(index + 1) % key.length]].sort
+              (boundaries[edge] ||= {})[identity] = face
+            end
+          end
+          fail_contract('bulk white-mask native cell is missing') unless created.length == cells.length
+          actual_edges, edge_ids = {}, {}
+          native_entities.each do |entity|
+            next if entity.typename.to_s == 'Face'
+            unless entity.valid? && entity.typename.to_s == 'Edge' &&
+                !entity.soft? && !entity.smooth? && entity.vertices.length == 2
+              fail_contract('bulk white-mask native edge ownership changed')
+            end
+            edge = entity.vertices.map { |v| p = v.position; [p.x.to_f, p.y.to_f, p.z.to_f] }.sort
+            expected = boundaries[edge]
+            identity = entity.respond_to?(:entityID) ? entity.entityID : nil
+            actual = entity.faces.to_a
+            unless expected && !actual_edges.key?(edge) && identity.is_a?(Integer) && identity > 0 &&
+                !edge_ids.key?(identity) && actual.length >= 1 && actual.length <= 2 &&
+                actual.map(&:entityID).sort == expected.keys.sort &&
+                actual.all? { |face| created[face.entityID] == face }
+              fail_contract('bulk white-mask native edge boundary changed')
+            end
+            actual_edges[edge] = true
+            edge_ids[identity] = true
+          end
+          fail_contract('bulk white-mask native edge is missing') unless actual_edges.length == boundaries.length
+          created
+        rescue StandardError => error
+          # Terminal stops never retry another native representation.
+          raise error if error.is_a?(ImportRunControl::ImportCancelled) ||
+            error.is_a?(ImportRunControl::ResumeMismatch) || error.is_a?(ImportRunControl::RollbackFailure)
+          begin
+            container.erase! if container && container.valid?
+            if (container && container.valid?) || !stage.valid? || !stage.entities.to_a.empty? ||
+                stage.transformation.to_a != frame
+              raise ImportRunControl::RollbackFailure, 'bulk white-mask private container was not erased'
+            end
+            verify_mask_owner!(group)
+            current, expected_ids = {}, {}
+            (originals + [stage]).each do |entity|
+              identity = entity.respond_to?(:entityID) ? entity.entityID : nil
+              unless entity.valid? && identity.is_a?(Integer) && identity > 0 && !expected_ids.key?(identity)
+                raise ImportRunControl::RollbackFailure, 'bulk white-mask fallback original identity is unavailable'
+              end
+              expected_ids[identity] = entity
+            end
+            entities.to_a.each do |entity|
+              identity = entity.respond_to?(:entityID) ? entity.entityID : nil
+              if current.key?(identity) || !expected_ids.key?(identity) || entity != expected_ids[identity]
+                raise ImportRunControl::RollbackFailure, 'bulk white-mask fallback source roster changed'
+              end
+              current[identity] = true
+            end
+            unless current.length == expected_ids.length &&
+                visibility.all? { |entity, hidden| hidden.nil? || entity.hidden? == hidden }
+              raise ImportRunControl::RollbackFailure, 'bulk white-mask fallback source roster or visibility changed'
+            end
+          rescue StandardError => cleanup_error
+            raise ImportRunControl::RollbackFailure,
+              'bulk white-mask fallback cleanup failed: ' + cleanup_error.message.to_s
+          end
+          nil # Source and frame are unchanged; the isolated path remains available.
         end
       end
 

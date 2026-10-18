@@ -82,3 +82,78 @@ matrix. The result receipt SHA-256 is
 
 Native v3.7.179 import/save/Undo/reopen and source-footprint acceptance remain
 pending. Prior failures, packages, original PDFs and saved models are preserved.
+
+## Completed v3.7.179 host checks
+
+The r28 candidate was built from `57b011f3a03782c39f4c5e51e28d9c4282a05ee3`;
+its RBZ SHA-256 is
+`8a355e0d12d7c08841e67119bc7601f465cef049dfbdd31448b37037a7b550c4`.
+The ordinary foundation Glyphs import again exceeded the unchanged 1,800-second
+stage limit. The log recorded 260 eligible attempts: 254 composed, four exact
+no-ink outcomes and two restored failures. Composition alone took 1,474.389
+seconds. There was no completed import, Save, Undo or fresh-open acceptance.
+The last picture-clip warning does not establish the cause of the remaining delay.
+
+The separate 3D Text import completed in 160.5 seconds, with ordinary Save As,
+one Undo to an empty root, fresh Open without repair and a separate Save As.
+Both test processes exited naturally with zero. All 291 spans were accounted for
+(286 positive-depth owners and five verified blanks), and all 16 final
+annotations retained their source placement, paint, order and height above the
+measured 1/64-inch text depth across the four captures.
+
+The strict cross-process numeric comparison still failed. The original rejection
+and raw differences remain: 2,119 host-derived area/normal/plane scalar changes,
+at most four ULPs, and 66 signed-zero raw transform changes. A separate scoped
+classification found no other selected primary geometry/style differences. This
+is not strict raw identity, whole-PDF appearance, native-image pixel, independently
+exact glyph-outline, manifold or volume acceptance. The r28 package was not
+promoted; its added dated guide and acceptance supplement preserve these limits.
+
+Its report also showed zero warnings despite retaining a source-picture clipping
+qualification failure in `extra.embedded_image_paint_order`. This reporting gap
+is addressed below; the picture's clipping itself is not declared fixed.
+
+## v3.7.180 bulk construction and warning repair
+
+For a single source-white owner with retained cells, the importer may construct
+those cells with PolygonMesh in one empty child of the verified construction
+frame. Exact source partition, all-cell clearance, frame, source class/area,
+coverage and style checks remain. Each native Face must match one exact cell;
+actual native Edges must match its Face-loop boundaries and adjacency. Merged,
+split, missing or changed cells are rejected, including tiny cells below the
+aggregate area tolerance. Unsupported APIs and other source-owner cases retain
+the isolated construction path.
+
+A rejected mesh can retry isolated construction only after its owned child is
+removed and the original roster, visibility and empty frame are read back
+unchanged. Cancellation, changed resume data and uncertain cleanup never retry.
+Original editable fills are hidden only after the shared final checks pass.
+
+A private SketchUp 2017 sample built all 505 retained white cells with 1,568 Edges
+and 1,067 Vertices, including 435 Edges shared by two Faces. Ordinary Save As,
+one Undo to an empty root, fresh Open without repair and resave passed. Four
+read-only captures matched the source cell/world loops, native adjacency and
+styles. Cross-process persistent geometry matched; 7,212 session/reference ID
+changes remain in the strict raw comparison, with no derived scalar changes.
+The independent pair receipt SHA-256 is
+`1721b311bc97faf0d300d26a9e4b0857859868333400f9aaf88a04c5b2db3088`.
+This finite historical-coordinate sample is not a fresh PDF import or full
+product acceptance. The actual importer adds an identity staging child, so the
+new package still requires its own ordinary foundation lifecycle checks.
+
+QA now counts deduplicated picture-display qualification warnings and presents a
+plain-language clipping/overlap caution in its summary and Import Health. Exact
+image identities and reasons stay in the detailed report. This does not alter
+text modes, delivery status or image geometry. The white-area warning's doubled
+period is also corrected.
+
+All 34 actual-repository required/affected runs passed: 17 suites on verified
+Ruby 2.2.4 with official Minitest 5.4.3 and Ruby 3.4.4 with Minitest 5.25.4.
+There were no failures, errors, skips or timeouts, and all snapshotted source,
+tests and README bytes stayed unchanged. QA had 60 tests / 431 assertions on each
+runtime; the white-area suite had 113 tests / 5,177 assertions. The result receipt
+SHA-256 is
+`04f76104be742646c175b8fc3bd0db04b0ac28c8a4ad7087a81b178a52dca031`.
+
+Native v3.7.180 package acceptance is recorded separately after the exact build.
+Original PDFs, saved models, older packages and negative evidence are retained.

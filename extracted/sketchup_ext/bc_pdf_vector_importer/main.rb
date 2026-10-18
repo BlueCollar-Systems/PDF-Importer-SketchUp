@@ -3401,7 +3401,7 @@ module BlueCollarSystems
       failed = report[:failed_groups].to_i
       return report if failed == 0
       detail = "#{failed} source fill(s) were left unchanged; text drawn over them may be hidden. " \
-               'Compare these areas with the PDF.'
+               'Compare these areas with the PDF'
       record_page_step_down!(stats, page_num, 'white_areas',
         'white_area_check_failed', detail)
       report

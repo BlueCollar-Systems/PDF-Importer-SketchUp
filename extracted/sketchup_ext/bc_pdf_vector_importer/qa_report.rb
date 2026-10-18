@@ -313,6 +313,7 @@ module BlueCollarSystems
         # Repeated copies of one page warning do not count as new warnings.
         # Raw step-down rows remain untouched in the detailed report.
         warnings += Array(telemetry_value(stats, :page_step_downs)).uniq.length
+        warnings += embedded_image_display_warnings(stats).length
         version = importer_version
 
         report = {
@@ -2692,6 +2693,11 @@ module BlueCollarSystems
           signals << 'page_items_stepped_down'
           actions << 'Some page items were kept without all visual checks; compare the listed pages with the PDF. See extra.page_step_downs for details.'
         end
+        unless embedded_image_display_warnings(stats).empty?
+          quality_level = 'review' if %w[high moderate].include?(quality_level)
+          signals << 'embedded_image_display_unqualified'
+          actions << 'Picture clipping or overlap remains unverified; compare the pictures with the PDF. See extra.embedded_image_paint_order for image identities and exact reasons.'
+        end
         lineweights=lineweight_approximation_block(stats)
         if lineweights[:unresolved_path_count] > 0
           quality_level='review'
@@ -2817,6 +2823,28 @@ module BlueCollarSystems
         else
           value
         end
+      end
+
+      # These source-display qualification failures are already retained in
+      # the detailed report. They are visual review warnings, not failed image
+      # delivery, proof of changed pixels, or a text/representation fallback.
+      def embedded_image_display_warnings(stats)
+        seen, warnings = {}, []
+        Array(telemetry_value(stats, :embedded_image_paint_order)).each do |record|
+          next unless record.is_a?(Hash)
+          Array(telemetry_value(record, :unqualified)).each do |item|
+            next unless item.is_a?(Hash)
+            warning = { :page => telemetry_value(record, :page),
+              :image_id => telemetry_value(item, :image_id),
+              :reason => telemetry_value(item, :reason),
+              :source_svg_sha256 => telemetry_value(record, :source_svg_sha256) }
+            key = warning.values_at(:page, :image_id, :reason, :source_svg_sha256)
+            next if seen[key]
+            seen[key] = true
+            warnings << warning
+          end
+        end
+        warnings
       end
 
       def lineweight_approximation_block(stats)
@@ -2978,6 +3006,15 @@ module BlueCollarSystems
           bit = "Simplified on page#{'s' if pages.length != 1} #{pages.join(', ')}"
           bit += ": #{detail}" unless detail.empty?
           parts << bit
+        end
+
+        image_warnings = embedded_image_display_warnings(
+          :embedded_image_paint_order => extra['embedded_image_paint_order'])
+        unless image_warnings.empty?
+          pictures = image_warnings.map { |row| [row[:page], row[:image_id]] }.uniq.length
+          pages = image_warnings.map { |row| row[:page].to_i }.select { |page| page > 0 }.uniq.sort
+          where = pages.empty? ? '' : " on page#{pages.length == 1 ? '' : 's'} #{pages.join(', ')}"
+          parts << "Picture clipping or overlap remains unverified for #{pictures} picture#{pictures == 1 ? '' : 's'}#{where}; compare with the PDF"
         end
 
         quality = diagnostics['quality_level'].to_s

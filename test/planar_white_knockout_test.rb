@@ -24,6 +24,7 @@ module Geom
         offset.each_with_index.map { |v, i| v * other.weight + scale * other.offset[i] }, weight * other.weight)
     end
     def inverse; Transformation.new(1.0 / scale, offset.map { |v| -v / (scale * weight) }, 1.0 / weight); end
+    def to_a; [scale,0,0,0,0,scale,0,0,0,0,scale,0,offset[0],offset[1],offset[2],weight]; end
     def point(p); Point3d.new(*[p.x, p.y, p.z].each_with_index.map { |v, i| (v * scale + offset[i]) / weight }); end
   end
 end
@@ -170,6 +171,7 @@ RUBY
       @attributes = {}
     end
     def typename; 'Group'; end
+    def entityID; object_id; end
     def valid?; !@erased; end
     def hidden?; @hidden == true; end
     def erase!; @erased = true; end
@@ -2106,6 +2108,342 @@ class PlanarWhiteKnockoutTest
       end
       error=assert_raises(ContractError) { Subject.compose!([mask],[text]) }
       assert_match(/unique entity identity/,error.message)
+      assert_white_only_source_retained(wrapper,source,original,ink)
+    end
+  end
+
+
+
+  # A PolygonMesh stand-in only: host welding/persistence is independently
+  # qualified in real SketchUp. These tests exercise actual product guards.
+  class BulkTestMesh
+    attr_reader :points, :polygons
+    def initialize(_point_count, _polygon_count)
+      @points, @polygons = [], []
+    end
+    def add_point(point)
+      options = PlanarWhiteKnockoutTest.bulk_test_options
+      return 1 if options[:collapse_point] && points.length == 1
+      points << point
+      points.length
+    end
+    def point_at(index); points.fetch(index-1); end
+    def add_polygon(indices)
+      loop = indices.dup
+      loop[0] = loop[1] if PlanarWhiteKnockoutTest.bulk_test_options[:change_polygon]
+      polygons << loop
+      polygons.length
+    end
+    def polygon_at(index); polygons.fetch(index-1); end
+    def count_points; points.length; end
+    def count_polygons; polygons.length; end
+  end
+
+  class BulkTestEdge
+    attr_accessor :hidden, :soft, :smooth
+    attr_reader :faces, :vertices
+    def initialize(faces, points = [[0,0,0],[0,1,0]])
+      @faces=faces;@vertices=points.map { |p| Vertex.new(Geom::Point3d.new(*p)) }
+      @hidden=false;@soft=false;@smooth=false;@erased=false
+    end
+    def entityID; object_id; end
+    def typename; 'Edge'; end
+    def valid?; !@erased; end
+    def erase!;@erased=true;end
+    def soft?;@soft;end
+    def smooth?;@smooth;end
+  end
+
+  def self.bulk_test_options; @bulk_test_options; end
+  def with_bulk_mesh(options = {})
+    raise 'test PolygonMesh already defined' if Geom.const_defined?(:PolygonMesh)
+    self.class.instance_variable_set(:@bulk_test_options, options)
+    Geom.const_set(:PolygonMesh, BulkTestMesh)
+    Entities.class_eval do
+      define_method(:fill_from_mesh) do |mesh,weld,flags,front,back|
+        options=PlanarWhiteKnockoutTest.bulk_test_options
+        options[:fills]=(options[:fills] || 0)+1
+        options[:containers] ||= [];options[:containers] << self
+        options[:arguments]=[weld,flags,front,back]
+        options[:before_fill].call(self,mesh) if options[:before_fill]
+        raise options[:error] if options[:error]
+        return false if options[:return_false]
+        faces=mesh.polygons.map do |indices|
+          loop=indices.map { |index| p=mesh.point_at(index);[p.x,p.y,p.z] }
+          face=Face.new([loop]);face.material=front;face.back_material=back;face
+        end
+        faces.pop if options[:missing_face]
+        faces.delete_at(faces.each_with_index.min_by { |f,i|f.area }[1]) if options[:missing_smallest]
+        faces[0]=Face.new([faces.first.raw.first,[[0,0,0],[1,0,0],[0,1,0]]]) if options[:added_hole]
+        faces << Face.new([[[0,0,0],[1,0,0],[0,1,0]]]) if options[:extra_face]
+        if options[:change_face]
+          points=faces.first.raw.first;points[0][0]+=1.0e-8;faces[0]=Face.new([points])
+        end
+        faces.last.define_singleton_method(:entityID) { faces.first.entityID } if options[:duplicate_identity]
+        faces.first.define_singleton_method(:area) { Float::NAN } if options[:nonfinite_area]
+        faces.first.define_singleton_method(:area) { super()*1.01 } if options[:wrong_area]
+        edges={}
+        faces.each do |face|
+          loop=face.raw.first
+          loop.each_with_index do |point,i|
+            key=[point,loop[(i+1)%loop.length]].sort
+            (edges[key] ||= []) << face
+          end
+        end
+        edge_objects=edges.map { |points,adjacency| BulkTestEdge.new(adjacency,points) }
+        edge_objects.first.soft=true if options[:soft_edge]
+        edge_objects << BulkTestEdge.new([]) if options[:loose_edge]
+        edge_objects << BulkTestEdge.new([faces.first],[[99,0,0],[100,0,0]]) if options[:false_boundary]
+        edge_objects.pop if options[:missing_edge]
+        @items.concat(faces+edge_objects)
+        options[:after_fill].call(self,mesh) if options[:after_fill]
+        true
+      end
+    end
+    yield options
+  ensure
+    Entities.class_eval { remove_method(:fill_from_mesh) } if Entities.instance_methods(false).include?(:fill_from_mesh)
+    Geom.send(:remove_const,:PolygonMesh) if Geom.const_defined?(:PolygonMesh)
+    self.class.instance_variable_set(:@bulk_test_options,nil)
+  end
+
+  def bulk_test_fixture
+    mask,wrapper,source,original=preserved_mask([rect(0,0,4,4)])
+    ink=Face.new([rect(1,1,3,3),rect(1.5,1.5,2.5,2.5)])
+    text=Group.new(Entities.new([ink]));text.owner=true
+    [mask,wrapper,source,original,ink,text]
+  end
+
+  def test_bulk_mesh_emits_one_container_with_exact_cells_counter_style_and_source_ink
+    mask,wrapper,source,original,ink,text=bulk_test_fixture
+    with_bulk_mesh do |observed|
+      result=Subject.compose!([mask],[text])
+      assert_equal 1,observed[:fills]
+      assert_equal [true,0,:source_front,:source_back],observed[:arguments]
+      assert_equal 1,result[:composed_groups]
+      assert_equal 3.0,result[:removed_area]
+      assert_equal 'exact_source_partition',result[:removed_area_basis]
+      stage=wrapper.entities.stage
+      children=stage.entities.to_a
+      assert_equal 1,children.length
+      assert_equal 'Group',children.first.typename
+      faces=Subject.partition_faces(stage.entities)
+      assert faces.all? { |f| f.material==:source_front && f.back_material==:source_back && f.layer==:source_layer }
+      assert children.first.entities.to_a.select { |e| e.typename=='Edge' }.all? { |e| e.hidden && !e.soft? && !e.smooth? }
+      geometry=Subject.snapshots(stage,stage.transformation,false)
+      assert geometry.any? { |r| Subject.contains?(r,[2,2,0]) }, 'counter remains white'
+      refute geometry.any? { |r| Subject.contains?(r,[1.2,2,0]) }, 'source ink remains exposed'
+      assert source.hidden? && source.valid? && original.valid? && ink.valid?
+      refute original.hidden?
+    end
+  end
+
+  def test_bulk_mesh_unavailable_uses_existing_isolated_constructor
+    mask,wrapper,source,original,ink,text=bulk_test_fixture
+    report=Subject.compose!([mask],[text])
+    assert_equal 1,report[:composed_groups]
+    assert wrapper.entities.stage.entities.to_a.length>1
+    assert source.hidden? && original.valid? && ink.valid?
+  end
+
+  def test_bulk_mesh_rejects_host_loss_extra_changed_face_ids_area_edges_and_falls_back
+    [:missing_face,:extra_face,:change_face,:duplicate_identity,:nonfinite_area,
+:wrong_area,:added_hole,:soft_edge,:loose_edge,:false_boundary,:missing_edge,:return_false].each do |failure|
+      mask,wrapper,source,original,ink,text=bulk_test_fixture
+      with_bulk_mesh(failure=>true) do |observed|
+        report=Subject.compose!([mask],[text])
+        assert_equal 1,observed[:fills],failure.to_s
+        assert_equal 1,report[:composed_groups],failure.to_s
+        assert_equal 0,report[:failed_groups],failure.to_s
+        assert_equal 3.0,report[:removed_area],failure.to_s
+        assert wrapper.entities.stage.entities.items.first.erased, 'rejected bulk child erased before isolated fallback'
+        assert wrapper.entities.stage.entities.to_a.length>1, 'existing isolated constructor used after erased bulk child'
+        assert source.hidden? && original.valid? && ink.valid?,failure.to_s
+      end
+    end
+  end
+
+  def test_bulk_mesh_point_collapse_and_polygon_change_fall_back_before_fill
+    [:collapse_point,:change_polygon].each do |failure|
+      mask,wrapper,source,original,ink,text=bulk_test_fixture
+      with_bulk_mesh(failure=>true) do |observed|
+        report=Subject.compose!([mask],[text])
+        assert_nil observed[:fills]
+        assert_equal 1,report[:composed_groups]
+        assert_equal 3.0,report[:removed_area]
+        assert source.hidden? && original.valid? && ink.valid?
+      end
+    end
+  end
+
+  def test_bulk_mesh_host_exception_can_fall_back_without_touching_sources
+    mask,wrapper,source,original,ink,text=bulk_test_fixture
+    with_bulk_mesh(:error=>RuntimeError.new('host rejected mesh')) do |observed|
+      report=Subject.compose!([mask],[text])
+      assert_equal 1,observed[:fills]
+      assert_equal 1,report[:composed_groups]
+      assert_equal 3.0,report[:removed_area]
+      assert source.hidden? && original.valid? && ink.valid?
+    end
+  end
+
+  def test_bulk_mesh_terminal_host_stop_never_retries_isolated_constructor
+    [WhiteOnlyControl::ImportCancelled.new([1],1,{}),
+      WhiteOnlyControl::ResumeMismatch.new('resume'),
+      WhiteOnlyControl::RollbackFailure.new('rollback')].each do |stop|
+      mask,wrapper,source,original,ink,text=bulk_test_fixture
+      with_bulk_mesh(:error=>stop) do |observed|
+        error=assert_raises(stop.class) { Subject.compose!([mask],[text],:continue_mask_failures=>true) }
+        assert_same stop,error
+        assert_equal 1,observed[:fills]
+        assert_white_only_source_retained(wrapper,source,original,ink)
+      end
+    end
+  end
+
+  def test_bulk_mesh_cleanup_refuses_fallback_if_owner_or_original_visibility_changed
+    [:owner,:source,:visibility].each do |failure|
+      mask,wrapper,source,original,ink,text=bulk_test_fixture
+      action=lambda do |_entities,_mesh|
+        if failure==:owner;wrapper.erase!
+        elsif failure==:source;source.erase!
+        else;source.hidden=true
+        end
+      end
+      with_bulk_mesh(:before_fill=>action,:error=>RuntimeError.new('host failed')) do |observed|
+        assert_raises(WhiteOnlyControl::RollbackFailure) { Subject.compose!([mask],[text],:continue_mask_failures=>true) }
+        assert_equal 1,observed[:fills]
+        assert wrapper.entities.stage.erased
+      end
+    end
+  end
+
+  def test_bulk_mesh_rejected_child_must_really_erase_before_any_fallback
+    mask,wrapper,source,original,ink,text=bulk_test_fixture
+    real=wrapper.entities.method(:add_group)
+    wrapper.entities.define_singleton_method(:add_group) do
+      stage=real.call
+      child_adder=stage.entities.method(:add_group)
+      stage.entities.define_singleton_method(:add_group) do
+        child=child_adder.call
+        child.define_singleton_method(:erase!) { nil }
+        child
+      end
+      stage
+    end
+    with_bulk_mesh(:return_false=>true) do |observed|
+      assert_raises(WhiteOnlyControl::RollbackFailure) { Subject.compose!([mask],[text],:continue_mask_failures=>true) }
+      assert_equal 1,observed[:fills]
+      assert wrapper.entities.stage.erased
+      assert source.valid? && original.valid? && ink.valid?
+      refute source.hidden?
+    end
+  end
+
+  def test_bulk_mesh_positive_ink_full_clearance_and_native_classification_are_still_required
+    mask,wrapper,source,original,ink,text=bulk_test_fixture
+    actual_scale=Subject.method(:partition_construction_scale);seen=[]
+    with_bulk_mesh do |observed|
+      Subject.stub(:partition_construction_scale,lambda { |cells|seen << cells.map { |c|c[:region] };actual_scale.call(cells) }) do
+        actual_classify=Subject.method(:classify_cells)
+        Subject.stub(:classify_cells,lambda do |*args|
+          plan=actual_classify.call(*args);plan.first[:region]=:ink;plan
+        end) do
+          assert_raises(ContractError) { Subject.compose!([mask],[text]) }
+        end
+      end
+      assert_equal 1,observed[:fills]
+      assert seen.all? { |classes|classes.include?(:white) && classes.include?(:ink) }
+      assert_white_only_source_retained(wrapper,source,original,ink)
+    end
+  end
+
+
+  def test_bulk_mesh_shared_native_edge_belongs_to_exact_face_loop_boundaries
+    mask,wrapper,source,original=preserved_mask([rect(0,0,4,4)])
+    ink=Face.new([[[1,1,0],[3,1,0],[2,3,0]]]);text=Group.new(Entities.new([ink]));text.owner=true
+    with_bulk_mesh do |observed|
+      result=Subject.compose!([mask],[text])
+      assert_equal 1,result[:composed_groups]
+      assert_equal 1,observed[:fills]
+      children=wrapper.entities.stage.entities.to_a
+      assert_equal 1,children.length
+      shared=children.first.entities.to_a.select { |e|e.typename=='Edge' && e.faces.length==2 }
+      assert_equal 1,shared.length
+      assert shared.all? { |e|e.hidden && !e.soft? && !e.smooth? }
+      assert source.hidden? && original.valid? && ink.valid?
+    end
+  end
+
+
+  def test_bulk_mesh_missing_tiny_white_cell_cannot_pass_aggregate_area_tolerance
+    tiny=2.0**-24
+    mask,wrapper,source,original=preserved_mask([rect(0,0,4,4)])
+    ink=Face.new([rect(tiny,0,3,4)]);text=Group.new(Entities.new([ink]));text.owner=true
+    assert tiny*4 < 16*1.0e-7, 'lost exact white area is below existing aggregate tolerance'
+    with_bulk_mesh(:missing_smallest=>true) do |observed|
+      result=Subject.compose!([mask],[text])
+      assert_equal 1,observed[:fills]
+      assert_equal 1,result[:composed_groups]
+      assert wrapper.entities.stage.entities.items.first.erased
+      assert_in_delta (3-tiny)*4,result[:removed_area],1.0e-10
+      geometry=Subject.snapshots(wrapper.entities.stage,wrapper.entities.stage.transformation,false)
+      assert geometry.any? { |record| Subject.contains?(record,[tiny*0.5,2,0]) }, 'tiny white cell retained by isolated fallback'
+      assert geometry.any? { |record| Subject.contains?(record,[3.5,2,0]) }
+      assert source.hidden? && original.valid? && ink.valid?
+    end
+  end
+
+  def test_bulk_mesh_does_not_guess_multiple_source_owners_or_styles
+    first=Face.new([rect(0,0,2,4)]);second=Face.new([rect(2,0,4,4)])
+    first.material=:first;second.material=:second
+    group=Group.new(Entities.new([first,second]))
+    white=Subject.snapshots(group,group.transformation,false)
+    ink=[record(rect(1,1,3,3))]
+    with_bulk_mesh do |observed|
+      assert_equal 4.0,Subject.compose_group!(group,group.transformation,white,ink)
+      assert_nil observed[:fills]
+      materials=Subject.partition_faces(group.entities.stage.entities).map(&:material).uniq
+      assert_includes materials,:first
+      assert_includes materials,:second
+      assert first.erased && second.erased
+    end
+  end
+
+  def test_bulk_mesh_keeps_original_full_ink_route_and_skips_mesh
+    mask,wrapper,source,original=preserved_mask([rect(0,0,4,4)])
+    ink=Face.new([rect(-1,-1,5,5)]);text=Group.new(Entities.new([ink]));text.owner=true
+    with_bulk_mesh do |observed|
+      result=Subject.compose!([mask],[text])
+      assert_nil observed[:fills]
+      assert_equal 1,result[:composed_groups]
+      assert_equal 16.0,result[:removed_area]
+      assert wrapper.entities.stage.erased
+      assert source.hidden? && original.valid? && ink.valid?
+    end
+  end
+
+  def test_bulk_mesh_refuses_retry_if_verified_stage_frame_changes
+    mask,wrapper,source,original,ink,text=bulk_test_fixture
+    action=lambda { |_entities,_mesh|wrapper.entities.stage.transformation=Geom::Transformation.new(0.001,[1,0,0]) }
+    with_bulk_mesh(:before_fill=>action,:return_false=>true) do |observed|
+      assert_raises(WhiteOnlyControl::RollbackFailure) { Subject.compose!([mask],[text],:continue_mask_failures=>true) }
+      assert_equal 1,observed[:fills]
+      assert wrapper.entities.stage.erased
+      assert source.valid? && original.valid? && ink.valid?
+      refute source.hidden?
+    end
+  end
+
+  def test_bulk_mesh_final_ink_side_coverage_proof_is_not_bypassed
+    mask,wrapper,source,original,ink,text=bulk_test_fixture
+    with_bulk_mesh do |observed|
+      error=ContractError.new('authored uncovered ink side')
+      raised=Subject.stub(:verify_ink_samples!,lambda { |*_args|raise error }) do
+        assert_raises(ContractError) { Subject.compose!([mask],[text]) }
+      end
+      assert_match(/authored uncovered ink side/,raised.message)
+      assert_equal 1,observed[:fills]
       assert_white_only_source_retained(wrapper,source,original,ink)
     end
   end

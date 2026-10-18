@@ -145,7 +145,12 @@ class WhiteMaskCompositionControlTest < Minitest::Test
     end
     result = compose({:composition_inventory => inventory, :run_controller => controller}, bound, compose_native)
     stats = {:pages=>1,:edges=>100,:primitives=>100,:text=>128,:peak_mb=>1.0}
-    assert_same native, IMP.record_page_white_mask_composition!(stats, 1, result)
+    logged = []
+    IMP::Logger.stub(:warn, lambda { |context, text| logged << [context, text] }) do
+      assert_same native, IMP.record_page_white_mask_composition!(stats, 1, result)
+    end
+    assert_includes logged.first.last, 'Compare these areas with the PDF. The rest'
+    refute_includes logged.first.last, 'PDF..'
     saved = stats[:planar_white_knockout].first
     assert_equal 1, saved[:page]
     assert_equal [2,1,4], saved.values_at(:composed_groups,:failed_groups,:unchanged_no_ink_groups)
@@ -154,7 +159,7 @@ class WhiteMaskCompositionControlTest < Minitest::Test
     assert_equal 'white_areas', warning[:item]
     assert_equal 'white_area_check_failed', warning[:reason_code]
     assert_includes warning[:detail], '1 source fill(s) were left unchanged'
-    assert_includes warning[:detail], 'Compare these areas with the PDF.'
+    assert_includes warning[:detail], 'Compare these areas with the PDF'
     refute_includes warning[:detail], '[0, 100]'
     refute_includes warning[:detail], 'PlanarRegionPartition::Error'
     refute_includes warning[:detail], 'exact cell budget exceeded'
