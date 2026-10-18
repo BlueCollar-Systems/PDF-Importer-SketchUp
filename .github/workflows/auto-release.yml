@@ -229,6 +229,10 @@ jobs:
     # Probe: run the release job's build and test steps on pull_request.
     # Publishing stays impossible here; the mint step below is if: false.
     if: >-
+      always() &&
+      !cancelled() &&
+      needs.release-plan.result == 'success' &&
+      needs.source-only-build-windows.result == 'success' &&
       needs.source-only-build-windows.outputs.publication_ready == 'true' &&
       (
         github.event_name == 'pull_request' ||

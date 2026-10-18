@@ -21,6 +21,8 @@ jobs:
 
   syntax-check:
     needs: ruby22-exact-parse
+    # Probe only: still run this job after the Ruby 2.2 gate fails.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     strategy:
       matrix:
@@ -63,6 +65,8 @@ jobs:
 
   smoke:
     needs: ruby22-exact-parse
+    # Probe only: still run this job after the Ruby 2.2 gate fails.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
