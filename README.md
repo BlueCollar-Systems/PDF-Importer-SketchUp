@@ -26,15 +26,22 @@ use the same validation.
 
 - White-area refinement can build retained cells together while checking every
   cell boundary, source area and shared edge. A rejected mesh is removed and
-  checked before the existing isolated construction is retried. Original fills
-  stay editable; requested text modes and construction limits are unchanged.
+  checked before isolated construction is retried. Original fills stay editable;
+  requested text modes and construction limits are unchanged.
 - Picture clipping or overlap concerns already recorded in detailed diagnostics
   now appear in the import summary and Import Health. The white-area warning
   also uses the correct punctuation.
-- A bounded SketchUp 2017 sample retained all 505 expected white faces through
-  ordinary Save As, one Undo, fresh Open and resave. This establishes the sample's
-  source geometry and lifecycle; full importer acceptance is recorded separately
-  for each test package.
+- The full foundation drawing completed ordinary import, Save As, one Undo,
+  fresh Open and resave in SketchUp Make 2017: 939.1 seconds for Glyphs and
+  171.1 seconds for 3D Text. Glyphs retained the selected 505 white faces
+  and their shared boundaries; both modes retained all 16 final annotations.
+  The 3D text census retained 286 owners with positive 1/64-inch depth, caps
+  and side walls.
+- Two Glyphs white-area checks and picture clipping remain unresolved and are
+  reported. Its full graph/census exceeded the existing diagnostic limit;
+  strict derived Face measurements also differed after 3D Text was reopened.
+  The [completed validation notes](docs/validation/2026-10-18-mask-performance-and-text-height.md#completed-v37180-host-checks)
+  separate these limits from the successful lifecycle and selected source checks.
 
 ### Recent fixes (v3.7.179)
 
