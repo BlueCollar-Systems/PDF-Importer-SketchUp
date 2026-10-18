@@ -13,6 +13,7 @@ module BlueCollarSystems
       def self.prepare(masks, roots, inventory, opts = {})
         tolerance = SOURCE_GRID_INCHES * (opts[:scale] || 1.0).to_f.abs
         tolerance = SOURCE_GRID_INCHES if tolerance <= 0.0
+        boundary_opts = opts.merge(:allow_point_touches => true)
         source_masks = Array(inventory.key?(:opaque_paths) ? inventory[:opaque_paths] : inventory[:white_paths]).map { |r| geometry_record(r) }
         glyphs = Array(inventory[:glyphs]).map { |r| geometry_record(r) }
         glyphs_by_index = {}
@@ -53,11 +54,11 @@ module BlueCollarSystems
           native_boundary_checked = false
           candidates = near.select do |candidate|
             unless native_boundary_checked
-              native_boundary = SvgRegionBoundary.normalize(white, :native_union, opts)
+              native_boundary = SvgRegionBoundary.normalize(white, :native_union, boundary_opts)
               native_boundary_checked = true
             end
             unless candidate.key?(:binding_boundary)
-              candidate[:binding_boundary] = SvgRegionBoundary.normalize([candidate], :svg, opts)
+              candidate[:binding_boundary] = SvgRegionBoundary.normalize([candidate], :svg, boundary_opts)
             end
             source_boundary = candidate[:binding_boundary]
             native_boundary && source_boundary &&

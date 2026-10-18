@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.175-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.176-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -21,6 +21,15 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Recent fixes (v3.7.176)
+
+- Opaque-fill matching can now verify separate filled regions that touch at an
+  exact corner. It retains every component and counter, and keeps the existing
+  shape, colour and paint-order checks.
+- Final annotations retain the measured native text height when a later
+  opaque-fill check fails. Verified raster crop exclusions also remain checked;
+  incomplete inventories are still reported explicitly.
 
 ### Recent fixes (v3.7.175)
 

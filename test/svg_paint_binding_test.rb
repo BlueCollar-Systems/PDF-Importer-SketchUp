@@ -300,4 +300,58 @@ class SvgPaintBindingTest < Minitest::Test
     refute Binding.boundary_segment_covered?([0,0,0],[1.2,0,0],boundary,0.1)
     refute Binding.boundary_segment_covered?([0,0.11,0],[0.8,0.11,0],boundary,0.1)
   end
+
+  def point_contact_contours
+    # An authored analog of a compound clip: one large contour and two chains
+    # of three tiny triangles, with exact point contacts inside each chain.
+    large = rectangle(0, 3, 6, 5)
+    chain = 3.times.map do |i|
+      x = i * 0.01
+      [[x, 1 - x, 0.0], [x + 0.01, 0.99 - x, 0.0], [x + 0.01, 1 - x, 0.0]]
+    end
+    # Construct contacts from the same stored coordinate values; no snapping.
+    chain[1][0] = chain[0][1].dup
+    chain[2][0] = chain[1][1].dup
+    [large] + chain + chain.map { |loop| loop.map { |x,y,z| [x + 5, y, z] } }
+  end
+
+  def test_seven_point_touching_opaque_components_bind_without_changing_geometry
+    contours = point_contact_contours
+    physical = contours.map { |loop| native(loop, []) }
+    before = Marshal.dump(physical)
+    painted = source(contours.first, 20).merge(:loops => contours, :fill_rule => :evenodd,
+                                              :fill_rgb => [0.0, 0.0, 0.0])
+    glyph = rectangle(1, 3.5, 2, 4)
+    result = prepare([mask(100).merge(:fill_rgb => [0.0, 0.0, 0.0])], physical,
+      [native(glyph, [1])], :opaque_paths => [painted], :glyphs => [source(glyph, 30, 1)])
+    assert_equal [0, 20], result[:masks].first[:paint_order]
+    assert_equal 1, result[:binding][:matched_masks]
+    assert_equal before, Marshal.dump(physical)
+    assert_equal 7, result[:masks].first[:svg_candidates].first[:binding_boundary].length
+  end
+
+  def test_point_contacts_do_not_hide_missing_components_or_wrong_source_style
+    contours = point_contact_contours
+    painted = source(contours.first, 20).merge(:loops => contours, :fill_rule => :evenodd)
+    glyph = rectangle(1, 3.5, 2, 4)
+    missing_middle = contours.each_with_index.reject { |_loop, i| i == 2 }.map(&:first)
+    assert_equal Geometry.union_bounds(contours.map { |loop| native(loop, []) }),
+                 Geometry.union_bounds(missing_middle.map { |loop| native(loop, []) })
+    [missing_middle, contours[0, 6] + [rectangle(5, 0.97, 5.03, 1)]].each do |native_loops|
+      assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+        prepare([mask(100)], native_loops.map { |loop| native(loop, []) }, [native(glyph, [1])],
+          :white_paths => [painted], :glyphs => [source(glyph, 30, 1)])
+      end
+    end
+    assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+      prepare([mask(100)], contours.map { |loop| native(loop, []) }, [native(glyph, [1])],
+        :opaque_paths => [painted.merge(:fill_rgb => [0.0, 0.0, 0.0])],
+        :glyphs => [source(glyph, 30, 1)])
+    end
+    assert_raises(BlueCollarSystems::PDFVectorImporter::RepresentationFidelity::ContractError) do
+      prepare([mask(100)], contours.map { |loop| native(loop, []) }, [native(glyph, [1])],
+        :white_paths => [painted, painted.merge(:paint_order => [0, 40])],
+        :glyphs => [source(glyph, 30, 1)])
+    end
+  end
 end

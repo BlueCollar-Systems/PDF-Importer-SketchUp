@@ -3233,7 +3233,9 @@ module BlueCollarSystems
       text_items
     end
 
-    def self.compose_page_white_masks!(builder, text_items, media_box, opts = {})
+    # The native text inventory is independent of source paint-order binding.
+    # Publish it only after the complete source-root and bounds checks succeed.
+    def self.collect_page_composition_inventory!(builder, text_items, opts = {})
       return nil unless builder.respond_to?(:fill_only_groups) && builder.page_group
       masks = Array(builder.fill_only_groups)
       masks_by_id = {}
@@ -3301,9 +3303,33 @@ module BlueCollarSystems
         bounds = root[:group].bounds
         8.times do |index|
           z = bounds.corner(index).transform(root[:parent_transform]).z.to_f
+          unless z.finite?
+            raise RepresentationFidelity::ContractError,
+                  'native text bounds contain a nonfinite height'
+          end
           highest_text_z = z if z > highest_text_z
         end
       end
+      { :page_group => builder.page_group, :masks => masks, :roots => roots,
+        :highest_text_z => highest_text_z }
+    end
+
+    def self.compose_page_white_masks!(builder, text_items, media_box, opts = {})
+      context = opts[:composition_inventory] ||
+        collect_page_composition_inventory!(builder, text_items, opts)
+      return nil unless context
+      unless context.is_a?(Hash) && builder.page_group &&
+             context[:page_group].equal?(builder.page_group) &&
+             context[:masks].is_a?(Array) && context[:roots].is_a?(Array) &&
+             context[:roots].all? { |root| root.is_a?(Hash) && root[:group] && root[:group].valid? } &&
+             context[:highest_text_z].is_a?(Numeric) &&
+             context[:highest_text_z].to_f.finite?
+        raise RepresentationFidelity::ContractError,
+              'native page composition inventory is incomplete'
+      end
+      masks, roots = context[:masks], context[:roots]
+      highest_text_z = context[:highest_text_z]
+      source_units = Array(opts[:source_units])
       inventory = { :white_paths => [], :opaque_paths => [], :glyphs => [] }
       unless roots.all? { |root| root[:group].typename.to_s == 'Image' }
         document = opts[:svg_provider].call
@@ -3348,6 +3374,39 @@ module BlueCollarSystems
       report[:source_svg_sha256] = source_svg_sha256 if document
       { :report => report, :highest_text_z => highest_text_z,
         :final_page_crops => bound[:ink_faces].select { |face| face[:final_page_crop] == true } }
+    end
+
+    def self.late_overlay_composition_context!(composition, inventory, opts = {})
+      source = composition || inventory
+      unless source.is_a?(Hash) && source[:highest_text_z].is_a?(Numeric) &&
+             source[:highest_text_z].to_f.finite?
+        raise RepresentationFidelity::ContractError,
+              'native text-height inventory is unavailable for final vector annotations'
+      end
+      crops = if composition
+                composition[:final_page_crops]
+              else
+                unless inventory[:roots].is_a?(Array) && inventory[:roots].all? do |root|
+                  root.is_a?(Hash) && root[:group] && root[:group].valid?
+                end
+                  raise RepresentationFidelity::ContractError,
+                        'native text roots are unavailable for final vector annotations'
+                end
+                # A failed white-mask binding does not invalidate measured text
+                # height or independently certified final-page raster crops.
+                # Only this failure path repeats the read-only face scan.
+                faces = PlanarWhiteKnockout.collect_text_faces(inventory[:roots], opts)
+                unless faces.is_a?(Array)
+                  raise RepresentationFidelity::ContractError,
+                        'native raster-overlap inventory is unavailable for final vector annotations'
+                end
+                faces.select { |face| face[:final_page_crop] == true }
+              end
+      unless crops.is_a?(Array)
+        raise RepresentationFidelity::ContractError,
+              'native raster-overlap inventory is unavailable for final vector annotations'
+      end
+      { :highest_text_z => source[:highest_text_z], :final_page_crops => crops }
     end
 
     def self.verify_composition_source_unit!(entity, row)
@@ -6679,17 +6738,23 @@ module BlueCollarSystems
         # final swap is restored by PlanarWhiteKnockout (its unfinished work
         # is erased), and the areas after it are left untouched.
         composition = nil
+        composition_inventory = nil
+        composition_opts = {
+          :scale => opts[:scale], :svg_page_box => svg_page_box,
+          :page_rotation => page_rotation, :y_offset => page_y_offset,
+          :run_controller => opts[:run_controller], :page_number => page_num,
+          :svg_provider => paint_svg_provider,
+          :source_units => Array(stats[:source_glyph_physical_deliveries]).select { |row| row[:page] == page_num }
+        }
         keep_page_on_page_stage_failure(
           stats, page_num, 'white_areas', 'white_area_check_failed',
           'Some white areas were left as plain white shapes; text drawn ' \
             'over them may be hidden'
         ) do
+        composition_inventory = collect_page_composition_inventory!(
+          builder, text_items, composition_opts)
         composition = compose_page_white_masks!(builder, text_items, media_box,
-          :scale => opts[:scale], :svg_page_box => svg_page_box,
-          :page_rotation => page_rotation, :y_offset => page_y_offset,
-          :run_controller => opts[:run_controller], :page_number => page_num,
-          :svg_provider => paint_svg_provider,
-          :source_units => Array(stats[:source_glyph_physical_deliveries]).select { |row| row[:page] == page_num })
+          composition_opts.merge(:composition_inventory => composition_inventory))
         end
         if composition
           stats[:planar_white_knockout] ||= []
@@ -6702,19 +6767,19 @@ module BlueCollarSystems
             raise RepresentationFidelity::ContractError,
               'final vector annotations require the page group'
           end
-          overlay_top = composition ? composition[:highest_text_z] : nil
-          overlay_crops = composition ? composition[:final_page_crops] : []
-          if overlay_top.nil?
-            # Step down: draw the final marks just above the page instead of
-            # dropping the page; they may sit under raised 3D text.
-            overlay_top = 0.0
-            record_page_step_down!(
+          overlay_context = nil
+          keep_page_on_page_stage_failure(
               stats, page_num, 'final_vector_annotations',
               'text_inventory_unavailable',
               'Marks drawn last in the PDF were placed without the text ' \
-                'height check'
-            )
+                'height and raster-overlap checks'
+          ) do
+            overlay_context = late_overlay_composition_context!(
+              composition, composition_inventory,
+              :run_controller => opts[:run_controller], :page_number => page_num)
           end
+          overlay_top = overlay_context ? overlay_context[:highest_text_z] : 0.0
+          overlay_crops = overlay_context ? overlay_context[:final_page_crops] : []
           factor = opts[:scale].to_f / 72.0
           mapper = lambda do |pdf_x, pdf_y|
             xy = PageTransform.transform_point(pdf_x, pdf_y, media_box, page_rotation)
