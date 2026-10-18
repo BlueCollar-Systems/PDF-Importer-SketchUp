@@ -270,6 +270,274 @@ RUBY
     [white, text, white_face, ink_face]
   end
 
+  def preserved_mask(loops, order = 0)
+    face = Face.new(loops)
+    face.material, face.back_material, face.layer = :source_front, :source_back, :source_layer
+    source = Group.new(Entities.new([face]))
+    source.attributes['source_fill_original'] = true
+    wrapper = Group.new(Entities.new([source]))
+    [{ :group => wrapper, :fill_rgb => [1,1,1], :before_text => true,
+       :preserve_source => true, :pdf_paint_order => [0, 100 + order],
+       :paint_order => [1, 200 + order] }, wrapper, source, face]
+  end
+
+  def test_exact_zero_ink_keeps_native_source_and_style_without_constructing_cells
+    triangle = [[0,0,0],[3,0,0],[0,3,0]]
+    cases = [
+      [[triangle], [[[2,2,0],[3,2,0],[2,3,0]]]],
+      [[triangle], [[[1.5,1.5,0],[2.5,1.5,0],[1.5,2.5,0]]]],
+      [[triangle], [[[0,3,0],[3,0,0],[3,3,0]]]],
+      [[rect(0,0,4,4), rect(1,1,3,3)], [rect(1.5,1.5,2.5,2.5)]]
+    ]
+    cases.each do |white_loops, ink_loops|
+      mask, wrapper, source, original = preserved_mask(white_loops)
+      ink = Face.new(ink_loops)
+      text = Group.new(Entities.new([ink]));text.owner = true
+      transform = Geom::Transformation.new(2.0, [5,7,0])
+      wrapper.transformation = transform;text.transformation = transform
+      before = Marshal.dump([original.raw, original.material, original.back_material,
+        original.layer, source.attributes, source.hidden?, ink.raw])
+      wrapper.entities.define_singleton_method(:add_group) { raise 'no-op constructed native geometry' }
+      result = Subject.compose!([mask], [text])
+      assert_equal 1, result[:unchanged_no_ink_groups]
+      assert_equal 0, result[:composed_groups]
+      assert_equal 0, result[:failed_groups]
+      assert_equal 0.0, result[:removed_area]
+      assert_nil wrapper.entities.stage
+      assert source.valid? && original.valid? && ink.valid?
+      assert_same transform, wrapper.transformation
+      assert_same transform, text.transformation
+      assert_equal before, Marshal.dump([original.raw, original.material, original.back_material,
+        original.layer, source.attributes, source.hidden?, ink.raw])
+    end
+  end
+
+  def test_direct_zero_ink_returns_explicit_nil_and_cancellation_does_not_count_success
+    mask, wrapper, source, original = preserved_mask([rect(0,0,4,4), rect(1,1,3,3)])
+    ink = [record(rect(1.5,1.5,2.5,2.5))]
+    white = Subject.snapshots(wrapper, wrapper.transformation, false)
+    assert_nil Subject.compose_group!(wrapper, wrapper.transformation, white, ink, :preserve_source => true)
+    text = Group.new(Entities.new([Face.new([rect(1.5,1.5,2.5,2.5)])]));text.owner = true
+    assert_raises(BlueCollarSystems::PDFVectorImporter::ImportRunControl::ImportCancelled) do
+      Subject.compose!([mask], [text], :continue_mask_failures => true,
+        :run_controller => cancelling_controller(:white_mask_verify), :page_number => 1)
+    end
+    assert_nil wrapper.entities.stage
+    assert source.valid? && original.valid?
+    refute source.hidden?
+  end
+
+  def test_no_op_requires_nonempty_positive_exact_area_consistent_with_source_and_owned_originals
+    partition = BlueCollarSystems::PDFVectorImporter::PlanarRegionPartition
+    exact_loop = rect(0,0,4,4).map { |point| point.map(&:to_r) }
+    [[], [{:region=>:white,:area=>0.to_r}], [{:region=>:white,:area=>16.0}],
+      [{:region=>:white,:area=>1.to_r}], [{:region=>:white,:area=>16.to_r}],
+      [{:region=>:white,:area=>16.to_r,:loop=>[]}],
+      [{:region=>:white,:area=>16.to_r,:loop=>rect(0,0,2,2).map { |p| p.map(&:to_r) }}],
+      [{:region=>:white,:area=>16.to_r,:loop=>exact_loop.map { |p| [p[0],p[1],1.to_r] }}],
+      [{:region=>:white,:area=>16.to_r,:loop=>exact_loop.map { |p| [p[0].to_f,p[1],p[2]] }}],
+      [{:region=>:white,:area=>16.to_r,:loop=>[[0,0,0],[5,0,0],[5,2,0],[2,2,0],[2,5,0],[0,5,0]].map { |p| p.map(&:to_r) }}],
+      [{:region=>:white,:area=>16.to_r,:loop=>exact_loop+[exact_loop.first]}]
+    ].each do |cells|
+      white, text, original, ink = fixture
+      partition.stub(:partition, cells) do
+        assert_raises(ContractError) do
+          Subject.compose!([{:group=>white,:fill_rgb=>[1,1,1],:before_text=>true}], [text])
+        end
+      end
+      assert original.valid? && ink.valid?
+      assert white.entities.stage.nil? || !white.entities.stage.valid?,
+        'a rejected empty partition must not leave a live native stage'
+    end
+    mask, wrapper, source, original = preserved_mask([rect(0,0,4,4), rect(1,1,3,3)])
+    source.attributes.delete('source_fill_original')
+    text = Group.new(Entities.new([Face.new([rect(1.5,1.5,2.5,2.5)])]));text.owner = true
+    error = assert_raises(ContractError) { Subject.compose!([mask], [text]) }
+    assert_match(/separately owned/, error.message)
+    assert source.valid? && original.valid?
+    assert_nil wrapper.entities.stage
+    white, text, original, = fixture
+    zero_source = [record([[0,0,0],[1,0,0],[2,0,0]])]
+    tiny_loop = [[0,0,0],[Rational(1,10**6),0,0],[0,Rational(1,10**6),0]].map { |p| p.map(&:to_r) }
+    tiny_cell = {:region=>:white,:area=>Rational(1,2*10**12),:loop=>tiny_loop}
+    partition.stub(:partition, [tiny_cell]) do
+      assert_raises(ContractError) do
+        Subject.compose_group!(white, white.transformation, zero_source,
+          Subject.collect_text_faces([text]))
+      end
+    end
+    assert original.valid?
+    assert_nil white.entities.stage
+  end
+
+  def test_positive_tiny_ink_is_not_a_zero_area_shortcut
+    white, text, original, = fixture
+    text.entities.items.replace([Face.new([rect(0,0,2.0**-70,4)])])
+    scale = Subject.method(:partition_construction_scale)
+    attempts = 0
+    Subject.stub(:partition_construction_scale, lambda { |cells|
+      attempts += 1
+      assert cells.any? { |cell| cell[:region] == :ink && cell[:area] > 0 }
+      scale.call(cells)
+    }) do
+      assert_raises(ContractError) do
+        Subject.compose!([{:group=>white,:fill_rgb=>[1,1,1],:before_text=>true}], [text])
+      end
+    end
+    assert_operator attempts, :>, 0
+    assert original.valid?
+    assert_nil white.entities.stage
+  end
+
+  def test_opt_in_continues_only_after_local_cleanup_and_retains_earlier_and_later_success
+    partition = BlueCollarSystems::PDFVectorImporter::PlanarRegionPartition
+    [:partition, :native].each do |failure_kind|
+      masks = 3.times.map { |i| preserved_mask([rect(0,0,4,4)], i) }
+      _white, text, _original, ink = fixture
+      before = Marshal.dump([masks[1][3].raw, masks[1][3].material,
+        masks[1][3].back_material, masks[1][3].layer, masks[1][2].attributes, ink.raw])
+      masks[1][1].entities.fail_add = true if failure_kind == :native
+      real_partition = partition.method(:partition)
+      partitioner = lambda do |white, ink_rows, opts|
+        if failure_kind == :partition && white.first[:entity_id] == masks[1][3].object_id
+          raise partition::Error, 'fictional exact cell budget exceeded'
+        end
+        real_partition.call(white, ink_rows, opts)
+      end
+      result = partition.stub(:partition, partitioner) do
+        Subject.compose!(masks.map(&:first), [text], :continue_mask_failures => true)
+      end
+      assert_equal 2, result[:composed_groups]
+      assert_equal 1, result[:failed_groups]
+      assert_equal 0, result[:unchanged_no_ink_groups]
+      assert_in_delta 6.0, result[:removed_area], 1.0e-10
+      assert masks[0][2].hidden? && masks[2][2].hidden?
+      refute masks[1][2].hidden?
+      assert masks[1][2].valid? && masks[1][3].valid?
+      stage = masks[1][1].entities.stage
+      failure_kind == :native ? assert(stage.erased) : assert_nil(stage)
+      detail = result[:mask_failures].first
+      assert_equal true, detail[:local_cleanup_verified]
+      assert_equal 1, detail[:mask_index]
+      assert_equal [0,101], detail[:pdf_paint_order]
+      assert_equal [1,201], detail[:svg_paint_order]
+      assert_equal [0.0,0.0,4.0,4.0], detail[:white_bbox]
+      assert_equal ['text_span:1:84'], detail[:source_span_ids]
+      assert_equal before, Marshal.dump([masks[1][3].raw, masks[1][3].material,
+        masks[1][3].back_material, masks[1][3].layer, masks[1][2].attributes, ink.raw])
+    end
+  end
+
+  def test_continuation_does_not_hide_terminal_errors_or_uncertain_stage_cleanup
+    control = BlueCollarSystems::PDFVectorImporter::ImportRunControl
+    [control::ImportCancelled.new([],1,{}), control::ResumeMismatch.new('changed journal'),
+      control::RollbackFailure.new('uncertain rollback')].each do |stop|
+      mask, wrapper, source, = preserved_mask([rect(0,0,4,4)])
+      peer, later, = preserved_mask([rect(0,0,4,4)], 1)
+      _white, text, = fixture
+      wrapper.entities.fail_add = true
+      creator = wrapper.entities.method(:add_group)
+      wrapper.entities.define_singleton_method(:add_group) do
+        stage = creator.call
+        adder = stage.entities.method(:add_group)
+        stage.entities.define_singleton_method(:add_group) do
+          cell = adder.call
+          cell.entities.define_singleton_method(:add_face) { |_points| raise stop }
+          cell
+        end
+        stage
+      end
+      actual = assert_raises(stop.class) do
+        Subject.compose!([mask,peer], [text], :continue_mask_failures => true)
+      end
+      assert_same stop, actual
+      assert wrapper.entities.stage.erased
+      refute source.hidden?
+      assert_nil later.entities.stage
+    end
+    mask, wrapper, source, = preserved_mask([rect(0,0,4,4)])
+    peer, later, = preserved_mask([rect(0,0,4,4)], 1)
+    _white, text, = fixture
+    wrapper.entities.fail_add = true
+    creator = wrapper.entities.method(:add_group)
+    wrapper.entities.define_singleton_method(:add_group) do
+      stage = creator.call
+      stage.define_singleton_method(:erase!) { false }
+      stage
+    end
+    assert_raises(control::RollbackFailure) do
+      Subject.compose!([mask,peer], [text], :continue_mask_failures => true)
+    end
+    assert wrapper.entities.stage.valid?
+    refute source.hidden?
+    assert_nil later.entities.stage
+  end
+
+  def test_failure_context_is_bounded_without_losing_total_failed_count
+    partition = BlueCollarSystems::PDFVectorImporter::PlanarRegionPartition
+    count = Subject::MAX_MASK_FAILURE_DETAILS + 3
+    masks = count.times.map { |i| preserved_mask([rect(0,0,4,4)], i) }
+    _white, text, = fixture
+    result = partition.stub(:partition, lambda { |*_args|
+      raise partition::Error, 'fictional cell budget exceeded C:/private/shop/drawing.pdf ' + 'x' * 1000
+    }) do
+      Subject.compose!(masks.map(&:first), [text], :continue_mask_failures => true)
+    end
+    assert_equal count, result[:failed_groups]
+    assert_equal Subject::MAX_MASK_FAILURE_DETAILS, result[:mask_failures].length
+    assert_equal 3, result[:mask_failure_details_omitted]
+    assert_equal 0, result[:composed_groups]
+    assert_equal 0, result[:unchanged_no_ink_groups]
+    result[:mask_failures].each do |row|
+      assert_operator row[:detail].length, :<=, 180
+      refute_includes row[:detail], 'private/shop'
+      assert_match(/PlanarRegionPartition::Error/, row[:error_class])
+    end
+    masks.each do |_record, wrapper, source, original|
+      assert_nil wrapper.entities.stage
+      assert source.valid? && original.valid?
+      refute source.hidden?
+    end
+  end
+
+  def test_destroyed_mask_wrapper_is_never_a_restored_failure_or_an_unchanged_success
+    control = BlueCollarSystems::PDFVectorImporter::ImportRunControl
+    mask, wrapper, source, original = preserved_mask([rect(0,0,4,4)])
+    peer, later, = preserved_mask([rect(0,0,4,4)], 1)
+    _white, text, = fixture
+    creator = wrapper.entities.method(:add_group)
+    wrapper.entities.define_singleton_method(:add_group) do
+      stage = creator.call
+      adder = stage.entities.method(:add_group)
+      stage.entities.define_singleton_method(:add_group) do
+        cell = adder.call
+        cell.entities.define_singleton_method(:add_face) do |_points|
+          wrapper.erase!
+          raise 'fictional owner invalidation while original definition children remain valid'
+        end
+        cell
+      end
+      stage
+    end
+    error = assert_raises(control::RollbackFailure) do
+      Subject.compose!([mask,peer], [text], :continue_mask_failures => true)
+    end
+    assert_match(/owner was destroyed/, error.message)
+    assert source.valid? && original.valid?
+    assert wrapper.entities.stage.erased
+    assert_nil later.entities.stage
+    mask, wrapper, source, original = preserved_mask([rect(0,0,4,4),rect(1,1,3,3)])
+    ink = [record(rect(1.5,1.5,2.5,2.5))]
+    white = Subject.snapshots(wrapper, wrapper.transformation, false)
+    wrapper.erase!
+    assert_raises(control::RollbackFailure) do
+      Subject.compose_group!(wrapper, wrapper.transformation, white, ink,
+        :continue_mask_failures => true, :preserve_source => true)
+    end
+    assert source.valid? && original.valid?
+    assert_nil wrapper.entities.stage
+  end
+
   def test_composition_keeps_counter_and_surrounding_white_without_mutating_text
     white, text, original, ink = fixture
     before = Marshal.dump(ink.raw)
@@ -457,7 +725,7 @@ RUBY
   # until rollback, so a live cleanup failure cannot pass as a clean fallback.
   def with_noncancel_failure(cleanup, late = false, visibility = :normal,
                             already_hidden = false, direct = false,
-                            preserve_source = late)
+                            preserve_source = late, continue_failures = false)
     require_relative '../extracted/sketchup_ext/bc_pdf_vector_importer/main'
     importer = BlueCollarSystems::PDFVectorImporter
     white, text, original, ink = fixture
@@ -522,7 +790,7 @@ RUBY
       end
       stage
     end
-    opts = {:preserve_source => preserve_source}
+    opts = {:preserve_source => preserve_source, :continue_mask_failures => continue_failures}
     operation = lambda do
       if direct
         Subject.compose_group!(white, white.transformation,
@@ -530,7 +798,8 @@ RUBY
           Subject.collect_text_faces([text]), opts)
       else
         Subject.compose!([{:group => white, :fill_rgb => [1,1,1],
-                          :before_text => true, :preserve_source => preserve_source}], [text])
+                          :before_text => true, :preserve_source => preserve_source}], [text],
+                          :continue_mask_failures => continue_failures)
       end
     end
     yield importer, operation, {
@@ -576,6 +845,30 @@ RUBY
       refute run[:white].entities.stage.valid?
       assert run[:original].valid?
       assert run[:ink].valid?
+    end
+  end
+
+  def test_opt_in_post_hide_failure_restores_existing_visibility_before_continuing
+    with_noncancel_failure(:success, true, :normal, true, false, true, true) do |_importer, operation, run|
+      result = operation.call
+      assert_equal 1, result[:failed_groups]
+      assert_equal 0, result[:composed_groups]
+      assert_equal run[:original_hidden], run[:owners].map(&:hidden?)
+      assert run[:owners].all?(&:valid?)
+      assert run[:white].entities.stage.erased
+      assert_equal run[:source_before], Marshal.dump([run[:original].raw,
+        run[:original].material, run[:original].back_material,
+        run[:original].layer, run[:original].attributes, run[:ink].raw])
+      assert_equal 'RuntimeError', result[:mask_failures].first[:error_class]
+    end
+    [[:silent,false,:normal], [:throwing,false,:normal],
+     [:success,true,:silent], [:success,true,:throwing]].each do |cleanup, late, visibility|
+      with_noncancel_failure(cleanup, late, visibility, false, false, late, true) do |importer, operation, _run|
+        assert_raises(importer::ImportRunControl::RollbackFailure) { operation.call }
+      end
+    end
+    with_noncancel_failure(:success, true, :normal, false, false, false, true) do |importer, operation, _run|
+      assert_raises(importer::ImportRunControl::RollbackFailure) { operation.call }
     end
   end
 

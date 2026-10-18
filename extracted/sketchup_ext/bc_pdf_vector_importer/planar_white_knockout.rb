@@ -1,5 +1,6 @@
 # Exact planar composition for earlier, opaque PDF fills and flat text.
-# The caller owns the import operation and must abort it if this module raises.
+# The caller owns the import operation. Optional per-mask continuation accepts
+# only failures whose private stage and source visibility were safely restored.
 # No text geometry, representation, identity, or depth is changed here.
 require File.join(File.dirname(__FILE__), 'representation_fidelity')
 require File.join(File.dirname(__FILE__), 'import_run_control')
@@ -18,6 +19,15 @@ module BlueCollarSystems
       DICTIONARY = 'BC_PDF_Importer'.freeze
       GRID_SIZE = 0.25
       MAX_INDEX_CELLS = 4096
+      MAX_MASK_FAILURE_DETAILS = 32
+
+      class RestoredMaskFailure < StandardError
+        attr_reader :details
+        def initialize(details)
+          @details = details
+          super(details[:detail])
+        end
+      end
 
       def self.run_checkpoint!(opts, stage, completed, total)
         controller = opts[:run_controller]
@@ -36,7 +46,9 @@ module BlueCollarSystems
         fail_contract('prebound physical ink faces must be an array') unless ink.is_a?(Array)
         result = { :white_groups => 0, :opaque_groups => 0, :composed_groups => 0,
                    :ink_faces => ink.length, :removed_area => 0.0,
-                   :skipped_unproven_order => 0, :skipped_nonwhite => 0 }
+                   :skipped_unproven_order => 0, :skipped_nonwhite => 0,
+                   :unchanged_no_ink_groups => 0, :failed_groups => 0,
+                   :mask_failures => [], :mask_failure_details_omitted => 0 }
         masks = Array(fill_only_groups)
         masks.each_with_index do |record, mask_index|
           run_checkpoint!(opts, :white_mask, mask_index, masks.length)
@@ -62,8 +74,27 @@ module BlueCollarSystems
           candidates = overlaps.select { |face| earlier_mask?(record, face, opts) }
           result[:skipped_unproven_order] += overlaps.length - candidates.length
           next if candidates.empty?
-          result[:removed_area] += compose_group!(group, transform, white, candidates,
-            opts.merge(:preserve_source => record[:preserve_source] == true))
+          begin
+            removed_area = compose_group!(group, transform, white, candidates,
+              opts.merge(:preserve_source => record[:preserve_source] == true,
+                :mask_context => { :mask_index => mask_index,
+                  :pdf_paint_order => record[:pdf_paint_order] || record[:paint_order],
+                  :svg_paint_order => record[:paint_order] }))
+          rescue RestoredMaskFailure => error
+            raise unless opts[:continue_mask_failures] == true
+            result[:failed_groups] += 1
+            if result[:mask_failures].length < MAX_MASK_FAILURE_DETAILS
+              result[:mask_failures] << error.details
+            else
+              result[:mask_failure_details_omitted] += 1
+            end
+            next
+          end
+          if removed_area.nil?
+            result[:unchanged_no_ink_groups] += 1
+            next
+          end
+          result[:removed_area] += removed_area
           group.erase! if child_entities(group).to_a.empty?
           result[:composed_groups] += 1
         end
@@ -398,6 +429,29 @@ module BlueCollarSystems
           box = union_bounds(white)
           origin = [(box[0] + box[2]) * 0.5, (box[1] + box[3]) * 0.5, 0.0]
           source_cells = PlanarRegionPartition.partition(white, ink, opts)
+          if !source_cells.empty? && source_cells.all? { |cell| cell[:region] == :white }
+            unless source_cells.all? do |cell|
+              loop = cell[:loop]
+              cell[:area].is_a?(Rational) && cell[:area] > 0 &&
+                loop.is_a?(Array) && loop.length >= 3 && loop.all? { |point|
+                  point.is_a?(Array) && point.length == 3 &&
+                    point.all? { |value| value.is_a?(Rational) && value.to_f.finite? } && point[2] == 0
+                } && SvgRegionBoundary.signed_area2(loop) == cell[:area] * 2
+            end
+              fail_contract('exact no-op white-mask partition has invalid source cells')
+            end
+            partition_clearance_squared(source_cells) # Topology only; unchanged cells need no host scale.
+            expected = source_area(white)
+            area = source_cells.inject(0.to_r) { |sum, cell| sum + cell[:area] }.to_f
+            tolerance = [expected.abs * 1.0e-7, 1.0e-10].max
+            unless expected.finite? && expected > 0.0 && area.finite? && (area - expected).abs <= tolerance
+              fail_contract('native white-mask partition changed source white area')
+            end
+            verify_mask_owner!(group)
+            verify_preserved_source!(originals) if opts[:preserve_source] == true
+            run_checkpoint!(opts, :white_mask_verify, source_cells.length, source_cells.length)
+            return nil # Exact unchanged outcome, never a rounded numeric zero.
+          end
           begin
             scale = partition_construction_scale(source_cells)
           rescue ConstructionScaleBudgetError
@@ -455,13 +509,7 @@ module BlueCollarSystems
           # Cancel before changing source visibility or erasing originals.
           run_checkpoint!(opts, :white_mask_style, plan.length, plan.length)
           if opts[:preserve_source] == true
-            unless originals.all? do |entity|
-              entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?) &&
-                entity.respond_to?(:get_attribute) &&
-                entity.get_attribute(DICTIONARY, 'source_fill_original', false) == true
-            end
-              fail_contract('opaque mask lacks separately owned editable source fill')
-            end
+            verify_preserved_source!(originals)
             originals.each { |entity| entity.hidden = true }
             fail_contract('native host did not hide composed source fill') unless originals.all?(&:hidden?)
           else
@@ -478,12 +526,14 @@ module BlueCollarSystems
           removed.inject(0.0) { |sum, cell| sum + cell[:area] }
         rescue StandardError => error
           terminal = error.is_a?(ImportRunControl::ImportCancelled) ||
-                     error.is_a?(ImportRunControl::ResumeMismatch)
+                     error.is_a?(ImportRunControl::ResumeMismatch) ||
+                     error.is_a?(ImportRunControl::RollbackFailure)
           begin
             stage.erase! if stage && stage.valid?
             if stage && stage.valid?
               raise ImportRunControl::RollbackFailure, 'white-mask stage remains live after erase'
             end
+            verify_mask_owner!(group)
             unless originals.all? { |entity| entity.respond_to?(:valid?) && entity.valid? }
               raise ImportRunControl::RollbackFailure, 'original white-mask source was destroyed'
             end
@@ -505,6 +555,10 @@ module BlueCollarSystems
           end
           raise error if terminal
           partition_diagnostic(opts, white, ink, origin, error)
+          if opts[:continue_mask_failures] == true
+            raise RestoredMaskFailure.new(restored_mask_failure_details(
+              group, white, ink, error, opts[:mask_context] || {}))
+          end
           if error.is_a?(RepresentationFidelity::ContractError)
             bounds = union_bounds(white).map { |value| format('%.8g', value) }.join(',')
             owners = ink.map { |face| face[:source_span_id] }.compact.uniq.first(6).join(',')
@@ -513,6 +567,42 @@ module BlueCollarSystems
           end
           raise
         end
+      end
+
+      def self.verify_mask_owner!(group)
+        unless group.respond_to?(:valid?) && group.valid?
+          raise ImportRunControl::RollbackFailure, 'original white-mask owner was destroyed'
+        end
+      end
+
+      def self.verify_preserved_source!(originals)
+        unless originals.all? do |entity|
+          entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?) &&
+            entity.respond_to?(:get_attribute) &&
+            entity.get_attribute(DICTIONARY, 'source_fill_original', false) == true
+        end
+          fail_contract('opaque mask lacks separately owned editable source fill')
+        end
+      end
+
+      # Emitted only after compose_group! has proved its local cleanup. Detail
+      # strings and retained records are bounded; totals never imply success.
+      def self.restored_mask_failure_details(group, white, ink, error, context)
+        identity = begin
+          group.respond_to?(:persistent_id) ? group.persistent_id :
+            (group.respond_to?(:entityID) ? group.entityID : nil)
+        rescue StandardError
+          nil
+        end
+        { :local_cleanup_verified => true, :mask_index => context[:mask_index],
+          :source_group_id => identity,
+          :pdf_paint_order => context[:pdf_paint_order],
+          :svg_paint_order => context[:svg_paint_order],
+          :white_bbox => union_bounds(white), :ink_faces => ink.length,
+          :source_span_ids => ink.map { |face| face[:source_span_id].to_s }.
+            reject(&:empty?).uniq.first(6).map { |id| id[0, 120] },
+          :error_class => error.class.to_s[0, 120],
+          :detail => safe_error_detail(error.message) }
       end
 
       def self.verify_partition_face!(face, points)

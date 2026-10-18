@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.177-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.178-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -21,6 +21,15 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Recent fixes (v3.7.178)
+
+- A verified white-area partition with no ink to remove keeps the original
+  editable shapes without constructing replacement faces.
+- A white-area failure whose local cleanup succeeds is reported while later
+  areas continue. Cancellation, changed resume data and uncertain cleanup
+  remain terminal. Earlier successful repairs and independent annotation
+  height checks remain intact.
 
 ### Recent fixes (v3.7.177)
 

@@ -3369,11 +3369,28 @@ module BlueCollarSystems
       bound = SvgPaintBinding.prepare(masks, roots, inventory,
         control_opts.merge(:scale => opts[:scale]))
       report = PlanarWhiteKnockout.compose!(bound[:masks], roots,
-        control_opts.merge(:ink_faces => bound[:ink_faces]))
+        control_opts.merge(:ink_faces => bound[:ink_faces], :continue_mask_failures => true))
       report[:source_binding] = bound[:binding]
       report[:source_svg_sha256] = source_svg_sha256 if document
       { :report => report, :highest_text_z => highest_text_z,
         :final_page_crops => bound[:ink_faces].select { |face| face[:final_page_crop] == true } }
+    end
+
+    def self.record_page_white_mask_composition!(stats, page_num, composition)
+      report = composition[:report]
+      stats[:planar_white_knockout] ||= []
+      stats[:planar_white_knockout] << report.merge(:page => page_num)
+      failed = report[:failed_groups].to_i
+      return report if failed == 0
+      detail = "#{failed} source fill(s) were left unchanged; text drawn over them may be hidden"
+      first = Array(report[:mask_failures]).first
+      if first
+        detail += "; first PDF order=#{first[:pdf_paint_order].inspect}: " \
+                  "#{first[:error_class]}: #{first[:detail]}"
+      end
+      record_page_step_down!(stats, page_num, 'white_areas',
+        'white_area_check_failed', detail)
+      report
     end
 
     def self.late_overlay_composition_context!(composition, inventory, opts = {})
@@ -6734,9 +6751,9 @@ module BlueCollarSystems
         # White areas are cut around the text drawn on them. If that check
         # fails, the remaining white areas stay as plain white shapes and the
         # page is kept and listed (owner ruling: deliver, step down, report).
-        # Areas already cut stay cut; an area whose check fails before its
-        # final swap is restored by PlanarWhiteKnockout (its unfinished work
-        # is erased), and the areas after it are left untouched.
+        # Areas already cut stay cut. A failed area's unfinished work is erased
+        # and its source restored before trying later areas. Source-binding or
+        # uncertain-cleanup failures still leave this refinement stage.
         composition = nil
         composition_inventory = nil
         composition_opts = {
@@ -6757,8 +6774,7 @@ module BlueCollarSystems
           composition_opts.merge(:composition_inventory => composition_inventory))
         end
         if composition
-          stats[:planar_white_knockout] ||= []
-          stats[:planar_white_knockout] << composition[:report].merge(:page => page_num)
+          record_page_white_mask_composition!(stats, page_num, composition)
         end
 
         # ── Closed-shape extrusion (disabled; independent of 3D text) ───

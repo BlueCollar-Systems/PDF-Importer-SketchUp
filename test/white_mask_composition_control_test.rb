@@ -50,7 +50,7 @@ class WhiteMaskCompositionControlTest < Minitest::Test
     @verified = []
   end
 
-  def compose(opts = {}, binding = nil)
+  def compose(opts = {}, binding = nil, native_report = {})
     verify = lambda do |entity, row|
       @verified << [entity.id, row]
       true
@@ -60,7 +60,7 @@ class WhiteMaskCompositionControlTest < Minitest::Test
     IMP.stub(:verify_composition_source_unit!, verify) do
       IMP::SvgPaintOrder.stub(:build, inventory) do
         IMP::SvgPaintBinding.stub(:prepare, bound) do
-          IMP::PlanarWhiteKnockout.stub(:compose!, {}) do
+          IMP::PlanarWhiteKnockout.stub(:compose!, native_report) do
             IMP.stub(:page_representation_transform, Geom::Transformation.new) do
               IMP.compose_page_white_masks!(@builder, [], [0,0,100,100],
                 { :source_units => @units, :svg_provider => lambda { { :svg => SVG } } }.merge(opts))
@@ -121,6 +121,65 @@ class WhiteMaskCompositionControlTest < Minitest::Test
     end
     assert_equal 3.0, context[:highest_text_z]
     assert_same crops, context[:final_page_crops]
+  end
+
+  def test_main_opts_into_local_continuation_and_reports_partial_results_without_losing_annotation_context
+    @roots.first.attributes['native_bounds_z'] = 2.0
+    inventory = collect
+    crop = { :final_page_crop => true, :source_pdf_sha256 => 'a' * 64, :raster_page_number => 1 }
+    bound = { :masks => [], :ink_faces => [crop], :binding => { :matched_masks => 3 } }
+    failures = [{ :mask_index => 1, :pdf_paint_order => [0,100],
+      :error_class => 'PlanarRegionPartition::Error', :detail => 'exact cell budget exceeded',
+      :local_cleanup_verified => true }]
+    native = { :composed_groups => 2, :failed_groups => 1,
+      :unchanged_no_ink_groups => 4, :mask_failures => failures,
+      :mask_failure_details_omitted => 0, :removed_area => 6.0 }
+    controller = Object.new
+    compose_native = lambda do |masks, roots, opts|
+      assert_same bound[:masks], masks
+      assert_same inventory[:roots], roots
+      assert_same bound[:ink_faces], opts[:ink_faces]
+      assert_same controller, opts[:run_controller]
+      assert_equal true, opts[:continue_mask_failures]
+      native
+    end
+    result = compose({:composition_inventory => inventory, :run_controller => controller}, bound, compose_native)
+    stats = {:pages=>1,:edges=>100,:primitives=>100,:text=>128,:peak_mb=>1.0}
+    assert_same native, IMP.record_page_white_mask_composition!(stats, 1, result)
+    saved = stats[:planar_white_knockout].first
+    assert_equal 1, saved[:page]
+    assert_equal [2,1,4], saved.values_at(:composed_groups,:failed_groups,:unchanged_no_ink_groups)
+    assert_same failures, saved[:mask_failures]
+    warning = stats[:page_step_downs].first
+    assert_equal 'white_areas', warning[:item]
+    assert_equal 'white_area_check_failed', warning[:reason_code]
+    assert_includes warning[:detail], '1 source fill(s) were left unchanged'
+    assert_includes warning[:detail], '[0, 100]'
+    assert_includes warning[:detail], 'exact cell budget exceeded'
+    refute stats.key?(:text_step_downs)
+    context = IMP::PlanarWhiteKnockout.stub(:collect_text_faces,
+      lambda { |*_args| raise 'partial report caused an extra inventory scan' }) do
+      IMP.late_overlay_composition_context!(result, inventory)
+    end
+    assert_equal 2.0, context[:highest_text_z]
+    assert_equal [crop], context[:final_page_crops]
+    qa = IMP::QAReport.build_from_stats('fictional-source.pdf', {}, stats)
+    assert_equal 1, qa[:result][:warnings]
+    assert_equal 'review', qa[:extra][:diagnostics][:quality_level]
+    assert_equal 1, qa[:extra][:planar_white_knockout].first['failed_groups']
+    assert_equal failures.first[:detail], qa[:extra][:planar_white_knockout].first['mask_failures'].first['detail']
+  end
+
+  def test_all_exact_noop_results_are_recorded_without_a_step_down_warning
+    composition = { :report => { :composed_groups => 0, :failed_groups => 0,
+      :unchanged_no_ink_groups => 3, :removed_area => 0.0, :mask_failures => [] },
+      :highest_text_z => 0.0, :final_page_crops => [] }
+    stats = {}
+    IMP.record_page_white_mask_composition!(stats, 1, composition)
+    assert_equal 3, stats[:planar_white_knockout].first[:unchanged_no_ink_groups]
+    refute stats.key?(:page_step_downs)
+    assert_equal 0.0, composition[:highest_text_z]
+    assert_equal [], composition[:final_page_crops]
   end
 
   def test_cached_inventory_rejects_a_different_page_or_invalidated_native_root

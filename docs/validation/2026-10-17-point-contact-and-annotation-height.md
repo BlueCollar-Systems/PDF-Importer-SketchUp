@@ -91,8 +91,11 @@ following finite source facts:
   texture-free, with world loops literally equal to the previously source-bound
   native target. It has zero filled-region intersection with the only later
   bbox-overlapping glyph, placement 789, in both Cairo source and native geometry.
-  Subtraction leaves this particular target unchanged. The page rollback leaves
-  zero composed-target regions; this does not prove whole-page composition.
+  Subtraction leaves this particular target unchanged. The capture contains zero
+  composed-target regions. Source review establishes that earlier successful
+  mask changes remain while a failing mask stops later processing; the zero
+  target count alone does not establish why that target was unprocessed or prove
+  whole-page composition.
 - Cairo's target coordinates are quantized relative to original/native paths:
   measured boundary distance is `3.529641349429487e-5` inches and symmetric area
   difference is `1.0479832871710397e-5` square inches in every capture. Literal
