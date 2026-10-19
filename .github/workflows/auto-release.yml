@@ -176,11 +176,15 @@ jobs:
       - name: Zero-ceremony release contract tests
         run: |
           python tools/test_build_release.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest tools.test_poppler_runtime_contract tools.test_workflow_poppler_contract
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Release safety unit tests (R21-5)
         run: |
           python tools/test_release_safety.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest tools.test_complete_github_release tools.test_skp_probe_lock_contract
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Smoke the checked-in Windows Poppler helpers
         run: python tools/smoke_poppler_helpers.py --required
       - name: Verify separate Ghostscript runtime and relocated transparent rendering
@@ -188,15 +192,25 @@ jobs:
           BC_TEST_REQUIRE_BUNDLED_GS: '1'
         run: |
           python -m unittest tools.test_ghostscript_runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/smoke_ghostscript_runtime.py --required
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/ghostscript_runtime_resolver_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/command_runner_environment_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/item_raster_page_renderer_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/item_raster_display_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/source_image_paint_order_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/original_image_clip_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/decorative_display_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/text_display_container_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Evaluate release publication gate
         id: publication
         run: python tools/check_release_publication.py
