@@ -168,10 +168,20 @@ module BlueCollarSystems
 
       # Convex hull of all line/Bezier control points is a conservative source
       # ink bound. Arcs and unsupported commands cannot prove disjoint paint.
-      def self.path_points(data)
+      def self.exact_decimal_number(value)
+        token = value.to_s
+        exponent = token[/[eE]([+-]?\d+)\z/,1]
+        raise Unproven, 'source decimal number budget' if token.bytesize > 64 ||
+          (exponent && exponent.to_i.abs > 308)
+        number(token)
+        Rational(token)
+      end
+
+      def self.path_points(data, exact_decimal = false)
         tokens = data.to_s.scan(/[A-Za-z]|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/)
         raise Unproven, 'unparsed path data' unless data.to_s.gsub(/[\s,]/, '') == tokens.join
-        points, current, start, command = [], [0.0,0.0], nil, nil
+        zero = exact_decimal ? Rational(0,1) : 0.0
+        points, current, start, command = [], [zero,zero], nil, nil
         until tokens.empty?
           command = tokens.shift if tokens.first =~ /\A[A-Za-z]\z/
           raise Unproven, 'path command missing' unless command
@@ -186,7 +196,7 @@ module BlueCollarSystems
           count = { 'M'=>2, 'L'=>2, 'T'=>2, 'H'=>1, 'V'=>1, 'C'=>6, 'S'=>4, 'Q'=>4 }[kind]
           raise Unproven, 'unsupported source path command' unless count
           raise Unproven, 'truncated source path' unless tokens.length >= count
-          values = tokens.shift(count).map { |v| number(v) }
+          values = tokens.shift(count).map { |v| exact_decimal ? exact_decimal_number(v) : number(v) }
           if kind == 'H' || kind == 'V'
             target = current.dup
             axis = kind == 'H' ? 0 : 1
@@ -351,9 +361,20 @@ module BlueCollarSystems
           raise Unproven, 'unsupported source visibility or CSS' if attrs['class'] || attrs['display'] || attrs['visibility'] || attrs['mix-blend-mode']
           local = SvgPaintOrder.parse_transform(attrs['transform'])
           result = parent.merge(:matrix=>SvgPaintOrder.multiply(parent[:matrix], local))
-          ['fill','stroke','stroke-width','stroke-miterlimit','stroke-linejoin','fill-opacity','stroke-opacity'].each do |key|
+          svg_seen = parent[:clip_bound_svg_seen] == true
+          result[:clip_bound_exact_identity] = parent[:clip_bound_exact_identity] == true &&
+            attrs['transform'].to_s.strip.empty? && !(node[:name] == 'svg' && svg_seen)
+          result[:clip_bound_svg_seen] = svg_seen || node[:name] == 'svg'
+          ['fill','stroke','stroke-width','stroke-miterlimit','stroke-linejoin','stroke-linecap','fill-opacity','stroke-opacity'].each do |key|
             result[key] = attrs[key] if attrs.key?(key)
           end
+          # Unknown inherited paint semantics must never enable the narrower
+          # simple-line source footprint. The ordinary broad path is unchanged.
+          known = ['id','d','transform','fill','stroke','stroke-width','stroke-miterlimit',
+            'stroke-linejoin','stroke-linecap','fill-opacity','stroke-opacity','opacity',
+            'style','xmlns','xmlns:xlink','width','height','viewbox','version']
+          result[:round_line_style_known] = parent[:round_line_style_known] == true &&
+            (attrs.keys - known).empty?
           result[:alpha] *= number(attrs['opacity'] || 1.0)
           result
         end
@@ -377,7 +398,95 @@ module BlueCollarSystems
           bound
         end
 
+        # Exact support bounds of one open round-capped segment under a raw
+        # axis-aligned affine map. The complete stroke is the segment plus a
+        # radius-width/2 disc; a diagonal map gives the stated X/Y radii.
+        # This is exclusion only, not a general stroke or native-render proof.
+        def exact_round_line_bounds(node, parent, ctx, referenced_node)
+          return nil unless node[:name] == 'path' && !referenced_node &&
+            parent[:clip_bound_exact_identity] == true && parent[:matrix] == IDENTITY &&
+            ctx[:round_line_style_known] == true && ctx['fill'] == 'none' &&
+            ctx['stroke'] && ctx['stroke'] != 'none' && ctx['stroke-linecap'] == 'round'
+          attrs = attributes(node)
+          return nil if attrs['clip-path'] || attrs['mask'] || attrs['filter']
+          data, transform = attrs['d'].to_s, attrs['transform'].to_s
+          return nil if data.bytesize > 512 || transform.bytesize > 512
+          token = '[-+]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][-+]?[0-9]+)?'
+          separator = '(?:\\s*,\\s*|\\s+)'
+          path_match = /\A\s*M\s*(#{token})#{separator}(#{token})\s*L\s*(#{token})#{separator}(#{token})\s*\z/.match(data)
+          return nil unless path_match
+          values = path_match.captures.map { |value| SourceImagePaintOrder.exact_decimal_number(value) }
+          return nil if values.first(2) == values.last(2)
+          if transform.strip.empty?
+            matrix = IDENTITY.map(&:to_r)
+          else
+            matrix_match = /\A\s*matrix\s*\(\s*(#{token})#{separator}(#{token})#{separator}(#{token})#{separator}(#{token})#{separator}(#{token})#{separator}(#{token})\s*\)\s*\z/.match(transform)
+            return nil unless matrix_match
+            matrix = matrix_match.captures.map { |value| SourceImagePaintOrder.exact_decimal_number(value) }
+          end
+          a,b,c,d,e,f = matrix
+          return nil unless a != 0 && d != 0 && b == 0 && c == 0
+          width = SourceImagePaintOrder.exact_decimal_number(ctx['stroke-width'] || '1')
+          return nil unless width > 0
+          first, last = values.each_slice(2).map { |x,y| [a*x+e,d*y+f] }
+          rx, ry = width*a.abs/2, width*d.abs/2
+          [[first[0],last[0]].min-rx, [first[1],last[1]].min-ry,
+           [first[0],last[0]].max+rx, [first[1],last[1]].max+ry]
+        rescue Unproven, ArgumentError, TypeError
+          nil # Uncertain optional proof retains the original conservative route.
+        end
+
         def number(value); SourceImagePaintOrder.number(value); end
+
+        # This is exclusion only: a control-point hull cannot establish clip
+        # coverage, its filled topology, or a replacement for image pixels.
+        # Touching/overlapping/unsupported clips keep the strict existing path.
+        def strictly_disjoint_bounds?(bounds, query)
+          return false unless [bounds,query].all? do |value|
+            value.is_a?(Array) && value.length == 4 &&
+              value.all? { |n| n.is_a?(Numeric) && n.to_f.finite? }
+          end
+          bounds,query = [bounds,query].map { |value| value.map { |n| n.to_r } }
+          bounds[2] < query[0] || bounds[0] > query[2] ||
+            bounds[3] < query[1] || bounds[1] > query[3]
+        end
+
+        def clip_proven_disjoint?(node, matrix, query, exact_identity)
+          # Decline transformed/reference frames instead of treating their
+          # rounded Float matrix as exact source decimal geometry.
+          return false unless exact_identity == true && matrix == IDENTITY
+          attrs = attributes(node)
+          return false unless [nil,'userSpaceOnUse'].include?(attrs['clippathunits']) &&
+            (attrs.keys - ['id','clippathunits','transform']).empty? &&
+            attrs['transform'].to_s.strip.empty? &&
+            !node[:children].empty? && node[:children].length <= 64
+          points = []
+          node[:children].each do |child|
+            child_attrs = attributes(child)
+            allowed = ['id','transform','clip-rule','fill-rule']
+            case child[:name]
+            when 'path'
+              return false unless (child_attrs.keys - allowed - ['d']).empty? &&
+                child_attrs['d'].is_a?(String) && child_attrs['d'].bytesize <= 131_072
+              source = SourceImagePaintOrder.path_points(child_attrs['d'],true)
+            when 'rect'
+              return false unless (child_attrs.keys - allowed - ['x','y','width','height']).empty?
+              x,y,w,h = ['x','y','width','height'].map do |key|
+                SourceImagePaintOrder.exact_decimal_number(child_attrs[key] || (['x','y'].include?(key) ? '0' : nil))
+              end
+              return false unless w > 0 && h > 0
+              source = [[x,y],[x+w,y],[x+w,y+h],[x,y+h]]
+            else
+              return false
+            end
+            return false if source.length < 3 || source.length + points.length > 8192
+            return false unless child_attrs['transform'].to_s.strip.empty?
+            points.concat(source)
+          end
+          strictly_disjoint_bounds?(SourceImagePaintOrder.box(points),query)
+        rescue Unproven, ArgumentError, TypeError, NoMethodError, RangeError
+          false
+        end
 
         def rectangle_clip(node, matrix)
           attrs = attributes(node)
@@ -544,7 +653,8 @@ module BlueCollarSystems
 
         def events_for(query)
           events = []
-          walk(@root, { :matrix=>IDENTITY, :alpha=>1.0, 'fill'=>'black' }, query, events, [], false)
+          walk(@root, { :matrix=>IDENTITY, :alpha=>1.0, :clip_bound_exact_identity=>true,
+            :round_line_style_known=>true, 'fill'=>'black' }, query, events, [], false)
           events.each_with_index { |event,index| event[:paint_rank] = index }
           events
         end
@@ -601,6 +711,7 @@ module BlueCollarSystems
           attrs = attributes(node)
           ctx = context(node, parent)
           return if ctx[:alpha] == 0.0
+          ctx[:clip_bound_exact_identity] = false if referenced_node || node[:name] == 'use'
           if attrs['mask']
             mask = referenced(attrs['mask'])
             relation = same_opaque_image_mask?(node,ctx,mask) ? :all : mask_relation(mask, ctx[:matrix], query)
@@ -608,7 +719,9 @@ module BlueCollarSystems
             raise Unproven, 'mask crosses queried image footprint: ' + attrs['mask'].to_s unless relation == :all
           end
           if attrs['clip-path']
-            clip = rectangle_clip(referenced(attrs['clip-path']), ctx[:matrix])
+            clip_node = referenced(attrs['clip-path'])
+            return if clip_proven_disjoint?(clip_node,ctx[:matrix],query,ctx[:clip_bound_exact_identity])
+            clip = rectangle_clip(clip_node, ctx[:matrix])
             ctx[:clip] = SourceImagePaintOrder.intersection(ctx[:clip], clip)
             return if ctx[:clip] == []
           end
@@ -660,7 +773,16 @@ module BlueCollarSystems
             return if ctx['fill'] == 'none' && (!ctx['stroke'] || ctx['stroke'] == 'none')
             return if number(ctx['fill-opacity'] || 1) == 0 && (!ctx['stroke'] || ctx['stroke'] == 'none')
             bounds = shape_box(node,ctx)
-            events << { :kind=>:vector, :bounds=>bounds, :svg_offset=>node[:offset] }
+            event = { :kind=>:vector, :bounds=>bounds, :svg_offset=>node[:offset] }
+            if SourceImagePaintOrder.overlap?(bounds,query)
+              exact = exact_round_line_bounds(node,parent,ctx,referenced_node)
+              if exact && strictly_disjoint_bounds?(exact,query)
+                event[:conservative_bounds] = bounds
+                event[:bounds] = exact
+                event[:bounds_policy] = 'exact_axis_aligned_round_single_segment_disjoint'
+              end
+            end
+            events << event
           when 'image'
             quad = SourceImagePaintOrder.corners(attrs).map { |p| SourceImagePaintOrder.point(ctx[:matrix],p) }
             events << { :kind=>:image, :bounds=>SourceImagePaintOrder.box(quad), :corners=>quad,

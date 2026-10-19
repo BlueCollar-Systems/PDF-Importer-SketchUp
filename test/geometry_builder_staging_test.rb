@@ -94,14 +94,28 @@ class GeometryBuilderStagingTest < Minitest::Test
     end
   end
 
+  class BulkEdgeBuilder
+    def initialize(entities)
+      @entities = entities
+    end
+
+    def add_edges(points)
+      @entities.add_edges(points)
+    end
+  end
+
   class Edge
     attr_accessor :layer, :hidden, :material
     attr_reader :start_point, :end_point
 
+    Vertex = Struct.new(:position)
     def initialize(start_point, end_point)
       @start_point = start_point
       @end_point = end_point
     end
+    def valid?; true; end
+    def start; Vertex.new(@start_point); end
+    define_method(:end) { Vertex.new(@end_point) }
   end
 
   class Face
@@ -177,6 +191,14 @@ class GeometryBuilderStagingTest < Minitest::Test
     attr_reader :groups_created, :groups_exploded, :faces_created,
                 :instances_created
 
+    def self.bulk_build_counter
+      @bulk_build_counter
+    end
+
+    def self.bulk_build_counter=(value)
+      @bulk_build_counter = value
+    end
+
     def initialize(reject_small_faces = false)
       @items = []
       @groups_created = 0
@@ -184,6 +206,13 @@ class GeometryBuilderStagingTest < Minitest::Test
       @faces_created = 0
       @instances_created = 0
       @reject_small_faces = reject_small_faces
+      counter = self.class.bulk_build_counter
+      if counter
+        define_singleton_method(:build) do |&block|
+          counter[:calls] += 1
+          block.call(BulkEdgeBuilder.new(self))
+        end
+      end
     end
 
     def to_a
@@ -317,6 +346,33 @@ class GeometryBuilderStagingTest < Minitest::Test
       edge.start_point.y
     end
     assert_equal [0.0, 499.0 / 72.0], endpoints
+  end
+
+  # The final candidate keeps the supported add_edges route even when a
+  # host advertises build. A real 2022+ native canary is not available here;
+  # retain exact staging/style behavior without claiming that API's topology.
+  def test_heavy_page_retains_legacy_api_and_staging_on_build_capable_host
+    counter = { :calls => 0 }
+    Entities.bulk_build_counter = counter
+    model = Model.new
+    paths = 600.times.map { |index| line_path(index.to_f) }
+    builder = Builder.new(
+      model, paths, [], [0, 0, 4000, 800],
+      :group_per_page => false, :detect_arcs => false,
+      :import_fills => false, :group_by_color => false
+    )
+    result = builder.build
+    assert_equal 600, result[:edges]
+    assert_equal 3, result[:geometry_staging][:batch_count]
+    assert_equal 0, counter[:calls]
+    groups = model.active_entities.to_a.grep(Group)
+    assert_equal 3, groups.length
+    edges = groups.flat_map { |group| group.entities.to_a.grep(Edge) }
+    assert_equal 600, edges.length
+    assert edges.all? { |edge| edge.material }
+    assert_equal [0, 0, 0], [edges.first.material.color.red, edges.first.material.color.green, edges.first.material.color.blue]
+  ensure
+    Entities.bulk_build_counter = nil
   end
 
   def test_filled_closed_path_preserves_exact_boundary_without_arc_reconstruction

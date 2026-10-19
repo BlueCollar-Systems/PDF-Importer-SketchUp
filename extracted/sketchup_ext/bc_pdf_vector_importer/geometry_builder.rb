@@ -18,6 +18,7 @@ module BlueCollarSystems
     class GeometryBuilder
 
       class StrokeStyleFailure < StandardError; end
+      class StrokeBatchFailure < StandardError; end
       class FillDeliveryFailure < StandardError
         attr_reader :fill_delivery_failures
         def initialize(message, failures)
@@ -131,6 +132,11 @@ module BlueCollarSystems
           :simplified_path_count => 0 }
         @footprint_simplify = false
         @footprint_started = nil
+        # Simple strokes are queued per entities collection and committed
+        # together. SketchUp's add_edges intersects every new edge with the
+        # edges already in that collection, so about 30,000 separate calls
+        # on a dense sheet take minutes even after width faces are skipped.
+        @stroke_edge_batches = {}
         @lineweight_groups = {}
         @lineweight_organization = { :requested_mode=>@lineweight_mode,
           :organized_path_count=>0,:group_count=>0,:tag_names=>[],
@@ -345,6 +351,7 @@ module BlueCollarSystems
             # along the clipping boundary or connect across an invisible interval.
             fragments = should_stroke ? clipped_stroke_segments(path, points_list, subpath.closed, stroke_bounds) : nil
             if fragments
+              flush_stroke_edge_batches!(draw_dest)
               record_unresolved_stroke_clip('filled path boundary paint remains outside the centerline clipping contract') if should_fill
               fragments.each do |a, b|
                 p1 = pdf_to_su(a[0], a[1], page_origin_x, page_origin_y)
@@ -385,6 +392,7 @@ module BlueCollarSystems
           :total => @paths.length,
           :page => @page_number
         )
+        flush_stroke_edge_batches!
         finalize_geometry_staging!
         flush_deferred_small_faces!
         # Fill containers live inside color containers: prune the inner ones
@@ -705,7 +713,7 @@ module BlueCollarSystems
       def run_checkpoint!(stage, detail)
         controller = @run_controller
         return false unless controller && controller.respond_to?(:checkpoint!)
-        controller.checkpoint!(stage, detail)
+        controller.checkpoint!(stage, { :page => @page_number }.merge(detail))
         true
       end
 
@@ -746,6 +754,7 @@ module BlueCollarSystems
         chunk_limit = GEOMETRY_STAGING_CHUNK_PATHS
         if slot.nil? || (new_path && chunk_limit &&
                          slot[:path_count] >= chunk_limit)
+          flush_stroke_edge_batches!(slot[:group].entities) if slot && slot[:group]
           group = parent_entities.add_group
           unless group && group.respond_to?(:entities) &&
                  group.respond_to?(:explode)
@@ -934,6 +943,7 @@ module BlueCollarSystems
       # Draw edges with arc detection
       # ---------------------------------------------------------------
       def draw_with_arc_detection(entities, points, layer, dash_layer, dash_spec, closed, should_fill, fill_rgb = nil, stroke_style = nil)
+        flush_stroke_edge_batches!(entities)
         # Convert Point3d to [x,y] for the arc fitter
         pts_2d = points.map { |p| [p.x, p.y] }
 
@@ -1087,6 +1097,7 @@ module BlueCollarSystems
           !(@model.respond_to?(:line_styles) && @model.line_styles)
 
         if needs_physical_dashes
+          flush_stroke_edge_batches!(entities)
           (0...valid_pts.length - 1).each do |i|
             safe_add_line(entities, valid_pts[i], valid_pts[i + 1], layer, dash_layer, dash_spec, stroke_style)
           end
@@ -1094,24 +1105,228 @@ module BlueCollarSystems
         end
 
         target = dash_layer ? get_or_create_layer(dash_layer) : layer
+        (@stroke_edge_batches[entities] ||= []) << {
+          :points => valid_pts,
+          :layer => target,
+          :style => stroke_style
+        }
+      end
 
-        begin
-          edges = entities.add_edges(valid_pts)
-          if edges && !edges.empty?
-            edges.each do |edge|
-              set_layer(edge, target)
-              style_stroke_edge(edge, stroke_style)
+      # Queued strokes use the existing add_edges API on every supported
+      # host. The proposed Entities#build path is deliberately not executed:
+      # its different intersection/reuse semantics need a real 2022+ canary.
+      # Each native return must cover the requested source before styling.
+      def flush_stroke_edge_batches!(only = nil)
+        batches = @stroke_edge_batches
+        return true unless batches && !batches.empty?
+        keys = only ? [only] : batches.keys
+        keys.each_with_index do |entities, index|
+          batch = batches.delete(entities)
+          next unless batch && !batch.empty?
+          run_checkpoint!(:stroke_edge_flush, :phase => :before_batch,
+                          :batch_index => index, :batch_total => keys.length)
+          commit_stroke_edge_batch!(entities, batch)
+        end
+        true
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch
+        # These queued entries have not entered the native API. The caller
+        # owns rollback of geometry already committed to this page.
+        batches.clear if batches
+        raise
+      end
+
+      def commit_stroke_edge_batch!(entities, batch)
+        batch.each_with_index do |item, index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :before_item,
+                          :item_index => index, :item_total => batch.length) if index % 32 == 0
+          empty_before = stroke_collection_empty?(entities)
+          begin
+            edges = entities.add_edges(item[:points])
+            require_stroke_source_coverage!(item[:points], edges)
+            paint_queued_stroke_edges(edges.compact, item[:layer], item[:style])
+          rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch,
+                 StrokeStyleFailure, StrokeBatchFailure
+            raise
+          rescue StandardError => error
+            # No returned array describes every possible partial native edit.
+            # A retry is safe only when this exact collection was empty and
+            # still is empty. Never erase/retry over existing or partial ink.
+            unless empty_before && stroke_collection_empty?(entities)
+              raise StrokeBatchFailure,
+                    "cannot retry add_edges with uncertain partial geometry: #{error.message}"
             end
-            @edge_count += edges.length
+            Logger.warn('GeometryBuilder', "add_edges failed without geometry, falling back: #{error.message}")
+            commit_stroke_line_fallback!(entities, item)
           end
-        rescue StrokeStyleFailure
-          raise
-        rescue StandardError => e
-          # Fallback to individual lines if batch fails
-          Logger.warn("GeometryBuilder", "add_edges batch failed, falling back: #{e.message}")
-          (0...valid_pts.length - 1).each do |i|
-            safe_add_line(entities, valid_pts[i], valid_pts[i + 1], layer, dash_layer, dash_spec, stroke_style)
+        end
+        true
+      end
+
+      def commit_stroke_line_fallback!(entities, item)
+        fallback = []
+        item[:points].each_cons(2).with_index do |pair, segment|
+          run_checkpoint!(:stroke_edge_flush, :phase => :line_fallback,
+                          :segment_index => segment) if segment % 32 == 0
+          fallback << entities.add_line(pair[0], pair[1])
+        end
+        require_stroke_source_coverage!(item[:points], fallback)
+        paint_queued_stroke_edges(fallback.compact, item[:layer], item[:style])
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch,
+             StrokeStyleFailure, StrokeBatchFailure
+        raise
+      rescue StandardError => error
+        raise StrokeBatchFailure, "stroke line fallback failed: #{error.message}"
+      end
+
+      def stroke_collection_empty?(entities)
+        entities.respond_to?(:length) && entities.length == 0
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch
+        raise
+      rescue StandardError
+        false
+      end
+
+      def stroke_point_values(point)
+        values = [point.x.to_f, point.y.to_f, point.z.to_f]
+        raise StrokeBatchFailure, 'native stroke endpoint is not finite' unless values.all?(&:finite?)
+        values
+      end
+
+      def stroke_native_segment(edge)
+        unless edge && edge.respond_to?(:valid?) && edge.valid? &&
+               edge.respond_to?(:start) && edge.respond_to?(:end)
+          raise StrokeBatchFailure, 'native stroke return contains a missing or invalid edge'
+        end
+        [stroke_point_values(edge.start.position), stroke_point_values(edge.end.position)]
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch
+        raise
+      rescue StandardError => error
+        raise StrokeBatchFailure, "native stroke endpoints cannot be read: #{error.message}"
+      end
+
+      def stroke_segment_key(segment)
+        (segment[0] <=> segment[1]) == -1 ? segment : segment.reverse
+      end
+
+      # No tolerance increase or coordinate rounding is used. Usually the
+      # native/source segment keys already match. For native splits or
+      # collinear coalescing, compare exact interval unions grouped by their
+      # supporting lines: O(E log E), not a scan of every source/native pair.
+      def require_stroke_source_coverage!(points, edges)
+        unless edges.is_a?(Array)
+          raise StrokeBatchFailure, 'native add_edges did not return an edge roster'
+        end
+        source = []
+        points.each_cons(2).with_index do |pair, index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :coverage_input,
+                          :segment_index => index) if index % 64 == 0
+          source << pair.map { |point| stroke_point_values(point) }
+        end
+        actual = []
+        edges.each_with_index do |edge, index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :coverage_input,
+                          :edge_index => index) if index % 64 == 0
+          if edge
+            actual << stroke_native_segment(edge)
+          # A literal repeated endpoint has no centerline interval. Only its
+          # same-position API slot can explain nil; a tiny nonzero edge cannot.
+          elsif edges.length != source.length || source[index][0] != source[index][1]
+            raise StrokeBatchFailure, 'native add_edges omitted a nonzero source segment'
           end
+        end
+        expected_keys = {}; actual_keys = {}
+        [source, actual].each_with_index do |segments, side|
+          keys = side == 0 ? expected_keys : actual_keys
+          segments.reject! { |pair| pair[0] == pair[1] }
+          segments.each_with_index do |pair, index|
+            run_checkpoint!(:stroke_edge_flush, :phase => :coverage_keys,
+                            :segment_index => index) if index % 64 == 0
+            keys[stroke_segment_key(pair)] = true
+          end
+        end
+        same_keys = expected_keys.length == actual_keys.length
+        if same_keys
+          expected_keys.each_with_index do |(key, _value), index|
+            run_checkpoint!(:stroke_edge_flush, :phase => :coverage_keys,
+                            :key_index => index) if index % 64 == 0
+            unless actual_keys.key?(key)
+              same_keys = false
+              break
+            end
+          end
+        end
+        return true if same_keys
+        expected_unions = stroke_line_interval_unions(source)
+        actual_unions = stroke_line_interval_unions(actual)
+        covered = expected_unions.length == actual_unions.length
+        expected_unions.each_with_index do |(key, intervals), index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :coverage_compare,
+                          :line_index => index) if index % 64 == 0
+          other = actual_unions[key]
+          covered = false unless other && other.length == intervals.length
+          break unless covered
+          intervals.each_with_index do |interval, interval_index|
+            run_checkpoint!(:stroke_edge_flush, :phase => :coverage_compare,
+                            :interval_index => interval_index) if interval_index % 64 == 0
+            covered = false unless interval == other[interval_index]
+            break unless covered
+          end
+          break unless covered
+        end
+        unless covered
+          raise StrokeBatchFailure, 'native stroke roster does not exactly cover its source intervals'
+        end
+        true
+      end
+
+      def stroke_line_interval_unions(segments)
+        lines = {}
+        segments.each_with_index do |segment, index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :coverage_scan,
+                          :piece_index => index) if index % 64 == 0
+          a, b = segment.map { |point| point.map(&:to_r) }
+          axis = (0...3).find { |j| a[j] != b[j] }
+          # Zero-length intervals were removed by the caller. Keep all
+          # genuine short segments; exact Rational values do not merge gaps.
+          delta = b[axis] - a[axis]
+          direction = (0...3).map { |j| (b[j] - a[j]) / delta }
+          offset = (0...3).map { |j| a[j] - a[axis] * direction[j] }
+          key = [axis, direction, offset]
+          (lines[key] ||= []) << [a[axis], b[axis]].minmax
+        end
+        lines.each_with_index do |(key, intervals), line_index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :coverage_sort,
+                          :line_index => line_index)
+          comparisons = 0
+          ordered = intervals.sort do |left, right|
+            run_checkpoint!(:stroke_edge_flush, :phase => :coverage_sort,
+                            :comparison_index => comparisons) if comparisons % 1024 == 0
+            comparisons += 1
+            left <=> right
+          end
+          merged = []
+          ordered.each_with_index do |(low, high), index|
+            run_checkpoint!(:stroke_edge_flush, :phase => :coverage_merge,
+                            :interval_index => index) if index % 64 == 0
+            last = merged.last
+            if last && low <= last[1]
+              last[1] = high if high > last[1]
+            else
+              merged << [low, high]
+            end
+          end
+          lines[key] = merged
+        end
+        lines
+      end
+
+      def paint_queued_stroke_edges(edges, layer, style)
+        edges.each_with_index do |edge, index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :style,
+                          :edge_index => index) if index % 64 == 0
+          set_layer(edge, layer)
+          style_stroke_edge(edge, style)
+          @edge_count += 1
         end
       end
 
@@ -4051,12 +4266,16 @@ module BlueCollarSystems
       def style_stroke_edge(edge, style)
         return edge unless style
         edge.material = style[:material]
-        unless edge.material == style[:material] &&
-               stroke_material_rgb(edge.material) == style[:rgb]
-          raise StrokeStyleFailure, 'native edge did not retain source stroke RGB'
+        # Native material state is mutable. Reuse the owned material object,
+        # but prove each edge's assignment, RGB, opacity and texture live.
+        material = style[:material]
+        assigned = edge.material
+        unless assigned == material && stroke_material_rgb(assigned) == style[:rgb] &&
+               material.alpha == 1.0 && material.texture.nil?
+          raise StrokeStyleFailure, 'native edge did not retain source stroke RGB/material/opacity'
         end
         edge
-      rescue StrokeStyleFailure
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch, StrokeStyleFailure
         raise
       rescue StandardError => error
         raise StrokeStyleFailure, "cannot apply source stroke color: #{error.message}"
@@ -4426,6 +4645,8 @@ module BlueCollarSystems
         return unless layer
         begin
           entity.layer = layer
+        rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch
+          raise
         rescue StandardError => e
           Logger.warn("GeometryBuilder", "set_layer failed: #{e.message}")
         end

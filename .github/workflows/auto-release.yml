@@ -307,6 +307,7 @@ jobs:
             ruby test/separation_fill_fidelity_test.rb
           fi
           ruby test/stroke_color_preservation_test.rb
+          ruby test/stroke_batch_certainty_test.rb
           ruby test/pdf_color_space_test.rb
           ruby test/implicit_fill_close_test.rb
           ruby test/labels_empty_text_group_resume_signature_test.rb
