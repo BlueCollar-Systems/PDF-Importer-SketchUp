@@ -4,8 +4,7 @@
 
 The r27 archive was built from commit `434f2039328d83c85b8a31f73795c04141a91d30`,
 SHA-256 `1882e6f83a393bc9d8b34b56053e962df51529ec0a11fa0946002e5f03e085a1`.
-The foundation PDF SHA-256 remained
-`563ed39b60518ffe34844cd142063678d51e8f675396f6b968d478e81483d6cd`.
+The foundation sheet F1 was unchanged (SHA-256 kept in private evidence).
 All tests used installed SketchUp Make 2017, version 17.2.2555 / Ruby 2.2.4.
 
 - **Glyphs failed:** the import did not return before the existing 1,800-second

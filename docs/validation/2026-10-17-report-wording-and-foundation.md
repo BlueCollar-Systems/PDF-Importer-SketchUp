@@ -32,7 +32,7 @@ source/test hashes remained unchanged during all twelve runs.
 ## Completed r24 foundation Glyphs check
 
 The exact candidate used the ordinary SketchUp 2017 Make import menu on
-`00S-505_ FOUNDATION SECTION AND DETAILS Rev.0 markup.pdf`, followed by Save As,
+the private foundation sheet F1, followed by Save As,
 one Undo, normal close, then Open/Save As in a fresh process.
 
 | Observation | Result |

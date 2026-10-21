@@ -13,7 +13,7 @@ performance round already fixed the known SketchUp bottleneck (dense text now us
 glyph component definitions: ~60,047 raw text-edge operations -> 0) and its own top regret
 was recorded as **"measure, don't infer"**.
 
-That regret is still live. A surviving report for `1011 (1 OF 2) - Rev 0 / text` shows:
+That regret is still live. A surviving report for `B1 / text` (the private benchmark sheet) shows:
 
     "performance": { "elapsed_ms": 96800.0, "peak_mb": 783.07,
                      "phases": { "total_ms": 96800.0 } }
