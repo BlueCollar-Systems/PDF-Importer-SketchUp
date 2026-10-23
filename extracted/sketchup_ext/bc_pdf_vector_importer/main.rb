@@ -1455,6 +1455,7 @@ module BlueCollarSystems
           target_entities, svg_document[:svg], media_box, item, mode,
           :scale => opts[:scale],
           :svg_page_box => render_box,
+          :page_rotation => page_rotation,
           :y_offset => 0.0,
           :layer => text_layer,
           :peer_items => peer_items,
@@ -1537,11 +1538,13 @@ module BlueCollarSystems
     end
 
     def self.prepare_item_page_match_and_peer_boxes(
-      svg, media_box, text_items, opts, render_box, y_offset = 0.0
+      svg, media_box, text_items, opts, render_box, y_offset = 0.0,
+      page_rotation = 0
     )
       base_opts = {
         :scale => opts[:scale],
         :svg_page_box => render_box,
+        :page_rotation => page_rotation,
         :y_offset => y_offset.to_f
       }
       placed = CairoGlyphSource.model_space_loops(svg, media_box, base_opts)
@@ -1733,7 +1736,8 @@ module BlueCollarSystems
       precomputed_match, precomputed_peer_boxes,
         precomputed_placed, precomputed_pens =
         prepare_item_page_match_and_peer_boxes(
-          svg_document[:svg], media_box, text_items, opts, render_box, 0.0
+          svg_document[:svg], media_box, text_items, opts, render_box, 0.0,
+          page_rotation
         )
       glyph_component_cache = {}
 
@@ -1825,6 +1829,7 @@ module BlueCollarSystems
       result = Svg3DTextRenderer.render_svg(
         target_entities, svg_document[:svg], media_box, failed_items,
         :scale => opts[:scale], :svg_page_box => render_box,
+        :page_rotation => page_rotation,
         :y_offset => 0.0, :depth => depth, :layer => text_layer,
         :model => model,
         :page_number => page_num,
@@ -1890,7 +1895,8 @@ module BlueCollarSystems
       precomputed_match, precomputed_peer_boxes,
         precomputed_placed, precomputed_pens =
         prepare_item_page_match_and_peer_boxes(
-          svg_document[:svg], media_box, label_peer_items, opts, render_box, 0.0
+          svg_document[:svg], media_box, label_peer_items, opts, render_box, 0.0,
+          page_rotation
         )
       glyph_component_cache = {}
 
@@ -3379,6 +3385,7 @@ module BlueCollarSystems
         PlanarWhiteKnockout.log_progress!(opts, :source_inventory_started, {}, true)
         inventory = SvgPaintOrder.build(document[:svg], media_box,
           :scale => opts[:scale], :svg_page_box => opts[:svg_page_box], :y_offset => 0.0,
+          :page_rotation => opts[:page_rotation],
           :run_controller => opts[:run_controller], :page_number => opts[:page_number])
         run_control_checkpoint!(opts, :white_mask_inventory,
           :page => opts[:page_number], :completed => 1, :total => 1)
@@ -5768,7 +5775,7 @@ module BlueCollarSystems
              source_svg_document[:svg].to_s.length > 0
             source_summary = svg_page_source_summary(
               source_svg_document[:svg], media_box,
-              :svg_page_box => svg_page_box
+              :svg_page_box => svg_page_box, :page_rotation => page_rotation
             )
           elsif explicit_zero_canonical_page_raster
             reason = svg_failure[:reason].to_s
@@ -6409,6 +6416,7 @@ module BlueCollarSystems
             representation_parent, svg_document[:svg], media_box, text_items,
             :scale => opts[:scale],
             :svg_page_box => svg_page_box,
+            :page_rotation => page_rotation,
             :y_offset => 0.0,
             :depth => depth,
             :layer => layer_mgr.text_fallback_layer,
@@ -6637,7 +6645,7 @@ module BlueCollarSystems
             precomputed_peer_owners =
             prepare_item_page_match_and_peer_boxes(
               svg_document[:svg], media_box, text_items, opts,
-              svg_page_box, 0.0
+              svg_page_box, 0.0, page_rotation
             )
           stats[:pipeline_performance][:item_page_inventory_ms] =
             ((Time.now - inventory_started) * 1000.0).round(3)
@@ -6729,6 +6737,7 @@ module BlueCollarSystems
           source_unit = SvgItemRepresentationRenderer.render_unmatched_svg(
             representation_parent, svg_document[:svg], media_box, text_items,
             requested_text_mode, :scale => opts[:scale], :svg_page_box => svg_page_box,
+            :page_rotation => page_rotation,
             :y_offset => 0.0, :page_number => page_num, :model => model,
             :layer => text_layer, :glyph_component_cache => glyph_component_cache,
             :source_context => svg_source_context(svg_document,page_num,svg_failure),
