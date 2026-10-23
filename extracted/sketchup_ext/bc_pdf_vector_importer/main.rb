@@ -177,6 +177,19 @@ module BlueCollarSystems
       raise
     end
 
+    # Temp copies of the user's drawing made for one import (the
+    # font-embedded PDF used for glyph rendering) are deleted when that
+    # import ends: after success, a failure or Esc. Never raises.
+    def self.release_import_temp_copies!
+      SvgTextRenderer.release_embedded_font_copies!
+    rescue StandardError => e
+      begin
+        Logger.warn('Pipeline', "temp copy cleanup failed: #{e.message}")
+      rescue StandardError
+      end
+      nil
+    end
+
     def self.import_result_status(stats)
       return 'failed' unless stats
       return 'success' unless stats.is_a?(Hash)
@@ -4947,6 +4960,7 @@ module BlueCollarSystems
           end
           Logger.flush_log
           PdfSalvage.cleanup(prepared_path) if defined?(PdfSalvage)
+          release_import_temp_copies!
         end
       end
     end
@@ -7182,6 +7196,10 @@ module BlueCollarSystems
              opts[:preserve_prepared_parser])
           PdfSalvage.cleanup(path)
         end
+        # A page of a resumable import keeps the copy for the next page; the
+        # resumable import releases it once, when the whole file ends.
+        release_import_temp_copies! unless
+          defined?(opts) && opts.is_a?(Hash) && opts[:preserve_prepared_parser]
         begin
           report_pipeline_progress(opts, 'pipeline_ensure_finished') if
             defined?(opts) && opts.is_a?(Hash)
