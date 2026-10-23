@@ -6486,6 +6486,14 @@ module BlueCollarSystems
           end
 
           transition_proofs = Array(text3d_result[:transition_proofs])
+          unless transition_proofs.empty?
+            # Every stepped-down item can end at Raster, which needs one
+            # whole-page render. Start it now so it runs while the 3D Text
+            # evidence is recorded.
+            start_item_raster_page_prefetch!(
+              path, page_num, media_box, page_rotation, page_text_opts
+            )
+          end
           if text3d_result[:no_semantic_text] == true
             # This renderer subset can be empty while canonical source spaces
             # were retained in the page ledger. Do not call that "no text".
@@ -6588,6 +6596,7 @@ module BlueCollarSystems
               )
               end
             end
+            discard_item_raster_page_prefetch!(page_text_opts, page_num)
           end
           end
           end
@@ -7983,6 +7992,7 @@ module BlueCollarSystems
       unless import_text == true
         opts.delete(:item_raster_page_cache)
         opts.delete(:item_raster_page_failures)
+        opts.delete(:item_raster_page_prefetch)
         opts.delete(:source_pdf_digest_cache)
         opts.delete(:item_raster_cache_persistent)
         opts.delete(:item_raster_source_bounds_cache)
@@ -7993,6 +8003,7 @@ module BlueCollarSystems
       # starting rung so a terminal fallback cannot render the same page twice.
       opts[:item_raster_page_cache] = {}
       opts[:item_raster_page_failures] = {}
+      opts[:item_raster_page_prefetch] = {}
       opts[:item_raster_source_bounds_cache] = {}
       opts[:source_pdf_digest_cache] = {}
       opts[:item_raster_cache_persistent] = true
@@ -8123,6 +8134,16 @@ module BlueCollarSystems
       cache = opts[:item_raster_page_cache]
       paths = []
       directories = []
+      # A background page render still running (Esc, a failure, or no item
+      # needed it) is stopped before its folder is deleted.
+      prefetch = opts[:item_raster_page_prefetch]
+      if prefetch.is_a?(Hash)
+        prefetch.values.each do |job|
+          stop_item_raster_page_prefetch!(job)
+          directories << job[:owned_temp_dir] if job.is_a?(Hash)
+        end
+        prefetch.clear
+      end
       Array(cache && cache.values).each do |entry|
         next unless entry.is_a?(Hash)
         paths.concat(Array(entry[:owned_temp_paths]))
@@ -8164,7 +8185,12 @@ module BlueCollarSystems
       true
     end
 
-    def self.prepare_item_raster_page!(pdf_path, page_num, media_box,
+    # The time one item Raster page render may take, in the foreground or in
+    # the background (counted from its start).
+    ITEM_RASTER_PAGE_TIMEOUT_S = 180
+
+    # One item Raster page render per (PDF bytes, page, DPI, rotation).
+    def self.item_raster_page_identity(pdf_path, page_num, media_box,
                                        page_rotation, opts)
       page_width = PageTransform.effective_width(media_box, page_rotation)
       page_height = PageTransform.effective_height(media_box, page_rotation)
@@ -8174,23 +8200,168 @@ module BlueCollarSystems
       source_sha = cached_source_pdf_sha256!(opts, source_path)
       key = [source_path.downcase, source_sha, page_num.to_i, dpi,
              PageTransform.normalize_rotation(page_rotation)].join('|')
+      {
+        :key => key, :dpi => dpi, :source_path => source_path,
+        :source_sha => source_sha, :page_width => page_width,
+        :page_height => page_height
+      }
+    end
+
+    # Starts the page's one item Raster render in the background as soon as
+    # the page knows some text items step down from 3D Text, so Ghostscript
+    # runs while the importer records the 3D Text evidence. The ladder then
+    # collects it (prepare_item_raster_page!) instead of starting it and
+    # waiting. Same plan, argv, environment, source binding and checks as
+    # the synchronous render. Never fails the import: on any problem nothing
+    # is started and the ladder renders as before.
+    def self.start_item_raster_page_prefetch!(pdf_path, page_num, media_box,
+                                              page_rotation, opts)
+      return nil unless opts.is_a?(Hash) &&
+                        opts[:item_raster_cache_persistent] == true
+      registry = opts[:item_raster_page_prefetch]
+      return nil unless registry.is_a?(Hash)
+      job = nil
+      begin
+        identity = item_raster_page_identity(
+          pdf_path, page_num, media_box, page_rotation, opts
+        )
+        key = identity[:key]
+        cache = opts[:item_raster_page_cache]
+        failures = opts[:item_raster_page_failures]
+        return nil if registry.key?(key) ||
+                      (cache.is_a?(Hash) && cache.key?(key)) ||
+                      (failures.is_a?(Hash) && failures.key?(key))
+        job = { :key => key, :page_number => page_num.to_i }
+        owned_temp_dir = SafeTemp.mktmpdir("bc_item_page_p#{page_num}_")
+        job[:owned_temp_dir] = owned_temp_dir
+        png_path = File.join(owned_temp_dir, 'page.png')
+        job[:png_path] = png_path
+        job[:raw_path] = File.join(owned_temp_dir, 'page.rgba')
+        job[:plan] = ItemRasterPageRenderer.plan(
+          DependencyResolver.find_ghostscript, identity[:source_path],
+          page_num.to_i, identity[:dpi], png_path
+        )
+        job[:source_binding] = begin_source_pdf_render_binding!(
+          opts, identity[:source_path]
+        )
+        job[:render] = ItemRasterPageRenderer::BackgroundRender.new(
+          job[:plan][:arguments], job[:plan][:environment],
+          owned_temp_dir, ITEM_RASTER_PAGE_TIMEOUT_S
+        )
+      rescue StandardError => e
+        if job
+          stop_item_raster_page_prefetch!(job)
+          begin
+            cleanup_owned_temp_artifacts!([], [job[:owned_temp_dir]].compact)
+          rescue StandardError
+            nil
+          end
+        end
+        Logger.warn('Raster', "background item page render not started: #{e.message}")
+        return nil
+      end
+      registry[key] = job
+      Logger.info('Raster', "item page #{page_num} render started in the background")
+      job
+    end
+
+    def self.take_item_raster_page_prefetch!(opts, key)
+      registry = opts.is_a?(Hash) ? opts[:item_raster_page_prefetch] : nil
+      return nil unless registry.is_a?(Hash)
+      registry.delete(key)
+    end
+
+    def self.stop_item_raster_page_prefetch!(job)
+      return true unless job.is_a?(Hash)
+      render = job[:render]
+      render.stop! if render && render.respond_to?(:stop!)
+      true
+    rescue StandardError => e
+      Logger.warn('Raster', "background item page render could not be stopped: #{e.message}")
+      false
+    end
+
+    # A page whose step-downs finished without Raster leaves its render
+    # unused: stop it and delete its folder now instead of at import end.
+    def self.discard_item_raster_page_prefetch!(opts, page_num)
+      registry = opts.is_a?(Hash) ? opts[:item_raster_page_prefetch] : nil
+      return true unless registry.is_a?(Hash)
+      registry.keys.each do |key|
+        job = registry[key]
+        next unless job.is_a?(Hash) && job[:page_number] == page_num.to_i
+        stop_item_raster_page_prefetch!(job)
+        begin
+          cleanup_owned_temp_artifacts!([], [job[:owned_temp_dir]].compact)
+          registry.delete(key)
+        rescue StandardError => e
+          # Kept in the registry: the import's own cleanup tries again and
+          # reports it there. An unused picture never fails the page.
+          Logger.warn('Raster', "unused background item page render not removed yet: #{e.message}")
+        end
+      end
+      true
+    end
+
+    # Waits for a background render, checking Esc between polls (an Esc
+    # stops the child before ImportCancelled leaves this method).
+    def self.wait_item_raster_page_prefetch!(job, opts)
+      waited_started = Time.now
+      tick = lambda do
+        run_control_checkpoint!(
+          opts, :item_raster_page_render, :page => job[:page_number]
+        )
+      end
+      run = job[:render].wait!(tick)
+      job[:wait_ms] = ((Time.now - waited_started) * 1000.0).round(3)
+      unless run[:ok]
+        Logger.warn('Raster.item_page.ghostscript',
+                    "background render ended: exit #{run[:exitstatus].inspect}" \
+                    "#{run[:timed_out] ? ' (timed out)' : ''}")
+      end
+      run
+    end
+
+    def self.prepare_item_raster_page!(pdf_path, page_num, media_box,
+                                       page_rotation, opts)
+      identity = item_raster_page_identity(
+        pdf_path, page_num, media_box, page_rotation, opts
+      )
+      page_width = identity[:page_width]
+      page_height = identity[:page_height]
+      dpi = identity[:dpi]
+      source_path = identity[:source_path]
+      source_sha = identity[:source_sha]
+      key = identity[:key]
       candidates = []
       raw_path = nil
       owned_temp_dir = nil
       fetch_item_raster_page_cache!(opts, key) do
-        owned_temp_dir = SafeTemp.mktmpdir("bc_item_page_p#{page_num}_")
-        png_path = File.join(owned_temp_dir, 'page.png')
-        raw_path = File.join(owned_temp_dir, 'page.rgba')
-        candidates = [png_path]
-        plan = ItemRasterPageRenderer.plan(
-          DependencyResolver.find_ghostscript, source_path, page_num.to_i, dpi, png_path
-        )
-        args = plan[:arguments]
-        source_binding = begin_source_pdf_render_binding!(opts, source_path)
-        run = CommandRunner.run(
-          args, :timeout_s => 180, :context => 'Raster.item_page.ghostscript',
-          :env => plan[:environment]
-        )
+        prefetched = take_item_raster_page_prefetch!(opts, key)
+        if prefetched
+          owned_temp_dir = prefetched[:owned_temp_dir]
+          png_path = prefetched[:png_path]
+          raw_path = prefetched[:raw_path]
+          candidates = [png_path]
+          plan = prefetched[:plan]
+          args = plan[:arguments]
+          source_binding = prefetched[:source_binding]
+          run = wait_item_raster_page_prefetch!(prefetched, opts)
+        else
+          owned_temp_dir = SafeTemp.mktmpdir("bc_item_page_p#{page_num}_")
+          png_path = File.join(owned_temp_dir, 'page.png')
+          raw_path = File.join(owned_temp_dir, 'page.rgba')
+          candidates = [png_path]
+          plan = ItemRasterPageRenderer.plan(
+            DependencyResolver.find_ghostscript, source_path, page_num.to_i, dpi, png_path
+          )
+          args = plan[:arguments]
+          source_binding = begin_source_pdf_render_binding!(opts, source_path)
+          run = CommandRunner.run(
+            args, :timeout_s => ITEM_RASTER_PAGE_TIMEOUT_S,
+            :context => 'Raster.item_page.ghostscript',
+            :env => plan[:environment]
+          )
+        end
         verify_source_pdf_render_binding!(source_binding)
         ItemRasterPageRenderer.validate_result!(run, plan)
         actual_png = candidates.find { |candidate| File.file?(candidate) }
@@ -8219,6 +8390,8 @@ module BlueCollarSystems
           :source_pdf_binding_verified => true,
           :page_render_once_verified => true,
           :render_count => 1,
+          :render_started_in_background => prefetched ? true : false,
+          :render_wait_ms => prefetched ? prefetched[:wait_ms] : nil,
           :owned_temp_paths => (candidates + [raw_path]).uniq,
           :owned_temp_directories => [owned_temp_dir]
         )
@@ -8399,6 +8572,8 @@ module BlueCollarSystems
       owned_crop_dir = nil
       png_path = nil
       delivery
+    rescue ImportRunControl::ImportCancelled
+      raise
     rescue StandardError => e
       Logger.warn('Raster', "Item raster failed: #{e.message}")
       opts[:item_raster_failure_evidence] = {

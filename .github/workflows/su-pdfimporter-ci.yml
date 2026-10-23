@@ -213,6 +213,7 @@ jobs:
           ruby test/physical_evidence_sort_string_test.rb
           ruby test/outline_definition_counts_cache_test.rb
           ruby test/process_memory_reader_test.rb
+          ruby test/item_raster_background_render_test.rb
 
   poppler-prune:
     runs-on: ubuntu-latest
