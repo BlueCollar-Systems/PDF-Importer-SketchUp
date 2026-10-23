@@ -282,10 +282,34 @@ module BlueCollarSystems
         end
 
         # Separate inventory: never modify or borrow Poppler's approval record.
+        #
+        # The full check hashes every member (27 MB, about 230 files, 0.3-0.6 s)
+        # and used to run on every call: once per item Raster attempt and once
+        # per font repair. A successful check is now remembered together with
+        # the size, time and kind of every entry in the tree, read before the
+        # check; any added, removed, resized or re-timed entry, or any symlink,
+        # runs the full check again. A failed check is never remembered.
         def bundled_ghostscript_executable
           return nil unless windows?
           root = File.expand_path(File.join(support_dir, 'Ghostscript'))
           return nil unless runtime_path_components_symlink_free?(root)
+          stamp = runtime_tree_stamp(root)
+          memo = @verified_bundled_ghostscript
+          if stamp && memo.is_a?(Hash) && memo[:root] == root &&
+             memo[:stamp] == stamp
+            return memo[:path]
+          end
+          @verified_bundled_ghostscript = nil
+          path = verify_bundled_ghostscript_tree(root)
+          if path && stamp
+            @verified_bundled_ghostscript = {
+              :root => root, :stamp => stamp, :path => path
+            }
+          end
+          path
+        end
+
+        def verify_bundled_ghostscript_tree(root)
           manifest_path = File.join(root, 'runtime-manifest.json')
           return nil unless File.file?(manifest_path) && !File.symlink?(manifest_path)
           manifest = JSON.parse(File.read(manifest_path))
@@ -348,26 +372,97 @@ module BlueCollarSystems
           false
         end
 
+        # Every helper selection rechecks this symlink boundary. The full walk
+        # of Library/ and share/ (about 340 entries, roughly 0.1 s on Windows)
+        # ran on every call. A clean walk is now remembered with each scanned
+        # directory's modification time, read before that directory was
+        # listed. A later call re-reads only those directories: a new, removed
+        # or renamed entry anywhere in the tree changes its directory's time,
+        # and a directory that became a symlink fails its own check. Either
+        # runs the full walk again. A walk that found a symlink is never
+        # remembered.
         def runtime_trust_paths_symlink_free?(root)
           return false unless runtime_path_components_symlink_free?(root)
           return false unless File.directory?(root)
           manifest = File.join(root, 'poppler-runtime-manifest.json')
           return false unless File.file?(manifest)
           return false if File.symlink?(manifest)
+          return true if trusted_runtime_tree_current?(root)
+          @trusted_runtime_tree = nil
+          directories = {}
           %w[Library share].each do |relative_root|
             runtime_root = File.join(root, relative_root)
             return false unless File.directory?(runtime_root)
             return false if File.symlink?(runtime_root)
-            pattern = File.join(runtime_root, '**', '*')
-            Dir.glob(pattern, File::FNM_DOTMATCH).each do |path|
-              base = File.basename(path)
-              next if base == '.' || base == '..'
-              return false if File.symlink?(path)
+            pending = [runtime_root]
+            until pending.empty?
+              directory = pending.pop
+              stamp = trusted_directory_stamp(directory)
+              return false unless stamp
+              directories[directory] = stamp
+              Dir.entries(directory).each do |base|
+                next if base == '.' || base == '..'
+                path = File.join(directory, base)
+                return false if File.symlink?(path)
+                pending << path if File.directory?(path)
+              end
             end
           end
+          @trusted_runtime_tree = { :root => root, :directories => directories }
           true
         rescue StandardError
+          @trusted_runtime_tree = nil
           false
+        end
+
+        def trusted_runtime_tree_current?(root)
+          memo = @trusted_runtime_tree
+          return false unless memo.is_a?(Hash) && memo[:root] == root
+          directories = memo[:directories]
+          return false unless directories.is_a?(Hash) && !directories.empty?
+          directories.all? do |directory, stamp|
+            trusted_directory_stamp(directory) == stamp
+          end
+        rescue StandardError
+          false
+        end
+
+        def trusted_directory_stamp(directory)
+          return nil if File.symlink?(directory)
+          stat = File.lstat(directory)
+          return nil unless stat.directory?
+          [stat.mtime.to_i, stat.mtime.nsec]
+        rescue StandardError
+          nil
+        end
+
+        # Size, time and kind of every entry under root, sorted, or nil when
+        # any entry is a symlink or the tree cannot be read. Used only to
+        # decide whether a remembered full content check still applies.
+        def runtime_tree_stamp(root)
+          rows = []
+          pending = [root]
+          until pending.empty?
+            directory = pending.pop
+            Dir.entries(directory).each do |base|
+              next if base == '.' || base == '..'
+              path = File.join(directory, base)
+              return nil if File.symlink?(path)
+              stat = File.lstat(path)
+              rel = path[(root.length + 1)..-1].to_s
+              if stat.directory?
+                rows << [rel, 'd', 0, stat.mtime.to_i, stat.mtime.nsec]
+                pending << path
+              elsif stat.file?
+                rows << [rel, 'f', stat.size, stat.mtime.to_i, stat.mtime.nsec]
+              else
+                return nil
+              end
+            end
+          end
+          rows.sort
+        rescue StandardError
+          nil
         end
 
         def bundled_runtime_integrity_valid?(root, manifest)
