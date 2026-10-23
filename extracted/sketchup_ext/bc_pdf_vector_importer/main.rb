@@ -1804,7 +1804,7 @@ module BlueCollarSystems
       step_down_index = 0
       proofs_by_id.each do |source_id, initial_proof|
         ImportRunControl.progress!(
-          :text_step_down, step_down_index, proofs_by_id.length
+          :text_step_down, step_down_index, proofs_by_id.length, page_num
         )
         step_down_index += 1
         item = items_by_id[source_id]
@@ -2448,7 +2448,8 @@ module BlueCollarSystems
       physical_canonical_json_cache = {}
       evidence_total = rows.length + physical_rows.length
       rows.each_with_index do |row, row_index|
-        ImportRunControl.progress!(:text_evidence, row_index, evidence_total)
+        ImportRunControl.progress!(:text_evidence, row_index, evidence_total,
+                                   page_num)
         item = items_by_id[row[:source_span_id].to_s]
         unless item
           raise RepresentationFidelity::ContractError,
@@ -2562,7 +2563,7 @@ module BlueCollarSystems
       end
       physical_rows.each_with_index do |row, row_index|
         ImportRunControl.progress!(
-          :text_evidence, rows.length + row_index, evidence_total
+          :text_evidence, rows.length + row_index, evidence_total, page_num
         )
         Svg3DTextRenderer.finalize_source_unit_evidence!(
           row, page_rotation, physical_definition_tree_cache,

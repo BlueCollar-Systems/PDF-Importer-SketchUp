@@ -809,7 +809,10 @@ module BlueCollarSystems
           @status_sink = options[:status_sink]
           @clock = options[:clock] || lambda { Time.now.to_f }
           @started_at = finite_number(@clock.call, 'clock')
+          # Per [stage, page]: [when the current pass started, its count
+          # then] and the last [completed, total] seen (see stage_pace!).
           @stage_started_at = {}
+          @stage_last_counts = {}
           @stage_percentages = {}
           @retained_pages = []
           @current_page = nil
@@ -871,7 +874,6 @@ module BlueCollarSystems
           ImportRunControl.heartbeat!(stage)
           now = finite_number(@clock.call, 'clock')
           stage_key = [stage.to_sym, detail[:page]]
-          @stage_started_at[stage_key] = now unless @stage_started_at.key?(stage_key)
           @current_page = detail[:page] unless detail[:page].nil?
 
           completed = non_negative_integer(detail[:completed] || 0, 'completed')
@@ -882,15 +884,7 @@ module BlueCollarSystems
           percentage = raw_percentage < previous ? previous : raw_percentage
           @stage_percentages[stage_key] = percentage
 
-          stage_elapsed = now - @stage_started_at[stage_key]
-          stage_elapsed = 0.0 if stage_elapsed < 0.0
-          eta = nil
-          if completed > 0 && total > 0 && stage_elapsed > 0.0
-            remaining = total - completed
-            eta = stage_elapsed * remaining.to_f / completed.to_f
-          elsif completed >= total && total > 0
-            eta = 0.0
-          end
+          stage_elapsed, eta = stage_pace!(stage_key, now, completed, total)
 
           page_index = detail[:page_index]
           page_total = detail[:page_total]
@@ -1131,6 +1125,36 @@ module BlueCollarSystems
         end
 
         private
+
+        # Seconds into the current pass of a stage, and the time left at
+        # that pass's own pace (nil until some of it is done). The same
+        # [stage, page] can run more than once: per white mask, per page
+        # when a progress point does not know its page, and the 3D Text
+        # evidence check runs again for items that stepped down. Timing a
+        # later pass from the first pass's start showed "about 38 min left"
+        # with 18 s to go. A pass starts when the stage is first seen, when
+        # its total changes, or when its count goes back (to 0 for a new
+        # pass). A count that stays at 0 keeps the clock, so a slow first
+        # item still counts. Only work done since the pass started is
+        # credited to its pace.
+        def stage_pace!(stage_key, now, completed, total)
+          last = @stage_last_counts[stage_key]
+          if last.nil? || total != last[1] || completed < last[0]
+            @stage_started_at[stage_key] = [now, completed]
+          end
+          @stage_last_counts[stage_key] = [completed, total]
+          pass_started_at, pass_start_completed = @stage_started_at[stage_key]
+          elapsed = now - pass_started_at
+          elapsed = 0.0 if elapsed < 0.0
+          done = completed - pass_start_completed
+          eta = nil
+          if total > 0 && completed >= total
+            eta = 0.0
+          elsif total > 0 && done > 0 && elapsed > 0.0
+            eta = elapsed * (total - completed).to_f / done.to_f
+          end
+          [elapsed, eta]
+        end
 
         def ensure_journal_ready!
           raise ResumeMismatch, 'resume journal requires a model' unless @model

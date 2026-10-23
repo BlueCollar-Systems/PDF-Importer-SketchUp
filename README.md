@@ -23,7 +23,10 @@ or menu command made during the import waits in Windows' queue and SketchUp
 handles it after the import ends; the window cannot be moved or minimized
 until then. The status bar shows one plain line, for example
 `Importing page 1 of 1: building text 120 of 557 (about 30 s left), press Esc to cancel`.
-The time left is the current step's and appears once its pace is known.
+The time left is the current step's, measured on the current page from the
+moment that step started its current pass (a step that runs again, such as
+the text check after a step-down, starts its own clock), and appears once
+that pass has run for two seconds.
 Status-bar writes are limited to one every two seconds, and a write that is
 slow pushes the next one further out. The import report's
 `performance.ui_responsiveness` block gives the longest time without a
