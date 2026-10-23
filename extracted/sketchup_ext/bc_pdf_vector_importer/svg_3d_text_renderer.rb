@@ -727,9 +727,14 @@ module BlueCollarSystems
               :construction_scale => row[:construction_scale],
               :host_tolerance_adapted => row[:host_tolerance_adapted],
               :ink_applied => row[:ink_applied] == true,
-              :definition_group_entity_id => row[:group_entity_id]
+              :definition_group_entity_id => row[:group_entity_id],
+              :contour_edge_count => row[:contour_edge_count],
+              :hidden_contour_edge_count => row[:hidden_contour_edge_count],
+              :outline_counts_cover_definition =>
+                definition_holds_only?(definition_entities, definition_group)
             }
           end
+          remember_definition_outline!(solid_cache, record)
           instance = solid_cache.add_instance(child, record)
           instances << instance
           definition_records << record
@@ -777,7 +782,11 @@ module BlueCollarSystems
           end
           source_ink_material_name = nil
         end
-        contour_style = govern_source_outline_visual_style!(group)
+        contour_style = govern_source_outline_visual_style!(
+          group,
+          solid_cache.respond_to?(:outline_definition_counts) ?
+            solid_cache.outline_definition_counts : nil
+        )
         matrices = entries.map do |entry|
           Array(entry[:svg_matrix]).map { |value| value.to_f }
         end
@@ -1054,20 +1063,24 @@ module BlueCollarSystems
       # back before the delivery can advertise a verified policy. Component
       # definitions are walked once per object identity so cached glyph solids
       # receive the same durable state as uncached span geometry.
-      def self.govern_source_outline_visual_style!(group)
+      #
+      # definition_counts (optional, one Hash per page render) remembers each
+      # glyph definition's edge counts after its edges were hidden and read
+      # back once on this page. A later span group that places the same glyph
+      # adds those counts instead of hiding and reading back the same edges
+      # again: one walk per definition per page instead of one per span group.
+      # Only definitions with no nested component are remembered, so the
+      # per-group counts are exactly the counts of a full walk.
+      def self.govern_source_outline_visual_style!(group, definition_counts = nil)
         seen = {}
         counts = { :edge_count => 0, :hidden_edge_count => 0 }
-        visit_source_outline_entities(group, seen) do |entity|
-          next unless source_outline_entity_type(entity) == 'Edge'
-          counts[:edge_count] += 1
-          unless entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?)
-            raise 'source-outline contour visibility is not writable/readable'
+        if definition_counts
+          count_source_outline_edges!(group, seen, counts, definition_counts)
+          counts.delete(:definition_walks)
+        else
+          visit_source_outline_entities(group, seen) do |entity|
+            hide_source_outline_edge!(entity, counts)
           end
-          entity.hidden = true
-          unless entity.hidden? == true
-            raise 'source-outline contour edge hidden-state readback failed'
-          end
-          counts[:hidden_edge_count] += 1
         end
         counts[:visible_edge_count] =
           counts[:edge_count] - counts[:hidden_edge_count]
@@ -1077,6 +1090,20 @@ module BlueCollarSystems
         persist_source_outline_style_policy!(group, counts)
         counts
       end
+
+      def self.hide_source_outline_edge!(entity, counts)
+        return unless source_outline_entity_type(entity) == 'Edge'
+        counts[:edge_count] += 1
+        unless entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?)
+          raise 'source-outline contour visibility is not writable/readable'
+        end
+        entity.hidden = true
+        unless entity.hidden? == true
+          raise 'source-outline contour edge hidden-state readback failed'
+        end
+        counts[:hidden_edge_count] += 1
+      end
+      private_class_method :hide_source_outline_edge!
 
       def self.visit_source_outline_entities(entity, seen, &block)
         return if entity.nil?
@@ -1099,6 +1126,100 @@ module BlueCollarSystems
         end
       end
       private_class_method :visit_source_outline_entities
+
+      # The same walk as visit_source_outline_entities + hide, except that a
+      # definition already governed on this page adds its remembered counts
+      # instead of being walked again.
+      def self.count_source_outline_edges!(entity, seen, counts,
+                                           definition_counts)
+        return if entity.nil?
+        identity = entity.object_id
+        return if seen.key?(identity)
+        seen[identity] = true
+        hide_source_outline_edge!(entity, counts)
+        if entity.respond_to?(:entities)
+          count_source_outline_children!(
+            entity.entities, seen, counts, definition_counts
+          )
+          return
+        end
+        return unless entity.respond_to?(:definition) && entity.definition &&
+                      entity.definition.respond_to?(:entities)
+        definition = entity.definition
+        def_id = definition.object_id
+        return if seen.key?(def_id)
+        seen[def_id] = true
+        counts[:definition_walks] = counts[:definition_walks].to_i + 1
+        remembered = definition_counts[def_id]
+        if remembered && remembered[:definition].equal?(definition)
+          counts[:edge_count] += remembered[:edge_count]
+          counts[:hidden_edge_count] += remembered[:hidden_edge_count]
+          return
+        end
+        edges_before = counts[:edge_count]
+        hidden_before = counts[:hidden_edge_count]
+        walks_before = counts[:definition_walks]
+        count_source_outline_children!(
+          definition.entities, seen, counts, definition_counts
+        )
+        # A nested component may be shared with another definition and its
+        # edges count once per span group, so such a definition is never
+        # remembered; it is walked again like before.
+        if counts[:definition_walks] == walks_before
+          definition_counts[def_id] = {
+            :definition => definition,
+            :edge_count => counts[:edge_count] - edges_before,
+            :hidden_edge_count => counts[:hidden_edge_count] - hidden_before
+          }
+        end
+      end
+      private_class_method :count_source_outline_edges!
+
+      def self.count_source_outline_children!(collection, seen, counts,
+                                              definition_counts)
+        return unless collection && collection.respond_to?(:to_a)
+        Array(collection.to_a).each do |child|
+          count_source_outline_edges!(child, seen, counts, definition_counts)
+        end
+      end
+      private_class_method :count_source_outline_children!
+
+      # A glyph definition built on this page holds exactly the one group
+      # whose edges were just hidden and read back, so its counts are known.
+      # Record them so the first span group that places it does not walk the
+      # same edges again.
+      def self.remember_definition_outline!(solid_cache, record)
+        return unless solid_cache &&
+                      solid_cache.respond_to?(:outline_definition_counts)
+        definition_counts = solid_cache.outline_definition_counts
+        definition = record.is_a?(Hash) ? record[:definition] : nil
+        metrics = record.is_a?(Hash) ? record[:build_metrics] : nil
+        return unless definition_counts.is_a?(Hash) && definition &&
+                      metrics.is_a?(Hash) &&
+                      metrics[:outline_counts_cover_definition] == true
+        def_id = definition.object_id
+        return if definition_counts.key?(def_id)
+        edges = metrics[:contour_edge_count]
+        hidden = metrics[:hidden_contour_edge_count]
+        return unless edges.is_a?(Integer) && hidden.is_a?(Integer) &&
+                      edges == hidden
+        definition_counts[def_id] = {
+          :definition => definition,
+          :edge_count => edges,
+          :hidden_edge_count => hidden
+        }
+      end
+      private_class_method :remember_definition_outline!
+
+      # True when the definition holds exactly the one group just governed.
+      def self.definition_holds_only?(definition_entities, group)
+        return false unless definition_entities.respond_to?(:to_a)
+        values = Array(definition_entities.to_a)
+        values.length == 1 && values[0] == group
+      rescue StandardError
+        false
+      end
+      private_class_method :definition_holds_only?
 
       def self.source_outline_entity_type(entity)
         return entity.typename.to_s if entity.respond_to?(:typename)

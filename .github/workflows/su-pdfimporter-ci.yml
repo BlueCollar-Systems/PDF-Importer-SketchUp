@@ -204,6 +204,16 @@ jobs:
           ruby test/svg_paint_order_test.rb
           ruby test/content_stream_opacity_test.rb
           ruby test/synthetic_public_corpus_test.rb
+          ruby test/item_raster_rejected_page_cache_test.rb
+          ruby test/dependency_resolver_memo_test.rb
+          ruby test/white_mask_solid_text_skip_test.rb
+          ruby test/embedded_font_copy_cleanup_test.rb
+          ruby test/rotated_page_glyph_source_test.rb
+          ruby test/pipeline_stage_timers_test.rb
+          ruby test/physical_evidence_sort_string_test.rb
+          ruby test/outline_definition_counts_cache_test.rb
+          ruby test/process_memory_reader_test.rb
+          ruby test/item_raster_background_render_test.rb
 
   poppler-prune:
     runs-on: ubuntu-latest
