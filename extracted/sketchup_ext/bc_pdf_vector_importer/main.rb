@@ -190,6 +190,23 @@ module BlueCollarSystems
       nil
     end
 
+    # The bundled Ghostscript content check and the Poppler symlink walk are
+    # remembered for one import only: opened when the import starts and
+    # forgotten when it ends (success, failure or Esc). The next import runs
+    # each full check again, so a helper changed between imports is caught.
+    # Neither call ever raises.
+    def self.open_import_helper_checks!
+      DependencyResolver.open_import_checks!
+    rescue StandardError
+      false
+    end
+
+    def self.close_import_helper_checks!(opened)
+      DependencyResolver.close_import_checks! if opened
+    rescue StandardError
+      nil
+    end
+
     def self.import_result_status(stats)
       return 'failed' unless stats
       return 'success' unless stats.is_a?(Hash)
@@ -4820,6 +4837,7 @@ module BlueCollarSystems
     end
 
     def self.run_resumable_pipeline(model, source_path, opts)
+      helper_checks = open_import_helper_checks!
       # Decide once, before anything is built. Every page call below carries
       # :large_pdf_confirmed, so no page can put a question in front of the
       # operator mid-import; Esc (run controller) and resume are the safety net.
@@ -4983,6 +5001,8 @@ module BlueCollarSystems
           release_import_temp_copies!
         end
       end
+    ensure
+      close_import_helper_checks!(helper_checks)
     end
 
     def self.release_original_annotation_cache!(cache)

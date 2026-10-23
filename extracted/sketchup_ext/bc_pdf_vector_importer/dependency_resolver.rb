@@ -281,19 +281,56 @@ module BlueCollarSystems
           )
         end
 
+        # The two helper-tree checks below (bundled Ghostscript content and the
+        # Poppler symlink walk) are remembered for ONE import only. The import
+        # opens the window when it starts and closes it when it ends. Opening
+        # and closing both forget what was remembered, so every import runs
+        # each full check once, and a runtime changed between imports is caught
+        # even when its sizes and times were kept. Outside an import nothing is
+        # remembered and every call runs the full check.
+        def open_import_checks!
+          forget_verified_helper_trees! if @import_check_depth.to_i <= 0
+          @import_check_depth = @import_check_depth.to_i + 1
+          true
+        end
+
+        def close_import_checks!
+          depth = @import_check_depth.to_i - 1
+          @import_check_depth = depth > 0 ? depth : 0
+          forget_verified_helper_trees! if @import_check_depth.zero?
+          true
+        end
+
+        def with_import_checks
+          opened = open_import_checks!
+          yield
+        ensure
+          close_import_checks! if opened
+        end
+
+        def import_checks_open?
+          @import_check_depth.to_i > 0
+        end
+
+        def forget_verified_helper_trees!
+          @verified_bundled_ghostscript = nil
+          @trusted_runtime_tree = nil
+        end
+
         # Separate inventory: never modify or borrow Poppler's approval record.
         #
         # The full check hashes every member (27 MB, about 230 files, 0.3-0.6 s)
         # and used to run on every call: once per item Raster attempt and once
-        # per font repair. A successful check is now remembered together with
-        # the size, time and kind of every entry in the tree, read before the
-        # check; any added, removed, resized or re-timed entry, or any symlink,
-        # runs the full check again. A failed check is never remembered.
+        # per font repair. Inside an import (with_import_checks) a successful
+        # check is remembered together with the size, time and kind of every
+        # entry in the tree, read before the check; any added, removed, resized
+        # or re-timed entry, or any symlink, runs the full check again. A failed
+        # check is never remembered, and nothing is kept past the import.
         def bundled_ghostscript_executable
           return nil unless windows?
           root = File.expand_path(File.join(support_dir, 'Ghostscript'))
           return nil unless runtime_path_components_symlink_free?(root)
-          stamp = runtime_tree_stamp(root)
+          stamp = import_checks_open? ? runtime_tree_stamp(root) : nil
           memo = @verified_bundled_ghostscript
           if stamp && memo.is_a?(Hash) && memo[:root] == root &&
              memo[:stamp] == stamp
@@ -374,20 +411,24 @@ module BlueCollarSystems
 
         # Every helper selection rechecks this symlink boundary. The full walk
         # of Library/ and share/ (about 340 entries, roughly 0.1 s on Windows)
-        # ran on every call. A clean walk is now remembered with each scanned
-        # directory's modification time, read before that directory was
-        # listed. A later call re-reads only those directories: a new, removed
-        # or renamed entry anywhere in the tree changes its directory's time,
-        # and a directory that became a symlink fails its own check. Either
-        # runs the full walk again. A walk that found a symlink is never
-        # remembered.
+        # ran on every call. Inside an import (with_import_checks) a clean walk
+        # is remembered with each scanned directory's modification time, read
+        # before that directory was listed. A later call in the same import
+        # re-reads only those directories: a new, removed or renamed entry
+        # anywhere in the tree changes its directory's time, and a directory
+        # that became a symlink fails its own check. Either runs the full walk
+        # again. A walk that found a symlink is never remembered, and nothing
+        # is kept past the import. File times are whole seconds on SketchUp
+        # 2017's Ruby 2.2 on Windows, so there an entry added in the same
+        # second as the remembered walk is seen by the next import, not later
+        # in the same one.
         def runtime_trust_paths_symlink_free?(root)
           return false unless runtime_path_components_symlink_free?(root)
           return false unless File.directory?(root)
           manifest = File.join(root, 'poppler-runtime-manifest.json')
           return false unless File.file?(manifest)
           return false if File.symlink?(manifest)
-          return true if trusted_runtime_tree_current?(root)
+          return true if import_checks_open? && trusted_runtime_tree_current?(root)
           @trusted_runtime_tree = nil
           directories = {}
           %w[Library share].each do |relative_root|
@@ -408,7 +449,9 @@ module BlueCollarSystems
               end
             end
           end
-          @trusted_runtime_tree = { :root => root, :directories => directories }
+          if import_checks_open?
+            @trusted_runtime_tree = { :root => root, :directories => directories }
+          end
           true
         rescue StandardError
           @trusted_runtime_tree = nil
