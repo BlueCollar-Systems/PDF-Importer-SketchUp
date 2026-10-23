@@ -121,17 +121,25 @@ module BlueCollarSystems
         # Post-process text items.
         if @strict_text_fidelity
           # Keep exact extracted spans; only remove exact duplicates.
+          text_step_pulse
           @text_items = dedupe_text_items(@text_items)
+          text_step_pulse
         else
           # Reconstruct stacked fractions before run-merge so slash forms survive.
           @text_items = reconstruct_fractions(@text_items)
+          text_step_pulse
           if @merge_text_runs
             @text_items = merge_text_runs(@text_items)
+            text_step_pulse
             @text_items = fix_merged_fractions(@text_items)
+            text_step_pulse
           end
           @text_items = dedupe_text_items(@text_items)
+          text_step_pulse
           @text_items = quality_filter(@text_items)
+          text_step_pulse
           @text_items = suppress_overlaps(@text_items)
+          text_step_pulse
         end
         @text_items
       end
@@ -220,6 +228,7 @@ module BlueCollarSystems
 
         tokens.each do |token|
           if token[:type] == :operator
+            ImportRunControl.heartbeat_tick!(:reading_text) if defined?(ImportRunControl)
             @source_paint_order = [@source_stream_index, token[:source_offset]]
             op = token[:value]
             nums = operand_stack.select { |t| t[:type] == :number }.map { |t| t[:value] }
@@ -1326,6 +1335,11 @@ module BlueCollarSystems
       # ---------------------------------------------------------------
       # Tokenizer (simplified for text extraction)
       # ---------------------------------------------------------------
+      # Keeps SketchUp's window answering Windows between text clean-up steps.
+      def text_step_pulse
+        ImportRunControl.heartbeat!(:reading_text) if defined?(ImportRunControl)
+      end
+
       def tokenize(stream)
         tokens = []
         i = 0
@@ -1421,6 +1435,8 @@ module BlueCollarSystems
             tokens << { type: :number, value: word.to_f }
           else
             tokens << { type: :operator, value: word, source_offset: i }
+            # Long text streams tokenize for seconds; keep the window answering.
+            ImportRunControl.heartbeat_tick!(:reading_text) if defined?(ImportRunControl)
           end
           i = j
         end

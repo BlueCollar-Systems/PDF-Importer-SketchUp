@@ -1871,6 +1871,8 @@ module BlueCollarSystems
       def geometry_entity_payload(entity, child_payloads = nil,
                                   canonical_json_cache = nil,
                                   write_canonical_cache = false)
+        # Readback walks every placed letter; keep the window answering.
+        ImportRunControl.heartbeat_tick!(:text_evidence) if defined?(ImportRunControl)
         type = entity_type(entity)
         # A ComponentInstance's verified definition geometry plus its exact
         # 16-value transformation determines the same world bounds. Asking
@@ -1965,6 +1967,7 @@ module BlueCollarSystems
       def style_entity_payload(entity, child_payloads = nil,
                                canonical_json_cache = nil,
                                write_canonical_cache = false)
+        ImportRunControl.heartbeat_tick!(:text_evidence) if defined?(ImportRunControl)
         layer = layer_payload(entity)
         payload = {
           :type => entity_type(entity),

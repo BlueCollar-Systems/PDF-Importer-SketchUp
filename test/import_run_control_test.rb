@@ -71,6 +71,65 @@ class ImportRunControlTest < Minitest::Test
     assert_equal [first, second, third], events
   end
 
+  # The same [stage, page] can run more than once: a progress point that
+  # does not know its page, one pass per white mask, or the 3D Text evidence
+  # check running again for items that stepped down. Each pass is timed from
+  # its own start. Made-up counts and times.
+  def test_time_left_is_measured_from_the_current_pass_of_a_stage
+    now = [0.0]
+    run = controller(:clock => lambda { now[0] })
+
+    # First pass: 100 rows at 0.5 s each, then 200 s of other work.
+    100.times do |index|
+      run.progress(:text_evidence, :completed => index, :total => 100)
+      now[0] += 0.5
+    end
+    now[0] += 200.0
+
+    # Next pass of the same stage (no page given): 40 rows at 0.5 s each.
+    later = nil
+    9.times do |index|
+      later = run.progress(:text_evidence, :completed => index, :total => 40)
+      now[0] += 0.5
+    end
+    assert_equal 8, later[:completed]
+    assert_in_delta 4.0, later[:stage_elapsed_seconds], 1e-9
+    assert_in_delta 16.0, later[:eta_seconds], 1e-9,
+                    '32 rows left at 0.5 s each, not timed from the first pass'
+
+    # A pass with the same total starts again when its count goes back.
+    now[0] += 100.0
+    again = nil
+    5.times do |index|
+      again = run.progress(:text_evidence, :completed => index, :total => 40)
+      now[0] += 0.5
+    end
+    assert_in_delta 2.0, again[:stage_elapsed_seconds], 1e-9
+    assert_in_delta 18.0, again[:eta_seconds], 1e-9
+    assert_equal 99.0, again[:percentage], 'the stage percentage stays monotonic'
+  end
+
+  def test_a_count_held_at_zero_keeps_the_clock_and_a_late_start_is_not_credited
+    now = [10.0]
+    run = controller(:clock => lambda { now[0] })
+    run.progress(:white_mask_cells, :page => 1, :completed => 0, :total => 10)
+    now[0] += 3.0
+    run.progress(:white_mask_cells, :page => 1, :completed => 0, :total => 10)
+    now[0] += 1.0
+    slow_first = run.progress(:white_mask_cells, :page => 1, :completed => 1,
+                              :total => 10)
+    assert_in_delta 4.0, slow_first[:stage_elapsed_seconds], 1e-9,
+                    'the slow first item counts toward the pace'
+    assert_in_delta 36.0, slow_first[:eta_seconds], 1e-9
+
+    # First seen part-way (a resumed page): only work done since then counts.
+    run.progress(:geometry_path, :page => 2, :completed => 50, :total => 100)
+    now[0] += 1.0
+    partway = run.progress(:geometry_path, :page => 2, :completed => 60,
+                           :total => 100)
+    assert_in_delta 4.0, partway[:eta_seconds], 1e-9, '40 left at 10 per second'
+  end
+
   def test_progress_clamps_completion_and_has_stable_page_context
     run = controller(:clock => FakeClock.new([5.0, 7.0]))
     snapshot = run.progress(

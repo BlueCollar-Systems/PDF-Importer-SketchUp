@@ -818,6 +818,7 @@ module BlueCollarSystems
       def self.parse_glyph_defs(svg)
         h = {}
         svg.scan(/<g id="(glyph-\d+-\d+)">\s*<path d="([^"]*)"/m) do |id, d|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           h[id] = d unless d.strip.empty?
         end
         svg.scan(/<path\b[^>]*\bid="([^"]+)"[^>]*\bd="([^"]*)"/m) do |id, d|
@@ -841,6 +842,7 @@ module BlueCollarSystems
 
       def self.copy_use_placements(placements)
         Array(placements).map do |placement|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           copy = placement.dup
           rgb = copy[:fill_rgb]
           copy[:fill_rgb] = rgb.dup if rgb
@@ -867,6 +869,7 @@ module BlueCollarSystems
         }]
         svg.to_s.scan(/<\/?\s*[A-Za-z][A-Za-z0-9:_-]*\b[^>]*>/m) do |m|
           source_svg_offset = Regexp.last_match.begin(0)
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           tag = m.is_a?(Array) ? m.first.to_s : m.to_s
           if tag =~ /\A<\s*\/\s*([A-Za-z][A-Za-z0-9:_-]*)\b/i
             paint_stack.pop if paint_stack.length > 1
