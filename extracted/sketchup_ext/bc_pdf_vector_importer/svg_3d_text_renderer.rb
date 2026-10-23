@@ -1092,6 +1092,7 @@ module BlueCollarSystems
       end
 
       def self.hide_source_outline_edge!(entity, counts)
+        ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
         return unless source_outline_entity_type(entity) == 'Edge'
         counts[:edge_count] += 1
         unless entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?)

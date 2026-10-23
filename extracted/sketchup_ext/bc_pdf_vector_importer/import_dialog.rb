@@ -141,6 +141,28 @@ module BlueCollarSystems
       end
 
       PROGRESS_STAGE_LABELS = {
+          'reading_pdf' => 'reading the PDF',
+          'page_parse' => 'reading the page',
+          'page' => 'placing the page picture',
+          'reading_paths' => 'reading lines and fills',
+          'reading_text' => 'reading text',
+          'analyzing_page' => 'checking the page',
+          'geometry_path' => 'drawing lines and fills',
+          'stroke_footprint' => 'measuring line widths',
+          'renderer_stage' => 'preparing text',
+          'text_outlines' => 'reading letter shapes',
+          'text_item' => 'building text',
+          'glyph_placement' => 'placing letters',
+          'text_evidence' => 'checking text',
+          'text_step_down' => 'stepping down text that did not build',
+          'page_picture' => 'drawing the page picture',
+          'cleanup' => 'cleaning up lines',
+          'extruding' => 'extruding faces',
+          'certify_page' => 'recording the finished page',
+          'pre_commit' => 'saving the page',
+          'page_completed' => 'page finished',
+          'import_report' => 'writing the import report',
+          'complexity_confirmation' => 'checking the page size',
           'white_mask_scan' => 'checking page content',
           'white_mask_inventory' => 'reading PDF paint order',
           'white_mask_inventory_glyphs' => 'reading text outlines',
@@ -157,6 +179,14 @@ module BlueCollarSystems
           'white_mask' => 'layering fills and text'
       }.freeze
 
+      # A stage needs this much of its own running time before its
+      # remaining time is shown; earlier estimates swing too much.
+      PROGRESS_ETA_MIN_STAGE_SECONDS = 2.0
+
+      # One plain status line, for example
+      # "Importing page 1 of 1: building text 120 of 557 (about 30 s left),
+      # press Esc to cancel". The time left is the current step's, measured
+      # from its own pace, and is shown only once that pace is known.
       def self.progress_status(snapshot)
         data = snapshot.is_a?(Hash) ? snapshot : {}
         stage_key = data[:stage].to_s
@@ -165,26 +195,47 @@ module BlueCollarSystems
         # The controller's page-wide monotonic value/ETA belong to an earlier
         # mask after a restart; display the current task's real count instead.
         repeated_mask_stage = stage_key.start_with?('white_mask_')
-        percentage = data[:percentage].to_f
-        if repeated_mask_stage
-          total = data[:total].to_i
-          percentage = total > 0 ? [data[:completed].to_i, total].min * 100.0 / total : 0.0
+        completed = data[:completed].to_i
+        total = data[:total].to_i
+        completed = total if total > 0 && completed > total
+        text = "Importing #{progress_page_phrase(data)}: #{stage}"
+        if total > 0
+          text += " #{format_integer(completed)} of #{format_integer(total)}"
         end
-        page = data[:page] || data[:page_index]
+        left = repeated_mask_stage ? nil : progress_time_left(data, completed, total)
+        text += " (#{left})" if left
+        text + ', press Esc to cancel'
+      end
+
+      def self.progress_page_phrase(data)
+        page = data[:page] || data[:current_page]
+        index = data[:page_index]
         page_total = data[:page_total]
-        prefix = 'PDF Import'
-        if page && page_total
-          prefix += " — page #{page}/#{page_total}"
+        if index && page_total
+          if page && page.to_i != index.to_i
+            "page #{page} (#{index} of #{page_total})"
+          else
+            "page #{index} of #{page_total}"
+          end
         elsif page
-          prefix += " — page #{page}"
+          "page #{page}"
+        else
+          'the PDF'
         end
-        text = "#{prefix} — #{stage} #{data[:completed].to_i}/" \
-          "#{data[:total].to_i} — #{format('%.1f', percentage)}% — " \
-          "elapsed #{format('%.1f', data[:elapsed_seconds].to_f)}s"
-        unless data[:eta_seconds].nil? || repeated_mask_stage
-          text += " — ETA #{format('%.1f', data[:eta_seconds].to_f)}s"
-        end
-        text + ' — Esc to cancel'
+      end
+
+      def self.progress_time_left(data, completed, total)
+        eta = data[:eta_seconds]
+        return nil if eta.nil? || total <= 0 || completed <= 0 || completed >= total
+        stage_elapsed = data[:stage_elapsed_seconds]
+        return nil unless stage_elapsed &&
+                          stage_elapsed.to_f >= PROGRESS_ETA_MIN_STAGE_SECONDS
+        seconds = eta.to_f
+        return nil unless seconds.finite? && seconds >= 0.0
+        return 'a few seconds left' if seconds < 10.0
+        rounded = ((seconds / 5.0).round * 5).to_i
+        return "about #{rounded} s left" if rounded < 60
+        "about #{[(seconds / 60.0).round, 1].max} min left"
       end
 
       def self.format_integer(value)

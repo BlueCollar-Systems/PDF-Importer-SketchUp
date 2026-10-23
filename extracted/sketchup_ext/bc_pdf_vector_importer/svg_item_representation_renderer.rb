@@ -339,6 +339,7 @@ module BlueCollarSystems
           raise RepresentationFidelity::ContractError, 'source-only glyph identity is invalid'
         end
         context_check = verify_source_context!(source_id, opts[:source_context], item)
+        ImportRunControl.heartbeat!(:text_step_down) if defined?(ImportRunControl)
         if context_check == :font_gap_impossible
           return impossible_result(
             source_id, item, mode, [], {}, opts[:source_context], {},
@@ -1624,6 +1625,8 @@ module BlueCollarSystems
       end
 
       def self.emit_progress_callback(callback, phase, detail = nil)
+        # Each item step is also a point that keeps the window answering.
+        ImportRunControl.heartbeat!(:text_step_down) if defined?(ImportRunControl)
         return false unless callback.respond_to?(:call)
         callback.call(phase.to_s, detail)
         true

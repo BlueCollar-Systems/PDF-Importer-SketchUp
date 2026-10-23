@@ -16,9 +16,11 @@ class ImportStatusSinkThrottleTest < Minitest::Test
 
   class RecordingHost
     class << self
-      attr_accessor :writes, :clock
+      attr_accessor :writes, :clock, :write_cost
       def status_text=(text)
         writes << [clock.call, text]
+        # A slow host repaint: the write itself takes this long.
+        clock.now += write_cost.to_f
       end
     end
   end
@@ -33,6 +35,7 @@ class ImportStatusSinkThrottleTest < Minitest::Test
     @clock = ManualClock.new
     RecordingHost.writes = []
     RecordingHost.clock = @clock
+    RecordingHost.write_cost = 0.0
     IMP.const_set(:Sketchup, RecordingHost)
   end
 
@@ -97,8 +100,8 @@ class ImportStatusSinkThrottleTest < Minitest::Test
     RecordingHost.writes.each_cons(2) do |previous, current|
       assert_operator current[0] - previous[0], :>=, 2.0
     end
-    assert_includes RecordingHost.writes.first[1], 'building fill cutouts 1/2500'
-    assert_includes RecordingHost.writes.first[1], 'Esc to cancel'
+    assert_equal 'Importing page 1 of 1: building fill cutouts 1 of 2,500, ' \
+                 'press Esc to cancel', RecordingHost.writes.first[1]
   end
 
   def test_boundary_new_sink_and_completion_are_independent
@@ -114,8 +117,8 @@ class ImportStatusSinkThrottleTest < Minitest::Test
         @clock.now = 2.0
         assert_equal true, sink.call(snapshot.merge(:completed => 3))
         assert_equal 2, RecordingHost.writes.length
-        assert_includes RecordingHost.writes.last[1], '37.5%'
-        refute_includes RecordingHost.writes.last[1], 'ETA'
+        assert_includes RecordingHost.writes.last[1], 'building fill cutouts 3 of 8'
+        refute_includes RecordingHost.writes.last[1], 'left'
         assert_equal true, sink.call(snapshot.merge(:completed => 8))
         assert_equal 2, RecordingHost.writes.length,
           'per-stage N/N progress stays throttled; it is not the final import outcome'
@@ -126,6 +129,32 @@ class ImportStatusSinkThrottleTest < Minitest::Test
         next_import = IMP.import_status_sink({})
         assert_equal true, next_import.call(snapshot)
         assert_equal 4, RecordingHost.writes.length, 'each import gets an immediate first update'
+      end
+    end
+  end
+
+  def test_a_slow_status_write_pushes_the_next_one_further_out
+    with_interactive do
+      with_clock do
+        sink = IMP.import_status_sink({})
+        snapshot = {:stage => :text_item, :completed => 1, :total => 9}
+        RecordingHost.write_cost = 0.5
+        sink.call(snapshot) # written at 0.0, finished at 0.5
+        assert_equal 1, RecordingHost.writes.length
+        RecordingHost.write_cost = 0.0
+        @clock.now = 10.0
+        sink.call(snapshot)
+        assert_equal 1, RecordingHost.writes.length,
+          'a 0.5 s write waits 40 x 0.5 s = 20 s for the next write'
+        @clock.now = 20.5
+        sink.call(snapshot)
+        assert_equal 2, RecordingHost.writes.length
+        @clock.now = 22.4
+        sink.call(snapshot)
+        assert_equal 2, RecordingHost.writes.length, 'fast writes return to 2 s'
+        @clock.now = 22.5
+        sink.call(snapshot)
+        assert_equal 3, RecordingHost.writes.length
       end
     end
   end
