@@ -7868,7 +7868,23 @@ module BlueCollarSystems
       cache = {} unless cache.is_a?(Hash)
       opts[:item_raster_page_cache] = cache
       return cache[cache_key] if cache.key?(cache_key)
-      value = yield
+      # A rejected page render is as final as a good one for this import: the
+      # same PDF bytes, page, DPI and renderer give the same rejection. Without
+      # this, every later text item on the page ran Ghostscript over the whole
+      # page again (1.3-1.8 s each, dozens of items on a sheet with
+      # non-embedded fonts) only to be rejected for the same reason.
+      failures = opts[:item_raster_page_failures]
+      failures = {} unless failures.is_a?(Hash)
+      opts[:item_raster_page_failures] = failures
+      if failures.key?(cache_key)
+        raise RepresentationFidelity::ContractError, failures[cache_key]
+      end
+      begin
+        value = yield
+      rescue RepresentationFidelity::ContractError => error
+        failures[cache_key] = error.message.to_s
+        raise
+      end
       unless value.is_a?(Hash)
         raise RepresentationFidelity::ContractError,
               'item raster page cache producer returned no artifact'
@@ -7881,6 +7897,7 @@ module BlueCollarSystems
         opts.is_a?(Hash)
       unless import_text == true
         opts.delete(:item_raster_page_cache)
+        opts.delete(:item_raster_page_failures)
         opts.delete(:source_pdf_digest_cache)
         opts.delete(:item_raster_cache_persistent)
         opts.delete(:item_raster_source_bounds_cache)
@@ -7890,6 +7907,7 @@ module BlueCollarSystems
       # Raster. Own one cache for the entire import regardless of the requested
       # starting rung so a terminal fallback cannot render the same page twice.
       opts[:item_raster_page_cache] = {}
+      opts[:item_raster_page_failures] = {}
       opts[:item_raster_source_bounds_cache] = {}
       opts[:source_pdf_digest_cache] = {}
       opts[:item_raster_cache_persistent] = true
@@ -8027,6 +8045,8 @@ module BlueCollarSystems
       end
       cleanup_owned_temp_artifacts!(paths, directories)
       cache.clear if cache.respond_to?(:clear)
+      failures = opts[:item_raster_page_failures]
+      failures.clear if failures.respond_to?(:clear)
       bounds_cache = opts[:item_raster_source_bounds_cache]
       bounds_cache.clear if bounds_cache.respond_to?(:clear)
       true
