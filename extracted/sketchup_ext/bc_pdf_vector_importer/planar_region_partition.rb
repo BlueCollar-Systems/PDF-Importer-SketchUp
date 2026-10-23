@@ -12,6 +12,33 @@ module BlueCollarSystems
         :cells => 32768, :predicate_edges => 40_000_000
       }.freeze
 
+      # The slab event sweep visits source edges once per slab, rather than
+      # running a complete winding walk for every elementary interval. Bound
+      # those actual visits/comparisons/constructions, not the superseded walk.
+      # Input preparation and intersection splitting retain their independent
+      # input/atomic/slab bounds and original intersection checkpoints.
+      class WorkBudget
+        attr_reader :used
+
+        def initialize(maximum, options, total)
+          @maximum, @options, @total = maximum, options, total
+          @used, @completed, @checkpoint_at = 0, 0, 256
+        end
+
+        def slab!(completed); @completed = completed; end
+
+        def charge!(amount = 1)
+          if @used + amount > @maximum
+            raise Error, 'exact planar partition predicate budget exceeded'
+          end
+          @used += amount
+          if @used >= @checkpoint_at
+            SvgRegionBoundary.run_checkpoint!(@options, :white_mask_partition, @completed, @total)
+            @checkpoint_at = @used + 256
+          end
+        end
+      end
+
       # Each result is a convex triangle/trapezoid inside the original white
       # union, classified as :white or :ink. Ink cells remain in the partition
       # until the caller has verified complete native white-area coverage.
@@ -49,74 +76,71 @@ module BlueCollarSystems
         cuts = atoms.flat_map { |edge| edge.map { |point| point[0] } }.uniq.sort
         raise Error, 'exact planar partition slab budget exceeded' if cuts.length - 1 > limits[:slabs]
         cells = []
-        predicates = 0
-        generated_cells = 0
         previous = {}
         slab_total = [cuts.length - 1, 0].max
+        work = WorkBudget.new(limits[:predicate_edges], requested_limits, slab_total)
         boundary.run_checkpoint!(requested_limits, :white_mask_partition, 0, slab_total)
         cuts.each_cons(2).with_index do |span, slab_index|
           left, right = span
+          work.slab!(slab_index)
           boundary.run_checkpoint!(requested_limits, :white_mask_partition, slab_index, slab_total) if slab_index % 16 == 0
           middle = (left + right) / 2
           # Vertical edges belong to slab boundaries. Every crossing or vertex
           # is an x cut, so edge order is constant throughout the open slab.
           lines = {}
           atoms.each do |edge|
+            work.charge!
             a, b = edge
             next unless [a[0], b[0]].min < middle && middle < [a[0], b[0]].max
             lines[y_at(edge, middle)] ||= edge
           end
-          levels = lines.keys.sort
-          membership = slab_membership_state(prepared_white, prepared_ink, middle) if levels.length >= 2
+          levels = lines.keys.sort { |first, second| work.charge!; first <=> second }
+          membership = slab_membership_state(prepared_white, prepared_ink, middle, work) if levels.length >= 2
           runs = []
           active = nil
           levels.each_cons(2).with_index do |heights, level_index|
             lower, upper = heights
             boundary.run_checkpoint!(requested_limits, :white_mask_partition, slab_index, slab_total) if level_index % 64 == 0
-            # Retain the original contour weight for the existing work budget;
-            # clipping must not turn expensive classification into free work.
-            predicates += input_edge_count
-            if predicates > limits[:predicate_edges]
-              raise Error, 'exact planar partition predicate budget exceeded'
-            end
+            work.charge!
             probe = [middle, (lower + upper) / 2]
-            owner, filled_ink = advance_slab_membership!(membership, probe[1])
+            owner, filled_ink = advance_slab_membership!(membership, probe[1], work)
             if owner.nil?
+              finish_run!(active, runs, left, right, cells.length, limits[:cells], work)
               active = nil
               next
             end
             region = filled_ink ? :ink : :white
             low_edge, high_edge = lines[lower], lines[upper]
-            cell = exact_cell(region, left, right, low_edge, high_edge)
-            next unless cell
-            generated_cells += 1
-            raise Error, 'exact planar partition cell budget exceeded' if generated_cells > limits[:cells]
+            # The integral of the linear gap is width times midpoint height.
+            # Keep every positive elementary area for the same exact covered-
+            # area equality, without allocating an intermediate polygon.
+            interval_area = (right - left) * (upper - lower)
+            raise Error, 'exact planar partition produced a degenerate cell' unless interval_area > 0
             # Adjacent same-class intervals in this one slab have no semantic
             # boundary between them. Their union is one exact convex trapezoid.
             # Retain first white-face ownership so material boundaries survive.
             if active && active[:region] == region && active[:owner] == owner && active[:upper] == lower
-              merged = exact_cell(region, left, right, active[:low_edge], high_edge)
-              unless merged && merged[:area] == active[:cell][:area] + cell[:area]
-                raise Error, 'exact planar cell coalescing changed covered area'
-              end
               active[:high_edge] = high_edge
               active[:upper] = upper
-              active[:cell] = merged
+              active[:area] += interval_area
             else
+              finish_run!(active, runs, left, right, cells.length, limits[:cells], work)
               active = { :region => region, :owner => owner, :lower => lower,
                          :upper => upper, :low_edge => low_edge,
-                         :high_edge => high_edge, :cell => cell }
-              runs << active
+                         :high_edge => high_edge, :area => interval_area }
             end
           end
+          finish_run!(active, runs, left, right, cells.length, limits[:cells], work)
           current = {}
           runs.each do |run|
+            work.charge!
             key = [run[:region], run[:owner], line_key(run[:low_edge]), line_key(run[:high_edge])]
             prior = previous[key]
             if prior && prior[:right] == left
               # Across consecutive slabs, identical exact lower/upper lines
               # share the complete vertical edge. Removing this interior seam
               # changes neither covered area nor any exterior/ink boundary.
+              work.charge!(2) # One coalescing attempt and one cell construction.
               merged = exact_cell(run[:region], prior[:left], right,
                                   run[:low_edge], run[:high_edge])
               unless merged && merged[:area] == prior[:cell][:area] + run[:cell][:area]
@@ -126,6 +150,7 @@ module BlueCollarSystems
               prior[:right] = right
               current[key] = prior
             else
+              raise Error, 'exact planar partition cell budget exceeded' if cells.length >= limits[:cells]
               cells << run[:cell]
               current[key] = { :cell => run[:cell], :left => left, :right => right }
             end
@@ -138,12 +163,29 @@ module BlueCollarSystems
         raise Error, 'invalid arithmetic in exact planar partition: ' + error.class.to_s
       end
 
+      # Every crossing/vertex is a slab boundary, so a maximal consecutive
+      # same-owner/class run is exactly one triangle/trapezoid. Keep the sum of
+      # all elementary linear-gap areas as an independent equality guard.
+      def self.finish_run!(active, runs, left, right, held, maximum, work)
+        return unless active
+        if held + runs.length >= maximum
+          raise Error, 'exact planar partition cell budget exceeded'
+        end
+        work.charge!
+        cell = exact_cell(active[:region], left, right, active[:low_edge], active[:high_edge])
+        unless cell && cell[:area] == active[:area]
+          raise Error, 'exact planar cell coalescing changed covered area'
+        end
+        active[:cell] = cell
+        runs << active
+      end
+
       # Membership uses every complete prepared source contour, not clipped
       # arrangement atoms. At fixed slab x, crossing a directed source edge
       # upward changes that loop's winding by sign(dx). Half-open x intervals
       # handle original vertices whose x is absent from the clipped x cuts.
       # All coincident events are consumed before any open-cell probe is read.
-      def self.slab_membership_state(white, ink, middle)
+      def self.slab_membership_state(white, ink, middle, work = nil)
         events = []
         regions = [white, ink]
         windings = regions.map do |records|
@@ -153,6 +195,7 @@ module BlueCollarSystems
           records.each_with_index do |record, region_index|
             record[:loops].each_with_index do |loop, loop_index|
               loop.each_index do |index|
+                work.charge! if work
                 a, b = loop[index], loop[(index + 1) % loop.length]
                 dx = b[0] - a[0]
                 next if dx == 0
@@ -164,16 +207,21 @@ module BlueCollarSystems
             end
           end
         end
-        { :events => events.sort_by { |event| event[0] }, :cursor => 0,
+        sorted = events.sort do |first, second|
+          work.charge! if work
+          first[0] <=> second[0]
+        end
+        { :events => sorted, :cursor => 0,
           :windings => windings,
           :holes => regions.map { |records| Array.new(records.length, 0) },
           :white_bits => 0, :ink_count => 0 }
       end
 
-      def self.advance_slab_membership!(state, height)
+      def self.advance_slab_membership!(state, height, work = nil)
         events = state[:events]
         cursor = state[:cursor]
         while cursor < events.length && events[cursor][0] <= height
+          work.charge! if work
           _y, kind, region_index, loop_index, delta = events[cursor]
           counts = state[:windings][kind][region_index]
           holes = state[:holes][kind]

@@ -192,6 +192,7 @@ readonly SMOKE_TESTS=(
   test/page_paint_bounds_test.rb
   test/stroke_clipping_test.rb
   test/stroke_color_preservation_test.rb
+  test/stroke_batch_certainty_test.rb
   test/geometry_builder_lineweight_test.rb
   test/pdf_color_space_test.rb
   test/implicit_fill_close_test.rb
