@@ -295,26 +295,56 @@ module BlueCollarSystems
       # Unlike the earlier rounded cleanup, this final sweep must preserve
       # distinct coincident vertices, nearby strokes, faces, curves, attributes
       # and every style property. A matching source segment must survive erase.
+      #
+      # Erasing the duplicate can make SketchUp heal: a vertex left with only
+      # the kept edge and one collinear edge is merged into one longer edge.
+      # Measured in SketchUp 2017 on a handrail sheet (2026-10-23): 3 of 7
+      # erasures merged the kept edge into its same-style neighbour, so the
+      # kept object was gone although its segment was still drawn. Requiring
+      # that exact object stopped the page. The rule is now checked on the
+      # strokes themselves: every edge around the duplicate must still be
+      # drawn, in its own style, and nothing may be drawn beyond them. A heal
+      # that would join different styles, owned edges or a not-quite-straight
+      # line is never started; both copies are kept instead.
+      #
+      # A heal can also make a new exact duplicate: an edge that grows onto
+      # two vertices another same-style edge already joins. Survivors are
+      # filed under the vertices they had when first seen, so the grown edge
+      # was never compared again and the pair stayed for Save to repair.
+      # After every accepted erase the live edges around it are checked again
+      # at once, under their current vertices. A native erase or heal never
+      # adds edges, so erasures cannot outnumber the edges swept. If they
+      # ever do, re-checks stop and the sweep only finishes the edges it
+      # listed at the start, so it always ends.
       def self.remove_exact_duplicate_loose_edges(entities)
         return 0 if source_width_ancestor?(entities)
         count = 0
         survivors = {}
-        entities.grep(Sketchup::Edge).each do |edge|
+        pending = entities.grep(Sketchup::Edge)
+        swept = pending.length
+        until pending.empty?
+          edge = pending.shift
           signature = exact_loose_edge_signature(edge)
           next unless signature
-          endpoints, _style = signature
+          endpoints, style = signature
           bucket = (survivors[endpoints] ||= [])
-          kept = bucket.find { |candidate| exact_loose_edge_signature(candidate) == signature }
+          kept = bucket.find do |candidate|
+            !heal_same?(candidate, edge) && exact_loose_edge_signature(candidate) == signature
+          end
           unless kept
-            bucket << edge
+            bucket << edge unless bucket.any? { |candidate| heal_same?(candidate, edge) }
             next
           end
 
+          neighbourhood = duplicate_erase_neighbourhood(kept, edge, style)
+          next unless neighbourhood
           edge.erase!
-          unless !edge.valid? && exact_loose_edge_signature(kept) == signature
+          around = edge.valid? ? nil : heal_ring_edges(neighbourhood[:ring], nil)
+          unless around && duplicate_erase_preserved?(neighbourhood, around)
             raise CleanupFailure, 'exact duplicate cleanup did not preserve its native source edge'
           end
           count += 1
+          pending.unshift(*around) if count <= swept
         end
         count
       rescue CleanupFailure
@@ -323,6 +353,166 @@ module BlueCollarSystems
         # An erase may already have changed native topology. The caller must
         # roll back its operation rather than commit an uncertain cleanup.
         raise CleanupFailure, "exact duplicate cleanup failed (#{error.class}): #{error.message}"
+      end
+
+      # Inches. A hundred times finer than SketchUp's own 0.001 in tolerance.
+      HEAL_POINT_TOLERANCE = 1.0e-5
+      # Sine of the angle between two edges at a vertex: at or below the first
+      # they are one straight line (a merged edge then stays within the point
+      # tolerance for 1,000 in), above the second no heal is expected, and in
+      # between the outcome is uncertain, so the duplicate stays.
+      HEAL_STRAIGHT_SINE = 1.0e-9
+      HEAL_POSSIBLE_SINE = 1.0e-3
+
+      # Records every edge within two vertices of the kept edge (the duplicate
+      # excluded) before the erase, or returns nil when the erase must not
+      # happen: a vertex that would be left with the kept edge and one other
+      # edge on the same line may be healed, and that is only allowed when the
+      # other edge is loose, unowned, straight-on and styled exactly the same.
+      def self.duplicate_erase_neighbourhood(kept, duplicate, style)
+        vertices = [kept.start, kept.end]
+        return nil unless vertices.all? { |vertex| vertex.respond_to?(:edges) }
+        vertices.each do |vertex|
+          others = vertex.edges.select do |other|
+            other.valid? && !heal_same?(other, kept) && !heal_same?(other, duplicate)
+          end
+          next unless others.length == 1
+          other = others.first
+          relation = native_heal_relation(kept, other, vertex)
+          next if relation == :none
+          return nil unless relation == :joins && other.faces.empty? &&
+                            joinable_edge_style(other) == style
+        end
+        ring = []
+        vertices.each do |vertex|
+          vertex.edges.each do |other|
+            next if !other.valid? || heal_same?(other, duplicate)
+            [other.start, other.end].each do |point|
+              ring << point unless ring.any? { |seen| heal_same?(seen, point) }
+            end
+          end
+        end
+        { :ring => ring,
+          :records => heal_ring_edges(ring, duplicate).map { |other| heal_record(other) } }
+      end
+
+      # Called only after the duplicate is gone, so no deleted entity is read.
+      # +around+ is heal_ring_edges(neighbourhood[:ring], nil) read after it.
+      def self.duplicate_erase_preserved?(neighbourhood, around)
+        before = neighbourhood[:records]
+        after = around.map { |other| heal_record(other) }
+        kept_drawn = before.all? { |old| heal_record_drawn?(old, after) }
+        nothing_added = after.all? { |now| heal_record_drawn?(now, before) }
+        kept_drawn && nothing_added
+      end
+
+      # Either the same edge with the same ends and style, or a loose stroke
+      # covered end to end by edges of exactly its style in +records+. Faced,
+      # attributed and curve edges (style nil) must be unchanged.
+      def self.heal_record_drawn?(record, records)
+        same = records.find { |other| heal_same?(other[:edge], record[:edge]) }
+        return true if same && same[:style] == record[:style] &&
+                       ([same[:from], same[:to]] == [record[:from], record[:to]] ||
+                        [same[:to], same[:from]] == [record[:from], record[:to]])
+        return false if record[:style].nil?
+        heal_covered?(record, records.select { |other| other[:style] == record[:style] })
+      end
+
+      # Identity of two native entities. A deleted one is only ever equal to
+      # its own reference and is never asked anything else.
+      def self.heal_same?(first, second)
+        return true if first.equal?(second)
+        return false if first.nil? || second.nil?
+        first.valid? && second.valid? && first == second
+      end
+
+      # What a native erase may do at +vertex+ once only +kept+ and +other+
+      # are left there: :none (not one line, nothing to heal), :joins (the two
+      # run straight on from each other, SketchUp may merge them) or :uncertain.
+      def self.native_heal_relation(kept, other, vertex)
+        origin = heal_xyz(vertex)
+        far_kept = heal_same?(kept.start, vertex) ? kept.end : kept.start
+        far_other = heal_same?(other.start, vertex) ? other.end : other.start
+        # Another edge between the same two vertices (a copy in another
+        # style) is no end-to-end junction; a native heal cannot join them.
+        return :none if heal_same?(far_other, far_kept)
+        a = heal_sub(heal_xyz(far_kept), origin)
+        b = heal_sub(heal_xyz(far_other), origin)
+        lengths = Math.sqrt(heal_dot(a, a)) * Math.sqrt(heal_dot(b, b))
+        return :uncertain unless lengths > 0.0 && lengths.finite?
+        sine = heal_cross_length(a, b) / lengths
+        return :none if sine > HEAL_POSSIBLE_SINE
+        return :joins if sine <= HEAL_STRAIGHT_SINE && heal_dot(a, b) < 0.0
+        :uncertain
+      end
+
+      def self.heal_ring_edges(ring, excluded)
+        found = []
+        ring.each do |vertex|
+          next unless vertex.valid?
+          vertex.edges.each do |other|
+            next if !other.valid? || heal_same?(other, excluded)
+            found << other unless found.any? { |seen| heal_same?(seen, other) }
+          end
+        end
+        found
+      end
+
+      def self.heal_record(edge)
+        style = edge.faces.empty? ? joinable_edge_style(edge) : nil
+        { :edge => edge, :from => heal_xyz(edge.start), :to => heal_xyz(edge.end),
+          :style => style }
+      end
+
+      # True when the union of the candidate strokes lying on the target's
+      # line covers the target from end to end.
+      def self.heal_covered?(target, candidates)
+        origin = target[:from]
+        axis = heal_sub(target[:to], origin)
+        length_squared = heal_dot(axis, axis)
+        return false unless length_squared > 0.0 && length_squared.finite?
+        spans = []
+        candidates.each do |candidate|
+          start = candidate[:from]
+          direction = heal_sub(candidate[:to], start)
+          size = Math.sqrt(heal_dot(direction, direction))
+          next unless size > 0.0
+          on_line = [target[:from], target[:to]].all? do |point|
+            heal_cross_length(direction, heal_sub(point, start)) / size <= HEAL_POINT_TOLERANCE
+          end
+          next unless on_line
+          ends = [candidate[:from], candidate[:to]].map do |point|
+            heal_dot(heal_sub(point, origin), axis) / length_squared
+          end
+          spans << ends.sort
+        end
+        slack = HEAL_POINT_TOLERANCE / Math.sqrt(length_squared)
+        reach = 0.0
+        spans.sort_by { |span| span[0] }.each do |low, high|
+          break if low > reach + slack
+          reach = high if high > reach
+        end
+        reach >= 1.0 - slack
+      end
+
+      def self.heal_xyz(vertex)
+        point = vertex.position
+        [point.x.to_f, point.y.to_f, point.z.to_f]
+      end
+
+      def self.heal_sub(a, b)
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+      end
+
+      def self.heal_dot(a, b)
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+      end
+
+      def self.heal_cross_length(a, b)
+        x = a[1] * b[2] - a[2] * b[1]
+        y = a[2] * b[0] - a[0] * b[2]
+        z = a[0] * b[1] - a[1] * b[0]
+        Math.sqrt(x * x + y * y + z * z)
       end
 
       # ---------------------------------------------------------------
