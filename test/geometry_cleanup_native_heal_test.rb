@@ -269,6 +269,9 @@ class GeometryCleanupNativeHealTest < Minitest::Test
 
   ANGLED_LENGTHS = [0.005, 0.02, 0.05, 0.1, 1.0, 10.0].freeze
   ANGLED_TURNS = [0.0005, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1].freeze
+  # Inches from the far-end chord beyond which the sweep may erase: twice
+  # SketchUp's 0.001 in tolerance.
+  NO_HEAL_BEYOND = 0.002
 
   def ends_of(edge)
     [edge.start.position, edge.end.position].map(&:to_a_for_test)
@@ -304,7 +307,7 @@ class GeometryCleanupNativeHealTest < Minitest::Test
         erased = Cleanup.remove_exact_duplicate_loose_edges(entities)
         assert [kept, neighbour].all?(&:valid?), label
         assert_equal before.values_at(0, 1), [ends_of(neighbour), ends_of(kept)], label
-        if gap > Cleanup::HEAL_POSSIBLE_DISTANCE
+        if gap > NO_HEAL_BEYOND
           assert_equal 1, erased, label
           refute duplicate.valid?, label
         else
@@ -380,6 +383,7 @@ class GeometryCleanupNativeHealTest < Minitest::Test
       assert_equal expected, Cleanup.native_heal_relation(kept, other, vertex),
                    "#{kept_end.inspect} #{other_end.inspect}"
     end
+    assert_equal NO_HEAL_BEYOND, Cleanup::HEAL_POSSIBLE_DISTANCE
   end
 
   def test_a_bent_or_branching_junction_has_nothing_to_heal
