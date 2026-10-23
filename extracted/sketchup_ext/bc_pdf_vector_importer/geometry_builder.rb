@@ -131,6 +131,12 @@ module BlueCollarSystems
           :simplified_path_count => 0 }
         @footprint_simplify = false
         @footprint_started = nil
+        # Simple strokes are queued per entities collection and committed
+        # together. SketchUp's add_edges intersects every new edge with the
+        # edges already in that collection, so about 30,000 separate calls
+        # on a dense sheet take minutes even after width faces are skipped.
+        @stroke_edge_batches = {}
+        @proven_stroke_materials = {}
         @lineweight_groups = {}
         @lineweight_organization = { :requested_mode=>@lineweight_mode,
           :organized_path_count=>0,:group_count=>0,:tag_names=>[],
@@ -345,6 +351,7 @@ module BlueCollarSystems
             # along the clipping boundary or connect across an invisible interval.
             fragments = should_stroke ? clipped_stroke_segments(path, points_list, subpath.closed, stroke_bounds) : nil
             if fragments
+              flush_stroke_edge_batches!(draw_dest)
               record_unresolved_stroke_clip('filled path boundary paint remains outside the centerline clipping contract') if should_fill
               fragments.each do |a, b|
                 p1 = pdf_to_su(a[0], a[1], page_origin_x, page_origin_y)
@@ -385,6 +392,7 @@ module BlueCollarSystems
           :total => @paths.length,
           :page => @page_number
         )
+        flush_stroke_edge_batches!
         finalize_geometry_staging!
         flush_deferred_small_faces!
         # Fill containers live inside color containers: prune the inner ones
@@ -746,6 +754,7 @@ module BlueCollarSystems
         chunk_limit = GEOMETRY_STAGING_CHUNK_PATHS
         if slot.nil? || (new_path && chunk_limit &&
                          slot[:path_count] >= chunk_limit)
+          flush_stroke_edge_batches!(slot[:group].entities) if slot && slot[:group]
           group = parent_entities.add_group
           unless group && group.respond_to?(:entities) &&
                  group.respond_to?(:explode)
@@ -934,6 +943,7 @@ module BlueCollarSystems
       # Draw edges with arc detection
       # ---------------------------------------------------------------
       def draw_with_arc_detection(entities, points, layer, dash_layer, dash_spec, closed, should_fill, fill_rgb = nil, stroke_style = nil)
+        flush_stroke_edge_batches!(entities)
         # Convert Point3d to [x,y] for the arc fitter
         pts_2d = points.map { |p| [p.x, p.y] }
 
@@ -1087,6 +1097,7 @@ module BlueCollarSystems
           !(@model.respond_to?(:line_styles) && @model.line_styles)
 
         if needs_physical_dashes
+          flush_stroke_edge_batches!(entities)
           (0...valid_pts.length - 1).each do |i|
             safe_add_line(entities, valid_pts[i], valid_pts[i + 1], layer, dash_layer, dash_spec, stroke_style)
           end
@@ -1094,24 +1105,68 @@ module BlueCollarSystems
         end
 
         target = dash_layer ? get_or_create_layer(dash_layer) : layer
+        (@stroke_edge_batches[entities] ||= []) << {
+          :points => valid_pts,
+          :layer => target,
+          :style => stroke_style
+        }
+      end
 
-        begin
-          edges = entities.add_edges(valid_pts)
-          if edges && !edges.empty?
-            edges.each do |edge|
-              set_layer(edge, target)
-              style_stroke_edge(edge, stroke_style)
+      # Commit queued simple strokes together. SketchUp 2022+ Entities#build
+      # appends edges without cutting them against every edge already in the
+      # group. Older hosts still call add_edges, in one loop per flush.
+      # Measured on the 00S-505 sheet (32,463 paths, fills off, lineweight
+      # Ignore): Ruby build 0.64s, then 29,592 add_edges, 37,875 edge.layer=
+      # and 37,875 edge.material=. That native work is the multi-minute part.
+      # Arcs, clips, and physical dashes flush early, so one 250-path staging
+      # group can take more than one build. On that sheet 129 groups became
+      # 266 build sessions, and direct add_edges dropped to zero.
+      def flush_stroke_edge_batches!(only = nil)
+        batches = @stroke_edge_batches
+        return true unless batches && !batches.empty?
+        keys = only ? [only] : batches.keys
+        keys.each do |entities|
+          batch = batches.delete(entities)
+          next unless batch && !batch.empty?
+          commit_stroke_edge_batch!(entities, batch)
+        end
+        true
+      end
+
+      def commit_stroke_edge_batch!(entities, batch)
+        if entities.respond_to?(:build)
+          entities.build do |builder|
+            batch.each do |item|
+              edges = builder.add_edges(item[:points])
+              paint_queued_stroke_edges(edges, item[:layer], item[:style])
             end
-            @edge_count += edges.length
           end
-        rescue StrokeStyleFailure
-          raise
-        rescue StandardError => e
-          # Fallback to individual lines if batch fails
-          Logger.warn("GeometryBuilder", "add_edges batch failed, falling back: #{e.message}")
-          (0...valid_pts.length - 1).each do |i|
-            safe_add_line(entities, valid_pts[i], valid_pts[i + 1], layer, dash_layer, dash_spec, stroke_style)
+          return true
+        end
+        batch.each do |item|
+          begin
+            edges = entities.add_edges(item[:points])
+            paint_queued_stroke_edges(edges, item[:layer], item[:style])
+          rescue StrokeStyleFailure
+            raise
+          rescue StandardError => e
+            Logger.warn("GeometryBuilder", "add_edges batch failed, falling back: #{e.message}")
+            points = item[:points]
+            (0...points.length - 1).each do |i|
+              safe_add_line(entities, points[i], points[i + 1], item[:layer], nil, nil, item[:style])
+            end
           end
+        end
+        true
+      end
+
+      def paint_queued_stroke_edges(edges, layer, style)
+        return unless edges
+        edges.each do |edge|
+          next unless edge
+          set_layer(edge, layer)
+          style_stroke_edge(edge, style)
+          @edge_count += 1
         end
       end
 
@@ -4051,10 +4106,16 @@ module BlueCollarSystems
       def style_stroke_edge(edge, style)
         return edge unless style
         edge.material = style[:material]
-        unless edge.material == style[:material] &&
+        # Reading the color back forces a native round trip on every edge.
+        # The first edge of each material still has to prove the host kept
+        # the source RGB; the rest of that material reuse the same object.
+        material = style[:material]
+        return edge if @proven_stroke_materials[material.object_id]
+        unless edge.material == material &&
                stroke_material_rgb(edge.material) == style[:rgb]
           raise StrokeStyleFailure, 'native edge did not retain source stroke RGB'
         end
+        @proven_stroke_materials[material.object_id] = true
         edge
       rescue StrokeStyleFailure
         raise
