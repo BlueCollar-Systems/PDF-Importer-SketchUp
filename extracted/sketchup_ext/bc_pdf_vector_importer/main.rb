@@ -2141,6 +2141,11 @@ module BlueCollarSystems
         :real_raster_verified => true
       }
     rescue StandardError => e
+      # Esc (and the other stops that end the import) is never an item
+      # Raster failure. Wrapped as a ContractError it would look like one:
+      # keep_page_on_text_failure would list the item and the import would
+      # go on, with the Esc already read by the background-render wait.
+      terminal = terminal_import_error?(e)
       if parent && before
         begin
           current = RepresentationFidelity.snapshot(parent)
@@ -2149,11 +2154,14 @@ module BlueCollarSystems
           )
           RepresentationFidelity.erase_owned!(parent, owned) unless owned.empty?
         rescue StandardError => cleanup_error
+          # The stop still wins: the stopped import rolls its operation back.
+          raise e if terminal
           raise RepresentationFidelity::ContractError,
                 "terminal item raster verification failed: #{e.message}; " \
                 "owned cleanup failed: #{cleanup_error.message}"
         end
       end
+      raise e if terminal
       raise e if e.is_a?(RepresentationFidelity::ContractError)
       raise RepresentationFidelity::ContractError,
             "terminal item raster verification failed: #{e.message}"
@@ -8404,6 +8412,12 @@ module BlueCollarSystems
           cleanup_paths, [defined?(owned_temp_dir) && owned_temp_dir].compact
         )
       rescue StandardError => cleanup_error
+        # Esc during the background-render wait still stops the import; a
+        # render folder that could not be removed is only logged then.
+        if terminal_import_error?(original_error)
+          Logger.warn('Raster', "item page render folder not removed after the stop: #{cleanup_error.message}")
+          raise original_error
+        end
         raise RepresentationFidelity::ContractError,
               "#{original_error.message}; #{cleanup_error.message}"
       end

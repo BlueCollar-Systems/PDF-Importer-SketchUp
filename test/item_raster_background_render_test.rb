@@ -245,4 +245,132 @@ class ItemRasterBackgroundRenderTest < Minitest::Test
       end
     end
   end
+
+  # The collection the ladder builds in (no SketchUp here). fail_after makes
+  # every to_a after that many calls raise, as a host that cannot list its
+  # entities any more would.
+  class MadeUpEntities
+    def initialize(fail_after = nil)
+      @items = []
+      @calls = 0
+      @fail_after = fail_after
+    end
+
+    def to_a
+      @calls += 1
+      raise IOError, 'made-up host cannot list entities' if @fail_after && @calls > @fail_after
+      @items.dup
+    end
+
+    def length
+      @items.length
+    end
+
+    def erase_entities(*doomed)
+      doomed.flatten.each { |item| @items.delete(item) }
+    end
+  end
+
+  def made_up_item
+    IMP::TextParser::TextItem.new(
+      'MADE UP', 1, 1, 2, 0, 'F1', 2, 1, 1, 5, 3, nil, 'text_span:1:0'
+    )
+  end
+
+  # Raises ImportCancelled from the second wait check on; returns the
+  # controller and the list the raised error is put in.
+  def esc_controller
+    raised = []
+    calls = 0
+    controller = Object.new
+    controller.define_singleton_method(:checkpoint!) do |_stage, _detail = {}|
+      calls += 1
+      if calls >= 2
+        raised << IMP::ImportRunControl::ImportCancelled.new([], 1, {})
+        raise raised.last
+      end
+      {}
+    end
+    [controller, raised]
+  end
+
+  # The real chain an Esc goes through: the page's text stage wrapper
+  # (keep_page_on_text_failure), the item ladder, verified_item_raster_entity!,
+  # import_item_as_raster, prepare_item_raster_page! and the wait. Esc must
+  # leave the wrapper as ImportCancelled (so the import stops) and never be
+  # listed as an item that could not be delivered.
+  def test_esc_during_the_wait_stops_the_import_and_lists_no_item
+    with_fake_renderer(SLOW) do |pdf, _plans|
+      opts = import_opts
+      controller, raised = esc_controller
+      opts[:run_controller] = controller
+      job = IMP.start_item_raster_page_prefetch!(pdf, 1, MEDIA_BOX, 0, opts)
+      pid = job[:render].pid
+      folder = job[:owned_temp_dir]
+      assert alive?(pid)
+      item = made_up_item
+      source_id = IMP::RepresentationFidelity.source_span_id(item)
+      ladder = IMP::RepresentationFidelity::FallbackController.new(:raster, source_id)
+      parent = MadeUpEntities.new
+      stats = { :text_delivery_failures => [] }
+      error = assert_raises(IMP::ImportRunControl::ImportCancelled) do
+        IMP.keep_page_on_text_failure(
+          stats, 1, :raster, :parent => parent, :owner => source_id,
+          :items => [item], :reason_code => 'text_item_failed'
+        ) do
+          IMP.complete_item_representation_ladder!(
+            stats, nil, parent, pdf, 1, item, :raster, ladder, [], MEDIA_BOX,
+            MEDIA_BOX, 0, opts, Time.now, 0.0, {}, nil, []
+          )
+        end
+      end
+      assert_equal 1, raised.length, 'the wait read Esc once'
+      assert_same raised.first, error, 'the Esc itself leaves, not a wrapped copy'
+      assert gone?(pid), 'Esc must stop the render'
+      refute File.exist?(folder)
+      assert_empty stats[:text_delivery_failures], 'Esc is not an item failure'
+      refute stats.key?(:text_step_downs)
+      assert_nil opts[:item_raster_failure_evidence]
+      assert_empty opts[:item_raster_page_failures], 'Esc is not a page rejection'
+      IMP.cleanup_item_raster_page_cache!(opts)
+    end
+  end
+
+  def test_item_raster_verification_passes_esc_up_unchanged
+    item = made_up_item
+    cancel = IMP::ImportRunControl::ImportCancelled.new([], 1, {})
+    IMP.stub(:prepare_item_raster_page!, lambda { |*_args| raise cancel }) do
+      # The second listing is the owned-entity cleanup; it fails here too.
+      [MadeUpEntities.new, MadeUpEntities.new(1)].each do |parent|
+        error = assert_raises(IMP::ImportRunControl::ImportCancelled) do
+          IMP.verified_item_raster_entity!(
+            nil, parent, 'made_up.pdf', 1, item, MEDIA_BOX,
+            { :item_raster_cache_persistent => true }, Time.now, 0.0
+          )
+        end
+        assert_same cancel, error
+      end
+    end
+  end
+
+  def test_esc_still_stops_when_the_render_folder_cannot_be_removed
+    with_fake_renderer(SLOW) do |pdf, _plans|
+      opts = import_opts
+      controller, = esc_controller
+      opts[:run_controller] = controller
+      job = IMP.start_item_raster_page_prefetch!(pdf, 1, MEDIA_BOX, 0, opts)
+      locked = lambda do |*_args|
+        raise IMP::RepresentationFidelity::ContractError,
+              'owned temporary artifact cleanup failed: made up'
+      end
+      IMP.stub(:cleanup_owned_temp_artifacts!, locked) do
+        assert_raises(IMP::ImportRunControl::ImportCancelled) do
+          IMP.prepare_item_raster_page!(pdf, 1, MEDIA_BOX, 0, opts)
+        end
+      end
+      assert gone?(job[:render].pid)
+      IMP.cleanup_owned_temp_artifacts!([], [job[:owned_temp_dir]])
+      IMP.cleanup_item_raster_page_cache!(opts)
+    end
+  end
 end
