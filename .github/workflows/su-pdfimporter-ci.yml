@@ -210,6 +210,7 @@ jobs:
           ruby test/embedded_font_copy_cleanup_test.rb
           ruby test/rotated_page_glyph_source_test.rb
           ruby test/pipeline_stage_timers_test.rb
+          ruby test/physical_evidence_sort_string_test.rb
 
   poppler-prune:
     runs-on: ubuntu-latest
