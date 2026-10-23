@@ -566,4 +566,256 @@ class SourceImagePaintOrderTest < Minitest::Test
     assert_equal [10.0,10.0,20.0,20.0],plan[:source_image_event][:clip_bounds]
     assert_equal 'svg_clip_covers_full_native_affine_footprint',plan[:clip_qualification][:policy]
   end
+
+  def clipped_branch(clip_shape, content, clip_attrs = '')
+    [ '<g clip-path="url(#far)">'+content+'</g>',
+      '<clipPath id="far" '+clip_attrs+'>'+clip_shape+'</clipPath>' ]
+  end
+
+  def test_unrelated_nonrectangular_clip_does_not_block_unclipped_picture
+    branch,defs = clipped_branch('<path clip-rule="evenodd" d="M40 40 L60 40 L60 45 L55 45 L55 50 L60 50 L60 60 L40 60 Z M40 40"/>',
+      '<path d="M40 40 L60 40 L60 60 L40 60 Z"/>')
+    subject = inventory(document(branch+IMAGE_USE,IMAGE_DEF+defs))
+    plan = subject.qualify(image,[])
+    assert_equal 'pic',plan[:source_image_event][:svg_image_id]
+    assert_nil plan[:source_image_event][:clip_bounds]
+    assert_equal 'svg_clip_covers_full_native_affine_footprint',plan[:clip_qualification][:policy]
+    assert_equal 0,plan[:later_overlapping_paint_count]
+  end
+
+  def test_compound_and_multichild_clip_hulls_only_exclude_strictly_distant_paint
+    shapes = [
+      '<path d="M40 40 L50 40 L50 50 L40 50 Z M60 60 L70 60 L70 70 Z"/>',
+      '<path d="M40 40 L50 40 L50 50 Z"/><rect x="60" y="60" width="10" height="10"/>'
+    ]
+    shapes.each do |shape|
+      branch,defs = clipped_branch(shape,'<rect width="100" height="100"/>')
+      plan = inventory(document(IMAGE_USE+branch,IMAGE_DEF+defs)).qualify(image,[])
+      assert_equal 0,plan[:later_overlapping_paint_count]
+      assert_empty plan[:later_roots]
+    end
+    branch,defs = clipped_branch('<path d="M40 40 L50 40 L50 50 Z"/><rect x="12" y="12" width="2" height="2"/>',
+      '<rect width="100" height="100"/>')
+    assert_raises(Subject::Unproven) { inventory(document(IMAGE_USE+branch,IMAGE_DEF+defs)).qualify(image,[]) }
+  end
+
+  def test_proven_outer_clip_excludes_unknown_descendant_without_losing_shared_definitions
+    defs = IMAGE_DEF+GLYPH_DEF+'<clipPath id="outer"><rect x="40" y="40" width="10" height="10"/></clipPath>'+
+      '<clipPath id="inner"><circle cx="45" cy="45" r="4"/></clipPath>'
+    branch = '<g clip-path="url(#outer)"><g clip-path="url(#inner)">'+
+      '<use xlink:href="#glyph-0-0" x="42" y="42"/></g></g>'
+    svg = document(branch+IMAGE_USE+GLYPH,defs)
+    plan = inventory(svg).qualify(image,[{:id=>'live-root',:placement_indices=>[1]}])
+    assert_equal ['live-root'],plan[:later_roots].map { |r| r[:id] }
+    assert_equal [1],plan[:later_roots].first[:placement_indices]
+    assert_operator plan[:later_roots].first[:source_paint_ranks].first,:>,plan[:image_paint_rank]
+  end
+
+  def test_touching_intersecting_and_transformed_clips_keep_the_strict_guard
+    triangle = '<path d="M40 40 L50 40 L40 50 Z"/>'
+    [ ['<path d="M20 12 L25 12 L20 18 Z"/>',''],
+      ['<path d="M12 12 L15 12 L12 15 Z"/>',''],
+      [triangle,'transform="translate(-30,-30)"'],
+      ['<path transform="translate(-30,-30)" d="M40 40 L50 40 L40 50 Z"/>','']
+    ].each do |shape,attrs|
+      branch,defs = clipped_branch(shape,IMAGE_USE,attrs)
+      assert_raises(Subject::Unproven) { inventory(document(branch,IMAGE_DEF+defs)).qualify(image,[]) }
+    end
+  end
+
+  def test_curve_control_hull_is_conservative_and_unknown_clip_programs_never_disappear
+    [ '<path d="M40 40 C-20 -20 -20 -20 50 50 L40 50 Z"/>',
+      '<path d="M40 40 A10 10 0 0 0 50 50 Z"/>',
+      '<use xlink:href="#glyph-0-0" x="40" y="40"/>',
+      '<path d="M40 40 L50 40 L40 50 Z"/><circle cx="45" cy="45" r="1"/>',
+      '<path class="unknown" d="M40 40 L50 40 L40 50 Z"/>'
+    ].each do |shape|
+      branch,defs = clipped_branch(shape,'<rect width="100" height="100"/>')
+      assert_raises(Subject::Unproven) { inventory(document(IMAGE_USE+branch,IMAGE_DEF+GLYPH_DEF+defs)).qualify(image,[]) }
+    end
+    branch,defs = clipped_branch('<path d="M40 40 L50 40 L40 50 Z"/>',IMAGE_USE,'clipPathUnits="objectBoundingBox"')
+    assert_raises(Subject::Unproven) { inventory(document(branch,IMAGE_DEF+defs)).qualify(image,[]) }
+  end
+
+  def test_clip_exclusion_honors_bounds_and_cannot_change_an_intersecting_image_clip
+    branch,defs = clipped_branch('<path d="M40 40 L50 40 L40 50 Z"/>',IMAGE_USE,
+      'transform="matrix(1e308,0,0,1e308,0,0)"')
+    assert_raises(Subject::Unproven) { inventory(document(branch,IMAGE_DEF+defs)).qualify(image,[]) }
+    oversized = '<path d="'+('M40 40 L50 40 L40 50 Z '*7000)+'"/>'
+    branch,defs = clipped_branch(oversized,'<rect width="100" height="100"/>')
+    assert_raises(Subject::Unproven) { inventory(document(IMAGE_USE+branch,IMAGE_DEF+defs)).qualify(image,[]) }
+    far = '<clipPath id="far"><path d="M40 40 L50 40 L40 50 Z"/></clipPath>'
+    actual = '<clipPath id="actual"><path d="M10 10 L20 10 L15 15 L20 20 L10 20 Z"/></clipPath>'
+    svg = document('<g clip-path="url(#far)"><path d="M40 40 L50 40 L40 50 Z"/></g>'+
+      '<g clip-path="url(#actual)">'+IMAGE_USE+'</g>',IMAGE_DEF+far+actual)
+    assert_raises(Subject::Unproven) { inventory(svg).qualify(image,[]) }
+  end
+
+  def test_exact_relative_coordinates_cannot_round_a_touch_into_a_disjoint_clip
+    data = 'M10000000000000000 12 l3 0 l-9999999999999982 0 l0 2 Z'
+    exact = Subject.path_points(data,true)
+    assert_equal Rational(21,1),exact[2][0]
+    assert_equal Rational(10000000000000003,1),exact[1][0]
+    assert_equal 10000000000000004.0,Subject.path_points(data)[1][0]
+    branch,defs = clipped_branch('<path d="'+data+'"/>','<rect width="100" height="100"/>')
+    actual_image = '<use xlink:href="#pic" transform="matrix(5,0,0,5,11,12)"/>'
+    native = image.merge(:corners_svg=>[[11,12],[21,12],[21,22],[11,22]])
+    assert_raises(Subject::Unproven) { inventory(document(actual_image+branch,IMAGE_DEF+defs)).qualify(native,[]) }
+  end
+
+  def test_rounded_canceling_transform_frames_and_excess_decimal_work_are_not_proofs
+    branch,defs = clipped_branch('<path d="M40 40 L50 40 L40 50 Z"/>','<rect width="100" height="100"/>')
+    transformed = '<g transform="translate(10000000000000000,0)"><g transform="translate(-10000000000000000,0)">'+branch+'</g></g>'
+    assert_raises(Subject::Unproven) { inventory(document(IMAGE_USE+transformed,IMAGE_DEF+defs)).qualify(image,[]) }
+    assert_raises(Subject::Unproven) { Subject.path_points('M0e1000000000 0 L1 0 L0 1 Z',true) }
+    assert_raises(Subject::Unproven) { Subject.path_points('M0.'+('0'*70)+'1 0 L1 0 L0 1 Z',true) }
+  end
+
+  def test_nested_svg_viewport_is_not_an_untransformed_query_frame
+    branch,defs = clipped_branch('<path d="M40 40 L50 40 L40 50 Z"/>','<rect width="100" height="100"/>')
+    [ '<svg x="-30" y="-30">'+branch+'</svg>',
+      '<svg x="10" y="10" width="10" height="10" viewBox="40 40 10 10">'+branch+'</svg>'
+    ].each do |nested|
+      assert_raises(Subject::Unproven) { inventory(document(IMAGE_USE+nested,IMAGE_DEF+defs)).qualify(image,[]) }
+    end
+  end
+
+  def test_disjoint_comparison_keeps_exact_decimal_gaps_and_strict_touching
+    subject = inventory(document(IMAGE_USE))
+    epsilon = Rational(1,10**30)
+    edge = 10.0.to_r
+    query = [0.0,0.0,10.0,20.0]
+    assert subject.strictly_disjoint_bounds?([edge+epsilon,11.to_r,11.to_r,19.to_r],query)
+    refute subject.strictly_disjoint_bounds?([edge,11.to_r,11.to_r,19.to_r],query)
+    refute subject.strictly_disjoint_bounds?([edge-epsilon,11.to_r,11.to_r,19.to_r],query)
+    assert subject.strictly_disjoint_bounds?([11.0,11.0,12.0,19.0],[0.to_r,0.to_r,11.to_r-epsilon,20.to_r])
+    refute subject.strictly_disjoint_bounds?([11.0,11.0,12.0,19.0],[0.to_r,0.to_r,11.to_r+epsilon,20.to_r])
+  end
+
+  def round_line(data = 'M5 7 L25 7', extra = '')
+    '<path fill="none" stroke="black" stroke-width="2" stroke-linecap="round" '+
+      'stroke-linejoin="round" stroke-miterlimit="10" d="'+data+'" '+extra+'/>'
+  end
+
+  def vector_events(svg, query = [10,10,20,20])
+    inventory(svg).events_for(query).select { |event| event[:kind] == :vector }
+  end
+
+  def test_live_use_translation_cannot_prune_its_own_nonrectangular_clip
+    defs = IMAGE_DEF+'<g id="shape"><rect x="40" y="40" width="10" height="10"/></g>'+
+      '<clipPath id="far"><path d="M40 40 L50 40 L40 50 Z"/></clipPath>'
+    branch = '<use xlink:href="#shape" x="-30" y="-30" clip-path="url(#far)"/>'
+    error = assert_raises(Subject::Unproven) { inventory(document(IMAGE_USE+branch,defs)).qualify(image,[]) }
+    assert_match(/four-corner/,error.message)
+  end
+
+  def test_actual_two_round_line_sources_are_disjoint_without_changing_picture_order
+    paths = '<path fill="none" stroke-width="27.6" stroke-linecap="round" stroke-linejoin="round" '+
+      'stroke="rgb(0%, 0%, 0%)" stroke-opacity="1" stroke-miterlimit="10" '+
+      'd="M 31326.015625 3800.390625 L 34207.1875 3800.390625 " transform="matrix(0.1, 0, 0, -0.1, 0, 2592)"/>'+
+      '<path fill="none" stroke-width="14.4" stroke-linecap="round" stroke-linejoin="round" '+
+      'stroke="rgb(0%, 0%, 0%)" stroke-opacity="1" stroke-miterlimit="10" '+
+      'd="M 32766.015625 3844.804688 L 32766.015625 4573.203125 " transform="matrix(0.1, 0, 0, -0.1, 0, 2592)"/>'
+    use = '<use xlink:href="#pic" transform="matrix(76.8,0,0,-48.12,3200.28,2313.36)"/>'
+    corners = [[3200.28,2313.36],[3353.88,2313.36],[3353.88,2217.12],[3200.28,2217.12]]
+    bound = image.merge(:corners_svg=>corners)
+    svg = document(use+paths)
+    events = vector_events(svg,Subject.box(corners))
+    assert_equal 2,events.length
+    assert events.all? { |event| event[:bounds_policy] == 'exact_axis_aligned_round_single_segment_disjoint' }
+    assert_equal Rational('2213.3409375'),events[0][:bounds][3]
+    assert_equal Rational('2208.2395312'),events[1][:bounds][3]
+    assert events.all? { |event| event[:bounds].all? { |value| value.is_a?(Rational) } }
+    plan = inventory(svg).qualify(bound,[])
+    assert_equal 0,plan[:later_overlapping_paint_count]
+    assert_empty plan[:later_roots]
+    assert_equal 'pic',plan[:source_image_event][:svg_image_id]
+  end
+
+  def test_round_line_inherits_declared_cap_and_width_but_default_or_square_caps_do_not_qualify
+    bare = '<path d="M5 7 L25 7"/>'
+    group = '<g fill="none" stroke="black" stroke-width="2" stroke-linecap="round">'+bare+'</g>'
+    events = vector_events(document(IMAGE_USE+group))
+    assert_equal [4,6,26,8].map(&:to_r),events.first[:bounds]
+    assert_equal 0,inventory(document(IMAGE_USE+group)).qualify(image,[])[:later_overlapping_paint_count]
+    [group.sub('stroke-linecap="round"',''),group.sub('stroke-linecap="round"','stroke-linecap="square"')].each do |unsupported|
+      assert_nil vector_events(document(IMAGE_USE+unsupported)).first[:bounds_policy]
+      assert_raises(Subject::Unproven) { inventory(document(IMAGE_USE+unsupported)).qualify(image,[]) }
+    end
+  end
+
+  def test_touching_or_intersecting_round_strokes_retain_the_broad_nontext_guard
+    ['M5 9 L25 9','M5 9.5 L25 9.5','M15 0 L15 10'].each do |data|
+      svg = document(IMAGE_USE+round_line(data))
+      assert_nil vector_events(svg).first[:bounds_policy]
+      error = assert_raises(Subject::Unproven) { inventory(svg).qualify(image,[]) }
+      assert_match(/nontext/,error.message)
+    end
+  end
+
+  def test_exact_line_bounds_support_reflection_and_nonuniform_axis_scales
+    svg = document(IMAGE_USE+round_line('M3 1 L8 1','transform="matrix(-2,0,0,3,30,0)"'))
+    event = vector_events(svg).first
+    assert_equal [12,0,26,6].map(&:to_r),event[:bounds]
+    assert_equal 'exact_axis_aligned_round_single_segment_disjoint',event[:bounds_policy]
+    assert_equal 0,inventory(svg).qualify(image,[])[:later_overlapping_paint_count]
+  end
+
+  def test_exact_line_decimal_translation_does_not_inherit_float_endpoint_rounding
+    line = round_line('M10000000000000000 7 L10000000000000003 7',
+      'transform="matrix(1,0,0,1,-9999999999999993,0)"')
+    event = vector_events(document(IMAGE_USE+line)).first
+    assert_equal [6,6,11,8].map(&:to_r),event[:bounds]
+    assert_equal 'exact_axis_aligned_round_single_segment_disjoint',event[:bounds_policy]
+    assert event[:conservative_bounds][3] > 10
+  end
+
+  def test_unknown_curve_multisegment_closed_relative_and_degenerate_lines_keep_broad_bounds
+    ['M5 7 L15 7 L25 7','M5 7 L25 7 Z','M5 7 C10 7 20 7 25 7',
+     'm5 7 l20 0','M5 7 L5 7'].each do |data|
+      assert_nil vector_events(document(IMAGE_USE+round_line(data))).first[:bounds_policy]
+    end
+    zero = round_line.sub('stroke-width="2"','stroke-width="0"')
+    assert_nil vector_events(document(IMAGE_USE+zero)).first[:bounds_policy]
+  end
+
+  def test_unknown_or_inherited_paint_semantics_cannot_enable_exact_line_exclusion
+    [round_line('M5 7 L25 7','vector-effect="non-scaling-stroke"'),
+     '<g marker-end="url(#mark)">'+round_line+'</g>',
+     '<g stroke-dasharray="1 1">'+round_line+'</g>'].each do |line|
+      svg = document(IMAGE_USE+line)
+      assert_nil vector_events(svg).first[:bounds_policy]
+      assert_raises(Subject::Unproven) { inventory(svg).qualify(image,[]) }
+    end
+  end
+
+  def test_transformed_referenced_or_nested_parent_frames_do_not_gain_exact_line_bounds
+    [ '<g transform="translate(0,0)">'+round_line+'</g>',
+      '<svg x="0" y="0">'+round_line+'</svg>',
+      '<use xlink:href="#line"/>'
+    ].each do |branch|
+      defs = IMAGE_DEF+'<g id="line">'+round_line+'</g>'
+      svg = document(IMAGE_USE+branch,defs)
+      assert_nil vector_events(svg).first[:bounds_policy]
+      assert_raises(Subject::Unproven) { inventory(svg).qualify(image,[]) }
+    end
+  end
+
+  def test_skew_rotated_singular_and_composed_raw_line_matrices_keep_original_route
+    ['matrix(1,1,0,1,0,0)','matrix(0,1,-1,0,20,0)',
+     'matrix(0,0,0,1,0,0)','matrix(1,0,0,1,0,0) translate(0,0)'].each do |matrix|
+      assert_nil vector_events(document(IMAGE_USE+round_line('M5 7 L25 7','transform="'+matrix+'"'))).first[:bounds_policy]
+    end
+  end
+
+  def test_existing_generic_shape_box_is_not_narrowed_by_the_optional_disjoint_proof
+    subject = inventory(document(IMAGE_USE))
+    node = {:name=>'path',:attrs=>{'d'=>'M5 7 L25 7'},:children=>[]}
+    ctx = {:matrix=>Subject::IDENTITY,'stroke'=>'black','stroke-width'=>'2','stroke-miterlimit'=>'10','stroke-linecap'=>'round'}
+    broad = subject.shape_box(node,ctx)
+    assert_operator broad[3],:>,20
+    event = vector_events(document(IMAGE_USE+round_line)).first
+    assert_equal broad,event[:conservative_bounds]
+    assert_equal [4,6,26,8].map(&:to_r),event[:bounds]
+  end
 end

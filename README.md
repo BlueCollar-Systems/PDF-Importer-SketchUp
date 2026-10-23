@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.180-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.181-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -21,6 +21,24 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Test candidate (v3.7.181)
+
+- Exact white-area partitioning counts the work it actually performs and
+  constructs each maximal vertical cell once. Source coverage, rational
+  coordinates, clearance checks, cancellation and construction limits remain.
+  Authored fixtures retain the exact previous cells; the two outstanding
+  foundation Glyphs fills still require native verification.
+- Picture qualification can exclude a source clip or a round-capped single
+  line only when exact bounds prove it is strictly outside that picture.
+  Unknown, unsupported transforms, touching and overlapping cases keep their existing
+  checks. This corrects false overlap failures in the foundation SVG replay.
+- Both Ruby 2.2.4 and 3.4.4 passed the focused source tests. Native picture
+  pixels, placement, display ordering and save/reopen remain pending. The
+  attempted retained-model inspection never passed Welcome because Windows
+  activation failed; its timeout is preserved as a failed inspection.
+- This is a separate test candidate. The completed v3.7.180 host results below
+  do not certify v3.7.181. Public release remains held.
 
 ### Recent fixes (v3.7.180)
 

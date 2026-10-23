@@ -350,4 +350,107 @@ class PlanarRegionPartitionTest
     end
     assert_equal expected,partition(white,ink)
   end
+
+  def nested_ink_fixture(count = 24)
+    white = [face(rect(0,0,10,10))]
+    ink = count.times.map do |index|
+      inset = Rational(index, count * 4)
+      face(rect(1,1+inset,9,9-inset))
+    end
+    [white,ink]
+  end
+
+  def test_maximal_run_avoids_discarded_polygons_but_retains_literal_cells
+    white,ink = nested_ink_fixture
+    expected = [[:white,rect(0,0,1,10),10],[:white,rect(1,0,9,1),8],
+      [:ink,rect(1,1,9,9),64],[:white,rect(1,9,9,10),8],
+      [:white,rect(9,0,10,10),10]].map do |region,loop,value|
+      {:region=>region,:loop=>loop.map { |point|point.map(&:to_r) },:area=>value.to_r}
+    end
+    calls = 0
+    original = Subject.method(:exact_cell)
+    cells = Subject.stub(:exact_cell,lambda { |*args| calls += 1; original.call(*args) }) do
+      partition(white,ink)
+    end
+    assert_equal expected,cells
+    assert_equal 5,calls, 'internal same-class intervals do not allocate discarded polygons'
+    assert_equal expected,partition(white,ink,:cells=>5)
+    error = assert_raises(Subject::Error) { partition(white,ink,:cells=>4) }
+    assert_match(/cell budget/,error.message)
+  end
+
+  def test_actual_work_cap_covers_original_source_scans_even_when_clipped_out
+    white = [face(rect(0,0,1,1))]
+    ink = 12.times.map { |index| face(rect(index+10,20,index+11,21)) }
+    before = Marshal.dump([white,ink])
+    error = assert_raises(Subject::Error) { partition(white,ink,:predicate_edges=>16) }
+    assert_match(/predicate budget/,error.message)
+    assert_equal before,Marshal.dump([white,ink])
+    assert_equal [{:region=>:white,:loop=>rect(0,0,1,1).map { |p|p.map(&:to_r) },:area=>1.to_r}],
+      partition(white,ink)
+  end
+
+  def test_work_budget_is_one_shared_counter_and_does_not_spend_past_limit
+    budget = Subject::WorkBudget.new(3,{},1)
+    budget.charge!
+    budget.charge!(2)
+    assert_equal 3,budget.used
+    error = assert_raises(Subject::Error) { budget.charge! }
+    assert_match(/predicate budget/,error.message)
+    assert_equal 3,budget.used
+  end
+
+  def test_deferred_run_still_checks_every_elementary_exact_area_sum
+    budget = Subject::WorkBudget.new(10,{},1)
+    active = {:region=>:white,:owner=>0,:low_edge=>[[0.to_r,0.to_r],[2.to_r,0.to_r]],
+      :high_edge=>[[0.to_r,2.to_r],[2.to_r,2.to_r]],:area=>5.to_r}
+    runs = []
+    error = assert_raises(Subject::Error) do
+      Subject.finish_run!(active,runs,0.to_r,2.to_r,0,10,budget)
+    end
+    assert_match(/changed covered area/,error.message)
+    assert_empty runs
+  end
+
+  def test_cells_cap_covers_live_output_and_pending_run_before_polygon_allocation
+    budget = Subject::WorkBudget.new(10,{},1)
+    active = {:region=>:white,:owner=>0,:low_edge=>[[0.to_r,0.to_r],[2.to_r,0.to_r]],
+      :high_edge=>[[0.to_r,2.to_r],[2.to_r,2.to_r]],:area=>4.to_r}
+    original = Subject.method(:exact_cell)
+    calls = 0
+    Subject.stub(:exact_cell,lambda { |*args| calls += 1; original.call(*args) }) do
+      assert_raises(Subject::Error) do
+        Subject.finish_run!(active,[],0.to_r,2.to_r,1,1,budget)
+      end
+    end
+    assert_equal 0,calls
+  end
+
+  class WorkCancel
+    attr_reader :seen, :failure
+    def initialize
+      @seen = []
+      @partition_calls = 0
+      @failure = RuntimeError.new('one-shot work checkpoint cancellation')
+    end
+    def checkpoint!(stage, metadata)
+      @seen << [stage,metadata]
+      return unless stage == :white_mask_partition
+      @partition_calls += 1
+      raise @failure if @partition_calls == 3
+    end
+  end
+
+  def test_counted_inner_work_keeps_terminal_exception_identity_and_inputs
+    white,ink = nested_ink_fixture(32)
+    before = Marshal.dump([white,ink])
+    controller = WorkCancel.new
+    raised = assert_raises(RuntimeError) do
+      partition(white,ink,:run_controller=>controller,:page_number=>7)
+    end
+    assert_same controller.failure,raised
+    assert_equal before,Marshal.dump([white,ink])
+    assert_equal 3,controller.seen.count { |row|row[0] == :white_mask_partition }
+    assert_equal 7,controller.seen.last[1][:page]
+  end
 end
