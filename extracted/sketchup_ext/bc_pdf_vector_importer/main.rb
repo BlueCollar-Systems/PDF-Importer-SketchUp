@@ -8423,6 +8423,9 @@ module BlueCollarSystems
     def self.wait_item_raster_page_prefetch!(job, opts)
       waited_started = Time.now
       tick = lambda do
+        # Keeps the window answering during the wait even when no run
+        # controller is attached (the heartbeat rate-limits itself).
+        ImportRunControl.heartbeat!(:item_raster_page_render) if defined?(ImportRunControl)
         run_control_checkpoint!(
           opts, :item_raster_page_render, :page => job[:page_number]
         )
