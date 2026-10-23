@@ -32,7 +32,7 @@ class ItemRasterBackgroundRenderTest < Minitest::Test
       [0].pack('C') + pixels.flatten.pack('C*')
     end
     header = [width, height, 8, 6, 0, 0, 0].pack('NNCCCCC')
-    "\x89PNG\r\n\x1a\n".b + png_chunk('IHDR', header) +
+    "\x89PNG\r\n\x1a\n".dup.force_encoding(Encoding::BINARY) + png_chunk('IHDR', header) +
       png_chunk('IDAT', Zlib::Deflate.deflate(rows.join)) + png_chunk('IEND', '')
   end
 
