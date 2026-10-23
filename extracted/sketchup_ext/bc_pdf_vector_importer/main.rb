@@ -3334,7 +3334,23 @@ module BlueCollarSystems
       highest_text_z = context[:highest_text_z]
       source_units = Array(opts[:source_units])
       inventory = { :white_paths => [], :opaque_paths => [], :glyphs => [] }
-      unless roots.all? { |root| root[:group].typename.to_s == 'Image' }
+      # Solid (positive-depth) text is already in front of every page fill;
+      # collect_text_faces drops such a root whole. Leave it out of the face
+      # walk. With no flat text left, no fill can be cut whatever its colour,
+      # so the page SVG is not parsed again and the fills are not walked.
+      ink_roots = roots.reject { |root| PlanarWhiteKnockout.solid_text_root?(root) }
+      ink_roots = roots if ink_roots.length == roots.length
+      if ink_roots.empty?
+        report = PlanarWhiteKnockout.empty_result(0).merge(
+          :skipped => 'no_flat_text', :solid_text_roots => roots.length,
+          :source_masks => masks.length)
+        PlanarWhiteKnockout.log_progress!(opts, :page_completed,
+          { :composed_groups => 0, :unchanged_no_ink_groups => 0,
+            :failed_groups => 0, :skipped => 'no_flat_text' }, true)
+        return { :report => report, :highest_text_z => highest_text_z,
+                 :final_page_crops => [] }
+      end
+      unless ink_roots.all? { |root| root[:group].typename.to_s == 'Image' }
         document = opts[:svg_provider].call
         unless document && !document[:svg].to_s.empty?
           raise RepresentationFidelity::ContractError,
@@ -3373,13 +3389,14 @@ module BlueCollarSystems
       control_opts[:run_controller] = PlanarWhiteKnockout.progress_controller(
         opts[:run_controller], control_opts)
       PlanarWhiteKnockout.log_progress!(opts, :source_binding_started,
-        { :source_masks => masks.length, :text_roots => roots.length }, true)
-      bound = SvgPaintBinding.prepare(masks, roots, inventory,
+        { :source_masks => masks.length, :text_roots => ink_roots.length }, true)
+      bound = SvgPaintBinding.prepare(masks, ink_roots, inventory,
         control_opts.merge(:scale => opts[:scale]))
       PlanarWhiteKnockout.log_progress!(opts, :source_binding_completed,
         { :bound_masks => bound[:masks].length, :ink_faces => bound[:ink_faces].length }, true)
-      report = PlanarWhiteKnockout.compose!(bound[:masks], roots,
+      report = PlanarWhiteKnockout.compose!(bound[:masks], ink_roots,
         control_opts.merge(:ink_faces => bound[:ink_faces], :continue_mask_failures => true))
+      report[:solid_text_roots] = roots.length - ink_roots.length
       report[:source_binding] = bound[:binding]
       report[:source_svg_sha256] = source_svg_sha256 if document
       PlanarWhiteKnockout.log_progress!(opts, :page_completed,

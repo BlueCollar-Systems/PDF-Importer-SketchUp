@@ -206,6 +206,7 @@ jobs:
           ruby test/synthetic_public_corpus_test.rb
           ruby test/item_raster_rejected_page_cache_test.rb
           ruby test/dependency_resolver_memo_test.rb
+          ruby test/white_mask_solid_text_skip_test.rb
 
   poppler-prune:
     runs-on: ubuntu-latest
