@@ -297,15 +297,18 @@ module BlueCollarSystems
       # and every style property. A matching source segment must survive erase.
       #
       # Erasing the duplicate can make SketchUp heal: a vertex left with only
-      # the kept edge and one collinear edge is merged into one longer edge.
-      # Measured in SketchUp 2017 on a handrail sheet (2026-10-23): 3 of 7
-      # erasures merged the kept edge into its same-style neighbour, so the
-      # kept object was gone although its segment was still drawn. Requiring
-      # that exact object stopped the page. The rule is now checked on the
-      # strokes themselves: every edge around the duplicate must still be
-      # drawn, in its own style, and nothing may be drawn beyond them. A heal
-      # that would join different styles, owned edges or a not-quite-straight
-      # line is never started; both copies are kept instead.
+      # the kept edge and one other edge is merged away, leaving one longer
+      # edge, whenever it lies within SketchUp's 0.001 in tolerance of the
+      # segment between their far ends, at any angle. Measured in SketchUp
+      # 2017 on a handrail sheet (2026-10-23): 3 of 7 erasures merged the
+      # kept edge into its same-style neighbour, so the kept object was gone
+      # although its segment was still drawn. Requiring that exact object
+      # stopped the page. The rule is now checked on the strokes themselves:
+      # every edge around the duplicate must still be drawn, in its own style,
+      # and nothing may be drawn beyond them. A heal that would join different
+      # styles or owned edges, or that would bend a line which is not exactly
+      # straight (a short segment of a flattened curve), is never started;
+      # both copies are kept instead.
       #
       # A heal can also make a new exact duplicate: an edge that grows onto
       # two vertices another same-style edge already joins. Survivors are
@@ -357,18 +360,26 @@ module BlueCollarSystems
 
       # Inches. A hundred times finer than SketchUp's own 0.001 in tolerance.
       HEAL_POINT_TOLERANCE = 1.0e-5
-      # Sine of the angle between two edges at a vertex: at or below the first
-      # they are one straight line (a merged edge then stays within the point
-      # tolerance for 1,000 in), above the second no heal is expected, and in
-      # between the outcome is uncertain, so the duplicate stays.
+      # Inches. SketchUp 2017 (17.2.2555) merged the two edges left at a
+      # vertex whenever the vertex lay within about 0.001 in of the segment
+      # between their far ends, whatever the angle: on made-up edges 0.005 to
+      # 100 in long it healed at 0.000999 in from that segment and never at
+      # 0.0015 in or more (2026-10-23). Twice its tolerance leaves a margin.
+      # Farther than this no heal is expected.
+      HEAL_POSSIBLE_DISTANCE = 2.0e-3
+      # Sine of the angle between two edges at a vertex at or below which they
+      # are one straight line: a merged edge then stays within the point
+      # tolerance for 1,000 in. Any other heal bends or moves ink, so the
+      # duplicate stays.
       HEAL_STRAIGHT_SINE = 1.0e-9
-      HEAL_POSSIBLE_SINE = 1.0e-3
 
       # Records every edge within two vertices of the kept edge (the duplicate
       # excluded) before the erase, or returns nil when the erase must not
       # happen: a vertex that would be left with the kept edge and one other
-      # edge on the same line may be healed, and that is only allowed when the
-      # other edge is loose, unowned, straight-on and styled exactly the same.
+      # edge may be healed when it lies within HEAL_POSSIBLE_DISTANCE of the
+      # segment between their far ends, and that is only allowed when the
+      # other edge is loose, unowned, exactly straight-on and styled exactly
+      # the same.
       def self.duplicate_erase_neighbourhood(kept, duplicate, style)
         vertices = [kept.start, kept.end]
         return nil unless vertices.all? { |vertex| vertex.respond_to?(:edges) }
@@ -427,8 +438,14 @@ module BlueCollarSystems
       end
 
       # What a native erase may do at +vertex+ once only +kept+ and +other+
-      # are left there: :none (not one line, nothing to heal), :joins (the two
-      # run straight on from each other, SketchUp may merge them) or :uncertain.
+      # are left there: :none (the vertex is too far from the segment between
+      # their far ends for SketchUp to merge them), :joins (the two run
+      # exactly straight on from each other, so a merge moves no ink) or
+      # :uncertain (a merge is possible and would bend or move the line).
+      # SketchUp decides by that distance, not by the angle, so a short
+      # segment turning a few hundredths of a radian is merged too. An other
+      # edge lying along the kept one from the same vertex is as far from
+      # that segment as the shorter of the two is long, so it is :none.
       def self.native_heal_relation(kept, other, vertex)
         origin = heal_xyz(vertex)
         far_kept = heal_same?(kept.start, vertex) ? kept.end : kept.start
@@ -436,14 +453,32 @@ module BlueCollarSystems
         # Another edge between the same two vertices (a copy in another
         # style) is no end-to-end junction; a native heal cannot join them.
         return :none if heal_same?(far_other, far_kept)
-        a = heal_sub(heal_xyz(far_kept), origin)
-        b = heal_sub(heal_xyz(far_other), origin)
+        kept_end = heal_xyz(far_kept)
+        other_end = heal_xyz(far_other)
+        a = heal_sub(kept_end, origin)
+        b = heal_sub(other_end, origin)
         lengths = Math.sqrt(heal_dot(a, a)) * Math.sqrt(heal_dot(b, b))
         return :uncertain unless lengths > 0.0 && lengths.finite?
+        gap = heal_segment_distance(origin, kept_end, other_end)
+        return :uncertain unless gap.finite?
+        return :none if gap > HEAL_POSSIBLE_DISTANCE
         sine = heal_cross_length(a, b) / lengths
-        return :none if sine > HEAL_POSSIBLE_SINE
         return :joins if sine <= HEAL_STRAIGHT_SINE && heal_dot(a, b) < 0.0
         :uncertain
+      end
+
+      # Distance from +point+ to the segment from +first+ to +last+.
+      def self.heal_segment_distance(point, first, last)
+        axis = heal_sub(last, first)
+        length_squared = heal_dot(axis, axis)
+        offset = heal_sub(point, first)
+        along = length_squared > 0.0 ? heal_dot(offset, axis) / length_squared : 0.0
+        along = 0.0 unless along > 0.0
+        along = 1.0 if along > 1.0
+        nearest = [first[0] + axis[0] * along, first[1] + axis[1] * along,
+                   first[2] + axis[2] * along]
+        apart = heal_sub(point, nearest)
+        Math.sqrt(heal_dot(apart, apart))
       end
 
       def self.heal_ring_edges(ring, excluded)

@@ -2,8 +2,9 @@ require 'minitest/mock'
 # Reuse the small host API fakes (and run their existing stroke-union checks).
 require_relative 'geometry_cleanup_collinear_coverage_test'
 
-# SketchUp heals when an erase leaves a vertex with exactly two collinear
-# edges: it merges them into one longer edge. Measured in SketchUp 2017 on a
+# SketchUp heals when an erase leaves a vertex with exactly two edges and
+# that vertex lies within its 0.001 in tolerance of the segment between their
+# far ends: it merges them into one longer edge. Measured in SketchUp 2017 on a
 # handrail sheet (2026-10-23), 3 of the 7 duplicates the final sweep erased
 # sat at such a vertex. The older neighbour grew over the kept edge and the
 # kept object was deleted, although its segment was still drawn, so the old
@@ -222,6 +223,163 @@ class GeometryCleanupNativeHealTest < Minitest::Test
     entities.line([2, 3, 0], [2, 9, 0])
     assert_equal 0, Cleanup.remove_exact_duplicate_loose_edges(entities)
     assert [kept, duplicate, neighbour].all?(&:valid?)
+  end
+
+  # SketchUp 2017 heals by distance, not by angle. Measured on made-up edges
+  # in a throwaway group (2026-10-23): the two edges left at a vertex are
+  # merged whenever the vertex lies within about 0.001 in of the segment
+  # between their far ends, at any angle. It healed at 0.000999 in and never
+  # at 0.0015 in or more. This fake heals everything closer than 0.0015 in,
+  # the worst case that measurement leaves open. An angled heal moves the
+  # vertex onto the far end, so the line is bent.
+  class DistanceHealingEntities < HealingEntities
+    HEAL_DISTANCE = 0.0015
+
+    def collinear_junction?(vertex)
+      pair = vertex.edges
+      return false unless pair.length == 2
+      first, last = far(pair[0], vertex), far(pair[1], vertex)
+      return false if first.equal?(last)
+      segment_distance(vertex.position, first.position, last.position) < HEAL_DISTANCE
+    end
+
+    def segment_distance(point, first, last)
+      axis = last - first
+      along = axis.dot(point - first) / axis.dot(axis)
+      along = [[along, 0.0].max, 1.0].min
+      nearest = Geom::Point3d.new(first.x + axis.x * along, first.y + axis.y * along,
+                                  first.z + axis.z * along)
+      point.distance(nearest)
+    end
+  end
+
+  # A short segment V-W drawn twice, as on a flattened curve: the older
+  # neighbour leaves V turning +turn+ radians from the segment's line, and W
+  # is a free end. V lies length * sin(turn / 2) from the neighbour-W chord.
+  def angled_shape(length, turn, heal = :older_grows)
+    entities = DistanceHealingEntities.new(heal)
+    v = [8.0, 3.0, 0.0]
+    w = [8.0 - length, 3.0, 0.0]
+    n = [8.0 + length * Math.cos(turn), 3.0 + length * Math.sin(turn), 0.0]
+    neighbour = entities.line(n, v)
+    kept = entities.line(v, w)
+    duplicate = entities.line(w, v)
+    [entities, kept, duplicate, neighbour]
+  end
+
+  ANGLED_LENGTHS = [0.005, 0.02, 0.05, 0.1, 1.0, 10.0].freeze
+  ANGLED_TURNS = [0.0005, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1].freeze
+
+  def ends_of(edge)
+    [edge.start.position, edge.end.position].map(&:to_a_for_test)
+  end
+
+  def test_the_distance_fake_heals_and_bends_angled_junctions_like_the_host
+    healed = 0
+    ANGLED_LENGTHS.product(ANGLED_TURNS).each do |length, turn|
+      entities, kept, duplicate, neighbour = angled_shape(length, turn)
+      duplicate.erase!
+      near = length * Math.sin(turn / 2.0) < DistanceHealingEntities::HEAL_DISTANCE
+      label = "length #{length} turn #{turn}"
+      assert_equal !near, kept.valid?, label
+      next unless near
+      healed += 1
+      assert neighbour.valid?, label
+      assert_equal 1, entities.live.length, label
+      assert_includes ends_of(neighbour), [8.0 - length, 3.0, 0.0], label
+    end
+    assert_operator healed, :>=, 20
+  end
+
+  # Before this rule the precheck called these :none whenever the sine was
+  # above 0.001, let the erase run, SketchUp merged the junction, and the
+  # post-erase check raised CleanupFailure, which rolled the page back.
+  def test_an_angled_junction_that_may_heal_keeps_both_copies
+    [:older_grows, :newer_grows, :new_edge].each do |heal|
+      ANGLED_LENGTHS.product(ANGLED_TURNS).each do |length, turn|
+        entities, kept, duplicate, neighbour = angled_shape(length, turn, heal)
+        before = entities.map { |edge| ends_of(edge) }
+        gap = length * Math.sin(turn / 2.0)
+        label = "#{heal} length #{length} turn #{turn} gap #{gap}"
+        erased = Cleanup.remove_exact_duplicate_loose_edges(entities)
+        assert [kept, neighbour].all?(&:valid?), label
+        assert_equal before.values_at(0, 1), [ends_of(neighbour), ends_of(kept)], label
+        if gap > Cleanup::HEAL_POSSIBLE_DISTANCE
+          assert_equal 1, erased, label
+          refute duplicate.valid?, label
+        else
+          assert_equal 0, erased, label
+          assert duplicate.valid?, label
+        end
+      end
+    end
+  end
+
+  # The trigger on real sheets: one short segment of a flattened arc drawn
+  # twice. A straight duplicate on the same page is still swept.
+  def test_a_duplicated_segment_on_a_flattened_curve_keeps_both_copies
+    entities = DistanceHealingEntities.new
+    points = (0..12).map do |step|
+      angle = 0.01 * step
+      [30.0 + 2.0 * Math.sin(angle), 10.0 - 2.0 * Math.cos(angle), 0.0]
+    end
+    arc = points.each_cons(2).map { |first, last| entities.line(first, last) }
+    copy = entities.line(points[6], points[5])
+    straight = entities.line([0, 0, 0], [4, 0, 0])
+    entities.line([4, 0, 0], [7, 0, 0])
+    straight_copy = entities.line([7, 0, 0], [4, 0, 0])
+    entities.line([7, 0, 0], [7, 2, 0])
+    before = arc.map { |edge| ends_of(edge) }
+    assert_equal 1, Cleanup.remove_exact_duplicate_loose_edges(entities)
+    assert arc.all?(&:valid?)
+    assert_equal before, arc.map { |edge| ends_of(edge) }
+    assert copy.valid?
+    refute straight_copy.valid?
+    assert straight.valid?
+    assert_equal [[0.0, 0.0, 0.0], [7.0, 0.0, 0.0]], ends_of(straight)
+  end
+
+  # An other edge lying along the kept edge from the same vertex, in the
+  # same direction and overlapping it, is no junction SketchUp merges: on
+  # the host, erasing such a duplicate changed nothing else. Made-up lengths.
+  def test_a_same_direction_overlap_is_swept_without_a_heal
+    [HealingEntities, DistanceHealingEntities].product([1.25, 3.5]).each do |kind, reach|
+      label = "#{kind.name.split('::').last} overlap to #{reach}"
+      entities = kind.new
+      overlap = entities.line([0, 3, 0], [reach, 3, 0])
+      kept = entities.line([0, 3, 0], [2, 3, 0])
+      duplicate = entities.line([2, 3, 0], [0, 3, 0])
+      entities.line([2, 3, 0], [2, 7, 0])
+      entities.line([2, 3, 0], [2, -1, 0])
+      before = entities.map { |edge| ends_of(edge) }
+      assert_equal 1, Cleanup.remove_exact_duplicate_loose_edges(entities), label
+      refute duplicate.valid?, label
+      assert kept.valid?, label
+      assert overlap.valid?, label
+      assert_equal 4, entities.live.length, label
+      survivors = entities.each_with_index.reject { |edge, _| edge.equal?(duplicate) }
+      survivors.each { |edge, index| assert_equal before[index], ends_of(edge), label }
+      assert_equal 0, exact_pairs(entities), label
+    end
+  end
+
+  def test_the_heal_precheck_decides_by_distance_from_the_chord
+    far = lambda { |length, turn| [length * Math.cos(turn), length * Math.sin(turn), 0.0] }
+    [[[-1.0, 0, 0], [1.0, 0, 0], :joins],
+     [[-1.0, 0, 0], far.call(1.0, 0.002), :uncertain],
+     [[-0.02, 0, 0], far.call(0.02, 0.1), :uncertain],
+     [[-1.0, 0, 0], far.call(1.0, 0.005), :none],
+     [[-10.0, 0, 0], far.call(10.0, 0.0005), :none],
+     [[2.0, 0, 0], [1.25, 0, 0], :none],
+     [[2.0, 0, 0], [3.5, 0, 0], :none],
+     [[-1.0, 0, 0], [0, 1.0, 0], :none]].each do |kept_end, other_end, expected|
+      entities = Base.new
+      kept = entities.line([0, 0, 0], kept_end)
+      other = entities.line(other_end, [0, 0, 0])
+      vertex = entities.vertex([0, 0, 0])
+      assert_equal expected, Cleanup.native_heal_relation(kept, other, vertex),
+                   "#{kept_end.inspect} #{other_end.inspect}"
+    end
   end
 
   def test_a_bent_or_branching_junction_has_nothing_to_heal
