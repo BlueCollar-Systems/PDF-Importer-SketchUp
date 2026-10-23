@@ -212,6 +212,7 @@ jobs:
           ruby test/pipeline_stage_timers_test.rb
           ruby test/physical_evidence_sort_string_test.rb
           ruby test/outline_definition_counts_cache_test.rb
+          ruby test/process_memory_reader_test.rb
 
   poppler-prune:
     runs-on: ubuntu-latest
