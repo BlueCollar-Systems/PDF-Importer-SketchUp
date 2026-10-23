@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.180-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.183-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -41,6 +41,32 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Recent fixes (v3.7.183)
+
+- Handrail sheets finish again. Since v3.7.173 a last cleanup step stopped
+  most handrail sheets: after it erased a duplicate line, SketchUp joined the
+  two lines left at that point, and the step treated that as a failure. It now
+  checks that every line is still drawn end to end in its own style, and keeps
+  both copies where a join would not be safe.
+- SketchUp no longer shows "Not Responding" during an import. The status bar
+  shows the page, the current step and the time left; press Esc to cancel.
+  Clicks and keys made during the import are handled when it ends.
+- Imports are faster. A rejected page picture is no longer rendered again for
+  every text item, the bundled Ghostscript is checked once instead of on every
+  use, and pages with no white areas to repair skip that pass. On four real
+  handrail sheets in SketchUp Make 2017, the default import took 7 to 28
+  seconds instead of 26 to 46 seconds with v3.7.166.
+- Sideways (rotated) sheets now get their 3D Text letters instead of blanks.
+- This release also carries the unreleased v3.7.167 to v3.7.180 changes listed
+  below.
+
+Known limits:
+
+- A few sheets still list some text the importer could not draw. The import
+  finishes, and the summary and Import Health name those items.
+- Tested by us in SketchUp Make 2017 only. SketchUp 2024 and later were not
+  tested by us.
 
 ### Recent fixes (v3.7.180)
 
