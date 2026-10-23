@@ -246,6 +246,72 @@ class GeometryCleanupNativeHealTest < Minitest::Test
     end
   end
 
+  def exact_pairs(entities)
+    signatures = entities.live.map { |edge| Cleanup.exact_loose_edge_signature(edge) }.compact
+    signatures.length - signatures.uniq.length
+  end
+
+  # A heal can grow an edge onto two vertices that another same-style edge
+  # already joins. Here a long stroke F-W lies over neighbour F-V and the
+  # kept V-W, with a branch at W, so the heal at V makes a second F-W. A
+  # host count on a handrail sheet found one exact pair left after the
+  # sweep; this made-up shape left one too, until the edges around each
+  # erase were checked again under their new vertices.
+  def test_a_heal_that_makes_a_new_exact_pair_is_swept_in_the_same_pass
+    [:older_grows, :newer_grows, :new_edge].each do |heal|
+      [:long_first, :long_last].each do |order|
+        label = "#{heal} #{order}"
+        entities = HealingEntities.new(heal)
+        long = entities.line([0, 3, 0], [12, 3, 0]) if order == :long_first
+        entities.line([0, 3, 0], [5, 3, 0])
+        entities.line([5, 3, 0], [12, 3, 0])
+        duplicate = entities.line([12, 3, 0], [5, 3, 0])
+        entities.line([12, 3, 0], [12, 9, 0])
+        long = entities.line([0, 3, 0], [12, 3, 0]) if order == :long_last
+        assert_equal 2, Cleanup.remove_exact_duplicate_loose_edges(entities), label
+        refute duplicate.valid?, label
+        assert_equal 0, exact_pairs(entities), "#{label}: an exact duplicate pair is left"
+        assert_equal 2, entities.live.length, label
+        (0..12).each { |x| assert covered?(entities, x, 3, long), "#{label} lost x=#{x}" }
+        (3..9).each { |y| assert covered?(entities, 12, y, long), "#{label} lost y=#{y}" }
+        entities.live.each do |edge|
+          [edge.start.position, edge.end.position].each do |point|
+            inside = (point.y == 3 && point.x >= 0 && point.x <= 12) ||
+                     (point.x == 12 && point.y >= 3 && point.y <= 9)
+            assert inside, "#{label} drew outside the source: #{point.x},#{point.y}"
+          end
+        end
+        assert_equal 0, Cleanup.remove_exact_duplicate_loose_edges(entities), label
+      end
+    end
+  end
+
+  # A native erase never adds edges. A host that did, making a fresh copy
+  # each time a copy is erased, must still not keep the sweep running.
+  class CopyingEntities < HealingEntities
+    def line(first, last)
+      edge = super
+      owner = self
+      healing_erase = edge.method(:erase!)
+      edge.define_singleton_method(:erase!) do
+        healing_erase.call
+        owner.line(first, last)
+      end
+      edge
+    end
+  end
+
+  def test_rechecks_end_even_if_every_erase_made_a_new_copy
+    entities = CopyingEntities.new(:none)
+    kept = entities.line([0, 3, 0], [6, 3, 0])
+    entities.line([6, 3, 0], [0, 3, 0])
+    entities.line([6, 3, 0], [6, 9, 0])
+    swept = entities.length
+    assert_equal swept + 1, Cleanup.remove_exact_duplicate_loose_edges(entities)
+    assert kept.valid?
+    assert_equal 1, exact_pairs(entities)
+  end
+
   def test_full_cleanup_finishes_when_a_late_duplicate_heals
     entities = HealingEntities.new
     neighbour = entities.line([20, 3, 0], [8, 3, 0])

@@ -306,28 +306,45 @@ module BlueCollarSystems
       # drawn, in its own style, and nothing may be drawn beyond them. A heal
       # that would join different styles, owned edges or a not-quite-straight
       # line is never started; both copies are kept instead.
+      #
+      # A heal can also make a new exact duplicate: an edge that grows onto
+      # two vertices another same-style edge already joins. Survivors are
+      # filed under the vertices they had when first seen, so the grown edge
+      # was never compared again and the pair stayed for Save to repair.
+      # After every accepted erase the live edges around it are checked again
+      # at once, under their current vertices. A native erase or heal never
+      # adds edges, so erasures cannot outnumber the edges swept. If they
+      # ever do, re-checks stop and the sweep only finishes the edges it
+      # listed at the start, so it always ends.
       def self.remove_exact_duplicate_loose_edges(entities)
         return 0 if source_width_ancestor?(entities)
         count = 0
         survivors = {}
-        entities.grep(Sketchup::Edge).each do |edge|
+        pending = entities.grep(Sketchup::Edge)
+        swept = pending.length
+        until pending.empty?
+          edge = pending.shift
           signature = exact_loose_edge_signature(edge)
           next unless signature
           endpoints, style = signature
           bucket = (survivors[endpoints] ||= [])
-          kept = bucket.find { |candidate| exact_loose_edge_signature(candidate) == signature }
+          kept = bucket.find do |candidate|
+            !heal_same?(candidate, edge) && exact_loose_edge_signature(candidate) == signature
+          end
           unless kept
-            bucket << edge
+            bucket << edge unless bucket.any? { |candidate| heal_same?(candidate, edge) }
             next
           end
 
           neighbourhood = duplicate_erase_neighbourhood(kept, edge, style)
           next unless neighbourhood
           edge.erase!
-          unless !edge.valid? && duplicate_erase_preserved?(neighbourhood)
+          around = edge.valid? ? nil : heal_ring_edges(neighbourhood[:ring], nil)
+          unless around && duplicate_erase_preserved?(neighbourhood, around)
             raise CleanupFailure, 'exact duplicate cleanup did not preserve its native source edge'
           end
           count += 1
+          pending.unshift(*around) if count <= swept
         end
         count
       rescue CleanupFailure
@@ -380,9 +397,10 @@ module BlueCollarSystems
       end
 
       # Called only after the duplicate is gone, so no deleted entity is read.
-      def self.duplicate_erase_preserved?(neighbourhood)
+      # +around+ is heal_ring_edges(neighbourhood[:ring], nil) read after it.
+      def self.duplicate_erase_preserved?(neighbourhood, around)
         before = neighbourhood[:records]
-        after = heal_ring_edges(neighbourhood[:ring], nil).map { |other| heal_record(other) }
+        after = around.map { |other| heal_record(other) }
         kept_drawn = before.all? { |old| heal_record_drawn?(old, after) }
         nothing_added = after.all? { |now| heal_record_drawn?(now, before) }
         kept_drawn && nothing_added
