@@ -4565,6 +4565,19 @@ module BlueCollarSystems
       stats[:pipeline_performance][key] = (prior + elapsed_ms.to_f).round(3)
     end
 
+    # Adds the block's wall time to stats[:pipeline_performance][key], also
+    # when the block raises, so a host QA report shows where an import spent
+    # its time. Returns the block's value.
+    def self.time_pipeline_stage!(stats, key)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      yield
+    ensure
+      if started
+        record_pipeline_timing!(stats, key,
+          (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0)
+      end
+    end
+
     # Ownership-verification counters are accumulated inside RepresentationFidelity
     # rather than passed down the call chain, because snapshots are taken from many
     # call sites. Reset at the start of an import so the figures describe this import,
@@ -6766,10 +6779,12 @@ module BlueCollarSystems
 
         if opts[:cleanup_geometry] && builder.page_group
           Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Cleaning up geometry... [#{(Time.now - import_start).round(1)}s]"
-          cl = GeometryCleanup.cleanup(builder.page_group.entities,
-            merge_tolerance:    opts[:merge_tolerance],
-            min_edge_length:    opts[:merge_tolerance],
-            cleanup_level:      opts[:cleanup_level])
+          cl = time_pipeline_stage!(stats, :geometry_cleanup_ms) do
+            GeometryCleanup.cleanup(builder.page_group.entities,
+              merge_tolerance:    opts[:merge_tolerance],
+              min_edge_length:    opts[:merge_tolerance],
+              cleanup_level:      opts[:cleanup_level])
+          end
           cl.each { |k, v| stats[:cleanup][k] = (stats[:cleanup][k] || 0) + v }
         end
 
@@ -6817,6 +6832,7 @@ module BlueCollarSystems
           :svg_provider => paint_svg_provider,
           :source_units => Array(stats[:source_glyph_physical_deliveries]).select { |row| row[:page] == page_num }
         }
+        time_pipeline_stage!(stats, :white_mask_ms) do
         keep_page_on_page_stage_failure(
           stats, page_num, 'white_areas', 'white_area_check_failed',
           'Some white areas were left as plain white shapes; text drawn ' \
@@ -6826,6 +6842,7 @@ module BlueCollarSystems
           builder, text_items, composition_opts)
         composition = compose_page_white_masks!(builder, text_items, media_box,
           composition_opts.merge(:composition_inventory => composition_inventory))
+        end
         end
         if composition
           record_page_white_mask_composition!(stats, page_num, composition)
@@ -6956,9 +6973,13 @@ module BlueCollarSystems
         # page certification. Otherwise the immediate post-commit re-validation
         # reads a different signature ("page N retained entity signature
         # changed") and a multi-page import dies after its first pages.
-        pruned_fill_groups = builder.prune_empty_fill_groups!
-        builder.prune_empty_color_groups!
-        pruned_groups = builder.prune_empty_page_groups!
+        pruned_fill_groups = 0
+        pruned_groups = []
+        time_pipeline_stage!(stats, :prune_empty_groups_ms) do
+          pruned_fill_groups = builder.prune_empty_fill_groups!
+          builder.prune_empty_color_groups!
+          pruned_groups = builder.prune_empty_page_groups!
+        end
         if pruned_fill_groups > 0 || !pruned_groups.empty?
           Logger.info(
             'Pipeline',
