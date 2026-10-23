@@ -31,6 +31,10 @@ end
 module Sketchup
   Vertex = Struct.new(:position) do
     def valid?; true; end
+    # Like the native Vertex#edges: the live edges that use this vertex.
+    def edges; (@edges ||= []).select(&:valid?); end
+    def attach(edge); (@edges ||= []) << edge; end
+    def detach(edge); (@edges ||= []).delete_if { |other| other.equal?(edge) }; end
   end
   class Group
     attr_reader :entities
@@ -42,6 +46,7 @@ module Sketchup
     attr_reader :start, :end
     def initialize(start, finish)
       @start, @end = start, finish
+      [start, finish].each { |vertex| vertex.attach(self) if vertex.respond_to?(:attach) }
       @valid = true
       @layer = :drawing
       @hidden = @soft = @smooth = false

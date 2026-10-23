@@ -266,12 +266,11 @@ class GeometryBuilderLineweightTest < Minitest::Test
     raw = run[:details].select { |stage, _detail| stage == :stroke_footprint }.map { |pair| pair[1] }
     assert_equal [[0, 0], [1, 0], [1, 1], [2, 0]], raw.map { |detail| [detail[:path], detail[:subpath]] }
     assert_equal run[:snapshots], run[:probed], 'every footprint still polls cancellation'
-    lines = run[:status].select { |text| text.include?('stroke footprint') }
+    lines = run[:status].select { |text| text.include?('measuring line widths') }
     assert_equal 4, lines.length
     assert_includes lines[1], 'page 7'
-    assert_includes lines[1], 'stroke footprint 1/3'
-    assert_includes lines[1], '33.3%'
-    assert_includes lines.last, 'stroke footprint 2/3'
+    assert_includes lines[1], 'measuring line widths 1 of 3'
+    assert_includes lines.last, 'measuring line widths 2 of 3'
     endpoint = run[:snapshots].last
     assert_equal :geometry_path, endpoint[:stage]
     assert_equal [3, 3, 100.0], [endpoint[:completed], endpoint[:total], endpoint[:percentage]],
@@ -289,7 +288,7 @@ class GeometryBuilderLineweightTest < Minitest::Test
     assert_equal [1, 3], [error.snapshot[:completed], error.snapshot[:total]]
     assert_equal 2, run[:built].length, 'the cancelled third subpath must not be built'
     assert_equal run[:snapshots], run[:probed]
-    assert_includes run[:status].last, 'stroke footprint 1/3'
+    assert_includes run[:status].last, 'measuring line widths 1 of 3'
     assert_nil run[:result]
   end
 

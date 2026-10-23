@@ -281,11 +281,72 @@ module BlueCollarSystems
           )
         end
 
+        # The two helper-tree checks below (bundled Ghostscript content and the
+        # Poppler symlink walk) are remembered for ONE import only. The import
+        # opens the window when it starts and closes it when it ends. Opening
+        # and closing both forget what was remembered, so every import runs
+        # each full check once, and a runtime changed between imports is caught
+        # even when its sizes and times were kept. Outside an import nothing is
+        # remembered and every call runs the full check.
+        def open_import_checks!
+          forget_verified_helper_trees! if @import_check_depth.to_i <= 0
+          @import_check_depth = @import_check_depth.to_i + 1
+          true
+        end
+
+        def close_import_checks!
+          depth = @import_check_depth.to_i - 1
+          @import_check_depth = depth > 0 ? depth : 0
+          forget_verified_helper_trees! if @import_check_depth.zero?
+          true
+        end
+
+        def with_import_checks
+          opened = open_import_checks!
+          yield
+        ensure
+          close_import_checks! if opened
+        end
+
+        def import_checks_open?
+          @import_check_depth.to_i > 0
+        end
+
+        def forget_verified_helper_trees!
+          @verified_bundled_ghostscript = nil
+          @trusted_runtime_tree = nil
+        end
+
         # Separate inventory: never modify or borrow Poppler's approval record.
+        #
+        # The full check hashes every member (27 MB, about 230 files, 0.3-0.6 s)
+        # and used to run on every call: once per item Raster attempt and once
+        # per font repair. Inside an import (with_import_checks) a successful
+        # check is remembered together with the size, time and kind of every
+        # entry in the tree, read before the check; any added, removed, resized
+        # or re-timed entry, or any symlink, runs the full check again. A failed
+        # check is never remembered, and nothing is kept past the import.
         def bundled_ghostscript_executable
           return nil unless windows?
           root = File.expand_path(File.join(support_dir, 'Ghostscript'))
           return nil unless runtime_path_components_symlink_free?(root)
+          stamp = import_checks_open? ? runtime_tree_stamp(root) : nil
+          memo = @verified_bundled_ghostscript
+          if stamp && memo.is_a?(Hash) && memo[:root] == root &&
+             memo[:stamp] == stamp
+            return memo[:path]
+          end
+          @verified_bundled_ghostscript = nil
+          path = verify_bundled_ghostscript_tree(root)
+          if path && stamp
+            @verified_bundled_ghostscript = {
+              :root => root, :stamp => stamp, :path => path
+            }
+          end
+          path
+        end
+
+        def verify_bundled_ghostscript_tree(root)
           manifest_path = File.join(root, 'runtime-manifest.json')
           return nil unless File.file?(manifest_path) && !File.symlink?(manifest_path)
           manifest = JSON.parse(File.read(manifest_path))
@@ -348,26 +409,103 @@ module BlueCollarSystems
           false
         end
 
+        # Every helper selection rechecks this symlink boundary. The full walk
+        # of Library/ and share/ (about 340 entries, roughly 0.1 s on Windows)
+        # ran on every call. Inside an import (with_import_checks) a clean walk
+        # is remembered with each scanned directory's modification time, read
+        # before that directory was listed. A later call in the same import
+        # re-reads only those directories: a new, removed or renamed entry
+        # anywhere in the tree changes its directory's time, and a directory
+        # that became a symlink fails its own check. Either runs the full walk
+        # again. A walk that found a symlink is never remembered, and nothing
+        # is kept past the import. File times are whole seconds on SketchUp
+        # 2017's Ruby 2.2 on Windows, so there an entry added in the same
+        # second as the remembered walk is seen by the next import, not later
+        # in the same one.
         def runtime_trust_paths_symlink_free?(root)
           return false unless runtime_path_components_symlink_free?(root)
           return false unless File.directory?(root)
           manifest = File.join(root, 'poppler-runtime-manifest.json')
           return false unless File.file?(manifest)
           return false if File.symlink?(manifest)
+          return true if import_checks_open? && trusted_runtime_tree_current?(root)
+          @trusted_runtime_tree = nil
+          directories = {}
           %w[Library share].each do |relative_root|
             runtime_root = File.join(root, relative_root)
             return false unless File.directory?(runtime_root)
             return false if File.symlink?(runtime_root)
-            pattern = File.join(runtime_root, '**', '*')
-            Dir.glob(pattern, File::FNM_DOTMATCH).each do |path|
-              base = File.basename(path)
-              next if base == '.' || base == '..'
-              return false if File.symlink?(path)
+            pending = [runtime_root]
+            until pending.empty?
+              directory = pending.pop
+              stamp = trusted_directory_stamp(directory)
+              return false unless stamp
+              directories[directory] = stamp
+              Dir.entries(directory).each do |base|
+                next if base == '.' || base == '..'
+                path = File.join(directory, base)
+                return false if File.symlink?(path)
+                pending << path if File.directory?(path)
+              end
             end
+          end
+          if import_checks_open?
+            @trusted_runtime_tree = { :root => root, :directories => directories }
           end
           true
         rescue StandardError
+          @trusted_runtime_tree = nil
           false
+        end
+
+        def trusted_runtime_tree_current?(root)
+          memo = @trusted_runtime_tree
+          return false unless memo.is_a?(Hash) && memo[:root] == root
+          directories = memo[:directories]
+          return false unless directories.is_a?(Hash) && !directories.empty?
+          directories.all? do |directory, stamp|
+            trusted_directory_stamp(directory) == stamp
+          end
+        rescue StandardError
+          false
+        end
+
+        def trusted_directory_stamp(directory)
+          return nil if File.symlink?(directory)
+          stat = File.lstat(directory)
+          return nil unless stat.directory?
+          [stat.mtime.to_i, stat.mtime.nsec]
+        rescue StandardError
+          nil
+        end
+
+        # Size, time and kind of every entry under root, sorted, or nil when
+        # any entry is a symlink or the tree cannot be read. Used only to
+        # decide whether a remembered full content check still applies.
+        def runtime_tree_stamp(root)
+          rows = []
+          pending = [root]
+          until pending.empty?
+            directory = pending.pop
+            Dir.entries(directory).each do |base|
+              next if base == '.' || base == '..'
+              path = File.join(directory, base)
+              return nil if File.symlink?(path)
+              stat = File.lstat(path)
+              rel = path[(root.length + 1)..-1].to_s
+              if stat.directory?
+                rows << [rel, 'd', 0, stat.mtime.to_i, stat.mtime.nsec]
+                pending << path
+              elsif stat.file?
+                rows << [rel, 'f', stat.size, stat.mtime.to_i, stat.mtime.nsec]
+              else
+                return nil
+              end
+            end
+          end
+          rows.sort
+        rescue StandardError
+          nil
         end
 
         def bundled_runtime_integrity_valid?(root, manifest)
@@ -476,6 +614,9 @@ module BlueCollarSystems
           File.open(path, 'rb') do |io|
             while (chunk = io.read(1024 * 1024))
               digest.update(chunk)
+              # Checking the bundled helpers hashes tens of megabytes; keep
+              # SketchUp's window answering Windows meanwhile.
+              ImportRunControl.heartbeat!(:checking_helpers) if defined?(ImportRunControl)
             end
           end
           digest.hexdigest

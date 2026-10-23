@@ -116,6 +116,157 @@ module BlueCollarSystems
       def self.fail_contract(message)
         raise RepresentationFidelity::ContractError, message
       end
+
+      # The one page render, started in the background while the import goes
+      # on with other work, then collected when the first item needs it.
+      # Same argv and environment as the synchronous CommandRunner.run; the
+      # output goes to two log files in the render's own temp folder instead
+      # of pipes, so nothing has to read while the import is busy. #result
+      # answers in CommandRunner.run's shape, so validate_result! decides
+      # exactly as before. #stop! ends the child (Esc, timeout, cleanup).
+      class BackgroundRender
+        POLL_SECONDS = 0.05
+        STOP_WAIT_SECONDS = 5.0
+
+        attr_reader :pid, :timeout_s, :stdout_path, :stderr_path
+
+        def self.monotonic
+          Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        end
+
+        def initialize(args, environment, log_dir, timeout_s)
+          cmd = Array(args).map { |value| value.to_s }
+          raise ArgumentError, 'background render needs a command' if cmd.empty?
+          @timeout_s = timeout_s.to_f
+          @timeout_s = 180.0 unless @timeout_s > 0.0
+          @stdout_path = File.join(log_dir.to_s, 'render_stdout.txt')
+          @stderr_path = File.join(log_dir.to_s, 'render_stderr.txt')
+          @status = nil
+          @timed_out = false
+          @stopped = false
+          @killed = false
+          @error = nil
+          @started_at = self.class.monotonic
+          spawn_args = environment.nil? ? cmd : [environment] + cmd
+          @pid = Process.spawn(
+            *spawn_args,
+            :in => File::NULL,
+            :out => [@stdout_path, 'w'],
+            :err => [@stderr_path, 'w']
+          )
+        end
+
+        def elapsed_s
+          self.class.monotonic - @started_at
+        end
+
+        # Non-blocking: true once the child has exited and been reaped.
+        def finished?
+          return true if @status || @stopped
+          reaped = Process.wait(@pid, Process::WNOHANG)
+          @status = $? if reaped
+          !@status.nil?
+        rescue Errno::ECHILD
+          @stopped = true
+          @error ||= 'background render process was already reaped'
+          true
+        end
+
+        def running?
+          !finished?
+        end
+
+        # True once the child has exited and its exit status was collected.
+        def exited?
+          finished? && !@status.nil?
+        end
+
+        # Blocks until the child exits or its time is up. tick (optional) is
+        # called between polls; an exception from it (Esc) stops the child
+        # before it propagates.
+        def wait!(tick = nil)
+          until finished?
+            if elapsed_s >= @timeout_s
+              @timed_out = true
+              stop!
+              break
+            end
+            tick.call if tick
+            sleep(POLL_SECONDS)
+          end
+          result
+        rescue Exception
+          stop!
+          raise
+        end
+
+        # Ends the child if it is still running and reaps it. Safe to call
+        # more than once.
+        def stop!
+          return true if finished?
+          # Windows may report a killed child with exit code 0; a stopped
+          # render is never a successful one.
+          @killed = true
+          @error ||= 'background render was stopped before it finished'
+          begin
+            Process.kill('KILL', @pid)
+          rescue StandardError
+            nil
+          end
+          unless reaped_within?(STOP_WAIT_SECONDS)
+            kill_tree!
+            reaped_within?(STOP_WAIT_SECONDS)
+          end
+          @stopped = true
+          true
+        end
+
+        def result
+          ok = !@timed_out && !@killed && @status &&
+            @status.respond_to?(:success?) && @status.success?
+          {
+            :ok => ok ? true : false,
+            :timed_out => @timed_out,
+            :exitstatus => @status && @status.respond_to?(:exitstatus) ?
+              @status.exitstatus : nil,
+            :stdout => read_log(@stdout_path),
+            :stderr => read_log(@stderr_path),
+            :error => @timed_out ? nil : (ok ? nil : @error)
+          }
+        end
+
+        private
+
+        def reaped_within?(seconds)
+          deadline = self.class.monotonic + seconds
+          until finished?
+            return false if self.class.monotonic >= deadline
+            sleep(POLL_SECONDS)
+          end
+          true
+        end
+
+        def kill_tree!
+          if RUBY_PLATFORM =~ /mswin|mingw|cygwin/
+            system('taskkill', '/PID', @pid.to_s, '/T', '/F',
+                   :out => File::NULL, :err => File::NULL)
+          else
+            Process.kill('KILL', @pid)
+          end
+        rescue StandardError
+          nil
+        end
+
+        def read_log(path)
+          return '' unless File.file?(path)
+          text = File.binread(path)
+          text.force_encoding(Encoding::UTF_8)
+          text = text.scrub('?') unless text.valid_encoding?
+          text
+        rescue StandardError
+          ''
+        end
+      end
     end
   end
 end
