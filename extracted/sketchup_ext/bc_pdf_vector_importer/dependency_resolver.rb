@@ -476,6 +476,9 @@ module BlueCollarSystems
           File.open(path, 'rb') do |io|
             while (chunk = io.read(1024 * 1024))
               digest.update(chunk)
+              # Checking the bundled helpers hashes tens of megabytes; keep
+              # SketchUp's window answering Windows meanwhile.
+              ImportRunControl.heartbeat!(:checking_helpers) if defined?(ImportRunControl)
             end
           end
           digest.hexdigest

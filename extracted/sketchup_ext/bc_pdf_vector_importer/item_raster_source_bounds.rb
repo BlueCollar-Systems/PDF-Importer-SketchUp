@@ -122,6 +122,7 @@ module BlueCollarSystems
         view = SvgTextRenderer.parse_viewbox(svg)
         boxes = {}
         SvgTextRenderer.parse_use_placements(svg).each_with_index do |placement, index|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           next if stroked[index]
           glyph = placement[:glyph_id]
           controls[glyph] = conservative_local_points(definitions[glyph]) unless controls.key?(glyph)
@@ -156,6 +157,7 @@ module BlueCollarSystems
         result, definitions, uses = {}, {}, []
         stack, index = [{ :stroke => 'none', :width => '1', :opacity => '1' }], 0
         svg.to_s.scan(/<\/?\s*[A-Za-z][A-Za-z0-9:_-]*\b[^>]*>/m) do |tag|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           if tag =~ /\A<\s*\//
             stack.pop if stack.length > 1
             next
@@ -253,6 +255,7 @@ module BlueCollarSystems
         end
         svg_sha = Digest::SHA256.hexdigest(svg)
         result.each do |sid, row|
+          ImportRunControl.heartbeat_tick!(:text_match) if defined?(ImportRunControl)
           assigned = Array(assignments[sid])
           indices = assigned.map { |r| r[:placement_index] }
           row[:source_svg_sha256] = svg_sha

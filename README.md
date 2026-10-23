@@ -13,6 +13,23 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > PDF Vector Importer > Import Health... has the full summary.
 
+### Progress while an import runs
+
+On Windows the import keeps SketchUp's window answering Windows, so it is not
+marked "Not Responding" and offered for a force close. About four times a
+second it asks Windows for the next message without taking it
+(`PeekMessageW` with `PM_NOREMOVE`). Nothing is dispatched, so a click, key
+or menu command made during the import waits in Windows' queue and SketchUp
+handles it after the import ends; the window cannot be moved or minimized
+until then. The status bar shows one plain line, for example
+`Importing page 1 of 1: building text 120 of 557 (about 30 s left), press Esc to cancel`.
+The time left is the current step's and appears once its pace is known.
+Status-bar writes are limited to one every two seconds, and a write that is
+slow pushes the next one further out. The import report's
+`performance.ui_responsiveness` block gives the longest time without a
+message check and the steps around it. `BC_PDF_UI_HEARTBEAT=0` turns the
+message check off.
+
 ### Page selection
 
 Use `All`, a page number, or ascending ranges such as `1,3-5`. Invalid
