@@ -30,10 +30,14 @@ module BlueCollarSystems
 
       module_function
 
+      # The working set of this process in MB. On Windows it is read in
+      # process through K32GetProcessMemoryInfo (the same WorkingSetSize that
+      # Get-Process reports as WorkingSet64). Starting PowerShell for it cost
+      # 1-2 s at the end of every import; PowerShell is kept only as the
+      # fallback when the in-process read is unavailable.
       def sample_process_mb
         if RUBY_PLATFORM =~ /mswin|mingw|cygwin/i
-          size = `powershell -NoProfile -Command "(Get-Process -Id #{Process.pid}).WorkingSet64"`.strip.to_i
-          return (size / 1024.0 / 1024.0).round(2) if size > 0
+          return windows_process_mb
         elsif File.readable?('/proc/self/status')
           rss = File.read('/proc/self/status').each_line.find { |line| line.start_with?('VmRSS:') }
           if rss && rss =~ /(\d+)\s*kB/i
@@ -43,6 +47,82 @@ module BlueCollarSystems
         0.0
       rescue StandardError
         0.0
+      end
+
+      def windows_process_mb
+        size = windows_working_set_bytes
+        size = powershell_working_set_bytes unless size && size > 0
+        size && size > 0 ? (size / 1024.0 / 1024.0).round(2) : 0.0
+      rescue StandardError
+        0.0
+      end
+
+      # Built once per SketchUp session: the kernel32 handle and the two
+      # functions stay referenced here so Fiddle never frees them mid-call.
+      WINDOWS_MEMORY_READER = {}
+
+      # WorkingSetSize of this process in bytes, or nil when Fiddle or
+      # K32GetProcessMemoryInfo is unavailable (the caller then falls back).
+      def windows_working_set_bytes
+        reader = windows_memory_reader
+        return nil unless reader
+        counters_size = reader[:counters_size]
+        buffer = "\0" * counters_size
+        buffer.force_encoding(Encoding::BINARY)
+        buffer[0, 4] = [counters_size].pack('L')
+        process = reader[:current_process].call
+        ok = reader[:memory_info].call(process, buffer, counters_size)
+        return nil if ok.to_i == 0
+        # PROCESS_MEMORY_COUNTERS: DWORD cb, DWORD PageFaultCount, then
+        # SIZE_T PeakWorkingSetSize, SIZE_T WorkingSetSize, ...
+        size_t = reader[:size_t]
+        offset = 8 + size_t
+        value = buffer[offset, size_t].unpack(size_t == 8 ? 'Q' : 'L').first
+        value.to_i > 0 ? value.to_i : nil
+      rescue LoadError, StandardError
+        nil
+      end
+
+      def windows_memory_reader
+        if WINDOWS_MEMORY_READER.key?(:reader)
+          return WINDOWS_MEMORY_READER[:reader]
+        end
+        WINDOWS_MEMORY_READER[:reader] = build_windows_memory_reader
+      end
+
+      def build_windows_memory_reader
+        require 'fiddle'
+        system_root = ENV['SystemRoot'].to_s
+        system_root = 'C:/Windows' if system_root.empty?
+        kernel32 = Fiddle.dlopen(File.join(system_root, 'System32', 'kernel32.dll'))
+        function_class = Fiddle::Function
+        abi = if function_class.const_defined?(:STDCALL)
+                function_class.const_get(:STDCALL)
+              else
+                function_class.const_get(:DEFAULT)
+              end
+        size_t = Fiddle::SIZEOF_VOIDP
+        {
+          :library => kernel32,
+          :current_process => function_class.new(
+            kernel32['GetCurrentProcess'], [], Fiddle::TYPE_VOIDP, abi
+          ),
+          :memory_info => function_class.new(
+            kernel32['K32GetProcessMemoryInfo'],
+            [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT],
+            Fiddle::TYPE_INT, abi
+          ),
+          :size_t => size_t,
+          :counters_size => 8 + (8 * size_t)
+        }
+      rescue LoadError, StandardError
+        nil
+      end
+
+      def powershell_working_set_bytes
+        `powershell -NoProfile -Command "(Get-Process -Id #{Process.pid}).WorkingSet64"`.strip.to_i
+      rescue StandardError
+        0
       end
 
       # Split the pipeline's accumulated measurements into durations and everything else.

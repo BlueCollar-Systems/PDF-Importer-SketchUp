@@ -104,15 +104,19 @@ module BlueCollarSystems
       # :transformation is the complete transform of its group, not its parent.
       # :before_text must come from source paint order, never build order.
       # Text roots can instead be bare groups directly inside the page context.
+      def self.empty_result(ink_face_count = 0)
+        { :white_groups => 0, :opaque_groups => 0, :composed_groups => 0,
+          :ink_faces => ink_face_count, :removed_area => 0.0,
+          :removed_area_basis => 'exact_source_partition',
+          :skipped_unproven_order => 0, :skipped_nonwhite => 0,
+          :unchanged_no_ink_groups => 0, :failed_groups => 0,
+          :mask_failures => [], :mask_failure_details_omitted => 0 }
+      end
+
       def self.compose!(fill_only_groups, text_roots, opts = {})
         ink = opts.key?(:ink_faces) ? opts[:ink_faces] : collect_text_faces(text_roots, opts)
         fail_contract('prebound physical ink faces must be an array') unless ink.is_a?(Array)
-        result = { :white_groups => 0, :opaque_groups => 0, :composed_groups => 0,
-                   :ink_faces => ink.length, :removed_area => 0.0,
-                   :removed_area_basis => 'exact_source_partition',
-                   :skipped_unproven_order => 0, :skipped_nonwhite => 0,
-                   :unchanged_no_ink_groups => 0, :failed_groups => 0,
-                   :mask_failures => [], :mask_failure_details_omitted => 0 }
+        result = empty_result(ink.length)
         masks = Array(fill_only_groups)
         masks.each_with_index do |record, mask_index|
           if opts[:mask_progress].is_a?(Hash)
@@ -264,6 +268,48 @@ module BlueCollarSystems
         end
         run_checkpoint!(opts, :white_mask_ink, rows.length, rows.length)
         result.uniq { |face| [face[:entity_id], face[:loops]] }
+      end
+
+      # True only when this text root holds a source-owned face off the page
+      # plane. collect_text_faces drops such a root whole (positive-depth text
+      # is already in front of every page fill), so one such face settles it
+      # and the root's other faces are never read. Anything that cannot be
+      # shown here answers false, and the root keeps the full face walk.
+      def self.solid_text_root?(root)
+        record = root.is_a?(Hash) ? root : { :group => root }
+        group = record[:group]
+        return false unless group && group.respond_to?(:typename)
+        return false if group.typename.to_s == 'Image'
+        transform = record[:transformation] || group.transformation
+        owned_face_off_plane?(group, transform, record[:verified_source_unit] == true)
+      rescue StandardError
+        false
+      end
+
+      # Same traversal and ownership rule as snapshots(require_owner = true).
+      def self.owned_face_off_plane?(group, transform, inherited_owner)
+        return false unless group.respond_to?(:entities) || group.respond_to?(:definition)
+        owner = inherited_owner || source_owner?(group)
+        child_entities(group).to_a.each do |entity|
+          next if entity.respond_to?(:valid?) && !entity.valid?
+          next if entity.respond_to?(:hidden?) && entity.hidden? &&
+                  entity.respond_to?(:get_attribute) &&
+                  entity.get_attribute(DICTIONARY, 'source_fill_original', false) == true
+          kind = entity.typename.to_s
+          if kind == 'Face'
+            next unless owner
+            entity.loops.each do |loop|
+              loop.vertices.each do |vertex|
+                z = vertex.position.transform(transform).z.to_f
+                return true if z.abs > PLANE_TOLERANCE
+              end
+            end
+          elsif kind == 'Group' || kind == 'ComponentInstance'
+            return true if owned_face_off_plane?(entity,
+              transform * entity.transformation, owner)
+          end
+        end
+        false
       end
 
       def self.snapshots(group, transform, require_owner, inherited_owner = false,

@@ -1416,6 +1416,32 @@ module BlueCollarSystems
         nil
       end
 
+      # The font-embedded copy is the user's whole drawing written to the temp
+      # folder. It must not outlive the import that needed it, including an
+      # import that failed or was stopped with Esc. A copy that cannot be
+      # deleted yet stays listed so the next call tries again.
+      def self.release_embedded_font_copies!
+        cache = @embed_cache
+        return 0 unless cache.is_a?(Hash) && !cache.empty?
+        removed = 0
+        cache.keys.each do |key|
+          path = cache[key]
+          begin
+            if path && File.exist?(path)
+              File.delete(path)
+              removed += 1
+            end
+            cache.delete(key)
+          rescue StandardError => e
+            warn_safe("font-embedded copy could not be deleted yet: #{e.message}")
+          end
+        end
+        removed
+      rescue StandardError => e
+        warn_safe("release_embedded_font_copies! failed: #{e.message}")
+        0
+      end
+
       def self.ensure_renderable_pdf(pdf_path, pdftocairo_exe)
         return pdf_path unless pdf_needs_embedding?(pdf_path, pdftocairo_exe)
         gs = find_ghostscript

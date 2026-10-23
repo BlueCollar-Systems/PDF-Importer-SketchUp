@@ -37,6 +37,18 @@ module BlueCollarSystems
       # larger than this and is yielded as the interned string so SHA-256 and
       # sort can consume it without another parent join.
       CANONICAL_JSON_LARGE_CHUNK = 64
+      # A sort key may copy a cached fragment up to this size. Larger cached
+      # fragments (a glyph definition's whole JSON) keep the streamed compare.
+      CANONICAL_SORT_STRING_LIMIT = 4096
+      # Exact number tokens (canonical_number(value).to_s) and object key
+      # orders, reused while encoding sort keys. A glyph definition repeats
+      # each coordinate in several faces, edges and bounds; Float#to_s was
+      # most of the encoding time. Both tables are bounded and only ever
+      # hold the exact bytes the contract encoding would produce.
+      CANONICAL_NUMBER_TOKENS = {}
+      CANONICAL_NUMBER_TOKEN_LIMIT = 65_536
+      CANONICAL_KEY_ORDERS = {}
+      CANONICAL_KEY_ORDER_LIMIT = 1024
       SOURCE_EXPECTED_SCHEMA = 'bcs.source_expected/1.0'.freeze
       FLAT_TEXT_CAPABILITY_SCHEMA =
         'bcs.sketchup_flat_text_capability/1.0'.freeze
@@ -1605,6 +1617,134 @@ module BlueCollarSystems
         )
       end
 
+      # Order payloads by their canonical JSON bytes, as the contract says.
+      # Glyph faces and edges are small: each one is encoded once as a single
+      # string and the strings are sorted natively. Those strings are exactly
+      # the contract bytes, so every evidence hash is unchanged; only the
+      # Ruby-level chunk comparisons (one per pair, hundreds of thousands per
+      # sheet) are gone. When a payload embeds a large cached fragment (a
+      # component instance whose definition JSON is shared) the streamed chunk
+      # comparison is kept, because a string key would copy that fragment.
+      # write_cache keeps the old policy: only callers that already cached
+      # their children (one glyph definition) store the encoded strings.
+      def sort_canonical_payloads(values, cache = nil, write_cache = false)
+        list = Array(values)
+        return list.dup if list.length < 2
+        keys = []
+        list.each do |value|
+          key = canonical_json_sort_string(value, cache)
+          unless key
+            return list.sort_by do |entry|
+              canonical_json_order_key(entry, cache, write_cache)
+            end
+          end
+          keys << key
+        end
+        if write_cache && cache.is_a?(Hash)
+          list.each_with_index do |value, index|
+            next unless value.is_a?(Hash) || value.is_a?(Array)
+            next if cached_canonical_json(value, cache)
+            cache[value.object_id] = [value, keys[index]]
+          end
+        end
+        (0...list.length).sort_by { |index| keys[index] }.map do |index|
+          list[index]
+        end
+      end
+
+      # canonical_json_scalar(canonical_number(value)), remembered.
+      def canonical_number_token(value)
+        token = CANONICAL_NUMBER_TOKENS[value]
+        return token if token
+        token = canonical_json_scalar(canonical_number(value)).freeze
+        if CANONICAL_NUMBER_TOKENS.length >= CANONICAL_NUMBER_TOKEN_LIMIT
+          CANONICAL_NUMBER_TOKENS.clear
+        end
+        CANONICAL_NUMBER_TOKENS[value] = token
+      end
+
+      # [[separator + "name" + ':', key], ...] in canonical name order. The
+      # first key with a given name wins, as in emit_canonical_json_chunks.
+      def canonical_key_order(keys)
+        order = CANONICAL_KEY_ORDERS[keys]
+        return order if order
+        names = {}
+        keys.each do |key|
+          name = key.to_s
+          names[name] = key unless names.key?(name)
+        end
+        order = names.keys.sort.each_with_index.map do |name, index|
+          prefix = (index.zero? ? '' : JSON_COMMA) +
+            canonical_json_scalar(name) + JSON_COLON
+          [prefix.freeze, names[name]].freeze
+        end.freeze
+        if CANONICAL_KEY_ORDERS.length >= CANONICAL_KEY_ORDER_LIMIT
+          CANONICAL_KEY_ORDERS.clear
+        end
+        CANONICAL_KEY_ORDERS[keys.dup.freeze] = order
+      end
+
+      # The exact canonical JSON of one value as a single string, or nil when
+      # it would copy a cached fragment longer than
+      # CANONICAL_SORT_STRING_LIMIT. Reads the cache but never writes it.
+      def canonical_json_sort_string(value, cache = nil)
+        if cache
+          unless cache.is_a?(Hash)
+            raise ContractError, 'canonical JSON cache must be a Hash'
+          end
+          cached = cached_canonical_json(value, cache)
+          return cached if cached
+        end
+        buffer = String.new
+        return nil unless append_canonical_json_string!(buffer, value, cache)
+        buffer
+      end
+
+      # Same bytes as emit_canonical_json_chunks, appended to one buffer.
+      def append_canonical_json_string!(buffer, value, cache)
+        case value
+        when Hash, Array
+          # Points and empty collections are never worth a cache lookup:
+          # their bytes are shorter than the lookup (an object_id each).
+          if cache && !value.empty? &&
+             !(value.is_a?(Array) && value.length <= 4 && value[0].is_a?(Numeric))
+            cached = cached_canonical_json(value, cache)
+            if cached
+              return false if cached.length > CANONICAL_SORT_STRING_LIMIT
+              buffer << cached
+              return true
+            end
+          end
+          if value.is_a?(Hash)
+            buffer << JSON_BEGIN_OBJECT
+            canonical_key_order(value.keys).each do |prefix, key|
+              buffer << prefix
+              return false unless
+                append_canonical_json_string!(buffer, value[key], cache)
+            end
+            buffer << JSON_END_OBJECT
+          else
+            buffer << JSON_BEGIN_ARRAY
+            first = true
+            value.each do |entry|
+              buffer << JSON_COMMA unless first
+              first = false
+              return false unless append_canonical_json_string!(buffer, entry, cache)
+            end
+            buffer << JSON_END_ARRAY
+          end
+        when Numeric
+          buffer << canonical_number_token(value)
+        when Symbol
+          buffer << canonical_json_scalar(value.to_s)
+        when true, false, nil
+          buffer << canonical_json_scalar(value)
+        else
+          buffer << canonical_json_scalar(value.to_s)
+        end
+        true
+      end
+
       def canonical_json(value, cache = nil, write_cache = true)
         return JSON.generate(canonical_value(value)) if cache.nil?
         unless cache.is_a?(Hash)
@@ -1688,11 +1828,18 @@ module BlueCollarSystems
         nil
       end
 
+      # Points sort by their "x,y,z" text. The text is built from the same
+      # exact number tokens (canonical_number(n).to_s), so the order is
+      # unchanged; the tokens are reused instead of formatting every repeated
+      # coordinate again.
       def ordered_points(values)
         points = Array(values).map { |value| vertex_position(value) }.compact
-        points.map { |point| point.map { |number| canonical_number(number) } }.sort_by do |point|
-          point.join(',')
+        return [] if points.empty?
+        rows = points.map do |point|
+          [point.map { |number| canonical_number(number) },
+           point.map { |number| canonical_number_token(number) }.join(',')]
         end
+        rows.sort_by { |row| row[1] }.map { |row| row[0] }
       end
 
       def edge_points(entity)
@@ -1709,11 +1856,10 @@ module BlueCollarSystems
             vertices = loop.respond_to?(:vertices) ? loop.vertices : []
             ordered_points(vertices)
           end
-          return loops.reject { |points| points.empty? }.sort_by do |points|
-            canonical_json_order_key(
-              points, canonical_json_cache, write_canonical_cache
-            )
-          end
+          return sort_canonical_payloads(
+            loops.reject { |points| points.empty? },
+            canonical_json_cache, write_canonical_cache
+          )
         end
         vertices = entity.respond_to?(:vertices) ? entity.vertices : []
         points = ordered_points(vertices)
@@ -1762,11 +1908,9 @@ module BlueCollarSystems
                    else
                      Array(child_payloads)
                    end
-        payload[:children] = children.sort_by do |child|
-          canonical_json_order_key(
-            child, canonical_json_cache, write_canonical_cache
-          )
-        end
+        payload[:children] = sort_canonical_payloads(
+          children, canonical_json_cache, write_canonical_cache
+        )
         payload
       end
 
@@ -1849,11 +1993,9 @@ module BlueCollarSystems
                    else
                      Array(child_payloads)
                    end
-        payload[:children] = children.sort_by do |child|
-          canonical_json_order_key(
-            child, canonical_json_cache, write_canonical_cache
-          )
-        end
+        payload[:children] = sort_canonical_payloads(
+          children, canonical_json_cache, write_canonical_cache
+        )
         payload
       end
 
@@ -2105,15 +2247,20 @@ module BlueCollarSystems
         unless root_style_cache_keys.nil? || root_style_cache_keys.is_a?(Hash)
           raise ContractError, 'physical root style cache keys must be a Hash'
         end
+        if cache.nil?
+          # A fresh read for this call only: every face and edge of each
+          # shared component definition is still read, once per definition
+          # instead of once per placement, and every placement's own
+          # transform, bounds and style are read as before. The bytes and the
+          # hashes are the same as walking every placement in full.
+          cache = {}
+          canonical_json_cache = {} if canonical_json_cache.nil?
+        end
         physical_evidence_from_trees(
           values.map do |entity|
-            if cache
-              physical_entity_tree_with_definition_cache(
-                entity, cache, canonical_json_cache, root_style_cache_keys
-              )
-            else
-              physical_entity_tree(entity)
-            end
+            physical_entity_tree_with_definition_cache(
+              entity, cache, canonical_json_cache, root_style_cache_keys
+            )
           end,
           canonical_json_cache
         )
