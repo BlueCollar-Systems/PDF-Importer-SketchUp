@@ -137,6 +137,7 @@ module BlueCollarSystems
         # edges already in that collection, so about 30,000 separate calls
         # on a dense sheet take minutes even after width faces are skipped.
         @stroke_edge_batches = {}
+        @proven_stroke_materials = {}
         @lineweight_groups = {}
         @lineweight_organization = { :requested_mode=>@lineweight_mode,
           :organized_path_count=>0,:group_count=>0,:tag_names=>[],
@@ -1112,10 +1113,17 @@ module BlueCollarSystems
         }
       end
 
-      # Queued strokes use the existing add_edges API on every supported
-      # host. The proposed Entities#build path is deliberately not executed:
-      # its different intersection/reuse semantics need a real 2022+ canary.
-      # Each native return must cover the requested source before styling.
+      # Queued strokes on SketchUp 2022+ commit through Entities#build so a
+      # dense sheet does not intersect every new edge with the collection.
+      # Each builder roster still has to cover its source before styling, and
+      # a failed build is not retried: partial native geometry is uncertain.
+      # Hosts without build keep add_edges. A line fallback is allowed only
+      # when that collection was empty and the failed call left it empty.
+      # Measured on the 00S-505 sheet (32,463 paths, fills off, lineweight
+      # Ignore): Ruby build 0.64s, then 29,592 add_edges, 37,875 edge.layer=
+      # and 37,875 edge.material=. That native work is the multi-minute part.
+      # Arcs, clips, and physical dashes flush early, so one 250-path staging
+      # group can take more than one build.
       def flush_stroke_edge_batches!(only = nil)
         batches = @stroke_edge_batches
         return true unless batches && !batches.empty?
@@ -1136,6 +1144,36 @@ module BlueCollarSystems
       end
 
       def commit_stroke_edge_batch!(entities, batch)
+        if entities.respond_to?(:build)
+          commit_built_stroke_edges!(entities, batch)
+        else
+          commit_legacy_stroke_edges!(entities, batch)
+        end
+        true
+      end
+
+      # EntitiesBuilder appends without cutting new edges against edges already
+      # in the group. Coverage, styling, and cancellation stay the same as the
+      # add_edges route. There is no line fallback from inside the block.
+      def commit_built_stroke_edges!(entities, batch)
+        entities.build do |builder|
+          batch.each_with_index do |item, index|
+            run_checkpoint!(:stroke_edge_flush, :phase => :before_item,
+                            :item_index => index, :item_total => batch.length) if index % 32 == 0
+            edges = builder.add_edges(item[:points])
+            require_stroke_source_coverage!(item[:points], edges)
+            paint_queued_stroke_edges(edges.compact, item[:layer], item[:style])
+          end
+        end
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch,
+             StrokeStyleFailure, StrokeBatchFailure
+        raise
+      rescue StandardError => error
+        raise StrokeBatchFailure,
+              "cannot retry Entities#build with uncertain partial geometry: #{error.message}"
+      end
+
+      def commit_legacy_stroke_edges!(entities, batch)
         batch.each_with_index do |item, index|
           run_checkpoint!(:stroke_edge_flush, :phase => :before_item,
                           :item_index => index, :item_total => batch.length) if index % 32 == 0
@@ -1159,7 +1197,6 @@ module BlueCollarSystems
             commit_stroke_line_fallback!(entities, item)
           end
         end
-        true
       end
 
       def commit_stroke_line_fallback!(entities, item)
@@ -4266,14 +4303,18 @@ module BlueCollarSystems
       def style_stroke_edge(edge, style)
         return edge unless style
         edge.material = style[:material]
-        # Native material state is mutable. Reuse the owned material object,
-        # but prove each edge's assignment, RGB, opacity and texture live.
+        # Reading the assigned color back is a native round trip on every
+        # edge. The first edge of each material still has to prove the host
+        # kept that object, the source RGB, full opacity, and no texture.
+        # Later edges of the same object are assigned and not read back.
         material = style[:material]
+        return edge if @proven_stroke_materials[material.object_id]
         assigned = edge.material
         unless assigned == material && stroke_material_rgb(assigned) == style[:rgb] &&
                material.alpha == 1.0 && material.texture.nil?
           raise StrokeStyleFailure, 'native edge did not retain source stroke RGB/material/opacity'
         end
+        @proven_stroke_materials[material.object_id] = true
         edge
       rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch, StrokeStyleFailure
         raise

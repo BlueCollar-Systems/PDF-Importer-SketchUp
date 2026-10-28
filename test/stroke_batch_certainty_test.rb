@@ -15,9 +15,14 @@ class StrokeBatchCertaintyTest < Minitest::Test
       @native_calls = @line_calls = @build_calls = 0
     end
 
-    def build
-      @build_calls += 1
-      raise 'unqualified modern build route must not execute'
+    def advertise_build!
+      holder = self
+      define_singleton_method(:build) do |&block|
+        @build_calls += 1
+        bulk = Object.new
+        bulk.define_singleton_method(:add_edges) { |points| holder.add_edges(points) }
+        block.call(bulk)
+      end
     end
 
     def add_edges(points)
@@ -80,14 +85,69 @@ class StrokeBatchCertaintyTest < Minitest::Test
     builder.send(:flush_stroke_edge_batches!)
   end
 
-  def test_advertised_modern_api_is_not_executed_by_final_legacy_candidate
+  def test_host_without_build_keeps_the_verified_add_edges_route
     entities, builder, style = fixture
+    refute entities.respond_to?(:build)
     queue(builder, entities, [p3(0), p3(1), p3(2)], style)
     assert flush(builder)
     assert_equal 0, entities.build_calls
     assert_equal 1, entities.native_calls
     assert_equal 2, entities.length
     assert entities.to_a.all? { |e| e.material == style[:material] }
+  end
+
+  def test_advertised_build_covers_source_and_does_not_retry
+    entities, builder, style = fixture
+    entities.advertise_build!
+    queue(builder, entities, [p3(0), p3(1), p3(2)], style)
+    assert flush(builder)
+    assert_equal 1, entities.build_calls
+    assert_equal 1, entities.native_calls
+    assert_equal 2, entities.length
+    assert entities.to_a.all? { |edge| edge.material == style[:material] }
+
+    entities, builder, style = fixture
+    entities.advertise_build!
+    entities.response = proc do |es, _points|
+      [es.append_edge(p3(0), p3(0.25)), es.append_edge(p3(0.5), p3(1))]
+    end
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_equal 0, entities.line_calls
+    assert entities.to_a.all? { |edge| edge.material.nil? }
+
+    entities, builder, style = fixture
+    entities.advertise_build!
+    entities.response = :no_change_error
+    queue(builder, entities, [p3(0), p3(1)], style)
+    error = assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_match(/Entities#build/, error.message)
+    assert_equal 0, entities.line_calls
+    assert_equal 1, entities.build_calls
+
+    entities, builder, style = fixture
+    entities.advertise_build!
+    old = entities.append_edge(p3(10), p3(11))
+    foreign = Base::Material.new
+    old.material = foreign
+    entities.response = :partial_error
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_equal 0, entities.line_calls
+    assert_includes entities.to_a, old
+    assert_same foreign, old.material
+    assert_nil entities.to_a.last.material
+
+    error = IMP::ImportRunControl::ImportCancelled.new([1], 2, { :stage => :build })
+    entities, builder, style = fixture
+    entities.advertise_build!
+    entities.response = error
+    queue(builder, entities, [p3(0), p3(1)], style)
+    actual = assert_raises(IMP::ImportRunControl::ImportCancelled) { flush(builder) }
+    assert_same error, actual
+    assert_equal 0, entities.line_calls
+    assert_equal 1, entities.build_calls
+    assert_empty builder.instance_variable_get(:@stroke_edge_batches)
   end
 
   def test_mixed_valid_and_nil_cannot_silently_drop_nonzero_source

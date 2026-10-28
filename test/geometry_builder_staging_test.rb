@@ -348,10 +348,12 @@ class GeometryBuilderStagingTest < Minitest::Test
     assert_equal [0.0, 499.0 / 72.0], endpoints
   end
 
-  # The final candidate keeps the supported add_edges route even when a
-  # host advertises build. A real 2022+ native canary is not available here;
-  # retain exact staging/style behavior without claiming that API's topology.
-  def test_heavy_page_retains_legacy_api_and_staging_on_build_capable_host
+  # 00S-505 measured on current main, fills off, lineweight Ignore:
+  # Ruby geometry build 0.64s, then 29,592 add_edges plus 37,875 edge.layer=
+  # and 37,875 edge.material=. Hosts with Entities#build commit each 250-path
+  # staging group in one build. The builder's edges still have to cover the
+  # source before they are colored, and the batch groups stay.
+  def test_heavy_page_uses_one_bulk_builder_call_per_staging_group
     counter = { :calls => 0 }
     Entities.bulk_build_counter = counter
     model = Model.new
@@ -364,7 +366,7 @@ class GeometryBuilderStagingTest < Minitest::Test
     result = builder.build
     assert_equal 600, result[:edges]
     assert_equal 3, result[:geometry_staging][:batch_count]
-    assert_equal 0, counter[:calls]
+    assert_equal 3, counter[:calls]
     groups = model.active_entities.to_a.grep(Group)
     assert_equal 3, groups.length
     edges = groups.flat_map { |group| group.entities.to_a.grep(Edge) }

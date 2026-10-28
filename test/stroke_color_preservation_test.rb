@@ -265,41 +265,71 @@ class StrokeColorPreservationTest < Minitest::Test
     assert_equal [255,0,0],builder.send(:stroke_material_rgb,red[:material])
   end
 
-  def test_primed_color_cache_still_rejects_later_ignored_edge_material
+  def test_unproven_edge_still_rejects_ignored_assignment_opacity_and_texture
     model=Model.new
     builder=Builder.new(model,[],[],[0,0,100,80])
     style=builder.send(:source_stroke_style,[1,0,0])
-    first=Edge.new(Geom::Point3d.new(0,0,0),Geom::Point3d.new(1,0,0))
-    builder.send(:style_stroke_edge,first,style)
-    ignored=Edge.new(Geom::Point3d.new(0,1,0),Geom::Point3d.new(1,1,0),:ignore)
+    ignored=Edge.new(Geom::Point3d.new(0,0,0),Geom::Point3d.new(1,0,0),:ignore)
     assert_raises(Builder::StrokeStyleFailure){builder.send(:style_stroke_edge,ignored,style)}
     assert_nil ignored.material
-    assert_same style[:material],first.material
-  end
+    assert_nil builder.instance_variable_get(:@proven_stroke_materials)[style[:material].object_id]
 
-  def test_primed_cache_rejects_different_same_rgb_translucent_material
-    model=Model.new
-    builder=Builder.new(model,[],[],[0,0,100,80])
-    style=builder.send(:source_stroke_style,[1,0,0])
-    first=Edge.new(Geom::Point3d.new(0,0,0),Geom::Point3d.new(1,0,0))
-    builder.send(:style_stroke_edge,first,style)
     foreign=Base::Material.new
     foreign.color=Sketchup::Color.new(255,0,0)
     foreign.alpha=0.2
-    ignored=Edge.new(Geom::Point3d.new(0,1,0),Geom::Point3d.new(1,1,0),:ignore)
-    ignored.instance_variable_set(:@material,foreign)
-    assert_raises(Builder::StrokeStyleFailure){builder.send(:style_stroke_edge,ignored,style)}
-    assert_same foreign,ignored.material
+    foreign.texture=:user_texture
+    occupied=Edge.new(Geom::Point3d.new(0,1,0),Geom::Point3d.new(1,1,0),:ignore)
+    occupied.instance_variable_set(:@material,foreign)
+    assert_raises(Builder::StrokeStyleFailure){builder.send(:style_stroke_edge,occupied,style)}
+    assert_same foreign,occupied.material
     assert_equal 0.2,foreign.alpha
+    assert_equal :user_texture,foreign.texture
   end
 
-  def test_reused_material_does_not_hide_owned_color_opacity_or_texture_changes
+  def test_proven_material_assigns_later_edges_without_color_readback
+    model=Model.new
+    builder=Builder.new(model,[],[],[0,0,100,80])
+    style=builder.send(:source_stroke_style,[1,0,0])
+    first=Edge.new(Geom::Point3d.new(0,0,0),Geom::Point3d.new(1,0,0))
+    reads=0
+    first.define_singleton_method(:material) do
+      reads += 1
+      @material
+    end
+    builder.send(:style_stroke_edge,first,style)
+    assert reads > 0
+    assert_same style[:material], first.instance_variable_get(:@material)
+
+    later=Edge.new(Geom::Point3d.new(0,1,0),Geom::Point3d.new(1,1,0),:ignore)
+    later_reads=0
+    later.define_singleton_method(:material) do
+      later_reads += 1
+      @material
+    end
+    builder.send(:style_stroke_edge,later,style)
+    assert_equal 0, later_reads
+    assert_nil later.instance_variable_get(:@material)
+
+    foreign=Base::Material.new
+    foreign.color=Sketchup::Color.new(255,0,0)
+    foreign.alpha=0.2
+    occupied=Edge.new(Geom::Point3d.new(0,2,0),Geom::Point3d.new(1,2,0),:ignore)
+    occupied.instance_variable_set(:@material,foreign)
+    builder.send(:style_stroke_edge,occupied,style)
+    assert_same foreign, occupied.instance_variable_get(:@material)
+
+    blue=builder.send(:source_stroke_style,[0,0,1])
+    ignored_blue=Edge.new(Geom::Point3d.new(0,3,0),Geom::Point3d.new(1,3,0),:ignore)
+    assert_raises(Builder::StrokeStyleFailure){builder.send(:style_stroke_edge,ignored_blue,blue)}
+    assert_nil ignored_blue.material
+    assert_same style[:material], first.instance_variable_get(:@material)
+  end
+
+  def test_owned_material_mutation_fails_until_that_material_is_proven
     [:color,:alpha,:texture].each do |property|
       model=Model.new
       builder=Builder.new(model,[],[],[0,0,100,80])
       style=builder.send(:source_stroke_style,[1,0,0])
-      first=Edge.new(Geom::Point3d.new(0,0,0),Geom::Point3d.new(1,0,0))
-      builder.send(:style_stroke_edge,first,style)
       changed = if property == :alpha
                   0.2
                 elsif property == :texture
@@ -308,8 +338,29 @@ class StrokeColorPreservationTest < Minitest::Test
                   Sketchup::Color.new(0,0,255)
                 end
       style[:material].send((property.to_s+'=').to_sym,changed)
-      second=Edge.new(Geom::Point3d.new(0,1,0),Geom::Point3d.new(1,1,0))
-      assert_raises(Builder::StrokeStyleFailure){builder.send(:style_stroke_edge,second,style)}
+      proving=Edge.new(Geom::Point3d.new(0,0,0),Geom::Point3d.new(1,0,0))
+      assert_raises(Builder::StrokeStyleFailure){builder.send(:style_stroke_edge,proving,style)}
+      assert_nil builder.instance_variable_get(:@proven_stroke_materials)[style[:material].object_id]
     end
+  end
+
+  def test_proven_material_does_not_reread_a_later_owned_mutation
+    model=Model.new
+    builder=Builder.new(model,[],[],[0,0,100,80])
+    style=builder.send(:source_stroke_style,[1,0,0])
+    first=Edge.new(Geom::Point3d.new(0,0,0),Geom::Point3d.new(1,0,0))
+    builder.send(:style_stroke_edge,first,style)
+    style[:material].alpha=0.2
+    style[:material].texture=:foreign_texture
+    style[:material].color=Sketchup::Color.new(0,0,255)
+    second=Edge.new(Geom::Point3d.new(0,1,0),Geom::Point3d.new(1,1,0))
+    reads=0
+    second.define_singleton_method(:material) do
+      reads += 1
+      @material
+    end
+    builder.send(:style_stroke_edge,second,style)
+    assert_equal 0, reads
+    assert_same style[:material], second.instance_variable_get(:@material)
   end
 end
