@@ -36,6 +36,10 @@ module BlueCollarSystems
 
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
+      # SketchUp merges vertices closer than 0.001 inch, so a native stroke
+      # endpoint can move by up to this much onto an existing vertex
+      # (measured on SketchUp 2017 handrail sheets: 0.00044 in).
+      STROKE_NATIVE_VERTEX_TOLERANCE = 0.001
       # Heavy pages construct inside isolated 250-path groups so SketchUp is
       # not merging every add_edges into a live 36k-edge parent. A host canary
       # of one giant group + one explode made construction and explode both
@@ -1244,10 +1248,10 @@ module BlueCollarSystems
         (segment[0] <=> segment[1]) == -1 ? segment : segment.reverse
       end
 
-      # No tolerance increase or coordinate rounding is used. Usually the
-      # native/source segment keys already match. For native splits or
-      # collinear coalescing, compare exact interval unions grouped by their
-      # supporting lines: O(E log E), not a scan of every source/native pair.
+      # Usually the native/source segment keys already match. For native
+      # splits or collinear coalescing, compare exact interval unions grouped
+      # by their supporting lines: O(E log E). Only when that fails is
+      # SketchUp's own vertex snapping allowed for (see the fallback below).
       def require_stroke_source_coverage!(points, edges)
         unless edges.is_a?(Array)
           raise StrokeBatchFailure, 'native add_edges did not return an edge roster'
@@ -1309,10 +1313,68 @@ module BlueCollarSystems
           end
           break unless covered
         end
-        unless covered
+        unless covered || stroke_coverage_within_vertex_tolerance?(source, actual)
           raise StrokeBatchFailure, 'native stroke roster does not exactly cover its source intervals'
         end
         true
+      end
+
+      # Fallback after the exact comparison: every native edge must lie on a
+      # source segment, and the native edges on each source segment must
+      # cover it end to end, both within SketchUp's own vertex tolerance.
+      # A gap or an extra piece longer than that tolerance still fails.
+      def stroke_coverage_within_vertex_tolerance?(source, actual)
+        tol = STROKE_NATIVE_VERTEX_TOLERANCE
+        return false if source.empty? || actual.empty?
+        lines = source.map do |a, b|
+          d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+          length = Math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+          [a, d.map { |v| v / length }, length]
+        end
+        intervals = Array.new(lines.length) { [] }
+        actual.each_with_index do |(p, q), index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :coverage_tolerance,
+                          :edge_index => index) if index % 64 == 0
+          placed = false
+          lines.each_with_index do |(origin, unit, length), line_index|
+            tp = stroke_line_parameter(origin, unit, p)
+            tq = stroke_line_parameter(origin, unit, q)
+            next unless tp >= -tol && tp <= length + tol && tq >= -tol && tq <= length + tol
+            next unless stroke_line_distance(origin, unit, p, tp) <= tol &&
+                        stroke_line_distance(origin, unit, q, tq) <= tol
+            intervals[line_index] << [tp, tq].minmax
+            placed = true
+          end
+          return false unless placed
+        end
+        lines.each_with_index do |(_origin, _unit, length), line_index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :coverage_tolerance,
+                          :line_index => line_index) if line_index % 64 == 0
+          reach = nil
+          intervals[line_index].sort.each do |low, high|
+            if reach.nil?
+              return false if low > tol
+              reach = high
+            else
+              return false if low > reach + tol
+              reach = high if high > reach
+            end
+          end
+          return false if reach.nil? || reach < length - tol
+        end
+        true
+      end
+
+      def stroke_line_parameter(origin, unit, point)
+        (point[0] - origin[0]) * unit[0] + (point[1] - origin[1]) * unit[1] +
+          (point[2] - origin[2]) * unit[2]
+      end
+
+      def stroke_line_distance(origin, unit, point, t)
+        dx = point[0] - (origin[0] + unit[0] * t)
+        dy = point[1] - (origin[1] + unit[1] * t)
+        dz = point[2] - (origin[2] + unit[2] * t)
+        Math.sqrt(dx * dx + dy * dy + dz * dz)
       end
 
       def stroke_line_interval_unions(segments)
