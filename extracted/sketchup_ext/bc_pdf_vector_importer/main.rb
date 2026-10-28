@@ -177,6 +177,36 @@ module BlueCollarSystems
       raise
     end
 
+    # Temp copies of the user's drawing made for one import (the
+    # font-embedded PDF used for glyph rendering) are deleted when that
+    # import ends: after success, a failure or Esc. Never raises.
+    def self.release_import_temp_copies!
+      SvgTextRenderer.release_embedded_font_copies!
+    rescue StandardError => e
+      begin
+        Logger.warn('Pipeline', "temp copy cleanup failed: #{e.message}")
+      rescue StandardError
+      end
+      nil
+    end
+
+    # The bundled Ghostscript content check and the Poppler symlink walk are
+    # remembered for one import only: opened when the import starts and
+    # forgotten when it ends (success, failure or Esc). The next import runs
+    # each full check again, so a helper changed between imports is caught.
+    # Neither call ever raises.
+    def self.open_import_helper_checks!
+      DependencyResolver.open_import_checks!
+    rescue StandardError
+      false
+    end
+
+    def self.close_import_helper_checks!(opened)
+      DependencyResolver.close_import_checks! if opened
+    rescue StandardError
+      nil
+    end
+
     def self.import_result_status(stats)
       return 'failed' unless stats
       return 'success' unless stats.is_a?(Hash)
@@ -198,6 +228,7 @@ module BlueCollarSystems
     end
 
     def self.report_pipeline_progress(opts, phase, detail = nil)
+      ImportRunControl.heartbeat!(:pipeline_step)
       return false unless opts.is_a?(Hash)
       callback = opts[:progress_callback]
       return false unless callback.respond_to?(:call)
@@ -291,7 +322,17 @@ module BlueCollarSystems
       result
     end
 
-    # Progress on SketchUp's status bar ("... Esc to cancel"). Batch/host
+    # Status-bar writes are rate-limited: at most one per this many seconds.
+    STATUS_TEXT_MIN_INTERVAL_SECONDS = 2.0
+    # SketchUp 2017 can repaint a lot for one status write once a big solid
+    # text model exists. A write that took long pushes the next one further
+    # out (this many times its own duration), so status writes stay under
+    # about 2.5% of the import's time.
+    STATUS_TEXT_COST_FACTOR = 40.0
+    STATUS_TEXT_MAX_INTERVAL_SECONDS = 60.0
+
+    # Progress on SketchUp's status bar ("Importing page 1 of 1: building
+    # text 120 of 557 (about 30 s left), press Esc to cancel"). Batch/host
     # jobs stream progress JSON instead and never touch the status bar.
     def self.import_status_sink(opts)
       return opts[:status_sink] if opts[:status_sink]
@@ -303,15 +344,79 @@ module BlueCollarSystems
       # Every controller checkpoint still publishes and probes Escape. Only
       # expensive GUI writes are limited, using a clock unaffected by wall time.
       last_status_at = nil
+      interval = STATUS_TEXT_MIN_INTERVAL_SECONDS
       lambda do |snapshot|
         if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
           now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          next true if last_status_at && now - last_status_at < 2.0
+          next true if last_status_at && now - last_status_at < interval
           Sketchup.status_text = ImportDialog.progress_status(snapshot)
-          last_status_at = now
+          finished = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          heartbeat = ImportRunControl.active_heartbeat
+          heartbeat.record_status_write(finished - now) if
+            heartbeat.respond_to?(:record_status_write)
+          cost = (finished - now) * STATUS_TEXT_COST_FACTOR
+          interval = [[STATUS_TEXT_MIN_INTERVAL_SECONDS, cost].max,
+                      STATUS_TEXT_MAX_INTERVAL_SECONDS].min
+          last_status_at = finished
         end
         true
       end
+    end
+
+    # A named step of the page build on the status line (through the run
+    # controller, so it shares the sink's rate limit and stays off the
+    # status bar in batch jobs). Never reads Esc and never raises.
+    def self.pipeline_status!(opts, stage, detail = {})
+      controller = opts.is_a?(Hash) ? opts[:run_controller] : nil
+      if controller && controller.respond_to?(:progress)
+        controller.progress(stage, detail)
+      else
+        ImportRunControl.heartbeat!(stage)
+      end
+      true
+    rescue StandardError => e
+      Logger.warn('Pipeline', "progress status failed: #{e.message}")
+      false
+    end
+
+    # The window heartbeat's own measurements, for the import report.
+    def self.record_ui_responsiveness!(stats)
+      return unless stats.is_a?(Hash)
+      heartbeat = ImportRunControl.active_heartbeat
+      return unless heartbeat && heartbeat.respond_to?(:summary)
+      stats[:ui_responsiveness] = heartbeat.summary
+    rescue StandardError => e
+      Logger.warn('Pipeline', "window heartbeat summary failed: #{e.message}")
+    end
+
+    def self.with_import_heartbeat(heartbeat)
+      ImportRunControl.with_ui_heartbeat(heartbeat) { yield }
+    ensure
+      log_ui_responsiveness(heartbeat)
+    end
+
+    def self.log_ui_responsiveness(heartbeat)
+      return unless heartbeat && heartbeat.respond_to?(:summary)
+      data = heartbeat.summary
+      slow = Array(data[:slow_gaps]).map do |gap|
+        "#{gap[:gap_ms]} ms after #{gap[:after] || 'start'} before " \
+          "#{gap[:before] || 'end'} at #{gap[:at_ms]} ms"
+      end
+      Logger.info(
+        'Pipeline',
+        "Window heartbeat (#{data[:backend]}): #{data[:pulses]} peeks / " \
+          "#{data[:requests]} progress points over #{data[:active_ms]} ms; " \
+          "longest gap #{data[:longest_gap_ms]} ms after " \
+          "#{data[:longest_gap_after] || 'start'} before " \
+          "#{data[:longest_gap_before] || 'end'}; gaps over 1 s: " \
+          "#{data[:gaps_over_1s]}, over 5 s: #{data[:gaps_over_5s]}; " \
+          "status writes #{data[:status_writes]} (#{data[:status_write_ms]} ms, " \
+          "longest #{data[:status_write_max_ms]} ms)" \
+          "#{slow.empty? ? '' : "; slow: #{slow.join(' | ')}"}"
+      )
+      Logger.flush_log
+    rescue StandardError
+      nil
     end
 
     # Imports that cannot resume (Import Text = No, Raster, pages not
@@ -333,6 +438,7 @@ module BlueCollarSystems
           ImportRunControl::EscapeCancelProbe.new,
         :status_sink => import_status_sink(opts)
       )
+      ImportRunControl.active_controller = inner_opts[:run_controller]
       run_pipeline(model, source_path, inner_opts)
     rescue ImportRunControl::ImportCancelled => error
       # The inner pipeline confirms rollback before this result is built.
@@ -1442,6 +1548,7 @@ module BlueCollarSystems
           target_entities, svg_document[:svg], media_box, item, mode,
           :scale => opts[:scale],
           :svg_page_box => render_box,
+          :page_rotation => page_rotation,
           :y_offset => 0.0,
           :layer => text_layer,
           :peer_items => peer_items,
@@ -1524,11 +1631,13 @@ module BlueCollarSystems
     end
 
     def self.prepare_item_page_match_and_peer_boxes(
-      svg, media_box, text_items, opts, render_box, y_offset = 0.0
+      svg, media_box, text_items, opts, render_box, y_offset = 0.0,
+      page_rotation = 0
     )
       base_opts = {
         :scale => opts[:scale],
         :svg_page_box => render_box,
+        :page_rotation => page_rotation,
         :y_offset => y_offset.to_f
       }
       placed = CairoGlyphSource.model_space_loops(svg, media_box, base_opts)
@@ -1683,6 +1792,7 @@ module BlueCollarSystems
         cache[key] = ItemRasterSourceBounds.prepare(
           svg_document, items.values, media_box, render_box, rotation,
           page_num, source_sha)
+        ImportRunControl.heartbeat!(:page_picture)
       end
       sid = RepresentationFidelity.source_span_id(item)
       evidence = cache[key][sid]
@@ -1720,11 +1830,17 @@ module BlueCollarSystems
       precomputed_match, precomputed_peer_boxes,
         precomputed_placed, precomputed_pens =
         prepare_item_page_match_and_peer_boxes(
-          svg_document[:svg], media_box, text_items, opts, render_box, 0.0
+          svg_document[:svg], media_box, text_items, opts, render_box, 0.0,
+          page_rotation
         )
       glyph_component_cache = {}
 
+      step_down_index = 0
       proofs_by_id.each do |source_id, initial_proof|
+        ImportRunControl.progress!(
+          :text_step_down, step_down_index, proofs_by_id.length, page_num
+        )
+        step_down_index += 1
         item = items_by_id[source_id]
         raise RepresentationFidelity::ContractError,
               "fallback proof has no source item #{source_id}" unless item
@@ -1812,6 +1928,7 @@ module BlueCollarSystems
       result = Svg3DTextRenderer.render_svg(
         target_entities, svg_document[:svg], media_box, failed_items,
         :scale => opts[:scale], :svg_page_box => render_box,
+        :page_rotation => page_rotation,
         :y_offset => 0.0, :depth => depth, :layer => text_layer,
         :model => model,
         :page_number => page_num,
@@ -1877,7 +1994,8 @@ module BlueCollarSystems
       precomputed_match, precomputed_peer_boxes,
         precomputed_placed, precomputed_pens =
         prepare_item_page_match_and_peer_boxes(
-          svg_document[:svg], media_box, label_peer_items, opts, render_box, 0.0
+          svg_document[:svg], media_box, label_peer_items, opts, render_box, 0.0,
+          page_rotation
         )
       glyph_component_cache = {}
 
@@ -2028,9 +2146,11 @@ module BlueCollarSystems
                                           page_num, item, media_box, opts,
                                           import_start, y_offset,
                                           page_rotation = 0, source_bounds = nil)
+      ImportRunControl.heartbeat!(:page_picture)
       parent = target_entities
       delivery = nil
       before = RepresentationFidelity.snapshot(parent)
+      ImportRunControl.heartbeat!(:page_picture)
       opts.delete(:item_raster_failure_evidence)
       delivery = import_item_as_raster(
         model, parent, pdf_path, page_num, item, media_box, opts,
@@ -2105,6 +2225,11 @@ module BlueCollarSystems
         :real_raster_verified => true
       }
     rescue StandardError => e
+      # Esc (and the other stops that end the import) is never an item
+      # Raster failure. Wrapped as a ContractError it would look like one:
+      # keep_page_on_text_failure would list the item and the import would
+      # go on, with the Esc already read by the background-render wait.
+      terminal = terminal_import_error?(e)
       if parent && before
         begin
           current = RepresentationFidelity.snapshot(parent)
@@ -2113,11 +2238,14 @@ module BlueCollarSystems
           )
           RepresentationFidelity.erase_owned!(parent, owned) unless owned.empty?
         rescue StandardError => cleanup_error
+          # The stop still wins: the stopped import rolls its operation back.
+          raise e if terminal
           raise RepresentationFidelity::ContractError,
                 "terminal item raster verification failed: #{e.message}; " \
                 "owned cleanup failed: #{cleanup_error.message}"
         end
       end
+      raise e if terminal
       raise e if e.is_a?(RepresentationFidelity::ContractError)
       raise RepresentationFidelity::ContractError,
             "terminal item raster verification failed: #{e.message}"
@@ -2362,7 +2490,10 @@ module BlueCollarSystems
       end
       physical_definition_tree_cache = {}
       physical_canonical_json_cache = {}
-      rows.each do |row|
+      evidence_total = rows.length + physical_rows.length
+      rows.each_with_index do |row, row_index|
+        ImportRunControl.progress!(:text_evidence, row_index, evidence_total,
+                                   page_num)
         item = items_by_id[row[:source_span_id].to_s]
         unless item
           raise RepresentationFidelity::ContractError,
@@ -2474,7 +2605,10 @@ module BlueCollarSystems
           :width => row[:width], :height => row[:height], :depth => row[:depth]
         }
       end
-      physical_rows.each do |row|
+      physical_rows.each_with_index do |row, row_index|
+        ImportRunControl.progress!(
+          :text_evidence, rows.length + row_index, evidence_total, page_num
+        )
         Svg3DTextRenderer.finalize_source_unit_evidence!(
           row, page_rotation, physical_definition_tree_cache,
           physical_canonical_json_cache
@@ -3133,9 +3267,10 @@ module BlueCollarSystems
       nil
     end
 
+    # Not SecureRandom: see ImportRunControl.unique_uuid (a 6.7 s freeze
+    # on the first call in a SketchUp 2017 session).
     def self.new_import_session_id
-      require 'securerandom'
-      SecureRandom.uuid
+      ImportRunControl.unique_uuid
     rescue StandardError
       "su-import-#{Process.pid}-#{Time.now.to_i}"
     end
@@ -3334,7 +3469,23 @@ module BlueCollarSystems
       highest_text_z = context[:highest_text_z]
       source_units = Array(opts[:source_units])
       inventory = { :white_paths => [], :opaque_paths => [], :glyphs => [] }
-      unless roots.all? { |root| root[:group].typename.to_s == 'Image' }
+      # Solid (positive-depth) text is already in front of every page fill;
+      # collect_text_faces drops such a root whole. Leave it out of the face
+      # walk. With no flat text left, no fill can be cut whatever its colour,
+      # so the page SVG is not parsed again and the fills are not walked.
+      ink_roots = roots.reject { |root| PlanarWhiteKnockout.solid_text_root?(root) }
+      ink_roots = roots if ink_roots.length == roots.length
+      if ink_roots.empty?
+        report = PlanarWhiteKnockout.empty_result(0).merge(
+          :skipped => 'no_flat_text', :solid_text_roots => roots.length,
+          :source_masks => masks.length)
+        PlanarWhiteKnockout.log_progress!(opts, :page_completed,
+          { :composed_groups => 0, :unchanged_no_ink_groups => 0,
+            :failed_groups => 0, :skipped => 'no_flat_text' }, true)
+        return { :report => report, :highest_text_z => highest_text_z,
+                 :final_page_crops => [] }
+      end
+      unless ink_roots.all? { |root| root[:group].typename.to_s == 'Image' }
         document = opts[:svg_provider].call
         unless document && !document[:svg].to_s.empty?
           raise RepresentationFidelity::ContractError,
@@ -3350,6 +3501,7 @@ module BlueCollarSystems
         PlanarWhiteKnockout.log_progress!(opts, :source_inventory_started, {}, true)
         inventory = SvgPaintOrder.build(document[:svg], media_box,
           :scale => opts[:scale], :svg_page_box => opts[:svg_page_box], :y_offset => 0.0,
+          :page_rotation => opts[:page_rotation],
           :run_controller => opts[:run_controller], :page_number => opts[:page_number])
         run_control_checkpoint!(opts, :white_mask_inventory,
           :page => opts[:page_number], :completed => 1, :total => 1)
@@ -3373,13 +3525,14 @@ module BlueCollarSystems
       control_opts[:run_controller] = PlanarWhiteKnockout.progress_controller(
         opts[:run_controller], control_opts)
       PlanarWhiteKnockout.log_progress!(opts, :source_binding_started,
-        { :source_masks => masks.length, :text_roots => roots.length }, true)
-      bound = SvgPaintBinding.prepare(masks, roots, inventory,
+        { :source_masks => masks.length, :text_roots => ink_roots.length }, true)
+      bound = SvgPaintBinding.prepare(masks, ink_roots, inventory,
         control_opts.merge(:scale => opts[:scale]))
       PlanarWhiteKnockout.log_progress!(opts, :source_binding_completed,
         { :bound_masks => bound[:masks].length, :ink_faces => bound[:ink_faces].length }, true)
-      report = PlanarWhiteKnockout.compose!(bound[:masks], roots,
+      report = PlanarWhiteKnockout.compose!(bound[:masks], ink_roots,
         control_opts.merge(:ink_faces => bound[:ink_faces], :continue_mask_failures => true))
+      report[:solid_text_roots] = roots.length - ink_roots.length
       report[:source_binding] = bound[:binding]
       report[:source_svg_sha256] = source_svg_sha256 if document
       PlanarWhiteKnockout.log_progress!(opts, :page_completed,
@@ -4438,6 +4591,8 @@ module BlueCollarSystems
     end
 
     def self.finalize_import_diagnostics!(path, opts, stats)
+      record_ui_responsiveness!(stats)
+      ImportRunControl.progress!(:import_report)
       report = QAReport.build_from_stats(path, opts, stats)
       report_target = stats[:import_report_path] || QAReport.default_output_path(path)
       parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
@@ -4526,6 +4681,19 @@ module BlueCollarSystems
       stats[:pipeline_performance] ||= {}
       prior = stats[:pipeline_performance][key].to_f
       stats[:pipeline_performance][key] = (prior + elapsed_ms.to_f).round(3)
+    end
+
+    # Adds the block's wall time to stats[:pipeline_performance][key], also
+    # when the block raises, so a host QA report shows where an import spent
+    # its time. Returns the block's value.
+    def self.time_pipeline_stage!(stats, key)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      yield
+    ensure
+      if started
+        record_pipeline_timing!(stats, key,
+          (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0)
+      end
     end
 
     # Ownership-verification counters are accumulated inside RepresentationFidelity
@@ -4769,7 +4937,20 @@ module BlueCollarSystems
       )
     end
 
+    # Every import keeps SketchUp's window answering Windows while it runs
+    # (ImportRunControl::UiHeartbeat), so Windows does not show it as Not
+    # Responding. A nested call (batch import of several files) reuses the
+    # outer heartbeat.
     def self.run_resumable_pipeline(model, source_path, opts)
+      unless ImportRunControl.active_heartbeat
+        heartbeat = (opts.is_a?(Hash) && opts[:ui_heartbeat]) ||
+                    ImportRunControl::UiHeartbeat.new
+        stats = with_import_heartbeat(heartbeat) do
+          run_resumable_pipeline(model, source_path, opts)
+        end
+        return stats
+      end
+      helper_checks = open_import_helper_checks!
       # Decide once, before anything is built. Every page call below carries
       # :large_pdf_confirmed, so no page can put a question in front of the
       # operator mid-import; Esc (run controller) and resume are the safety net.
@@ -4796,9 +4977,11 @@ module BlueCollarSystems
       original_annotation_cache = {}
       begin
         prepared_path, salvage_note = PdfSalvage.prepare_if_needed(source_path)
+        ImportRunControl.heartbeat!(:reading_pdf)
         Logger.info('Pipeline', salvage_note) if salvage_note
         parser = PDFParser.new(prepared_path)
         parser.parse
+        ImportRunControl.heartbeat!(:reading_pdf)
         if parser.page_count.to_i <= 0
           raise RepresentationFidelity::ContractError,
                 'PDF parser returned zero pages; requested representation was not changed.'
@@ -4821,6 +5004,7 @@ module BlueCollarSystems
         identity = ImportRunControl.identity_for(
           source_path, opts, File.dirname(__FILE__)
         )
+        ImportRunControl.heartbeat!(:reading_pdf)
         status_sink = import_status_sink(opts)
         if defined?(BatchHostPolicy) &&
            BatchHostPolicy.respond_to?(:noninteractive?) &&
@@ -4840,6 +5024,7 @@ module BlueCollarSystems
           :status_sink => status_sink,
           :audit => opts[:audit] == true
         )
+        ImportRunControl.active_controller = controller
         controller.begin_request!
         runner = lambda do |page, offset, certifier|
           page_opts = opts.dup
@@ -4930,8 +5115,11 @@ module BlueCollarSystems
           end
           Logger.flush_log
           PdfSalvage.cleanup(prepared_path) if defined?(PdfSalvage)
+          release_import_temp_copies!
         end
       end
+    ensure
+      close_import_helper_checks!(helper_checks)
     end
 
     def self.release_original_annotation_cache!(cache)
@@ -5112,6 +5300,7 @@ module BlueCollarSystems
 
       ocg = OCGParser.new(parser)
       ocg.parse
+      ImportRunControl.heartbeat!(:reading_pdf)
 
       pages = normalized_requested_pages(opts[:pages], parser.page_count)
       opts = opts.merge(:pages => pages)
@@ -5131,6 +5320,7 @@ module BlueCollarSystems
         match_pdf_layers: match_pdf_layers)
       layer_mgr.precreate_pdf_layers(ocg.layer_list)
       layer_mgr.register_imported_names!
+      ImportRunControl.heartbeat!(:reading_pdf)
 
       requested_text_mode = opts[:text_mode]
       requested_text_mode ||= (opts[:use_3d_text] ? :text3d : (opts[:import_text] ? :geometry : :none))
@@ -5172,6 +5362,7 @@ module BlueCollarSystems
       record_source_lineage!(
         stats, source_input_path, path, salvage_note, opts
       )
+      ImportRunControl.heartbeat!(:reading_pdf)
 
       image_extractor = nil
       inline_image_scanner = nil
@@ -5187,6 +5378,7 @@ module BlueCollarSystems
       end
 
       page_fit_bounds = Geom::BoundingBox.new
+      ImportRunControl.heartbeat!(:reading_pdf)
 
       import_start = Time.now
       # Counters describe THIS import. Without a reset they would accumulate across
@@ -5205,10 +5397,6 @@ module BlueCollarSystems
        begin
         page_started = Time.now
         page_text_failures_before = Array(stats[:text_delivery_failures]).length
-        pct = pages.length > 1 ? " (#{((idx.to_f / pages.length) * 100).round}%)" : ""
-        elapsed = (Time.now - import_start).round(1)
-
-        Sketchup.status_text = "PDF Import#{pct} — Page #{page_num}/#{parser.page_count} — Parsing... [#{elapsed}s]"
 
         run_control_checkpoint!(
           opts, :page_parse,
@@ -5251,7 +5439,7 @@ module BlueCollarSystems
                 'requested representation was not changed.'
         end
 
-        Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Reading paths... [#{elapsed}s]"
+        pipeline_status!(opts, :reading_paths, :page => page_num)
         content_parse_started = Time.now
         ocg_map = parser.page_ocg_map(page_num)
         opacity_effects = ContentStreamParser.page_fill_opacity_effects(parser, page_num)
@@ -5466,7 +5654,7 @@ module BlueCollarSystems
         page_zero_ink_proofs = []
         if opts[:import_text]
           text_extract_started = Time.now
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Extracting text... [#{(Time.now - import_start).round(1)}s]"
+          pipeline_status!(opts, :reading_text, :page => page_num)
           strict_text_fidelity = !!opts[:strict_text_fidelity]
           text3d_mode = (requested_text_mode == :text3d)
           strict_text_processing = strict_text_fidelity
@@ -5737,7 +5925,7 @@ module BlueCollarSystems
              source_svg_document[:svg].to_s.length > 0
             source_summary = svg_page_source_summary(
               source_svg_document[:svg], media_box,
-              :svg_page_box => svg_page_box
+              :svg_page_box => svg_page_box, :page_rotation => page_rotation
             )
           elsif explicit_zero_canonical_page_raster
             reason = svg_failure[:reason].to_s
@@ -5869,7 +6057,7 @@ module BlueCollarSystems
           end
         end
 
-        Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — #{paths.length} paths, #{text_items.length} text items... [#{(Time.now - import_start).round(1)}s]"
+        pipeline_status!(opts, :analyzing_page, :page => page_num)
 
         complexity = confirm_page_complexity!(
           opts, page_num, paths.length, text_items.length
@@ -5916,7 +6104,7 @@ module BlueCollarSystems
             "(#{skip[:primitives]} primitives, #{skip[:paths]} paths, #{skip[:stream_mb]}MB streams); " \
             "vector/text import continues.")
         elsif recog_mode != :none
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Analyzing document... [#{(Time.now - import_start).round(1)}s]"
+          pipeline_status!(opts, :analyzing_page, :page => page_num)
           recognition = Recognizer.run(page_data, mode: recog_mode, config: config)
           stats[:mode_used] = recognition[:mode_used]
           if recognition[:generic]
@@ -5936,10 +6124,9 @@ module BlueCollarSystems
           Logger.warn("Pipeline",
             "Page #{page_num}: heavy page (#{paths.length} paths, " \
             "#{total_subpaths} subpaths). Import may take several minutes.")
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Heavy page: #{paths.length} paths (this may take a while)... [#{(Time.now - import_start).round(1)}s]"
-        else
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Building #{paths.length} paths... [#{(Time.now - import_start).round(1)}s]"
         end
+        pipeline_status!(opts, :geometry_path, :page => page_num,
+                         :completed => 0, :total => paths.length)
 
         # ── Hatch detection ──
         source_paths_for_paint_order = paths.dup
@@ -6378,6 +6565,7 @@ module BlueCollarSystems
             representation_parent, svg_document[:svg], media_box, text_items,
             :scale => opts[:scale],
             :svg_page_box => svg_page_box,
+            :page_rotation => page_rotation,
             :y_offset => 0.0,
             :depth => depth,
             :layer => layer_mgr.text_fallback_layer,
@@ -6414,6 +6602,14 @@ module BlueCollarSystems
           end
 
           transition_proofs = Array(text3d_result[:transition_proofs])
+          unless transition_proofs.empty?
+            # Every stepped-down item can end at Raster, which needs one
+            # whole-page render. Start it now so it runs while the 3D Text
+            # evidence is recorded.
+            start_item_raster_page_prefetch!(
+              path, page_num, media_box, page_rotation, page_text_opts
+            )
+          end
           if text3d_result[:no_semantic_text] == true
             # This renderer subset can be empty while canonical source spaces
             # were retained in the page ledger. Do not call that "no text".
@@ -6516,6 +6712,7 @@ module BlueCollarSystems
               )
               end
             end
+            discard_item_raster_page_prefetch!(page_text_opts, page_num)
           end
           end
           end
@@ -6557,7 +6754,7 @@ module BlueCollarSystems
 
         # Render text as precise vector geometry via Poppler/MuPDF SVG.
         if use_svg_text && builder.page_group
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
+          pipeline_status!(opts, :renderer_stage, :page => page_num)
           text_layer = layer_mgr.text_fallback_layer
 
           # A failure in this stage undoes this stage's text only and lists
@@ -6606,7 +6803,7 @@ module BlueCollarSystems
             precomputed_peer_owners =
             prepare_item_page_match_and_peer_boxes(
               svg_document[:svg], media_box, text_items, opts,
-              svg_page_box, 0.0
+              svg_page_box, 0.0, page_rotation
             )
           stats[:pipeline_performance][:item_page_inventory_ms] =
             ((Time.now - inventory_started) * 1000.0).round(3)
@@ -6698,6 +6895,7 @@ module BlueCollarSystems
           source_unit = SvgItemRepresentationRenderer.render_unmatched_svg(
             representation_parent, svg_document[:svg], media_box, text_items,
             requested_text_mode, :scale => opts[:scale], :svg_page_box => svg_page_box,
+            :page_rotation => page_rotation,
             :y_offset => 0.0, :page_number => page_num, :model => model,
             :layer => text_layer, :glyph_component_cache => glyph_component_cache,
             :source_context => svg_source_context(svg_document,page_num,svg_failure),
@@ -6725,11 +6923,13 @@ module BlueCollarSystems
         end
 
         if opts[:cleanup_geometry] && builder.page_group
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Cleaning up geometry... [#{(Time.now - import_start).round(1)}s]"
-          cl = GeometryCleanup.cleanup(builder.page_group.entities,
-            merge_tolerance:    opts[:merge_tolerance],
-            min_edge_length:    opts[:merge_tolerance],
-            cleanup_level:      opts[:cleanup_level])
+          pipeline_status!(opts, :cleanup, :page => page_num)
+          cl = time_pipeline_stage!(stats, :geometry_cleanup_ms) do
+            GeometryCleanup.cleanup(builder.page_group.entities,
+              merge_tolerance:    opts[:merge_tolerance],
+              min_edge_length:    opts[:merge_tolerance],
+              cleanup_level:      opts[:cleanup_level])
+          end
           cl.each { |k, v| stats[:cleanup][k] = (stats[:cleanup][k] || 0) + v }
         end
 
@@ -6777,6 +6977,7 @@ module BlueCollarSystems
           :svg_provider => paint_svg_provider,
           :source_units => Array(stats[:source_glyph_physical_deliveries]).select { |row| row[:page] == page_num }
         }
+        time_pipeline_stage!(stats, :white_mask_ms) do
         keep_page_on_page_stage_failure(
           stats, page_num, 'white_areas', 'white_area_check_failed',
           'Some white areas were left as plain white shapes; text drawn ' \
@@ -6786,6 +6987,7 @@ module BlueCollarSystems
           builder, text_items, composition_opts)
         composition = compose_page_white_masks!(builder, text_items, media_box,
           composition_opts.merge(:composition_inventory => composition_inventory))
+        end
         end
         if composition
           record_page_white_mask_composition!(stats, page_num, composition)
@@ -6898,7 +7100,7 @@ module BlueCollarSystems
         if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0 && builder.page_group &&
            opts[:import_mode].to_s != 'raster'
           begin
-            Sketchup.status_text = "PDF Import#{pct} \u2014 Page #{page_num} \u2014 Extruding 3D faces... [#{(Time.now - import_start).round(1)}s]"
+            pipeline_status!(opts, :extruding, :page => page_num)
             ex = Extrude3D.apply(builder.page_group.entities, opts[:extrude_depth].to_f)
             stats[:extruded_faces] = (stats[:extruded_faces] || 0) + ex[:faces_extruded]
             Logger.info('Extrude3D',
@@ -6916,9 +7118,13 @@ module BlueCollarSystems
         # page certification. Otherwise the immediate post-commit re-validation
         # reads a different signature ("page N retained entity signature
         # changed") and a multi-page import dies after its first pages.
-        pruned_fill_groups = builder.prune_empty_fill_groups!
-        builder.prune_empty_color_groups!
-        pruned_groups = builder.prune_empty_page_groups!
+        pruned_fill_groups = 0
+        pruned_groups = []
+        time_pipeline_stage!(stats, :prune_empty_groups_ms) do
+          pruned_fill_groups = builder.prune_empty_fill_groups!
+          builder.prune_empty_color_groups!
+          pruned_groups = builder.prune_empty_page_groups!
+        end
         if pruned_fill_groups > 0 || !pruned_groups.empty?
           Logger.info(
             'Pipeline',
@@ -7165,6 +7371,10 @@ module BlueCollarSystems
              opts[:preserve_prepared_parser])
           PdfSalvage.cleanup(path)
         end
+        # A page of a resumable import keeps the copy for the next page; the
+        # resumable import releases it once, when the whole file ends.
+        release_import_temp_copies! unless
+          defined?(opts) && opts.is_a?(Hash) && opts[:preserve_prepared_parser]
         begin
           report_pipeline_progress(opts, 'pipeline_ensure_finished') if
             defined?(opts) && opts.is_a?(Hash)
@@ -7868,7 +8078,23 @@ module BlueCollarSystems
       cache = {} unless cache.is_a?(Hash)
       opts[:item_raster_page_cache] = cache
       return cache[cache_key] if cache.key?(cache_key)
-      value = yield
+      # A rejected page render is as final as a good one for this import: the
+      # same PDF bytes, page, DPI and renderer give the same rejection. Without
+      # this, every later text item on the page ran Ghostscript over the whole
+      # page again (1.3-1.8 s each, dozens of items on a sheet with
+      # non-embedded fonts) only to be rejected for the same reason.
+      failures = opts[:item_raster_page_failures]
+      failures = {} unless failures.is_a?(Hash)
+      opts[:item_raster_page_failures] = failures
+      if failures.key?(cache_key)
+        raise RepresentationFidelity::ContractError, failures[cache_key]
+      end
+      begin
+        value = yield
+      rescue RepresentationFidelity::ContractError => error
+        failures[cache_key] = error.message.to_s
+        raise
+      end
       unless value.is_a?(Hash)
         raise RepresentationFidelity::ContractError,
               'item raster page cache producer returned no artifact'
@@ -7881,6 +8107,8 @@ module BlueCollarSystems
         opts.is_a?(Hash)
       unless import_text == true
         opts.delete(:item_raster_page_cache)
+        opts.delete(:item_raster_page_failures)
+        opts.delete(:item_raster_page_prefetch)
         opts.delete(:source_pdf_digest_cache)
         opts.delete(:item_raster_cache_persistent)
         opts.delete(:item_raster_source_bounds_cache)
@@ -7890,6 +8118,8 @@ module BlueCollarSystems
       # Raster. Own one cache for the entire import regardless of the requested
       # starting rung so a terminal fallback cannot render the same page twice.
       opts[:item_raster_page_cache] = {}
+      opts[:item_raster_page_failures] = {}
+      opts[:item_raster_page_prefetch] = {}
       opts[:item_raster_source_bounds_cache] = {}
       opts[:source_pdf_digest_cache] = {}
       opts[:item_raster_cache_persistent] = true
@@ -8020,6 +8250,16 @@ module BlueCollarSystems
       cache = opts[:item_raster_page_cache]
       paths = []
       directories = []
+      # A background page render still running (Esc, a failure, or no item
+      # needed it) is stopped before its folder is deleted.
+      prefetch = opts[:item_raster_page_prefetch]
+      if prefetch.is_a?(Hash)
+        prefetch.values.each do |job|
+          stop_item_raster_page_prefetch!(job)
+          directories << job[:owned_temp_dir] if job.is_a?(Hash)
+        end
+        prefetch.clear
+      end
       Array(cache && cache.values).each do |entry|
         next unless entry.is_a?(Hash)
         paths.concat(Array(entry[:owned_temp_paths]))
@@ -8027,6 +8267,8 @@ module BlueCollarSystems
       end
       cleanup_owned_temp_artifacts!(paths, directories)
       cache.clear if cache.respond_to?(:clear)
+      failures = opts[:item_raster_page_failures]
+      failures.clear if failures.respond_to?(:clear)
       bounds_cache = opts[:item_raster_source_bounds_cache]
       bounds_cache.clear if bounds_cache.respond_to?(:clear)
       true
@@ -8059,7 +8301,12 @@ module BlueCollarSystems
       true
     end
 
-    def self.prepare_item_raster_page!(pdf_path, page_num, media_box,
+    # The time one item Raster page render may take, in the foreground or in
+    # the background (counted from its start).
+    ITEM_RASTER_PAGE_TIMEOUT_S = 180
+
+    # One item Raster page render per (PDF bytes, page, DPI, rotation).
+    def self.item_raster_page_identity(pdf_path, page_num, media_box,
                                        page_rotation, opts)
       page_width = PageTransform.effective_width(media_box, page_rotation)
       page_height = PageTransform.effective_height(media_box, page_rotation)
@@ -8069,23 +8316,171 @@ module BlueCollarSystems
       source_sha = cached_source_pdf_sha256!(opts, source_path)
       key = [source_path.downcase, source_sha, page_num.to_i, dpi,
              PageTransform.normalize_rotation(page_rotation)].join('|')
+      {
+        :key => key, :dpi => dpi, :source_path => source_path,
+        :source_sha => source_sha, :page_width => page_width,
+        :page_height => page_height
+      }
+    end
+
+    # Starts the page's one item Raster render in the background as soon as
+    # the page knows some text items step down from 3D Text, so Ghostscript
+    # runs while the importer records the 3D Text evidence. The ladder then
+    # collects it (prepare_item_raster_page!) instead of starting it and
+    # waiting. Same plan, argv, environment, source binding and checks as
+    # the synchronous render. Never fails the import: on any problem nothing
+    # is started and the ladder renders as before.
+    def self.start_item_raster_page_prefetch!(pdf_path, page_num, media_box,
+                                              page_rotation, opts)
+      return nil unless opts.is_a?(Hash) &&
+                        opts[:item_raster_cache_persistent] == true
+      registry = opts[:item_raster_page_prefetch]
+      return nil unless registry.is_a?(Hash)
+      job = nil
+      begin
+        identity = item_raster_page_identity(
+          pdf_path, page_num, media_box, page_rotation, opts
+        )
+        key = identity[:key]
+        cache = opts[:item_raster_page_cache]
+        failures = opts[:item_raster_page_failures]
+        return nil if registry.key?(key) ||
+                      (cache.is_a?(Hash) && cache.key?(key)) ||
+                      (failures.is_a?(Hash) && failures.key?(key))
+        job = { :key => key, :page_number => page_num.to_i }
+        owned_temp_dir = SafeTemp.mktmpdir("bc_item_page_p#{page_num}_")
+        job[:owned_temp_dir] = owned_temp_dir
+        png_path = File.join(owned_temp_dir, 'page.png')
+        job[:png_path] = png_path
+        job[:raw_path] = File.join(owned_temp_dir, 'page.rgba')
+        job[:plan] = ItemRasterPageRenderer.plan(
+          DependencyResolver.find_ghostscript, identity[:source_path],
+          page_num.to_i, identity[:dpi], png_path
+        )
+        job[:source_binding] = begin_source_pdf_render_binding!(
+          opts, identity[:source_path]
+        )
+        job[:render] = ItemRasterPageRenderer::BackgroundRender.new(
+          job[:plan][:arguments], job[:plan][:environment],
+          owned_temp_dir, ITEM_RASTER_PAGE_TIMEOUT_S
+        )
+      rescue StandardError => e
+        if job
+          stop_item_raster_page_prefetch!(job)
+          begin
+            cleanup_owned_temp_artifacts!([], [job[:owned_temp_dir]].compact)
+          rescue StandardError
+            nil
+          end
+        end
+        Logger.warn('Raster', "background item page render not started: #{e.message}")
+        return nil
+      end
+      registry[key] = job
+      Logger.info('Raster', "item page #{page_num} render started in the background")
+      job
+    end
+
+    def self.take_item_raster_page_prefetch!(opts, key)
+      registry = opts.is_a?(Hash) ? opts[:item_raster_page_prefetch] : nil
+      return nil unless registry.is_a?(Hash)
+      registry.delete(key)
+    end
+
+    def self.stop_item_raster_page_prefetch!(job)
+      return true unless job.is_a?(Hash)
+      render = job[:render]
+      render.stop! if render && render.respond_to?(:stop!)
+      true
+    rescue StandardError => e
+      Logger.warn('Raster', "background item page render could not be stopped: #{e.message}")
+      false
+    end
+
+    # A page whose step-downs finished without Raster leaves its render
+    # unused: stop it and delete its folder now instead of at import end.
+    def self.discard_item_raster_page_prefetch!(opts, page_num)
+      registry = opts.is_a?(Hash) ? opts[:item_raster_page_prefetch] : nil
+      return true unless registry.is_a?(Hash)
+      registry.keys.each do |key|
+        job = registry[key]
+        next unless job.is_a?(Hash) && job[:page_number] == page_num.to_i
+        stop_item_raster_page_prefetch!(job)
+        begin
+          cleanup_owned_temp_artifacts!([], [job[:owned_temp_dir]].compact)
+          registry.delete(key)
+        rescue StandardError => e
+          # Kept in the registry: the import's own cleanup tries again and
+          # reports it there. An unused picture never fails the page.
+          Logger.warn('Raster', "unused background item page render not removed yet: #{e.message}")
+        end
+      end
+      true
+    end
+
+    # Waits for a background render, checking Esc between polls (an Esc
+    # stops the child before ImportCancelled leaves this method).
+    def self.wait_item_raster_page_prefetch!(job, opts)
+      waited_started = Time.now
+      tick = lambda do
+        # Keeps the window answering during the wait even when no run
+        # controller is attached (the heartbeat rate-limits itself).
+        ImportRunControl.heartbeat!(:item_raster_page_render) if defined?(ImportRunControl)
+        run_control_checkpoint!(
+          opts, :item_raster_page_render, :page => job[:page_number]
+        )
+      end
+      run = job[:render].wait!(tick)
+      job[:wait_ms] = ((Time.now - waited_started) * 1000.0).round(3)
+      unless run[:ok]
+        Logger.warn('Raster.item_page.ghostscript',
+                    "background render ended: exit #{run[:exitstatus].inspect}" \
+                    "#{run[:timed_out] ? ' (timed out)' : ''}")
+      end
+      run
+    end
+
+    def self.prepare_item_raster_page!(pdf_path, page_num, media_box,
+                                       page_rotation, opts)
+      identity = item_raster_page_identity(
+        pdf_path, page_num, media_box, page_rotation, opts
+      )
+      page_width = identity[:page_width]
+      page_height = identity[:page_height]
+      dpi = identity[:dpi]
+      source_path = identity[:source_path]
+      source_sha = identity[:source_sha]
+      key = identity[:key]
       candidates = []
       raw_path = nil
       owned_temp_dir = nil
       fetch_item_raster_page_cache!(opts, key) do
-        owned_temp_dir = SafeTemp.mktmpdir("bc_item_page_p#{page_num}_")
-        png_path = File.join(owned_temp_dir, 'page.png')
-        raw_path = File.join(owned_temp_dir, 'page.rgba')
-        candidates = [png_path]
-        plan = ItemRasterPageRenderer.plan(
-          DependencyResolver.find_ghostscript, source_path, page_num.to_i, dpi, png_path
-        )
-        args = plan[:arguments]
-        source_binding = begin_source_pdf_render_binding!(opts, source_path)
-        run = CommandRunner.run(
-          args, :timeout_s => 180, :context => 'Raster.item_page.ghostscript',
-          :env => plan[:environment]
-        )
+        prefetched = take_item_raster_page_prefetch!(opts, key)
+        if prefetched
+          owned_temp_dir = prefetched[:owned_temp_dir]
+          png_path = prefetched[:png_path]
+          raw_path = prefetched[:raw_path]
+          candidates = [png_path]
+          plan = prefetched[:plan]
+          args = plan[:arguments]
+          source_binding = prefetched[:source_binding]
+          run = wait_item_raster_page_prefetch!(prefetched, opts)
+        else
+          owned_temp_dir = SafeTemp.mktmpdir("bc_item_page_p#{page_num}_")
+          png_path = File.join(owned_temp_dir, 'page.png')
+          raw_path = File.join(owned_temp_dir, 'page.rgba')
+          candidates = [png_path]
+          plan = ItemRasterPageRenderer.plan(
+            DependencyResolver.find_ghostscript, source_path, page_num.to_i, dpi, png_path
+          )
+          args = plan[:arguments]
+          source_binding = begin_source_pdf_render_binding!(opts, source_path)
+          run = CommandRunner.run(
+            args, :timeout_s => ITEM_RASTER_PAGE_TIMEOUT_S,
+            :context => 'Raster.item_page.ghostscript',
+            :env => plan[:environment]
+          )
+        end
         verify_source_pdf_render_binding!(source_binding)
         ItemRasterPageRenderer.validate_result!(run, plan)
         actual_png = candidates.find { |candidate| File.file?(candidate) }
@@ -8114,6 +8509,8 @@ module BlueCollarSystems
           :source_pdf_binding_verified => true,
           :page_render_once_verified => true,
           :render_count => 1,
+          :render_started_in_background => prefetched ? true : false,
+          :render_wait_ms => prefetched ? prefetched[:wait_ms] : nil,
           :owned_temp_paths => (candidates + [raw_path]).uniq,
           :owned_temp_directories => [owned_temp_dir]
         )
@@ -8126,6 +8523,12 @@ module BlueCollarSystems
           cleanup_paths, [defined?(owned_temp_dir) && owned_temp_dir].compact
         )
       rescue StandardError => cleanup_error
+        # Esc during the background-render wait still stops the import; a
+        # render folder that could not be removed is only logged then.
+        if terminal_import_error?(original_error)
+          Logger.warn('Raster', "item page render folder not removed after the stop: #{cleanup_error.message}")
+          raise original_error
+        end
         raise RepresentationFidelity::ContractError,
               "#{original_error.message}; #{cleanup_error.message}"
       end
@@ -8294,6 +8697,8 @@ module BlueCollarSystems
       owned_crop_dir = nil
       png_path = nil
       delivery
+    rescue ImportRunControl::ImportCancelled
+      raise
     rescue StandardError => e
       Logger.warn('Raster', "Item raster failed: #{e.message}")
       opts[:item_raster_failure_evidence] = {

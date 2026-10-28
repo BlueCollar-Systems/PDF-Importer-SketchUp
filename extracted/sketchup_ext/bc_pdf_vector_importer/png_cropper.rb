@@ -20,6 +20,17 @@ module BlueCollarSystems
 
       module_function
 
+      # The native decoder runs as a child process; during an import the
+      # wait keeps SketchUp's window answering Windows.
+      def capture_helper(command)
+        if defined?(ImportRunControl) &&
+           ImportRunControl.respond_to?(:capture3_with_heartbeat)
+          return ImportRunControl.capture3_with_heartbeat(*command)
+        end
+        Open3.capture3(*command)
+      end
+      private_class_method :capture_helper
+
       def native_decoder_path
         File.join(
           File.dirname(__FILE__), 'native', 'png_rgba_decoder.exe'
@@ -87,7 +98,7 @@ module BlueCollarSystems
 
         command = [helper, source, '--inspect-only']
         command << '--allow-rgb' unless require_alpha
-        stdout, stderr, status = Open3.capture3(*command)
+        stdout, stderr, status = capture_helper(command)
         unless status.success?
           detail = stderr.to_s.strip
           detail = stdout.to_s.strip if detail.empty?
@@ -151,7 +162,7 @@ module BlueCollarSystems
 
         command = [helper, source, raw]
         command << '--allow-rgb' unless require_alpha
-        stdout, stderr, status = Open3.capture3(*command)
+        stdout, stderr, status = capture_helper(command)
         unless status.success?
           detail = stderr.to_s.strip
           detail = stdout.to_s.strip if detail.empty?
@@ -516,6 +527,9 @@ module BlueCollarSystems
           output.write(rgba) if output
           state[:previous] = row
           state[:rows] += 1
+          # A large page picture decodes for seconds in Ruby.
+          ImportRunControl.heartbeat!(:page_picture) if
+            (state[:rows] & 31).zero? && defined?(ImportRunControl)
         end
         if pending_offset > 0
           remaining = state[:pending].bytesize - pending_offset

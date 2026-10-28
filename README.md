@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.181-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.183-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -12,6 +12,26 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 ### Unattended multi-page import
 
 A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > PDF Vector Importer > Import Health... has the full summary.
+
+### Progress while an import runs
+
+On Windows the import keeps SketchUp's window answering Windows, so it is not
+marked "Not Responding" and offered for a force close. About four times a
+second it asks Windows for the next message without taking it
+(`PeekMessageW` with `PM_NOREMOVE`). Nothing is dispatched, so a click, key
+or menu command made during the import waits in Windows' queue and SketchUp
+handles it after the import ends; the window cannot be moved or minimized
+until then. The status bar shows one plain line, for example
+`Importing page 1 of 1: building text 120 of 557 (about 30 s left), press Esc to cancel`.
+The time left is the current step's, measured on the current page from the
+moment that step started its current pass (a step that runs again, such as
+the text check after a step-down, starts its own clock), and appears once
+that pass has run for two seconds.
+Status-bar writes are limited to one every two seconds, and a write that is
+slow pushes the next one further out. The import report's
+`performance.ui_responsiveness` block gives the longest time without a
+message check and the steps around it. `BC_PDF_UI_HEARTBEAT=0` turns the
+message check off.
 
 ### Page selection
 
@@ -22,7 +42,37 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
+### Recent fixes (v3.7.183)
+
+- Handrail sheets finish again. Since v3.7.173 a last cleanup step stopped
+  most handrail sheets: after it erased a duplicate line, SketchUp joined the
+  two lines left at that point, and the step treated that as a failure. It now
+  checks that every line is still drawn end to end in its own style, and keeps
+  both copies where a join would not be safe.
+- SketchUp no longer shows "Not Responding" during an import. The status bar
+  shows the page, the current step and the time left; press Esc to cancel.
+  Clicks and keys made during the import are handled when it ends.
+- Imports are faster. A rejected page picture is no longer rendered again for
+  every text item, the bundled Ghostscript is checked once instead of on every
+  use, and pages with no white areas to repair skip that pass. On four real
+  handrail sheets in SketchUp Make 2017, the default import took 7 to 28
+  seconds instead of 26 to 46 seconds with v3.7.166.
+- Sideways (rotated) sheets now get their 3D Text letters instead of blanks.
+- This release also carries the unreleased v3.7.167 to v3.7.180 changes listed
+  below.
+
+Known limits:
+
+- A few sheets still list some text the importer could not draw. The import
+  finishes, and the summary and Import Health name those items.
+- Tested by us in SketchUp Make 2017 only. SketchUp 2024 and later were not
+  tested by us.
+
 ### Test candidate (v3.7.181)
+
+The version badge on this draft stays at the published v3.7.183. The notes
+below describe unreleased picture-query and fill-partition work. They do not
+publish a release, and the v3.7.183 notes above do not certify them.
 
 - Exact white-area partitioning counts the work it actually performs and
   constructs each maximal vertical cell once. Source coverage, rational

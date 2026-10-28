@@ -8,6 +8,10 @@ module BlueCollarSystems
   module PDFVectorImporter
     class Svg3DTextSolidCache
       attr_reader :depth
+      # Per page render: glyph definition object_id => its edge counts after
+      # its outline edges were hidden and read back once on this page (see
+      # Svg3DTextRenderer.govern_source_outline_visual_style!).
+      attr_reader :outline_definition_counts
 
       def initialize(model, depth, opts = {})
         @model = model
@@ -16,6 +20,7 @@ module BlueCollarSystems
         @definitions = model && model.respond_to?(:definitions) ?
           model.definitions : nil
         @records = {}
+        @outline_definition_counts = {}
         @created_definitions = []
         @run_controller = opts[:run_controller]
         @page_number = opts[:page_number]
@@ -163,6 +168,7 @@ module BlueCollarSystems
           end
           @created_definitions = []
           @records = {}
+          @outline_definition_counts = {}
           @metrics[:unique_cache_keys] = 0
           return true
         end
