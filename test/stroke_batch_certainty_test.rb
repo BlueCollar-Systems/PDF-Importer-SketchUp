@@ -353,7 +353,7 @@ class StrokeBatchCertaintyTest < Minitest::Test
            es.append_edge(p3(0, 2), p3(2, 0))]
         else
           [es.append_edge(p3(0, 0), p3(1, 1)), es.append_edge(p3(1, 1), p3(2, 2)),
-           es.append_edge(p3(0, 1.0e-12), p3(2, 2 + 1.0e-12))]
+           es.append_edge(p3(0, 0.01), p3(2, 2.01))]
         end
       end
       queue(builder, entities, [p3(0, 0), p3(2, 2)], style)
@@ -397,15 +397,39 @@ class StrokeBatchCertaintyTest < Minitest::Test
     assert entities.to_a.all? { |edge| edge.material == style[:material] }
   end
 
-  def test_a_tiny_nonzero_interval_gap_is_never_rounded_closed
+  def test_a_gap_wider_than_the_native_vertex_tolerance_is_never_closed
     entities, builder, style = fixture
     entities.response = proc do |es, _points|
-      [es.append_edge(p3(0), p3(0.5)), es.append_edge(p3(0.5 + 1.0e-12), p3(1))]
+      [es.append_edge(p3(0), p3(0.5)), es.append_edge(p3(0.51), p3(1))]
     end
     queue(builder, entities, [p3(0), p3(1)], style)
     assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
     assert entities.to_a.all? { |edge| edge.material.nil? }
     assert_equal 0, entities.line_calls
+  end
+
+  # SketchUp 2017 moved a handrail stroke start by 0.00044 in onto an
+  # existing vertex (within its 0.001 in merge tolerance).
+  def test_an_endpoint_snapped_within_native_vertex_tolerance_is_accepted
+    entities, builder, style = fixture
+    entities.response = proc do |es, _points|
+      [es.append_edge(Geom::Point3d.new(5.783717676056188, 5.948272233418909, 0),
+                      Geom::Point3d.new(6.539999999999999, 5.533055555555557, 0))]
+    end
+    queue(builder, entities, [Geom::Point3d.new(5.783333333333332, 5.948055555555555, 0),
+                              Geom::Point3d.new(6.539999999999999, 5.533055555555557, 0)], style)
+    assert flush(builder)
+    assert entities.to_a.all? { |edge| edge.material == style[:material] }
+  end
+
+  def test_an_endpoint_moved_beyond_native_vertex_tolerance_is_rejected
+    entities, builder, style = fixture
+    entities.response = proc do |es, _points|
+      [es.append_edge(p3(0.002), p3(1))]
+    end
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert entities.to_a.all? { |edge| edge.material.nil? }
   end
 
   def test_many_split_intervals_keep_complete_source_without_size_cutoff
