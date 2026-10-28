@@ -36,7 +36,7 @@ schema only and do not prove live-host or visual acceptance.
 
 - Save `import_report.json` from the import folder
 - Check **Import Health…** for scale cross-check warnings
-- If something looks wrong: use [Report Doctor](https://bluecollarsystems.com/report-doctor) or **Send Feedback** with screenshots and your report JSON
+- If something looks wrong: use [Report Doctor](https://bluecollar-systems.com/report-doctor) or **Send Feedback** with screenshots and your report JSON
 
 ## Sign-off
 
