@@ -156,6 +156,7 @@ jobs:
           ruby test/separation_fill_fidelity_test.rb
           ruby test/stroke_clipping_test.rb
           ruby test/stroke_color_preservation_test.rb
+          ruby test/stroke_batch_certainty_test.rb
           ruby test/geometry_builder_lineweight_test.rb
           ruby test/pdf_color_space_test.rb
           ruby test/implicit_fill_close_test.rb
@@ -242,14 +243,19 @@ jobs:
       - name: Release safety unit tests (R21-5)
         run: |
           python tools/test_release_safety.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest tools.test_complete_github_release tools.test_skp_probe_lock_contract
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/test_build_steel_shapes_release.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Smoke the checked-in Windows Poppler helpers
         run: python tools/smoke_poppler_helpers.py --required
       - name: Verify separate Ghostscript runtime and relocated transparent rendering
         run: |
           python -m unittest tools.test_ghostscript_runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/smoke_ghostscript_runtime.py --required
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Set up Ruby for bundled renderer fixtures
         uses: ruby/setup-ruby@v1
         with:
@@ -260,34 +266,66 @@ jobs:
           BC_TEST_REQUIRE_BUNDLED_GS: '1'
         run: |
           ruby test/command_runner_environment_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/item_raster_page_renderer_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/item_raster_source_bounds_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/source_fill_only_paint_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/source_fill_only_paint_pipeline_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/svg_item_filled_boundary_display_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/item_raster_display_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/pdf_navigation_link_appearance_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/source_round_annotation_ink_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/annotation_composite_source_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/annotation_composite_provider_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/annotation_microstroke_geometry_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/original_annotation_pipeline_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/stroke_clipping_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/stroke_color_preservation_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ruby test/stroke_batch_certainty_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/pdf_color_space_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/implicit_fill_close_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/labels_empty_text_group_resume_signature_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/empty_fill_group_resume_signature_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/no_mid_import_prompts_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/inline_image_omission_ledger_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/inline_image_boundary_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/inline_image_composite_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/inline_image_delivery_accounting_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/unattended_multipage_import_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/failed_page_outcome_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/retained_page_view_fit_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/opaque_mask_source_unit_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/batch_host_nonmodal_policy_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/pdf_color_display_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Validate release publication state
         run: python tools/check_release_publication.py

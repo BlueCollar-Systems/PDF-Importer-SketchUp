@@ -108,10 +108,14 @@ class GeometryBuilderStagingTest < Minitest::Test
     attr_accessor :layer, :hidden, :material
     attr_reader :start_point, :end_point
 
+    Vertex = Struct.new(:position)
     def initialize(start_point, end_point)
       @start_point = start_point
       @end_point = end_point
     end
+    def valid?; true; end
+    def start; Vertex.new(@start_point); end
+    define_method(:end) { Vertex.new(@end_point) }
   end
 
   class Face
@@ -346,10 +350,9 @@ class GeometryBuilderStagingTest < Minitest::Test
 
   # 00S-505 measured on current main, fills off, lineweight Ignore:
   # Ruby geometry build 0.64s, then 29,592 add_edges plus 37,875 edge.layer=
-  # and 37,875 edge.material=. SketchUp spends the remaining minutes inside
-  # those native calls. Hosts with Entities#build must commit each 250-path
-  # staging group in one build, not one add_edges per line. The edges, colors,
-  # and batch groups stay; the host does not cut crossings during the import.
+  # and 37,875 edge.material=. Hosts with Entities#build commit each 250-path
+  # staging group in one build. The builder's edges still have to cover the
+  # source before they are colored, and the batch groups stay.
   def test_heavy_page_uses_one_bulk_builder_call_per_staging_group
     counter = { :calls => 0 }
     Entities.bulk_build_counter = counter

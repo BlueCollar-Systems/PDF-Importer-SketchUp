@@ -68,6 +68,42 @@ Known limits:
 - Tested by us in SketchUp Make 2017 only. SketchUp 2024 and later were not
   tested by us.
 
+### Test candidate (v3.7.182)
+
+The version badge on this draft stays at the published v3.7.183. The notes
+below describe unreleased stroke, fill, and picture work. They do not publish
+a release, and the v3.7.183 notes above do not certify them.
+
+- Combines the v3.7.181 fill-work and picture-bound changes with repaired
+  queued stroke construction. All hosts use the existing `add_edges` route;
+  the proposed modern bulk API is omitted until its native behavior can be
+  checked on an available supported host.
+- Each edge retains a live material identity, RGB, opacity and texture check.
+  Incomplete native returns fail construction before styling; exact interval
+  coverage accepts splits and collinear overlaps without closing source gaps
+  or discarding tiny features. Cancellation keeps its current page context.
+- Source checks and native qualification for this combined candidate are
+  pending. Earlier v3.7.181 source checks and v3.7.180 host results below do
+  not certify v3.7.182. This candidate is not a published release.
+
+### Earlier test candidate (v3.7.181)
+
+- Exact white-area partitioning counts the work it actually performs and
+  constructs each maximal vertical cell once. Source coverage, rational
+  coordinates, clearance checks, cancellation and construction limits remain.
+  Authored fixtures retain the exact previous cells; the two outstanding
+  foundation Glyphs fills still require native verification.
+- Picture qualification can exclude a source clip or a round-capped single
+  line only when exact bounds prove it is strictly outside that picture.
+  Unknown, unsupported transforms, touching and overlapping cases keep their existing
+  checks. This corrects false overlap failures in the foundation SVG replay.
+- Both Ruby 2.2.4 and 3.4.4 passed the focused source tests. Native picture
+  pixels, placement, display ordering and save/reopen remain pending. The
+  attempted retained-model inspection never passed Welcome because Windows
+  activation failed; its timeout is preserved as a failed inspection.
+- This is a separate test candidate. The completed v3.7.180 host results below
+  do not certify v3.7.181. Public release remains held.
+
 ### Recent fixes (v3.7.180)
 
 - White-area refinement can build retained cells together while checking every

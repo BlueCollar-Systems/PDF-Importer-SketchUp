@@ -141,6 +141,18 @@ module PurgingHost
     def hidden?; false; end
   end
 
+  # Match Sketchup::Edge#start/#end -> Vertex#position without changing the
+  # existing point roster or commit-time empty-group cleanup semantics.
+  class Edge < Leaf
+    Vertex = Struct.new(:position)
+    attr_reader :start, :end
+
+    def initialize(a, b)
+      super('Edge', [a, b])
+      @start, @end = Vertex.new(a), Vertex.new(b)
+    end
+  end
+
   class Group
     include Attributes
     attr_accessor :name, :layer
@@ -178,7 +190,7 @@ module PurgingHost
     end
 
     def add_edges(points)
-      edges = Array(points).each_cons(2).map { |a, b| Leaf.new('Edge', [a, b]) }
+      edges = Array(points).each_cons(2).map { |a, b| Edge.new(a, b) }
       @items.concat(edges)
       edges
     end
