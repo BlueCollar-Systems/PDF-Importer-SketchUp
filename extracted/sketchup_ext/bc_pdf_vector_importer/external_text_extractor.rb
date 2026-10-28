@@ -162,6 +162,7 @@ module BlueCollarSystems
           items = []
 
           html.scan(/<line\s+([^>]+)>(.*?)<\/line>/mi) do |line_attrs, inner|
+            ImportRunControl.heartbeat_tick!(:reading_text) if defined?(ImportRunControl)
             words = inner.scan(/<word\s+([^>]+)>(.*?)<\/word>/mi).map do |attrs, txt|
               {
                 attrs: attrs,
@@ -778,8 +779,8 @@ module BlueCollarSystems
                 # source boxes overlap vertically and the fragment's centre
                 # lies inside the composite's horizontal extent. Anchor
                 # proximity alone (dx<=42 / dy<=30) dropped a genuinely
-                # separate weld size 23.5 pt below a "WEEP HOLES 3/16" line
-                # on 1011 (visual oracle, 2026-08-16); dropping a source span
+                # separate weld size 23.5 pt below a weld-note line on a private
+                # benchmark sheet (visual oracle, 2026-08-16); dropping a source span
                 # is a fidelity failure, keeping one extra fragment is not.
                 fragment_contained_in_line?(it, other)
               end

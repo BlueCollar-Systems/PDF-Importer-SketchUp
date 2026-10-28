@@ -818,6 +818,7 @@ module BlueCollarSystems
       def self.parse_glyph_defs(svg)
         h = {}
         svg.scan(/<g id="(glyph-\d+-\d+)">\s*<path d="([^"]*)"/m) do |id, d|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           h[id] = d unless d.strip.empty?
         end
         svg.scan(/<path\b[^>]*\bid="([^"]+)"[^>]*\bd="([^"]*)"/m) do |id, d|
@@ -841,6 +842,7 @@ module BlueCollarSystems
 
       def self.copy_use_placements(placements)
         Array(placements).map do |placement|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           copy = placement.dup
           rgb = copy[:fill_rgb]
           copy[:fill_rgb] = rgb.dup if rgb
@@ -867,6 +869,7 @@ module BlueCollarSystems
         }]
         svg.to_s.scan(/<\/?\s*[A-Za-z][A-Za-z0-9:_-]*\b[^>]*>/m) do |m|
           source_svg_offset = Regexp.last_match.begin(0)
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           tag = m.is_a?(Array) ? m.first.to_s : m.to_s
           if tag =~ /\A<\s*\/\s*([A-Za-z][A-Za-z0-9:_-]*)\b/i
             paint_stack.pop if paint_stack.length > 1
@@ -1414,6 +1417,32 @@ module BlueCollarSystems
           warn_safe("embed_fonts_cached failed: #{e.message}")
         end
         nil
+      end
+
+      # The font-embedded copy is the user's whole drawing written to the temp
+      # folder. It must not outlive the import that needed it, including an
+      # import that failed or was stopped with Esc. A copy that cannot be
+      # deleted yet stays listed so the next call tries again.
+      def self.release_embedded_font_copies!
+        cache = @embed_cache
+        return 0 unless cache.is_a?(Hash) && !cache.empty?
+        removed = 0
+        cache.keys.each do |key|
+          path = cache[key]
+          begin
+            if path && File.exist?(path)
+              File.delete(path)
+              removed += 1
+            end
+            cache.delete(key)
+          rescue StandardError => e
+            warn_safe("font-embedded copy could not be deleted yet: #{e.message}")
+          end
+        end
+        removed
+      rescue StandardError => e
+        warn_safe("release_embedded_font_copies! failed: #{e.message}")
+        0
       end
 
       def self.ensure_renderable_pdf(pdf_path, pdftocairo_exe)

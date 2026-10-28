@@ -457,7 +457,11 @@ module BlueCollarSystems
         raise ArgumentError, 'invalid_svg_viewbox' unless viewbox[2] > 0.0 && viewbox[3] > 0.0
         scale = strict_number(opts[:scale] || 1.0)
         raise ArgumentError, 'invalid_model_scale' unless scale > 0.0
+        # A /Rotate page is drawn as displayed: map it back to unrotated PDF
+        # space exactly as CairoGlyphSource.model_space_loops does.
+        rotated_source = CairoGlyphSource.rotated_source_frame(media_box, page_box, opts[:page_rotation])
         { :viewbox => viewbox, :dx => page_box[0] - media_box[0], :dy => page_box[1] - media_box[1],
+          :rotated_source => rotated_source,
           :page_bounds => [page_box[0] - media_box[0], page_box[1] - media_box[1],
                            page_box[2] - media_box[0], page_box[3] - media_box[1]],
           :unit => scale / 72.0, :x_offset => strict_number(opts[:x_offset] || 0.0),
@@ -468,10 +472,15 @@ module BlueCollarSystems
         raise ArgumentError, 'empty_source_contours' if loops.empty?
         a, b, c, d, e, f = frame[:matrix]
         vb = mapping[:viewbox]
+        rotated = mapping[:rotated_source]
         pdf = loops.map do |loop|
           loop.map do |point|
             x, y = point
-            [a*x+c*y+e-vb[0]+mapping[:dx], vb[3]+vb[1]-(b*x+d*y+f)+mapping[:dy]]
+            if rotated
+              CairoGlyphSource.unrotated_source_point(rotated, a*x+c*y+e-vb[0], vb[3]+vb[1]-(b*x+d*y+f))
+            else
+              [a*x+c*y+e-vb[0]+mapping[:dx], vb[3]+vb[1]-(b*x+d*y+f)+mapping[:dy]]
+            end
           end
         end
         mapped_record(pdf, frame, mapping, offset)

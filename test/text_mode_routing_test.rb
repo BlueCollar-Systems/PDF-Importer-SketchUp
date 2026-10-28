@@ -128,6 +128,8 @@ class TextModeRoutingTest < Minitest::Test
           raise 'wrong source scope' unless svg == '<svg/>' && items == ['span:1']
           raise 'wrong representation' unless [:glyphs, :geometry].include?(mode)
           raise 'missing shared component cache' unless options[:glyph_component_cache] == {}
+          raise 'missing page paint proof' unless options[:source_fill_only_paint] == :page_paint_proof &&
+                                                  options[:source_fill_only_paint_binding] == :page_paint_binding
           {:group => Object.new, :mode => mode, :placement_indices => [0, 1, 2]}
         end
         def self.finalize_source_unit_evidence!(row, _rotation)
@@ -138,6 +140,10 @@ class TextModeRoutingTest < Minitest::Test
       def self.create_text_representation_container!(*); Struct.new(:entities).new(Object.new); end
       def self.prepare_item_page_match_and_peer_boxes(*); [{}, [], [], [], {}]; end
       def self.report_pipeline_progress(*); end
+      def self.pipeline_status!(*); true; end
+      def self.source_fill_only_paint_for_page!(*)
+        {:proof => :page_paint_proof, :binding => :page_paint_binding}
+      end
       def self.run_control_checkpoint!(*); end
       # Owner ruling 2026-10-05: each text stage runs inside the keep-page
       # wrapper; on success it only yields (its failure path is covered in

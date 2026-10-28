@@ -534,6 +534,8 @@ module BlueCollarSystems
           operand_stack = []
           tokenize_content_stream(stream) do |token|
             if token[:type] == :operator
+              # A big page stream parses for seconds; keep the window answering.
+              ImportRunControl.heartbeat_tick!(:reading_paths) if defined?(ImportRunControl)
               @source_paint_order = [@source_stream_index, token[:source_offset]]
               handle_operator(token[:value], operand_stack)
               operand_stack.clear

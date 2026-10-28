@@ -939,32 +939,60 @@ class ImportDialogDefaultsTest < Minitest::Test
     controller.progress(:white_mask_cells, :page => 1, :completed => 42, :total => 42)
     current = controller.progress(:white_mask_cells, :page => 1, :completed => 0, :total => 120)
     assert_equal 100.0, current[:percentage], 'the journal controller remains monotonic'
-    message = BID.progress_status(current.merge(:eta_seconds => 0.0))
-    refute_includes message, '100.0%'
-    assert_includes message, 'building fill cutouts 0/120'
-    assert_match(/— 0\.0% —/, message)
-    refute_includes message, 'ETA'
-    assert_includes message, 'Esc to cancel'
+    message = BID.progress_status(current.merge(:eta_seconds => 0.0,
+                                                :stage_elapsed_seconds => 30.0))
+    assert_equal 'Importing page 1 of 1: building fill cutouts 0 of 120, ' \
+                 'press Esc to cancel', message
+    refute_includes message, 'left'
   end
 
   def test_progress_status_uses_measured_eta_only_when_available
     measured = BID.progress_status(
-      :stage => :text_item, :page => 2, :page_index => 2, :page_total => 3,
-      :completed => 25, :total => 100, :percentage => 25.0,
-      :elapsed_seconds => 10.2, :eta_seconds => 30.1
+      :stage => :text_item, :page => 1, :page_index => 1, :page_total => 1,
+      :completed => 120, :total => 557, :percentage => 21.5,
+      :elapsed_seconds => 10.2, :stage_elapsed_seconds => 8.0,
+      :eta_seconds => 29.1
     )
-    assert_equal(
-      'PDF Import — page 2/3 — text item 25/100 — 25.0% — ' \
-      'elapsed 10.2s — ETA 30.1s — Esc to cancel', measured
-    )
+    assert_equal 'Importing page 1 of 1: building text 120 of 557 ' \
+                 '(about 30 s left), press Esc to cancel', measured
 
     unmeasured = BID.progress_status(
       :stage => :geometry_path, :page => 1, :page_index => 1,
       :page_total => 1, :completed => 0, :total => 100,
       :percentage => 0.0, :elapsed_seconds => 0.0, :eta_seconds => nil
     )
-    refute_includes unmeasured, 'ETA'
-    assert_includes unmeasured, 'Esc to cancel'
+    assert_equal 'Importing page 1 of 1: drawing lines and fills 0 of 100, ' \
+                 'press Esc to cancel', unmeasured
+  end
+
+  def test_progress_status_waits_for_a_steady_pace_and_rounds_plainly
+    base = { :stage => :text_evidence, :page => 5, :page_index => 2,
+             :page_total => 3, :completed => 40, :total => 400 }
+    early = BID.progress_status(base.merge(:stage_elapsed_seconds => 1.5,
+                                           :eta_seconds => 13.5))
+    assert_equal 'Importing page 5 (2 of 3): checking text 40 of 400, ' \
+                 'press Esc to cancel', early
+    assert_includes BID.progress_status(base.merge(:stage_elapsed_seconds => 2.0,
+                                                   :eta_seconds => 4.0)),
+                    '(a few seconds left)'
+    assert_includes BID.progress_status(base.merge(:stage_elapsed_seconds => 9.0,
+                                                   :eta_seconds => 58.0)),
+                    '(about 1 min left)'
+    assert_includes BID.progress_status(base.merge(:stage_elapsed_seconds => 9.0,
+                                                   :eta_seconds => 151.0)),
+                    '(about 3 min left)'
+    done = BID.progress_status(base.merge(:completed => 400,
+                                          :stage_elapsed_seconds => 9.0,
+                                          :eta_seconds => 0.0))
+    refute_includes done, 'left'
+    no_page = BID.progress_status(:stage => :import_report, :completed => 0,
+                                  :total => 0)
+    assert_equal 'Importing the PDF: writing the import report, ' \
+                 'press Esc to cancel', no_page
+    deep = BID.progress_status(:stage => :text_step_down, :current_page => 3,
+                               :completed => 2, :total => 30)
+    assert_equal 'Importing page 3: stepping down text that did not build ' \
+                 '2 of 30, press Esc to cancel', deep
   end
 
   def test_resume_is_enabled_only_for_grouped_editable_text_imports
