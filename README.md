@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.184-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.185-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -48,7 +48,20 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.184)
+### Recent fixes (v3.7.185)
+
+- Dense sheets import in SketchUp 2017 again. v3.7.184 stopped handrail
+  sheets with "native stroke roster does not exactly cover its source
+  intervals": SketchUp moves a line end by up to 0.001 in onto a nearby
+  point, and the new line check allowed no difference at all. The check now
+  allows SketchUp's own 0.001 in, and still stops on a real gap or an extra
+  line. v3.7.184 was withdrawn; use this version or v3.7.183.
+- Measured in SketchUp Make 2017 on five real handrail sheets: all five
+  import, with the same line and face counts as v3.7.183, in 23.6 to 30.6
+  seconds (v3.7.183: 24.4 to 31.3 seconds).
+- Known limit: SketchUp 2022 and later were not run for this version.
+
+### Recent fixes (v3.7.184, withdrawn)
 
 - Dense sheets with many lines import in far fewer steps. In SketchUp 2022
   and later, simple lines are queued and added together through
