@@ -3,7 +3,7 @@
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-3.7.183-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-3.7.184-green.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-SketchUp%202017%2B-orange.svg)]()
 [![Ruby](https://img.shields.io/badge/Ruby-2.2%2B-red.svg)]()
 
@@ -41,6 +41,19 @@ omitting requested pages. Ranges remain compact until the PDF page count is
 known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
+
+### Recent fixes (v3.7.184)
+
+- Dense sheets with many lines import in far fewer steps. In SketchUp 2022
+  and later, simple lines are queued and added together through
+  Entities#build, so about 30,000 crossing lines become a few hundred build
+  steps. SketchUp 2017 keeps the older one-line-at-a-time path.
+- Every imported line's color is checked after it is added. If SketchUp did
+  not keep the drawing's color and full opacity, the import stops with an
+  error instead of finishing with wrong colors.
+- Fill repairs from the source drawing are combined in one pass.
+- Known limit: no new SketchUp host timings were recorded for this version;
+  the v3.7.183 timings below are the last measured ones.
 
 ### Recent fixes (v3.7.183)
 
