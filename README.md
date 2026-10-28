@@ -9,6 +9,12 @@
 
 Import PDF vector geometry as native editable SketchUp edges with arc reconstruction, color-based tag grouping, text import, dash patterns, Scale by Reference tool, and full Bezier support.
 
+### Quick Install (SketchUp 2017 Make through current Pro)
+
+1. Download `SketchUp-PDF-Importer_v3.7.184.rbz` from the [Releases page](https://github.com/BlueCollar-Systems/PDF-Importer-SketchUp/releases) (do **not** rename or unzip `.rbz`).
+2. In SketchUp, open **Window → Extension Manager** (or **Extensions → Extension Manager**), click **Install Extension**, and select the downloaded `.rbz`.
+3. Use **File → Import PDF Vectors…** (or **Extensions → PDF Vector Importer → Import PDF Vectors…**), choose your PDF and options, and click **Import**.
+
 ### Unattended multi-page import
 
 A multi-page import asks its questions up front (the import options dialog, plus the one-time very-large-file warning) and then runs to the end without stopping. Large pages no longer raise a per-page OK/Cancel box; they are logged and listed in the end-of-import summary. A page that fails is logged and skipped, the remaining pages still import, and a later resume retries it. When the import finishes, one status-bar line names the pages imported, any page delivered as a raster image (with the reason), and any failed page; Extensions > PDF Vector Importer > Import Health... has the full summary.
