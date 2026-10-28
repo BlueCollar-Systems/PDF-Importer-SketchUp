@@ -335,10 +335,10 @@ module BlueCollarSystems
     # text 120 of 557 (about 30 s left), press Esc to cancel"). Batch/host
     # jobs stream progress JSON instead and never touch the status bar.
     def self.import_status_sink(opts)
-      return opts[:status_sink] if opts[:status_sink]
+      return opts[:status_sink] if opts[:status_sink] && ENV['BC_LANEB_FORCE_STATUS'] != '1'
       if defined?(BatchHostPolicy) &&
          BatchHostPolicy.respond_to?(:noninteractive?) &&
-         BatchHostPolicy.noninteractive?
+         BatchHostPolicy.noninteractive? && ENV['BC_LANEB_FORCE_STATUS'] != '1'
         return lambda { |_snapshot| true }
       end
       # Every controller checkpoint still publishes and probes Escape. Only
@@ -5008,7 +5008,7 @@ module BlueCollarSystems
         status_sink = import_status_sink(opts)
         if defined?(BatchHostPolicy) &&
            BatchHostPolicy.respond_to?(:noninteractive?) &&
-           BatchHostPolicy.noninteractive?
+           BatchHostPolicy.noninteractive? && ENV['BC_LANEB_FORCE_STATUS'] != '1'
           # Batch/host jobs already stream progress JSON. SketchUp 2017 can
           # block for tens of minutes on status_text after huge solid-text
           # models (Alvord Text→3D Text), so never touch the UI status bar.
