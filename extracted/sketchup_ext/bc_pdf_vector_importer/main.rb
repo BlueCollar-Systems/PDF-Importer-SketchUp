@@ -198,6 +198,7 @@ module BlueCollarSystems
     end
 
     def self.report_pipeline_progress(opts, phase, detail = nil)
+      ImportRunControl.heartbeat!(:pipeline_step)
       return false unless opts.is_a?(Hash)
       callback = opts[:progress_callback]
       return false unless callback.respond_to?(:call)
@@ -291,27 +292,101 @@ module BlueCollarSystems
       result
     end
 
-    # Progress on SketchUp's status bar ("... Esc to cancel"). Batch/host
+    # Status-bar writes are rate-limited: at most one per this many seconds.
+    STATUS_TEXT_MIN_INTERVAL_SECONDS = 2.0
+    # SketchUp 2017 can repaint a lot for one status write once a big solid
+    # text model exists. A write that took long pushes the next one further
+    # out (this many times its own duration), so status writes stay under
+    # about 2.5% of the import's time.
+    STATUS_TEXT_COST_FACTOR = 40.0
+    STATUS_TEXT_MAX_INTERVAL_SECONDS = 60.0
+
+    # Progress on SketchUp's status bar ("Importing page 1 of 1: building
+    # text 120 of 557 (about 30 s left), press Esc to cancel"). Batch/host
     # jobs stream progress JSON instead and never touch the status bar.
     def self.import_status_sink(opts)
-      return opts[:status_sink] if opts[:status_sink]
+      return opts[:status_sink] if opts[:status_sink] && ENV['BC_LANEB_FORCE_STATUS'] != '1'
       if defined?(BatchHostPolicy) &&
          BatchHostPolicy.respond_to?(:noninteractive?) &&
-         BatchHostPolicy.noninteractive?
+         BatchHostPolicy.noninteractive? && ENV['BC_LANEB_FORCE_STATUS'] != '1'
         return lambda { |_snapshot| true }
       end
       # Every controller checkpoint still publishes and probes Escape. Only
       # expensive GUI writes are limited, using a clock unaffected by wall time.
       last_status_at = nil
+      interval = STATUS_TEXT_MIN_INTERVAL_SECONDS
       lambda do |snapshot|
         if defined?(Sketchup) && Sketchup.respond_to?(:status_text=)
           now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          next true if last_status_at && now - last_status_at < 2.0
+          next true if last_status_at && now - last_status_at < interval
           Sketchup.status_text = ImportDialog.progress_status(snapshot)
-          last_status_at = now
+          finished = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          heartbeat = ImportRunControl.active_heartbeat
+          heartbeat.record_status_write(finished - now) if
+            heartbeat.respond_to?(:record_status_write)
+          cost = (finished - now) * STATUS_TEXT_COST_FACTOR
+          interval = [[STATUS_TEXT_MIN_INTERVAL_SECONDS, cost].max,
+                      STATUS_TEXT_MAX_INTERVAL_SECONDS].min
+          last_status_at = finished
         end
         true
       end
+    end
+
+    # A named step of the page build on the status line (through the run
+    # controller, so it shares the sink's rate limit and stays off the
+    # status bar in batch jobs). Never reads Esc and never raises.
+    def self.pipeline_status!(opts, stage, detail = {})
+      controller = opts.is_a?(Hash) ? opts[:run_controller] : nil
+      if controller && controller.respond_to?(:progress)
+        controller.progress(stage, detail)
+      else
+        ImportRunControl.heartbeat!(stage)
+      end
+      true
+    rescue StandardError => e
+      Logger.warn('Pipeline', "progress status failed: #{e.message}")
+      false
+    end
+
+    # The window heartbeat's own measurements, for the import report.
+    def self.record_ui_responsiveness!(stats)
+      return unless stats.is_a?(Hash)
+      heartbeat = ImportRunControl.active_heartbeat
+      return unless heartbeat && heartbeat.respond_to?(:summary)
+      stats[:ui_responsiveness] = heartbeat.summary
+    rescue StandardError => e
+      Logger.warn('Pipeline', "window heartbeat summary failed: #{e.message}")
+    end
+
+    def self.with_import_heartbeat(heartbeat)
+      ImportRunControl.with_ui_heartbeat(heartbeat) { yield }
+    ensure
+      log_ui_responsiveness(heartbeat)
+    end
+
+    def self.log_ui_responsiveness(heartbeat)
+      return unless heartbeat && heartbeat.respond_to?(:summary)
+      data = heartbeat.summary
+      slow = Array(data[:slow_gaps]).map do |gap|
+        "#{gap[:gap_ms]} ms after #{gap[:after] || 'start'} before " \
+          "#{gap[:before] || 'end'} at #{gap[:at_ms]} ms"
+      end
+      Logger.info(
+        'Pipeline',
+        "Window heartbeat (#{data[:backend]}): #{data[:pulses]} peeks / " \
+          "#{data[:requests]} progress points over #{data[:active_ms]} ms; " \
+          "longest gap #{data[:longest_gap_ms]} ms after " \
+          "#{data[:longest_gap_after] || 'start'} before " \
+          "#{data[:longest_gap_before] || 'end'}; gaps over 1 s: " \
+          "#{data[:gaps_over_1s]}, over 5 s: #{data[:gaps_over_5s]}; " \
+          "status writes #{data[:status_writes]} (#{data[:status_write_ms]} ms, " \
+          "longest #{data[:status_write_max_ms]} ms)" \
+          "#{slow.empty? ? '' : "; slow: #{slow.join(' | ')}"}"
+      )
+      Logger.flush_log
+    rescue StandardError
+      nil
     end
 
     # Imports that cannot resume (Import Text = No, Raster, pages not
@@ -333,6 +408,7 @@ module BlueCollarSystems
           ImportRunControl::EscapeCancelProbe.new,
         :status_sink => import_status_sink(opts)
       )
+      ImportRunControl.active_controller = inner_opts[:run_controller]
       run_pipeline(model, source_path, inner_opts)
     rescue ImportRunControl::ImportCancelled => error
       # The inner pipeline confirms rollback before this result is built.
@@ -1683,6 +1759,7 @@ module BlueCollarSystems
         cache[key] = ItemRasterSourceBounds.prepare(
           svg_document, items.values, media_box, render_box, rotation,
           page_num, source_sha)
+        ImportRunControl.heartbeat!(:page_picture)
       end
       sid = RepresentationFidelity.source_span_id(item)
       evidence = cache[key][sid]
@@ -1724,7 +1801,12 @@ module BlueCollarSystems
         )
       glyph_component_cache = {}
 
+      step_down_index = 0
       proofs_by_id.each do |source_id, initial_proof|
+        ImportRunControl.progress!(
+          :text_step_down, step_down_index, proofs_by_id.length
+        )
+        step_down_index += 1
         item = items_by_id[source_id]
         raise RepresentationFidelity::ContractError,
               "fallback proof has no source item #{source_id}" unless item
@@ -2028,9 +2110,11 @@ module BlueCollarSystems
                                           page_num, item, media_box, opts,
                                           import_start, y_offset,
                                           page_rotation = 0, source_bounds = nil)
+      ImportRunControl.heartbeat!(:page_picture)
       parent = target_entities
       delivery = nil
       before = RepresentationFidelity.snapshot(parent)
+      ImportRunControl.heartbeat!(:page_picture)
       opts.delete(:item_raster_failure_evidence)
       delivery = import_item_as_raster(
         model, parent, pdf_path, page_num, item, media_box, opts,
@@ -2362,7 +2446,9 @@ module BlueCollarSystems
       end
       physical_definition_tree_cache = {}
       physical_canonical_json_cache = {}
-      rows.each do |row|
+      evidence_total = rows.length + physical_rows.length
+      rows.each_with_index do |row, row_index|
+        ImportRunControl.progress!(:text_evidence, row_index, evidence_total)
         item = items_by_id[row[:source_span_id].to_s]
         unless item
           raise RepresentationFidelity::ContractError,
@@ -2474,7 +2560,10 @@ module BlueCollarSystems
           :width => row[:width], :height => row[:height], :depth => row[:depth]
         }
       end
-      physical_rows.each do |row|
+      physical_rows.each_with_index do |row, row_index|
+        ImportRunControl.progress!(
+          :text_evidence, rows.length + row_index, evidence_total
+        )
         Svg3DTextRenderer.finalize_source_unit_evidence!(
           row, page_rotation, physical_definition_tree_cache,
           physical_canonical_json_cache
@@ -3133,9 +3222,10 @@ module BlueCollarSystems
       nil
     end
 
+    # Not SecureRandom: see ImportRunControl.unique_uuid (a 6.7 s freeze
+    # on the first call in a SketchUp 2017 session).
     def self.new_import_session_id
-      require 'securerandom'
-      SecureRandom.uuid
+      ImportRunControl.unique_uuid
     rescue StandardError
       "su-import-#{Process.pid}-#{Time.now.to_i}"
     end
@@ -4438,6 +4528,8 @@ module BlueCollarSystems
     end
 
     def self.finalize_import_diagnostics!(path, opts, stats)
+      record_ui_responsiveness!(stats)
+      ImportRunControl.progress!(:import_report)
       report = QAReport.build_from_stats(path, opts, stats)
       report_target = stats[:import_report_path] || QAReport.default_output_path(path)
       parts_payload = report[:extra] && report[:extra][:parts_bootstrap]
@@ -4769,7 +4861,19 @@ module BlueCollarSystems
       )
     end
 
+    # Every import keeps SketchUp's window answering Windows while it runs
+    # (ImportRunControl::UiHeartbeat), so Windows does not show it as Not
+    # Responding. A nested call (batch import of several files) reuses the
+    # outer heartbeat.
     def self.run_resumable_pipeline(model, source_path, opts)
+      unless ImportRunControl.active_heartbeat
+        heartbeat = (opts.is_a?(Hash) && opts[:ui_heartbeat]) ||
+                    ImportRunControl::UiHeartbeat.new
+        stats = with_import_heartbeat(heartbeat) do
+          run_resumable_pipeline(model, source_path, opts)
+        end
+        return stats
+      end
       # Decide once, before anything is built. Every page call below carries
       # :large_pdf_confirmed, so no page can put a question in front of the
       # operator mid-import; Esc (run controller) and resume are the safety net.
@@ -4796,9 +4900,11 @@ module BlueCollarSystems
       original_annotation_cache = {}
       begin
         prepared_path, salvage_note = PdfSalvage.prepare_if_needed(source_path)
+        ImportRunControl.heartbeat!(:reading_pdf)
         Logger.info('Pipeline', salvage_note) if salvage_note
         parser = PDFParser.new(prepared_path)
         parser.parse
+        ImportRunControl.heartbeat!(:reading_pdf)
         if parser.page_count.to_i <= 0
           raise RepresentationFidelity::ContractError,
                 'PDF parser returned zero pages; requested representation was not changed.'
@@ -4821,10 +4927,11 @@ module BlueCollarSystems
         identity = ImportRunControl.identity_for(
           source_path, opts, File.dirname(__FILE__)
         )
+        ImportRunControl.heartbeat!(:reading_pdf)
         status_sink = import_status_sink(opts)
         if defined?(BatchHostPolicy) &&
            BatchHostPolicy.respond_to?(:noninteractive?) &&
-           BatchHostPolicy.noninteractive?
+           BatchHostPolicy.noninteractive? && ENV['BC_LANEB_FORCE_STATUS'] != '1'
           # Batch/host jobs already stream progress JSON. SketchUp 2017 can
           # block for tens of minutes on status_text after huge solid-text
           # models (Alvord Text→3D Text), so never touch the UI status bar.
@@ -4840,6 +4947,7 @@ module BlueCollarSystems
           :status_sink => status_sink,
           :audit => opts[:audit] == true
         )
+        ImportRunControl.active_controller = controller
         controller.begin_request!
         runner = lambda do |page, offset, certifier|
           page_opts = opts.dup
@@ -5112,6 +5220,7 @@ module BlueCollarSystems
 
       ocg = OCGParser.new(parser)
       ocg.parse
+      ImportRunControl.heartbeat!(:reading_pdf)
 
       pages = normalized_requested_pages(opts[:pages], parser.page_count)
       opts = opts.merge(:pages => pages)
@@ -5131,6 +5240,7 @@ module BlueCollarSystems
         match_pdf_layers: match_pdf_layers)
       layer_mgr.precreate_pdf_layers(ocg.layer_list)
       layer_mgr.register_imported_names!
+      ImportRunControl.heartbeat!(:reading_pdf)
 
       requested_text_mode = opts[:text_mode]
       requested_text_mode ||= (opts[:use_3d_text] ? :text3d : (opts[:import_text] ? :geometry : :none))
@@ -5172,6 +5282,7 @@ module BlueCollarSystems
       record_source_lineage!(
         stats, source_input_path, path, salvage_note, opts
       )
+      ImportRunControl.heartbeat!(:reading_pdf)
 
       image_extractor = nil
       inline_image_scanner = nil
@@ -5187,6 +5298,7 @@ module BlueCollarSystems
       end
 
       page_fit_bounds = Geom::BoundingBox.new
+      ImportRunControl.heartbeat!(:reading_pdf)
 
       import_start = Time.now
       # Counters describe THIS import. Without a reset they would accumulate across
@@ -5205,10 +5317,6 @@ module BlueCollarSystems
        begin
         page_started = Time.now
         page_text_failures_before = Array(stats[:text_delivery_failures]).length
-        pct = pages.length > 1 ? " (#{((idx.to_f / pages.length) * 100).round}%)" : ""
-        elapsed = (Time.now - import_start).round(1)
-
-        Sketchup.status_text = "PDF Import#{pct} — Page #{page_num}/#{parser.page_count} — Parsing... [#{elapsed}s]"
 
         run_control_checkpoint!(
           opts, :page_parse,
@@ -5251,7 +5359,7 @@ module BlueCollarSystems
                 'requested representation was not changed.'
         end
 
-        Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Reading paths... [#{elapsed}s]"
+        pipeline_status!(opts, :reading_paths, :page => page_num)
         content_parse_started = Time.now
         ocg_map = parser.page_ocg_map(page_num)
         opacity_effects = ContentStreamParser.page_fill_opacity_effects(parser, page_num)
@@ -5466,7 +5574,7 @@ module BlueCollarSystems
         page_zero_ink_proofs = []
         if opts[:import_text]
           text_extract_started = Time.now
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Extracting text... [#{(Time.now - import_start).round(1)}s]"
+          pipeline_status!(opts, :reading_text, :page => page_num)
           strict_text_fidelity = !!opts[:strict_text_fidelity]
           text3d_mode = (requested_text_mode == :text3d)
           strict_text_processing = strict_text_fidelity
@@ -5869,7 +5977,7 @@ module BlueCollarSystems
           end
         end
 
-        Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — #{paths.length} paths, #{text_items.length} text items... [#{(Time.now - import_start).round(1)}s]"
+        pipeline_status!(opts, :analyzing_page, :page => page_num)
 
         complexity = confirm_page_complexity!(
           opts, page_num, paths.length, text_items.length
@@ -5916,7 +6024,7 @@ module BlueCollarSystems
             "(#{skip[:primitives]} primitives, #{skip[:paths]} paths, #{skip[:stream_mb]}MB streams); " \
             "vector/text import continues.")
         elsif recog_mode != :none
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Analyzing document... [#{(Time.now - import_start).round(1)}s]"
+          pipeline_status!(opts, :analyzing_page, :page => page_num)
           recognition = Recognizer.run(page_data, mode: recog_mode, config: config)
           stats[:mode_used] = recognition[:mode_used]
           if recognition[:generic]
@@ -5936,10 +6044,9 @@ module BlueCollarSystems
           Logger.warn("Pipeline",
             "Page #{page_num}: heavy page (#{paths.length} paths, " \
             "#{total_subpaths} subpaths). Import may take several minutes.")
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Heavy page: #{paths.length} paths (this may take a while)... [#{(Time.now - import_start).round(1)}s]"
-        else
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Building #{paths.length} paths... [#{(Time.now - import_start).round(1)}s]"
         end
+        pipeline_status!(opts, :geometry_path, :page => page_num,
+                         :completed => 0, :total => paths.length)
 
         # ── Hatch detection ──
         source_paths_for_paint_order = paths.dup
@@ -6557,7 +6664,7 @@ module BlueCollarSystems
 
         # Render text as precise vector geometry via Poppler/MuPDF SVG.
         if use_svg_text && builder.page_group
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Rendering text geometry... [#{(Time.now - import_start).round(1)}s]"
+          pipeline_status!(opts, :renderer_stage, :page => page_num)
           text_layer = layer_mgr.text_fallback_layer
 
           # A failure in this stage undoes this stage's text only and lists
@@ -6725,7 +6832,7 @@ module BlueCollarSystems
         end
 
         if opts[:cleanup_geometry] && builder.page_group
-          Sketchup.status_text = "PDF Import#{pct} — Page #{page_num} — Cleaning up geometry... [#{(Time.now - import_start).round(1)}s]"
+          pipeline_status!(opts, :cleanup, :page => page_num)
           cl = GeometryCleanup.cleanup(builder.page_group.entities,
             merge_tolerance:    opts[:merge_tolerance],
             min_edge_length:    opts[:merge_tolerance],
@@ -6898,7 +7005,7 @@ module BlueCollarSystems
         if SHAPE_EXTRUSION_ENABLED && opts[:extrude_depth].to_f > 0.0 && builder.page_group &&
            opts[:import_mode].to_s != 'raster'
           begin
-            Sketchup.status_text = "PDF Import#{pct} \u2014 Page #{page_num} \u2014 Extruding 3D faces... [#{(Time.now - import_start).round(1)}s]"
+            pipeline_status!(opts, :extruding, :page => page_num)
             ex = Extrude3D.apply(builder.page_group.entities, opts[:extrude_depth].to_f)
             stats[:extruded_faces] = (stats[:extruded_faces] || 0) + ex[:faces_extruded]
             Logger.info('Extrude3D',

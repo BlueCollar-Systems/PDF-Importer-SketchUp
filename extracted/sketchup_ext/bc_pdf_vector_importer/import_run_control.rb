@@ -4,7 +4,6 @@
 
 require 'digest'
 require 'json'
-require 'securerandom'
 
 module BlueCollarSystems
   module PDFVectorImporter
@@ -21,7 +20,7 @@ module BlueCollarSystems
         :page_certifier, :resumable_page_call, :initial_y_offset,
         :defer_final_diagnostics, :complexity_confirm, :prepared_parser,
         :prepared_pdf_path, :preserve_prepared_parser, :preserve_logger,
-        :stop_on_page_error,
+        :stop_on_page_error, :ui_heartbeat,
         # Audit (slow self-checks) changes how much the importer re-proves,
         # never what it builds, so it does not change resume identity.
         :audit, :import_digest_memo
@@ -148,13 +147,457 @@ module BlueCollarSystems
       # stop even an unattended run that normally skips individual errors.
       class RollbackFailure < ResumeMismatch; end
 
-      # Reads the Esc key for the run controller. SketchUp 2017-2023 ship
-      # Win32API, which stays the first choice there. SketchUp 2024+ ships
-      # Ruby 3.2, which no longer has Win32API, so the stdlib Fiddle reader
-      # (present in every SketchUp Ruby) is used instead. Without either, Esc
-      # cannot be read: that is reported once and the import simply runs to
-      # the end.
+      # The user32 loader shared by the Esc probe and the UI heartbeat.
+      # SketchUp 2017-2023 ship Win32API, which stays the first choice
+      # there. SketchUp 2024+ ships Ruby 3.2, which no longer has Win32API,
+      # so the stdlib Fiddle reader (present in every SketchUp Ruby) is used
+      # instead. Tests override these private methods with fixtures.
+      module User32Loader
+        private
+
+        # WINAPI is stdcall on 32-bit Windows. Windows x64 uses its unified
+        # platform ABI, exposed by Fiddle::Function::DEFAULT.
+        def windows_api_abi(fiddle)
+          function_class = fiddle.const_get(:Function)
+          if function_class.const_defined?(:STDCALL)
+            function_class.const_get(:STDCALL)
+          elsif fiddle.const_get(:SIZEOF_VOIDP) == 8
+            function_class.const_get(:DEFAULT)
+          else
+            raise LoadError, 'Fiddle Windows stdcall ABI is unavailable'
+          end
+        end
+
+        def system_user32_path
+          system_root = ENV['SystemRoot'].to_s
+          system_root = 'C:/Windows' if system_root.empty?
+          File.join(system_root, 'System32', 'user32.dll')
+        end
+
+        def windows_platform?
+          RUBY_PLATFORM =~ /mswin|mingw|cygwin/i
+        end
+
+        def load_key_library(name)
+          require name
+        end
+
+        def win32api_class
+          Win32API
+        end
+
+        def fiddle_module
+          Fiddle
+        end
+      end
+
+      # Keeps Windows from marking SketchUp "Not Responding" while an import
+      # runs. SketchUp runs extension Ruby on its window thread, so a long
+      # import never returns to SketchUp's message loop, and after 5 s
+      # Windows swaps the window for a frozen "Not Responding" ghost that
+      # invites a force close. pulse! calls user32 PeekMessageW with
+      # PM_NOREMOVE | PM_NOYIELD at most once per interval (250 ms). That
+      # tells Windows the program is still checking its messages. It never
+      # removes, translates or dispatches a queued message: clicks, keys,
+      # menu commands, timers and paint requests stay queued until the
+      # import ends, so nothing the user does can run in the middle of an
+      # import. (During any PeekMessage call Windows itself still delivers
+      # messages that another program sends straight to the window, such as
+      # the "are you still running?" check; none of them come from the
+      # keyboard or mouse.)
+      #
+      # Without a Windows message reader (macOS, a failed load) pulse! is a
+      # no-op, reported once. BC_PDF_UI_HEARTBEAT=0 turns it off.
+      #
+      # The heartbeat also measures itself: the longest time between two
+      # pulses, and which progress points surrounded it, so an import report
+      # names the stage that still kept the window busy.
+      class UiHeartbeat
+        include User32Loader
+
+        PM_NOREMOVE = 0x0000
+        PM_REMOVE = 0x0001
+        PM_NOYIELD = 0x0002
+        PEEK_FLAGS = PM_NOREMOVE | PM_NOYIELD
+        # A Windows MSG is 48 bytes on x64 and 28 on x86.
+        MESSAGE_BUFFER_BYTES = 64
+        DEFAULT_INTERVAL_SECONDS = 0.25
+        SLOW_GAP_SECONDS = 1.0
+        HUNG_GAP_SECONDS = 5.0
+        SLOW_GAP_LIMIT = 8
+        DISABLE_ENV_KEY = 'BC_PDF_UI_HEARTBEAT'.freeze
+
+        attr_reader :backend, :unavailable_reason, :requests, :pulses
+
+        # options:
+        #   :peek     - callable that peeks once (tests inject one); without
+        #               it the real user32 PeekMessageW is loaded.
+        #   :clock    - monotonic seconds (tests inject one).
+        #   :interval - minimum seconds between two peeks.
+        #   :logger   - anything with #warn(context, message).
+        #   :env      - environment Hash (tests inject one).
+        def initialize(options = {})
+          @clock = options[:clock] ||
+                   lambda { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+          interval = options[:interval].to_f
+          @interval = interval > 0.0 ? interval : DEFAULT_INTERVAL_SECONDS
+          @logger = options[:logger]
+          @diagnostic_reported = false
+          @unavailable_reason = nil
+          @requests = 0
+          @pulses = 0
+          @peek_seconds = 0.0
+          @inside = false
+          @started_at = nil
+          @last_pulse_at = nil
+          @last_request_label = nil
+          @longest_gap = 0.0
+          @longest_gap_labels = [nil, nil]
+          @slow_gaps = []
+          @slow_gap_count = 0
+          @hung_gap_count = 0
+          environment = options[:env] || ENV
+          if environment[DISABLE_ENV_KEY].to_s.strip =~ /\A(?:0|false|no|off)\z/i
+            @backend = :disabled
+            @unavailable_reason = "turned off by #{DISABLE_ENV_KEY}"
+            @peek = nil
+          elsif options[:peek]
+            @backend = :injected
+            @peek = options[:peek]
+          else
+            @backend = nil
+            @peek = windows_peek
+          end
+        end
+
+        def available?
+          !@peek.nil? && @backend != :unavailable && @backend != :disabled
+        end
+
+        # :win32api, :fiddle, :injected, :disabled or :none.
+        def adapter_kind
+          return @backend if @backend == :disabled
+          available? ? @backend : :none
+        end
+
+        def interval_seconds
+          @interval
+        end
+
+        # Starts the gap clock and peeks once.
+        def start!(label = :import_started)
+          @started_at = now_seconds
+          @last_pulse_at = nil
+          pulse!(label)
+        end
+
+        # Peeks if at least one interval has passed since the last beat.
+        # Returns true when it peeked. Never raises. Without a message
+        # reader the beat is still timed, so the report shows how dense the
+        # progress points were.
+        def pulse!(label = nil)
+          @requests += 1
+          now = now_seconds
+          last = @last_pulse_at
+          if last && now - last < @interval
+            @last_request_label = label
+            return false
+          end
+          # A message Windows delivers during the peek never starts a
+          # second peek.
+          return false if @inside
+          @inside = true
+          peeked = false
+          begin
+            record_gap!(now - last, label) if last
+            @last_pulse_at = now
+            peeked = peek_once!
+          ensure
+            @inside = false
+          end
+          @last_request_label = label
+          peeked
+        rescue StandardError => error
+          @inside = false
+          disable!("heartbeat failed: #{error.class}: #{error.message}")
+          false
+        end
+
+        # The status-line sink reports what each status-bar write cost, so
+        # the report shows whether showing progress slowed the import.
+        def record_status_write(seconds)
+          value = seconds.to_f
+          return unless value.finite? && value >= 0.0
+          @status_writes = @status_writes.to_i + 1
+          @status_write_seconds = @status_write_seconds.to_f + value
+          @status_write_max = value if value > @status_write_max.to_f
+        end
+
+        # What the import report shows. Labels name the progress points on
+        # both sides of the longest stretch without a peek.
+        def summary(now = nil)
+          now ||= now_seconds
+          active = @started_at ? now - @started_at : 0.0
+          open_gap = @last_pulse_at ? now - @last_pulse_at : 0.0
+          {
+            :backend => adapter_kind,
+            :available => available?,
+            :unavailable_reason => @unavailable_reason,
+            :interval_ms => (@interval * 1000.0).round(1),
+            :active_ms => (active * 1000.0).round(1),
+            :requests => @requests,
+            :pulses => @pulses,
+            :peek_ms => (@peek_seconds * 1000.0).round(3),
+            :longest_gap_ms => (@longest_gap * 1000.0).round(1),
+            :longest_gap_after => label_text(@longest_gap_labels[0]),
+            :longest_gap_before => label_text(@longest_gap_labels[1]),
+            :gaps_over_1s => @slow_gap_count,
+            :gaps_over_5s => @hung_gap_count,
+            :since_last_pulse_ms => (open_gap * 1000.0).round(1),
+            :status_writes => @status_writes.to_i,
+            :status_write_ms => (@status_write_seconds.to_f * 1000.0).round(1),
+            :status_write_max_ms => (@status_write_max.to_f * 1000.0).round(1),
+            :slow_gaps => @slow_gaps.map do |gap|
+              { :gap_ms => (gap[0] * 1000.0).round(1),
+                :after => label_text(gap[1]), :before => label_text(gap[2]),
+                :at_ms => (gap[3] * 1000.0).round(1) }
+            end
+          }
+        end
+
+        private
+
+        def now_seconds
+          @clock.call.to_f
+        end
+
+        def label_text(label)
+          label.nil? ? nil : label.to_s
+        end
+
+        def record_gap!(gap, label)
+          if gap > @longest_gap
+            @longest_gap = gap
+            @longest_gap_labels = [@last_request_label, label]
+          end
+          return if gap < SLOW_GAP_SECONDS
+          @slow_gap_count += 1
+          @hung_gap_count += 1 if gap >= HUNG_GAP_SECONDS
+          at = @started_at ? now_seconds - @started_at : 0.0
+          @slow_gaps << [gap, @last_request_label, label, at]
+          @slow_gaps = @slow_gaps.sort_by { |row| -row[0] }.first(SLOW_GAP_LIMIT)
+        end
+
+        def peek_once!
+          return false unless available?
+          started = now_seconds
+          @peek.call
+          @peek_seconds += now_seconds - started
+          @pulses += 1
+          true
+        end
+
+        def disable!(reason)
+          @backend = :unavailable
+          @unavailable_reason = reason
+          @peek = nil
+          report_unavailable!
+        end
+
+        # Only PeekMessageW is loaded: no Translate/DispatchMessage exists
+        # here to call by mistake. The MSG buffer is reused and never read.
+        def windows_peek
+          unless windows_platform?
+            @backend = :unavailable
+            @unavailable_reason = 'no Windows message reader on this platform'
+            return nil
+          end
+          @message_buffer = "\0" * MESSAGE_BUFFER_BYTES
+          failures = []
+          begin
+            load_key_library('Win32API')
+            api = win32api_class.new('user32', 'PeekMessageW',
+                                     ['P', 'P', 'I', 'I', 'I'], 'I')
+            @backend = :win32api
+            buffer = @message_buffer
+            return lambda { api.call(buffer, 0, 0, 0, PEEK_FLAGS) }
+          rescue LoadError, StandardError => error
+            failures << "Win32API: #{error.class}: #{error.message}"
+          end
+          begin
+            load_key_library('fiddle')
+            fiddle = fiddle_module
+            function_class = fiddle.const_get(:Function)
+            voidp = fiddle.const_get(:TYPE_VOIDP)
+            int = fiddle.const_get(:TYPE_INT)
+            @peek_library = fiddle.dlopen(system_user32_path)
+            @peek_function = function_class.new(
+              @peek_library['PeekMessageW'], [voidp, voidp, int, int, int],
+              int, windows_api_abi(fiddle)
+            )
+            @backend = :fiddle
+            buffer = @message_buffer
+            # Keep both the DLL handle and the function alive for the run.
+            return lambda { @peek_function.call(buffer, 0, 0, 0, PEEK_FLAGS) }
+          rescue LoadError, StandardError => error
+            failures << "Fiddle: #{error.class}: #{error.message}"
+            @peek_function = nil
+            @peek_library = nil
+          end
+          @backend = :unavailable
+          @unavailable_reason = failures.join('; ')
+          report_unavailable!
+          nil
+        end
+
+        def report_unavailable!
+          return if @diagnostic_reported
+          @diagnostic_reported = true
+          message = "SketchUp may show Not Responding during long imports: " \
+                    "the window heartbeat is unavailable (#{@unavailable_reason})"
+          logger = @logger
+          logger = Logger if logger.nil? && defined?(Logger) && Logger.respond_to?(:warn)
+          if logger && logger.respond_to?(:warn)
+            logger.warn('ImportRunControl', message)
+          else
+            warn(message)
+          end
+        rescue StandardError
+          nil
+        end
+      end
+
+      # The heartbeat and run controller of the import in progress. Deep
+      # code (subprocess waits, PNG decoding, evidence readback, cleanup)
+      # reaches them through ImportRunControl.heartbeat! and progress!
+      # without a controller being threaded through every call. Outside an
+      # import both are no-ops.
+      @active_heartbeat = nil
+      @active_controller = nil
+      @active_depth = 0
+
+      def self.with_ui_heartbeat(heartbeat)
+        previous = [@active_heartbeat, @active_controller]
+        @active_depth += 1
+        @active_heartbeat = heartbeat
+        @active_controller = nil
+        heartbeat.start! if heartbeat.respond_to?(:start!)
+        yield
+      ensure
+        @active_depth -= 1
+        @active_heartbeat, @active_controller = previous
+      end
+
+      def self.active_heartbeat
+        @active_heartbeat
+      end
+
+      # Registers the controller whose status line progress! updates. Only
+      # inside with_ui_heartbeat, so a test's controller never leaks.
+      def self.active_controller=(controller)
+        @active_controller = controller if @active_depth > 0
+      end
+
+      def self.active_controller
+        @active_controller
+      end
+
+      def self.heartbeat!(label = nil)
+        beat = @active_heartbeat
+        return false unless beat
+        beat.pulse!(label)
+      rescue StandardError
+        false
+      end
+
+      # Unique ids for an import session or a resume-journal generation,
+      # without OpenSSL. In SketchUp 2017 (Ruby 2.2) the first SecureRandom
+      # call of a session seeds OpenSSL by walking the whole process heap:
+      # measured 6,667 ms inside an import, with the window frozen. These ids
+      # only have to be unique, never secret. Ruby's Random is seeded from
+      # the operating system's random source when it is created.
+      def self.unique_hex(byte_count = 16)
+        @unique_random ||= Random.new
+        @unique_random.bytes(byte_count.to_i).unpack('H*').first
+      end
+
+      # The same shape as SecureRandom.uuid (version 4, RFC 4122 variant).
+      def self.unique_uuid
+        bytes = (@unique_random ||= Random.new).bytes(16).unpack('C*')
+        bytes[6] = (bytes[6] & 0x0f) | 0x40
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        hex = bytes.pack('C*').unpack('H*').first
+        [hex[0, 8], hex[8, 4], hex[12, 4], hex[16, 4], hex[20, 12]].join('-')
+      end
+
+      # For hot per-entity walks: only every 64th call even reads the clock.
+      @tick_count = 0
+      def self.heartbeat_tick!(label = nil)
+        return false unless @active_heartbeat
+        @tick_count = (@tick_count + 1) & 63
+        return false unless @tick_count.zero?
+        heartbeat!(label)
+      end
+
+      # Progress from code that has no run controller handy. It updates the
+      # status line (rate-limited by the sink) and pulses the heartbeat. It
+      # never reads Esc and never raises: these points sit inside work that
+      # is not a safe place to stop, so Esc takes effect at the next real
+      # checkpoint.
+      def self.progress!(stage, completed = 0, total = 0, page = nil)
+        controller = @active_controller
+        if controller && controller.respond_to?(:progress)
+          detail = { :completed => completed.to_i, :total => total.to_i }
+          detail[:page] = page unless page.nil?
+          controller.progress(stage, detail)
+        else
+          heartbeat!(stage)
+        end
+        true
+      rescue StandardError
+        false
+      end
+
+      # Waits for a Ruby thread (a subprocess waiter) while pulsing the
+      # heartbeat. Returns true when the thread finished, false when
+      # timeout_s ran out first. Without a heartbeat this is a plain join.
+      def self.wait_with_heartbeat(thread, timeout_s = nil, label = :waiting)
+        clock = lambda { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+        deadline = timeout_s ? clock.call + timeout_s.to_f : nil
+        if @active_heartbeat.nil?
+          return !thread.join(deadline ? [deadline - clock.call, 0.0].max : nil).nil?
+        end
+        poll = UiHeartbeat::DEFAULT_INTERVAL_SECONDS / 2.0
+        loop do
+          heartbeat!(label)
+          step = poll
+          if deadline
+            left = deadline - clock.call
+            return !thread.join(0).nil? if left <= 0.0
+            step = left if left < step
+          end
+          return true if thread.join(step)
+        end
+      end
+
+      # Open3.capture3 that keeps the window answering while the child
+      # runs. Same return value and exceptions as Open3.capture3.
+      def self.capture3_with_heartbeat(*command)
+        require 'open3'
+        return Open3.capture3(*command) if @active_heartbeat.nil?
+        worker = Thread.new { Open3.capture3(*command) }
+        worker.report_on_exception = false if worker.respond_to?(:report_on_exception=)
+        wait_with_heartbeat(worker, nil, :external_program)
+        worker.value
+      end
+
+      # Reads the Esc key for the run controller (Win32API on SketchUp
+      # 2017-2023, Fiddle on SketchUp 2024+, see User32Loader). Without
+      # either, Esc cannot be read: that is reported once and the import
+      # simply runs to the end.
       class EscapeCancelProbe
+        include User32Loader
+
         ESCAPE_VIRTUAL_KEY = 0x1B
         # GetAsyncKeyState: 0x8000 = held down now, 0x0001 = pressed since
         # the previous read.
@@ -301,25 +744,6 @@ module BlueCollarSystems
           lambda { |_key| 0 }
         end
 
-        # WINAPI is stdcall on 32-bit Windows. Windows x64 uses its unified
-        # platform ABI, exposed by Fiddle::Function::DEFAULT.
-        def windows_api_abi(fiddle)
-          function_class = fiddle.const_get(:Function)
-          if function_class.const_defined?(:STDCALL)
-            function_class.const_get(:STDCALL)
-          elsif fiddle.const_get(:SIZEOF_VOIDP) == 8
-            function_class.const_get(:DEFAULT)
-          else
-            raise LoadError, 'Fiddle Windows stdcall ABI is unavailable'
-          end
-        end
-
-        def system_user32_path
-          system_root = ENV['SystemRoot'].to_s
-          system_root = 'C:/Windows' if system_root.empty?
-          File.join(system_root, 'System32', 'user32.dll')
-        end
-
         # The real "is SketchUp in front?" check over user32 through Fiddle.
         # It reuses the key reader's user32 handle when that reader is Fiddle.
         # nil when it cannot be built: a held Esc then counts wherever it is
@@ -358,22 +782,6 @@ module BlueCollarSystems
           nil
         end
 
-        def windows_platform?
-          RUBY_PLATFORM =~ /mswin|mingw|cygwin/i
-        end
-
-        def load_key_library(name)
-          require name
-        end
-
-        def win32api_class
-          Win32API
-        end
-
-        def fiddle_module
-          Fiddle
-        end
-
         def report_unavailable!
           return if @diagnostic_reported
           @diagnostic_reported = true
@@ -404,6 +812,13 @@ module BlueCollarSystems
           @stage_started_at = {}
           @stage_percentages = {}
           @retained_pages = []
+          @current_page = nil
+          # Page number => its 1-based place in this request, for the status
+          # line ("page 7 (2 of 3)").
+          @page_positions = {}
+          @pages.uniq.sort.each_with_index do |page, index|
+            @page_positions[page] = index + 1
+          end
           @model = options[:model]
           @identity = stringify_hash(options[:identity] || {})
           @entity_signature_proc = options[:entity_signature]
@@ -452,9 +867,12 @@ module BlueCollarSystems
         end
 
         def progress(stage, detail = {})
+          # Every progress point also keeps the window answering Windows.
+          ImportRunControl.heartbeat!(stage)
           now = finite_number(@clock.call, 'clock')
           stage_key = [stage.to_sym, detail[:page]]
           @stage_started_at[stage_key] = now unless @stage_started_at.key?(stage_key)
+          @current_page = detail[:page] unless detail[:page].nil?
 
           completed = non_negative_integer(detail[:completed] || 0, 'completed')
           total = non_negative_integer(detail[:total] || 0, 'total')
@@ -474,16 +892,30 @@ module BlueCollarSystems
             eta = 0.0
           end
 
+          page_index = detail[:page_index]
+          page_total = detail[:page_total]
+          # Progress points deep in a page often do not know the page; the
+          # status line still names the page being built.
+          shown_page = detail[:page].nil? ? @current_page : detail[:page]
+          if page_total.nil? && !shown_page.nil?
+            position = @page_positions[shown_page.to_i]
+            if position
+              page_index = position
+              page_total = @page_positions.length
+            end
+          end
           snapshot = {
             :stage => stage.to_sym,
             :completed => completed,
             :total => total,
             :percentage => percentage,
             :elapsed_seconds => [now - @started_at, 0.0].max,
+            :stage_elapsed_seconds => stage_elapsed,
             :eta_seconds => eta,
             :page => detail[:page],
-            :page_index => detail[:page_index],
-            :page_total => detail[:page_total]
+            :current_page => shown_page,
+            :page_index => page_index,
+            :page_total => page_total
           }
           publish(snapshot)
           snapshot
@@ -596,7 +1028,7 @@ module BlueCollarSystems
 
           @pending_journal = {
             'schema' => JOURNAL_SCHEMA,
-            'generation' => SecureRandom.hex(16),
+            'generation' => ImportRunControl.unique_hex(16),
             'identity' => @identity.dup,
             'pages' => []
           }
@@ -961,6 +1393,7 @@ module BlueCollarSystems
 
         def collect_entity_signature(entity, digest, first, depth)
           raise ResumeMismatch, 'retained entity tree is too deep' if depth > 64
+          ImportRunControl.heartbeat!(:certify_page)
           row = {
             'depth' => depth,
             'persistent_id' => persistent_id_for(entity),

@@ -162,6 +162,7 @@ module BlueCollarSystems
           items = []
 
           html.scan(/<line\s+([^>]+)>(.*?)<\/line>/mi) do |line_attrs, inner|
+            ImportRunControl.heartbeat_tick!(:reading_text) if defined?(ImportRunControl)
             words = inner.scan(/<word\s+([^>]+)>(.*?)<\/word>/mi).map do |attrs, txt|
               {
                 attrs: attrs,
