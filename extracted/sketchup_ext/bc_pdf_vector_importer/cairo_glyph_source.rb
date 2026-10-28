@@ -1,4 +1,5 @@
 require 'digest/md5'
+require File.join(File.dirname(__FILE__), 'page_transform')
 
 # bc_pdf_vector_importer/cairo_glyph_source.rb
 # Round 23 (F-1): glyph SOURCE selection + telemetry for the requested
@@ -399,6 +400,7 @@ module BlueCollarSystems
         spatial_index = build_span_spatial_index(rows)
         pen_records = []
         pens.each_with_index do |pen, enumerated_index|
+          ImportRunControl.heartbeat_tick!(:text_match) if defined?(ImportRunControl)
           begin
             placement_index = if pen.is_a?(Hash) && pen.key?(:placement_index)
                                 pen[:placement_index].to_i
@@ -457,6 +459,7 @@ module BlueCollarSystems
         end
 
         rows.each do |row|
+          ImportRunControl.heartbeat_tick!(:text_match) if defined?(ImportRunControl)
           row[:candidates] = row[:candidates].sort_by do |candidate|
             [candidate[:score], candidate[:placement_index]]
           end
@@ -698,6 +701,7 @@ module BlueCollarSystems
                                          pen_slot, slot_pen, tolerance)
         owned = Hash.new { |hash, key| hash[key] = [] }
         pen_records.each do |record|
+          ImportRunControl.heartbeat_tick!(:text_match) if defined?(ImportRunControl)
           ink_bbox = record[:ink_bbox]
           next unless ink_bbox.is_a?(Array)
           contenders = []
@@ -729,6 +733,7 @@ module BlueCollarSystems
         end
 
         rows.each do |row|
+          ImportRunControl.heartbeat_tick!(:text_match) if defined?(ImportRunControl)
           candidates = owned[row[:index]].sort_by do |candidate|
             [candidate[:placement_index], candidate[:pen_index]]
           end
@@ -1326,12 +1331,14 @@ module BlueCollarSystems
         end
         pen_dx = svg_min_x - media_min_x
         pen_dy = svg_min_y - media_min_y
+        frame = rotated_source_frame(media_box, svg_page_box, opts[:page_rotation])
 
         canonical_unit = PDF_PT_TO_INCH
         glyph_paths = canonical_glyph_paths_in(svg)
         pens = []
         seen_physical = {}
         SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           local = glyph_paths[p[:glyph_id]]
           next unless local
           physical_key = exact_source_placement_key(p)
@@ -1353,8 +1360,13 @@ module BlueCollarSystems
             e = p[:x].to_f
             f = p[:y].to_f
           end
-          tx = (e - vb_min_x) + pen_dx
-          ty = (vb_h + vb_min_y - f) + pen_dy
+          if frame
+            tx, ty = unrotated_source_point(frame, e - vb_min_x, vb_h + vb_min_y - f)
+            a, b, c, d = unrotated_source_linear(frame, a, b, c, d)
+          else
+            tx = (e - vb_min_x) + pen_dx
+            ty = (vb_h + vb_min_y - f) + pen_dy
+          end
           ink_loops = local.map do |points|
             points.map do |point|
               # Curves are flattened once at the canonical 1x physical unit.
@@ -1393,7 +1405,9 @@ module BlueCollarSystems
             glyph_id: p[:glyph_id],
             fill_rgb: p[:fill_rgb] && p[:fill_rgb].dup,
             fill_opacity: p[:fill_opacity],
-            source_primary_axis: source_primary_axis_for_matrix(m),
+            source_primary_axis: unrotated_primary_axis(
+              frame, source_primary_axis_for_matrix(m)
+            ),
             ink_points_pdf: ink_points,
             ink_loops_pdf: ink_loops,
             ink_bbox_pdf: [xs.min, ys.min, xs.max, ys.max]
@@ -1425,6 +1439,56 @@ module BlueCollarSystems
         ]
       rescue StandardError
         [placement.object_id]
+      end
+
+      # pdftocairo draws a /Rotate page AS DISPLAYED, but the text spans
+      # (since v3.7.153), the page geometry and the page transform applied
+      # after construction all use unrotated PDF space. On a rotated page each
+      # displayed SVG point is mapped back the same way
+      # ItemRasterSourceBounds.raw_source_point does. Without this the pens
+      # matched almost no spans, glyphs past the unrotated page width were
+      # clipped away, and delivered outlines were rotated twice.
+      # nil for an unrotated page: its arithmetic stays exactly as before.
+      def self.rotated_source_frame(media_box, svg_page_box, rotation)
+        rot = PageTransform.normalize_rotation(rotation)
+        return nil if rot == 0
+        unless media_box.is_a?(Array) && media_box.length >= 4 &&
+               svg_page_box.is_a?(Array) && svg_page_box.length >= 4
+          raise ArgumentError, 'rotated glyph source requires page boxes'
+        end
+        media = media_box.first(4).map { |value| value.to_f }
+        render = svg_page_box.first(4).map { |value| value.to_f }
+        display = PageTransform.transform_bbox(
+          render[0], render[1], render[2], render[3], media, rot
+        )
+        { :rotation => rot, :display_box => display, :media_box => media }
+      end
+
+      # Displayed SVG point (relative to the viewBox origin, y-up) to
+      # media-relative unrotated PDF points.
+      def self.unrotated_source_point(frame, x, y)
+        media = frame[:media_box]
+        raw = PageTransform.inverse_transform_point(
+          x + frame[:display_box][0], y + frame[:display_box][1],
+          media, frame[:rotation]
+        )
+        [raw[0] - media[0], raw[1] - media[1]]
+      end
+
+      # The glyph's 2x2 SVG matrix with the same inverse rotation applied to
+      # its local axes: x' = a*x - c*y, y' = -b*x + d*y stays the form.
+      def self.unrotated_source_linear(frame, a, b, c, d)
+        case frame[:rotation]
+        when 90 then [b, -a, d, -c]
+        when 180 then [-a, -b, -c, -d]
+        when 270 then [-b, a, -d, c]
+        else [a, b, c, d]
+        end
+      end
+
+      def self.unrotated_primary_axis(frame, axis)
+        return axis unless frame && [90, 270].include?(frame[:rotation])
+        axis == :x ? :y : :x
       end
 
       def self.source_primary_axis_for_matrix(matrix)
@@ -1553,7 +1617,8 @@ module BlueCollarSystems
         if cache_enabled
           cache_key = [
             svg.respond_to?(:length) ? Digest::MD5.hexdigest(svg) : svg.object_id,
-            scale, y_offset, svg_page_box, media_box
+            scale, y_offset, svg_page_box, media_box,
+            PageTransform.normalize_rotation(opts[:page_rotation])
           ]
           @model_space_loops_cache ||= {}
           cached = @model_space_loops_cache[cache_key]
@@ -1575,6 +1640,7 @@ module BlueCollarSystems
         if vb_h <= 0.0 && svg_page_box.is_a?(Array) && svg_page_box.length >= 4
           vb_h = (svg_page_box[3] - svg_page_box[1]).abs.to_f
         end
+        frame = rotated_source_frame(media_box, svg_page_box, opts[:page_rotation])
 
         glyph_paths = canonical_glyph_paths_in(svg)
 
@@ -1583,6 +1649,7 @@ module BlueCollarSystems
         definition_loops_by_glyph = {}
         local_loops_by_matrix = {}
         SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           local = glyph_paths[p[:glyph_id]]
           next unless local
           physical_key = exact_source_placement_key(p)
@@ -1606,8 +1673,19 @@ module BlueCollarSystems
             f = p[:y].to_f
           end
 
-          tx = (e - vb_min_x) * unit + box_offset_x_in
-          ty = (vb_h + vb_min_y - f) * unit + y_offset + box_offset_y_in
+          if frame
+            pen_x_pdf, pen_y_pdf = unrotated_source_point(
+              frame, e - vb_min_x, vb_h + vb_min_y - f
+            )
+            a, b, c, d = unrotated_source_linear(frame, a, b, c, d)
+            tx = pen_x_pdf * unit
+            ty = pen_y_pdf * unit + y_offset
+          else
+            tx = (e - vb_min_x) * unit + box_offset_x_in
+            ty = (vb_h + vb_min_y - f) * unit + y_offset + box_offset_y_in
+            pen_x_pdf = (e - vb_min_x) + (svg_min_x - media_min_x)
+            pen_y_pdf = (vb_h + vb_min_y - f) + (svg_min_y - media_min_y)
+          end
 
           # Definition loops depend only on glyph identity + import scale.
           # Local loops depend on the 2x2 of the SVG matrix. Reuse those
@@ -1684,15 +1762,15 @@ module BlueCollarSystems
             ink_y = ink_loops_pdf.flatten(1).map { |point| point[1] }
           end
 
-          pen_x_pdf = (e - vb_min_x) + (svg_min_x - media_min_x)
-          pen_y_pdf = (vb_h + vb_min_y - f) + (svg_min_y - media_min_y)
           out << {
             glyph_id: p[:glyph_id],
             placement_index: placement_index,
             source_svg_offset: p[:source_svg_offset],
             svg_matrix: m.is_a?(Array) ? m.map { |value| value.to_f } :
               [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-            source_primary_axis: source_primary_axis_for_matrix(m),
+            source_primary_axis: unrotated_primary_axis(
+              frame, source_primary_axis_for_matrix(m)
+            ),
             pen_pdf: [pen_x_pdf, pen_y_pdf],
             ink_points_pdf: ink_loops_pdf.flatten(1),
             ink_loops_pdf: ink_loops_pdf,
@@ -1732,6 +1810,7 @@ module BlueCollarSystems
         when Array
           value.map { |item| copy_model_space_loop_value(item) }
         when Hash
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           copy = {}
           value.each do |key, item|
             copy[key] = copy_model_space_loop_value(item)

@@ -217,6 +217,7 @@ module BlueCollarSystems
       ensure
         Logger.flush_log
         PdfSalvage.cleanup(pdf_path) if defined?(PdfSalvage)
+        SvgTextRenderer.release_embedded_font_copies! if defined?(SvgTextRenderer)
       end
 
       def extract_pdf(pdf_path, opts, cli_opts)

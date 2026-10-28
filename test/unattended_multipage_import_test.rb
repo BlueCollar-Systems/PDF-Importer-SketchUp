@@ -410,7 +410,9 @@ class UnattendedMultipageImportTest < Minitest::Test
   def test_resumable_cleanup_preserves_the_active_terminal_error
     source = File.read(MAIN_RB)
     method = source[/^    def self\.run_resumable_pipeline.*?(?=^    def self\.release_original_annotation_cache!)/m]
-    ensure_body = method[/^      ensure\n(.*)(?=^      end\n    end\n)/m, 1]
+    # The method's own ensure (which closes the import's helper-check window)
+    # follows the cleanup block, so the block ends at "end" + "ensure" or "end".
+    ensure_body = method[/^      ensure\n(.*)(?=^      end\n    (?:ensure|end)\n)/m, 1]
     refute_nil ensure_body
     boundary = Module.new
     boundary.define_singleton_method(:preserve_terminal_import_error) do |error, &block|

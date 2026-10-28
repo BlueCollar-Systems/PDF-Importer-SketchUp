@@ -12,7 +12,7 @@
 #
 #     perf[:phases] = { total_ms: elapsed_ms } if elapsed_ms > 0
 #
-# A real report for `1011 (1 OF 2) - Rev 0 / text` therefore showed 96,800 ms of elapsed
+# A real report for `B1 / text` therefore showed 96,800 ms of elapsed
 # time with a single `total_ms` bucket and no breakdown. Optimising against that is
 # guessing -- and guessing already cost a day here: a bbox-cache hypothesis measured 2.8x
 # in a synthetic test and produced zero end-to-end gain.
@@ -165,7 +165,7 @@ class QAReportStageTimingTest < Minitest::Test
   # added, a naming rule cannot. Both known aggregates (page_total_ms, raster_total_ms)
   # already follow it.
 
-  # Exact values from the 2026-08-10 leased canary, 1011 (1 OF 2) - Rev 0 / text.
+  # Exact values from the 2026-08-10 leased canary, B1 / text.
   REAL_CANARY_STAGES = {
     page_total_ms: 72_522.0,          # aggregate: encloses everything below
     text3d_render_ms: 21_014.8,
@@ -267,7 +267,7 @@ class QAReportStageTimingTest < Minitest::Test
   # code follows it, and any *_ms key that is neither a declared parent nor a known leaf
   # is surfaced in `phase_unclassified` so a new stage cannot be silently misattributed.
 
-  # Exact phases from the v3.7.131 leased canary, 1011 (1 OF 2) - Rev 0 / text.
+  # Exact phases from the v3.7.131 leased canary, B1 / text.
   V37131_PHASES = {
     page_total_ms: 60_946.3,          # parent: the per-page loop
     post_build_ms: 7_200.4,           # parent: encloses commit/cleanup/diff/fit/diagnostics

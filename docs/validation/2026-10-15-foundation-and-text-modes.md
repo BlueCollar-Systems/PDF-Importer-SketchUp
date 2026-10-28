@@ -42,8 +42,7 @@ a release or establish compatibility with every PDF, setting or host release.
 
 ## Foundation drawing, requested 3D Text
 
-Source: `00S-505_ FOUNDATION SECTION AND DETAILS Rev.0 markup.pdf`, SHA-256
-`563ed39b60518ffe34844cd142063678d51e8f675396f6b968d478e81483d6cd`.
+Source: private foundation sheet F1 (file name and SHA-256 kept in private evidence).
 Evidence root: `C:/TMP/su170-fm-foundation-3d-20261015-r1`.
 
 - Native PID **17604** completed the ordinary import in **220.3 seconds**. The
