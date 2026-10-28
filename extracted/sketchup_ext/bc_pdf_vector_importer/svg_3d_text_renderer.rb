@@ -1058,6 +1058,7 @@ module BlueCollarSystems
         seen = {}
         counts = { :edge_count => 0, :hidden_edge_count => 0 }
         visit_source_outline_entities(group, seen) do |entity|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           next unless source_outline_entity_type(entity) == 'Edge'
           counts[:edge_count] += 1
           unless entity.respond_to?(:hidden=) && entity.respond_to?(:hidden?)

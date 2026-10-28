@@ -399,6 +399,7 @@ module BlueCollarSystems
         spatial_index = build_span_spatial_index(rows)
         pen_records = []
         pens.each_with_index do |pen, enumerated_index|
+          ImportRunControl.heartbeat_tick!(:text_match) if defined?(ImportRunControl)
           begin
             placement_index = if pen.is_a?(Hash) && pen.key?(:placement_index)
                                 pen[:placement_index].to_i
@@ -457,6 +458,7 @@ module BlueCollarSystems
         end
 
         rows.each do |row|
+          ImportRunControl.heartbeat_tick!(:text_match) if defined?(ImportRunControl)
           row[:candidates] = row[:candidates].sort_by do |candidate|
             [candidate[:score], candidate[:placement_index]]
           end
@@ -698,6 +700,7 @@ module BlueCollarSystems
                                          pen_slot, slot_pen, tolerance)
         owned = Hash.new { |hash, key| hash[key] = [] }
         pen_records.each do |record|
+          ImportRunControl.heartbeat_tick!(:text_match) if defined?(ImportRunControl)
           ink_bbox = record[:ink_bbox]
           next unless ink_bbox.is_a?(Array)
           contenders = []
@@ -729,6 +732,7 @@ module BlueCollarSystems
         end
 
         rows.each do |row|
+          ImportRunControl.heartbeat_tick!(:text_match) if defined?(ImportRunControl)
           candidates = owned[row[:index]].sort_by do |candidate|
             [candidate[:placement_index], candidate[:pen_index]]
           end
@@ -1332,6 +1336,7 @@ module BlueCollarSystems
         pens = []
         seen_physical = {}
         SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           local = glyph_paths[p[:glyph_id]]
           next unless local
           physical_key = exact_source_placement_key(p)
@@ -1583,6 +1588,7 @@ module BlueCollarSystems
         definition_loops_by_glyph = {}
         local_loops_by_matrix = {}
         SvgTextRenderer.parse_use_placements(svg).each_with_index do |p, placement_index|
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           local = glyph_paths[p[:glyph_id]]
           next unless local
           physical_key = exact_source_placement_key(p)
@@ -1732,6 +1738,7 @@ module BlueCollarSystems
         when Array
           value.map { |item| copy_model_space_loop_value(item) }
         when Hash
+          ImportRunControl.heartbeat_tick!(:text_outlines) if defined?(ImportRunControl)
           copy = {}
           value.each do |key, item|
             copy[key] = copy_model_space_loop_value(item)

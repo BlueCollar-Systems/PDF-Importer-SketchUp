@@ -18,6 +18,9 @@ module BlueCollarSystems
       module_function
 
       def new_import_session_id
+        if defined?(ImportRunControl) && ImportRunControl.respond_to?(:unique_uuid)
+          return ImportRunControl.unique_uuid
+        end
         require 'securerandom'
         SecureRandom.uuid
       rescue StandardError

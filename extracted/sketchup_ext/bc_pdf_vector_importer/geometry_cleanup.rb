@@ -77,6 +77,7 @@ module BlueCollarSystems
 
         stats = { merged_verts: 0, removed_dupes: 0, removed_micro: 0,
                   joined_collinear: 0, closed_gaps: 0, preserved_source_strokes: 0 }
+        pulse!
         if source_width_ancestor?(entities)
           stats[:preserved_source_strokes]=1
           return stats
@@ -105,18 +106,23 @@ module BlueCollarSystems
 
         # Phase 1: Remove micro segments
         stats[:removed_micro] += remove_micro_edges(entities, micro_len)
+        pulse!
 
         # Phase 2: Merge near-coincident vertices
         stats[:merged_verts] += merge_vertices(entities, merge_tol)
+        pulse!
 
         # Phase 3: Remove duplicate edges (same two endpoints)
         stats[:removed_dupes] += remove_duplicate_edges(entities)
+        pulse!
 
         # Phase 4: Join collinear segments
         stats[:joined_collinear] += join_collinear_edges(entities, collinear_tol)
+        pulse!
 
         # Phase 5: Close tiny face gaps
         stats[:closed_gaps] += close_face_gaps(entities, merge_tol * 2)
+        pulse!
 
         # Joining/bridging can leave redundant native edges after Phase 3.
         # SketchUp 2017 repaired shared-vertex duplicates on the first Save,
@@ -125,6 +131,11 @@ module BlueCollarSystems
         stats[:removed_dupes] += remove_exact_duplicate_loose_edges(entities)
 
         stats
+      end
+
+      # Keeps SketchUp's window answering Windows during a long cleanup.
+      def self.pulse!
+        ImportRunControl.heartbeat!(:cleanup) if defined?(ImportRunControl)
       end
 
       # ---------------------------------------------------------------

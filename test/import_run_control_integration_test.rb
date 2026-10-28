@@ -97,7 +97,7 @@ class ImportRunControlIntegrationTest < Minitest::Test
   def test_exact_page_complexity_is_checked_before_expensive_build
     pipeline = MAIN[/def self\.run_pipeline\(model, path, opts\).*\z/m]
     refute_nil pipeline
-    page_work = pipeline[/paths\.length\} paths.*?page_data = PrimitiveExtractor\.extract/m]
+    page_work = pipeline[/pipeline_status!\(opts, :analyzing_page.*?page_data = PrimitiveExtractor\.extract/m]
     refute_nil page_work
     assessment = page_work.index('confirm_page_complexity!(')
     build = page_work.index('page_data = PrimitiveExtractor.extract')
@@ -170,6 +170,11 @@ class ImportRunControlIntegrationTest < Minitest::Test
         module ImportRunControl
           JOURNAL_SCHEMA = 'test'
           def self.identity_for(*); {}; end
+          # The window heartbeat is outside this lineage check: behave as
+          # an import whose heartbeat is already running.
+          def self.active_heartbeat; :outer_import; end
+          def self.active_controller=(_controller); end
+          def self.heartbeat!(*); false; end
           class Controller
             def initialize(*); end
             def begin_request!; end

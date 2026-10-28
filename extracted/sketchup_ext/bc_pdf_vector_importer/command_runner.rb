@@ -61,7 +61,12 @@ module BlueCollarSystems
             err_thread = Thread.new { stderr.read.to_s }
 
             begin
-              Timeout.timeout(timeout_s) { status = wait_thr.value }
+              # During an import the wait keeps SketchUp's window answering
+              # Windows (a page render can take several seconds).
+              unless wait_for_child(wait_thr, timeout_s)
+                raise Timeout::Error, "command exceeded #{timeout_s}s"
+              end
+              status = wait_thr.value
             rescue Timeout::Error
               timed_out = true
               pid = nil
@@ -136,6 +141,18 @@ module BlueCollarSystems
           error: error ? error.message : nil
         }
       end
+
+      # true when the child finished within timeout_s.
+      def self.wait_for_child(wait_thr, timeout_s)
+        if defined?(ImportRunControl) &&
+           ImportRunControl.respond_to?(:wait_with_heartbeat)
+          return ImportRunControl.wait_with_heartbeat(
+            wait_thr, timeout_s, :external_program
+          )
+        end
+        !wait_thr.join(timeout_s).nil?
+      end
+      private_class_method :wait_for_child
 
       def self.safe_warn(context, msg)
         begin

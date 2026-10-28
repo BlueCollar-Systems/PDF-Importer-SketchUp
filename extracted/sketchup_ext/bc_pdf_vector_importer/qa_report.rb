@@ -32,7 +32,17 @@ module BlueCollarSystems
 
       def sample_process_mb
         if RUBY_PLATFORM =~ /mswin|mingw|cygwin/i
-          size = `powershell -NoProfile -Command "(Get-Process -Id #{Process.pid}).WorkingSet64"`.strip.to_i
+          command = "powershell -NoProfile -Command \"(Get-Process -Id #{Process.pid}).WorkingSet64\""
+          # PowerShell takes a second or two to start; during an import the
+          # wait keeps SketchUp's window answering Windows.
+          output = if defined?(ImportRunControl) && ImportRunControl.active_heartbeat
+                     reader = Thread.new { `#{command}` }
+                     ImportRunControl.wait_with_heartbeat(reader, nil, :import_report)
+                     reader.value
+                   else
+                     `#{command}`
+                   end
+          size = output.to_s.strip.to_i
           return (size / 1024.0 / 1024.0).round(2) if size > 0
         elsif File.readable?('/proc/self/status')
           rss = File.read('/proc/self/status').each_line.find { |line| line.start_with?('VmRSS:') }
@@ -385,6 +395,11 @@ module BlueCollarSystems
             # is expensive" from "each item re-scans everything created so far".
             bookkeeping = ownership_bookkeeping(stats)
             perf[:ownership_bookkeeping] = bookkeeping unless bookkeeping.empty?
+            # How well the window kept answering Windows during the import
+            # (ImportRunControl::UiHeartbeat): longest stretch without a
+            # message check and the progress points around it.
+            responsiveness = stats[:ui_responsiveness]
+            perf[:ui_responsiveness] = responsiveness if responsiveness.is_a?(Hash)
             perf
           end,
           fallback: fallback_block(stats, degraded_renderers),
@@ -2423,8 +2438,13 @@ module BlueCollarSystems
         session_id = (stats[:import_session_id] || stats['import_session_id']).to_s.strip
         if session_id.empty?
           begin
-            require 'securerandom'
-            session_id = SecureRandom.uuid
+            session_id = if defined?(ImportRunControl) &&
+                            ImportRunControl.respond_to?(:unique_uuid)
+                           ImportRunControl.unique_uuid
+                         else
+                           require 'securerandom'
+                           SecureRandom.uuid
+                         end
           rescue StandardError
             session_id = ''
           end
