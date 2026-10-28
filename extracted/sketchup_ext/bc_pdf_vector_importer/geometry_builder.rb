@@ -137,7 +137,6 @@ module BlueCollarSystems
         # edges already in that collection, so about 30,000 separate calls
         # on a dense sheet take minutes even after width faces are skipped.
         @stroke_edge_batches = {}
-        @proven_stroke_materials = {}
         @lineweight_groups = {}
         @lineweight_organization = { :requested_mode=>@lineweight_mode,
           :organized_path_count=>0,:group_count=>0,:tag_names=>[],
@@ -4303,18 +4302,14 @@ module BlueCollarSystems
       def style_stroke_edge(edge, style)
         return edge unless style
         edge.material = style[:material]
-        # Reading the assigned color back is a native round trip on every
-        # edge. The first edge of each material still has to prove the host
-        # kept that object, the source RGB, full opacity, and no texture.
-        # Later edges of the same object are assigned and not read back.
+        # Native material state is mutable. Reuse the owned material object,
+        # but prove each edge's assignment, RGB, opacity and texture live.
         material = style[:material]
-        return edge if @proven_stroke_materials[material.object_id]
         assigned = edge.material
         unless assigned == material && stroke_material_rgb(assigned) == style[:rgb] &&
                material.alpha == 1.0 && material.texture.nil?
           raise StrokeStyleFailure, 'native edge did not retain source stroke RGB/material/opacity'
         end
-        @proven_stroke_materials[material.object_id] = true
         edge
       rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch, StrokeStyleFailure
         raise
