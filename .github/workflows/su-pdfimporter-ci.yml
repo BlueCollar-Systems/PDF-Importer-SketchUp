@@ -137,6 +137,7 @@ jobs:
           ruby test/content_stream_graphics_state_test.rb
           ruby test/ghostscript_runtime_resolver_test.rb
           ruby test/command_runner_environment_test.rb
+          ruby test/command_runner_legacy_capture_test.rb
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_source_bounds_test.rb
           ruby test/source_fill_only_paint_test.rb
@@ -266,6 +267,8 @@ jobs:
           BC_TEST_REQUIRE_BUNDLED_GS: '1'
         run: |
           ruby test/command_runner_environment_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ruby test/command_runner_legacy_capture_test.rb
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/item_raster_page_renderer_test.rb
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
