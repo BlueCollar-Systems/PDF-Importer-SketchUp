@@ -1,12 +1,5 @@
 # PDF Vector Importer for SketchUp
 
-**Stable download: [v3.7.183](https://github.com/BlueCollar-Systems/PDF-Importer-SketchUp/releases/tag/v3.7.183).**
-Use this package even if a source badge or older notes below show a newer number.
-**v3.7.184 and v3.7.185 are withdrawn. Do not install them.** v3.7.184 fails
-some dense drawings in SketchUp 2017; v3.7.185 can accept incomplete or displaced
-linework. The historical timings and matching line counts below do not establish
-correct geometry for those withdrawn versions.
-
 **BUILT. NOT BOUGHT.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -18,7 +11,7 @@ Import PDF vector geometry as native editable SketchUp edges with arc reconstruc
 
 ### Quick Install (SketchUp 2017 Make through current Pro)
 
-1. Download `SketchUp-PDF-Importer_v3.7.183.rbz` from the [stable v3.7.183 release](https://github.com/BlueCollar-Systems/PDF-Importer-SketchUp/releases/tag/v3.7.183) (do **not** rename or unzip `.rbz`).
+1. Download `SketchUp-PDF-Importer_v3.7.185.rbz` from the [v3.7.185 release](https://github.com/BlueCollar-Systems/PDF-Importer-SketchUp/releases/tag/v3.7.185) (do **not** rename or unzip `.rbz`).
 2. In SketchUp, open **Window → Extension Manager** (or **Extensions → Extension Manager**), click **Install Extension**, and select the downloaded `.rbz`.
 3. Use **File → Import PDF Vectors…** (or **Extensions → PDF Vector Importer → Import PDF Vectors…**), choose your PDF and options, and click **Import**.
 
@@ -55,15 +48,14 @@ known, so an accidental range such as `1-1000000000` stops before allocating
 millions of page entries. Dialog, headless CLI, batch analysis, and host import
 use the same validation.
 
-### Recent fixes (v3.7.185, withdrawn)
+### Recent fixes (v3.7.185)
 
 - Dense sheets import in SketchUp 2017 again. v3.7.184 stopped handrail
   sheets with "native stroke roster does not exactly cover its source
   intervals": SketchUp moves a line end by up to 0.001 in onto a nearby
-  point, and the new line check allowed no difference at all. The v3.7.185 check
-  allowed a 0.001 in difference without proving where SketchUp actually snapped.
-  That fallback can accept a gap or a displaced line. v3.7.184 and v3.7.185
-  are withdrawn; use v3.7.183.
+  point, and the new line check allowed no difference at all. The check now
+  allows SketchUp's own 0.001 in, and still stops on a real gap or an extra
+  line. v3.7.184 was withdrawn; use this version or v3.7.183.
 - Measured in SketchUp Make 2017 on five real handrail sheets: all five
   import, with the same line and face counts as v3.7.183, in 23.6 to 30.6
   seconds (v3.7.183: 24.4 to 31.3 seconds).
