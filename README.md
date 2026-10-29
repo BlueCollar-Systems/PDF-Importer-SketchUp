@@ -52,14 +52,17 @@ use the same validation.
 
 - Dense sheets import in SketchUp 2017 again. v3.7.184 stopped handrail
   sheets with "native stroke roster does not exactly cover its source
-  intervals": SketchUp moves a line end by up to 0.001 in onto a nearby
-  point, and the new line check allowed no difference at all. The check now
-  allows SketchUp's own 0.001 in, and still stops on a real gap or an extra
-  line. v3.7.184 was withdrawn; use this version or v3.7.183.
+  intervals". v3.7.185 allows a 0.001 in difference in this line check.
+  Smaller gaps or shifted lines can pass without proof that SketchUp joined
+  their endpoints. Compare the imported geometry with the drawing; matching
+  line counts alone do not prove it is correct. v3.7.184 remains withdrawn;
+  v3.7.183 is available for rollback.
 - Measured in SketchUp Make 2017 on five real handrail sheets: all five
   import, with the same line and face counts as v3.7.183, in 23.6 to 30.6
   seconds (v3.7.183: 24.4 to 31.3 seconds).
-- Known limit: SketchUp 2022 and later were not run for this version.
+- Known limits: SketchUp 2022 and later were not run for this version. The
+  stricter line check proposed in [PR #128](https://github.com/BlueCollar-Systems/PDF-Importer-SketchUp/pull/128)
+  remains a draft, pending native SketchUp validation.
 
 ### Recent fixes (v3.7.184, withdrawn)
 
