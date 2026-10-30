@@ -63,6 +63,26 @@ class StrokeBatchCertaintyTest < Minitest::Test
     end
   end
 
+  class NativeVertex
+    attr_accessor :position, :live
+    def initialize(position)
+      @position, @live = position, true
+    end
+    def valid?; @live; end
+  end
+
+  class WitnessEdge < Base::Edge
+    attr_accessor :live
+    def initialize(a, b)
+      super(a, b)
+      @native_start, @native_end = NativeVertex.new(a), NativeVertex.new(b)
+      @live = true
+    end
+    def valid?; @live; end
+    def start; @native_start; end
+    define_method(:end) { @native_end }
+  end
+
   def p3(x, y = 0)
     Geom::Point3d.new(x, y, 0)
   end
@@ -83,6 +103,12 @@ class StrokeBatchCertaintyTest < Minitest::Test
 
   def flush(builder)
     builder.send(:flush_stroke_edge_batches!)
+  end
+
+  def observed_edge(entities, a, b)
+    edge = WitnessEdge.new(a, b)
+    entities.instance_variable_get(:@items) << edge
+    edge
   end
 
   def test_host_without_build_keeps_the_verified_add_edges_route
@@ -219,6 +245,248 @@ class StrokeBatchCertaintyTest < Minitest::Test
     assert entities.to_a.all? { |e| e.material == style[:material] }
   end
 
+  def test_legacy_snap_requires_a_unique_observed_live_vertex
+    entities, builder, style = fixture
+    peer = observed_edge(entities, p3(0.0003, 0.0002), p3(0.0003, 3))
+    foreign = Base::Material.new
+    peer.material = foreign
+    entities.response = proc do |es, _points|
+      [es.append_edge(p3(0.0003, 0.0002), p3(2, 1))]
+    end
+    points = [p3(0), p3(2, 1)]
+    queue(builder, entities, points, style)
+    assert flush(builder)
+    assert_same foreign, peer.material
+    assert_same style[:material], entities.to_a.last.material
+    assert_equal 0, points.first.x
+    assert_equal 0, points.first.y
+  end
+
+  def test_unobserved_endpoint_displacement_is_not_authorized_by_distance
+    entities, builder, style = fixture
+    entities.response = proc { |es, _points| [es.append_edge(p3(0.0004), p3(1))] }
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_nil entities.to_a.last.material
+    assert_equal 0, entities.line_calls
+  end
+
+  def test_unexplained_subradius_gap_and_parallel_phantom_are_rejected
+    [:gap, :tiny_gap, :parallel].each do |kind|
+      entities, builder, style = fixture
+      entities.response = proc do |es, _points|
+        if kind == :parallel
+          [es.append_edge(p3(0, 0.0005), p3(1, 0.0005))]
+        else
+          gap = kind == :tiny_gap ? 1.0e-12 : 0.0005
+          [es.append_edge(p3(0), p3(0.5)), es.append_edge(p3(0.5 + gap), p3(1))]
+        end
+      end
+      queue(builder, entities, [p3(0), p3(1)], style)
+      assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+      assert entities.to_a.all? { |edge| edge.material.nil? }
+    end
+  end
+
+  def test_observed_endpoint_does_not_authorize_an_internal_gap
+    entities, builder, style = fixture
+    observed_edge(entities, p3(0.0004), p3(0.0004, 3))
+    entities.response = proc do |es, _points|
+      [es.append_edge(p3(0.0004), p3(0.5)), es.append_edge(p3(0.5005), p3(1))]
+    end
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert entities.to_a.all? { |edge| edge.material.nil? }
+  end
+
+  def test_two_nearby_vertex_positions_are_ambiguous
+    entities, builder, style = fixture
+    observed_edge(entities, p3(0.0003, 0.0001), p3(0.0003, 3))
+    observed_edge(entities, p3(0.0004, 0.0002), p3(0.0004, 4))
+    entities.response = proc do |es, _points|
+      [es.append_edge(p3(0.0003, 0.0001), p3(1))]
+    end
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert entities.to_a.all? { |edge| edge.material.nil? }
+  end
+
+  def test_native_deletion_cannot_retroactively_remove_precall_ambiguity
+    entities, builder, style = fixture
+    observed_edge(entities, p3(0.0003, 0.0001), p3(0.0003, 3))
+    rival = observed_edge(entities, p3(0.0004, 0.0002), p3(0.0004, 4))
+    entities.response = proc do |es, _points|
+      rival.start.live = false
+      [es.append_edge(p3(0.0003, 0.0001), p3(1))]
+    end
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_nil entities.to_a.last.material
+  end
+
+  def test_native_endpoint_must_equal_its_witness_exactly
+    entities, builder, style = fixture
+    observed_edge(entities, p3(0.0004), p3(0.0004, 3))
+    entities.response = proc do |es, _points|
+      [es.append_edge(p3(0.0004000001), p3(1))]
+    end
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_nil entities.to_a.last.material
+  end
+
+  def test_observed_vertex_beyond_search_bound_is_not_authority
+    entities, builder, style = fixture
+    observed_edge(entities, p3(0.001000001), p3(0.001000001, 3))
+    entities.response = proc do |es, _points|
+      [es.append_edge(p3(0.001000001), p3(1))]
+    end
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+  end
+
+  def test_deleted_or_moved_vertex_cannot_remain_snap_authority
+    [:deleted, :moved].each do |kind|
+      entities, builder, style = fixture
+      peer = observed_edge(entities, p3(0.0004), p3(0.0004, 3))
+      entities.response = proc do |es, _points|
+        if kind == :deleted
+          peer.start.live = false
+        else
+          peer.start.position = p3(5, 5)
+        end
+        [es.append_edge(p3(0.0004), p3(1))]
+      end
+      queue(builder, entities, [p3(0), p3(1)], style)
+      assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+      assert_nil entities.to_a.last.material
+    end
+  end
+
+  def test_live_vertex_remains_authority_when_its_former_edge_was_split
+    entities, builder, style = fixture
+    peer = observed_edge(entities, p3(0.0004), p3(0.0004, 3))
+    entities.response = proc do |es, _points|
+      peer.live = false
+      [es.append_edge(p3(0.0004), p3(1))]
+    end
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert flush(builder)
+    assert_same style[:material], entities.to_a.last.material
+  end
+
+  def test_edge_witness_is_conservative_without_native_vertex_validity
+    [true, false].each do |edge_live|
+      entities, builder, style = fixture
+      peer = entities.append_edge(p3(0.0004), p3(0.0004, 3))
+      entities.response = proc do |es, _points|
+        peer.define_singleton_method(:valid?) { edge_live }
+        [es.append_edge(p3(0.0004), p3(1))]
+      end
+      queue(builder, entities, [p3(0), p3(1)], style)
+      if edge_live
+        assert flush(builder)
+      else
+        assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+        assert_nil entities.to_a.last.material
+      end
+    end
+  end
+
+  def test_snap_cannot_collapse_a_genuine_nonzero_segment
+    entities, builder, style = fixture
+    observed_edge(entities, p3(0.00025), p3(0.00025, 3))
+    entities.response = proc do |es, _points|
+      [es.append_edge(p3(0.00025), p3(0.00025))]
+    end
+    queue(builder, entities, [p3(0), p3(0.0005)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_nil entities.to_a.last.material
+  end
+
+  def test_unaccounted_endpoint_overhang_is_not_recolored
+    entities, builder, style = fixture
+    peer = observed_edge(entities, p3(-1), p3(2))
+    foreign = Base::Material.new
+    peer.material = foreign
+    entities.response = proc { |_es, _points| [peer] }
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_same foreign, peer.material
+  end
+
+  def test_observed_start_does_not_authorize_unobserved_end_overhang
+    entities, builder, style = fixture
+    observed_edge(entities, p3(0.0004), p3(0.0004, 3))
+    entities.response = proc do |es, _points|
+      [es.append_edge(p3(0.0004), p3(1.0004))]
+    end
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_nil entities.to_a.last.material
+  end
+
+  def test_api_argument_mutation_cannot_rewrite_source_or_comparison
+    entities, builder, style = fixture
+    points = [p3(0), p3(1)]
+    entities.response = proc do |es, native|
+      native.first.instance_variable_set(:@x, 0.0005)
+      [es.append_edge(native.first, native.last)]
+    end
+    queue(builder, entities, points, style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_equal 0, points.first.x
+    assert_nil entities.to_a.last.material
+  end
+
+  def test_verified_earlier_item_vertices_are_available_without_collection_rescan
+    entities, builder, style = fixture
+    reads = 0
+    entities.define_singleton_method(:to_a) do
+      reads += 1
+      super()
+    end
+    entities.response = proc do |es, points|
+      if es.native_calls == 1
+        [es.append_edge(points.first, points.last)]
+      else
+        [es.append_edge(p3(0.0004), p3(1))]
+      end
+    end
+    queue(builder, entities, [p3(0.0004, 3), p3(0.0004)], style)
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert flush(builder)
+    assert_equal 1, reads
+    assert_equal 2, entities.native_calls
+  end
+
+  def test_entities_builder_does_not_receive_legacy_snap_authority
+    entities, builder, style = fixture
+    observed_edge(entities, p3(0.0004), p3(0.0004, 3))
+    entities.advertise_build!
+    entities.response = proc { |es, _points| [es.append_edge(p3(0.0004), p3(1))] }
+    queue(builder, entities, [p3(0), p3(1)], style)
+    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
+    assert_nil entities.to_a.last.material
+    assert_equal 0, entities.line_calls
+  end
+
+  def test_cancellation_during_snapshot_and_local_queries_keeps_terminal_identity
+    [:vertex_snapshot, :source_snapshot, :vertex_query, :vertex_recheck].each do |phase|
+      error = IMP::ImportRunControl::ImportCancelled.new([1], 2, { :stage => phase })
+      entities, builder, style = fixture(Controller.new(error, phase))
+      observed_edge(entities, p3(0.0004), p3(0.0004, 3))
+      entities.response = proc { |es, _points| [es.append_edge(p3(0.0004), p3(1))] }
+      queue(builder, entities, [p3(0), p3(1)], style)
+      actual = assert_raises(IMP::ImportRunControl::ImportCancelled) { flush(builder) }
+      assert_same error, actual
+      assert_equal 0, entities.line_calls
+      assert entities.to_a.all? { |edge| edge.material.nil? }
+      assert_empty builder.instance_variable_get(:@stroke_edge_batches)
+      assert_equal(phase == :vertex_recheck ? 1 : 0, entities.native_calls)
+    end
+  end
+
   def test_exact_collinear_coalescing_preserves_complete_source
     entities, builder, style = fixture
     entities.response = proc { |es, _points| [es.append_edge(p3(0), p3(2))] }
@@ -353,7 +621,7 @@ class StrokeBatchCertaintyTest < Minitest::Test
            es.append_edge(p3(0, 2), p3(2, 0))]
         else
           [es.append_edge(p3(0, 0), p3(1, 1)), es.append_edge(p3(1, 1), p3(2, 2)),
-           es.append_edge(p3(0, 0.01), p3(2, 2.01))]
+           es.append_edge(p3(0, 1.0e-12), p3(2, 2 + 1.0e-12))]
         end
       end
       queue(builder, entities, [p3(0, 0), p3(2, 2)], style)
@@ -397,39 +665,15 @@ class StrokeBatchCertaintyTest < Minitest::Test
     assert entities.to_a.all? { |edge| edge.material == style[:material] }
   end
 
-  def test_a_gap_wider_than_the_native_vertex_tolerance_is_never_closed
+  def test_a_tiny_nonzero_interval_gap_is_never_rounded_closed
     entities, builder, style = fixture
     entities.response = proc do |es, _points|
-      [es.append_edge(p3(0), p3(0.5)), es.append_edge(p3(0.51), p3(1))]
+      [es.append_edge(p3(0), p3(0.5)), es.append_edge(p3(0.5 + 1.0e-12), p3(1))]
     end
     queue(builder, entities, [p3(0), p3(1)], style)
     assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
     assert entities.to_a.all? { |edge| edge.material.nil? }
     assert_equal 0, entities.line_calls
-  end
-
-  # SketchUp 2017 moved a handrail stroke start by 0.00044 in onto an
-  # existing vertex (within its 0.001 in merge tolerance).
-  def test_an_endpoint_snapped_within_native_vertex_tolerance_is_accepted
-    entities, builder, style = fixture
-    entities.response = proc do |es, _points|
-      [es.append_edge(Geom::Point3d.new(5.783717676056188, 5.948272233418909, 0),
-                      Geom::Point3d.new(6.539999999999999, 5.533055555555557, 0))]
-    end
-    queue(builder, entities, [Geom::Point3d.new(5.783333333333332, 5.948055555555555, 0),
-                              Geom::Point3d.new(6.539999999999999, 5.533055555555557, 0)], style)
-    assert flush(builder)
-    assert entities.to_a.all? { |edge| edge.material == style[:material] }
-  end
-
-  def test_an_endpoint_moved_beyond_native_vertex_tolerance_is_rejected
-    entities, builder, style = fixture
-    entities.response = proc do |es, _points|
-      [es.append_edge(p3(0.002), p3(1))]
-    end
-    queue(builder, entities, [p3(0), p3(1)], style)
-    assert_raises(Builder::StrokeBatchFailure) { flush(builder) }
-    assert entities.to_a.all? { |edge| edge.material.nil? }
   end
 
   def test_many_split_intervals_keep_complete_source_without_size_cutoff

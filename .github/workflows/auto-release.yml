@@ -199,6 +199,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/command_runner_environment_test.rb
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ruby test/command_runner_legacy_capture_test.rb
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/item_raster_page_renderer_test.rb
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/item_raster_display_test.rb
@@ -302,6 +304,7 @@ jobs:
           ruby test/import_health_test.rb
           ruby test/dependency_resolver_test.rb
           ruby test/command_runner_environment_test.rb
+          ruby test/command_runner_legacy_capture_test.rb
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_display_test.rb
           ruby test/source_image_paint_order_test.rb

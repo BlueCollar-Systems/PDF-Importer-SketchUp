@@ -36,10 +36,10 @@ module BlueCollarSystems
 
       PDF_POINT_TO_INCH = 1.0 / 72.0
       CLOSE_TOL = 1e-6
-      # SketchUp merges vertices closer than 0.001 inch, so a native stroke
-      # endpoint can move by up to this much onto an existing vertex
-      # (measured on SketchUp 2017 handrail sheets: 0.00044 in).
-      STROKE_NATIVE_VERTEX_TOLERANCE = 0.001
+      # Search bound for previously observed native vertices, not a coverage
+      # tolerance. A displaced endpoint must equal its unique live witness
+      # exactly; interval gaps and supporting lines still compare exactly.
+      STROKE_VERTEX_SEARCH_RADIUS = 0.001
       # Heavy pages construct inside isolated 250-path groups so SketchUp is
       # not merging every add_edges into a live 36k-edge parent. A host canary
       # of one giant group + one explode made construction and explode both
@@ -1177,14 +1177,20 @@ module BlueCollarSystems
       end
 
       def commit_legacy_stroke_edges!(entities, batch)
+        vertex_index = stroke_vertex_index(entities)
         batch.each_with_index do |item, index|
           run_checkpoint!(:stroke_edge_flush, :phase => :before_item,
                           :item_index => index, :item_total => batch.length) if index % 32 == 0
           empty_before = stroke_collection_empty?(entities)
+          # The API receives independent objects. A mutated argument must not
+          # rewrite the queued source or the coordinates used by the check.
+          source_points = copy_stroke_points(item[:points])
+          vertex_authority = stroke_vertex_authority(vertex_index, source_points)
           begin
-            edges = entities.add_edges(item[:points])
-            require_stroke_source_coverage!(item[:points], edges)
+            edges = entities.add_edges(copy_stroke_points(source_points))
+            require_stroke_source_coverage!(source_points, edges, vertex_authority)
             paint_queued_stroke_edges(edges.compact, item[:layer], item[:style])
+            index_stroke_vertices!(vertex_index, edges.compact)
           rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch,
                  StrokeStyleFailure, StrokeBatchFailure
             raise
@@ -1197,19 +1203,21 @@ module BlueCollarSystems
                     "cannot retry add_edges with uncertain partial geometry: #{error.message}"
             end
             Logger.warn('GeometryBuilder', "add_edges failed without geometry, falling back: #{error.message}")
-            commit_stroke_line_fallback!(entities, item)
+            commit_stroke_line_fallback!(entities, item.merge(:points => source_points))
           end
         end
       end
 
       def commit_stroke_line_fallback!(entities, item)
+        source_points = copy_stroke_points(item[:points])
         fallback = []
-        item[:points].each_cons(2).with_index do |pair, segment|
+        source_points.each_cons(2).with_index do |pair, segment|
           run_checkpoint!(:stroke_edge_flush, :phase => :line_fallback,
                           :segment_index => segment) if segment % 32 == 0
-          fallback << entities.add_line(pair[0], pair[1])
+          native_pair = copy_stroke_points(pair)
+          fallback << entities.add_line(native_pair[0], native_pair[1])
         end
-        require_stroke_source_coverage!(item[:points], fallback)
+        require_stroke_source_coverage!(source_points, fallback)
         paint_queued_stroke_edges(fallback.compact, item[:layer], item[:style])
       rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch,
              StrokeStyleFailure, StrokeBatchFailure
@@ -1232,6 +1240,161 @@ module BlueCollarSystems
         values
       end
 
+      def copy_stroke_points(points)
+        points.each_with_index.map do |point, index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :source_snapshot,
+                          :point_index => index) if index % 64 == 0
+          Geom::Point3d.new(*stroke_point_values(point))
+        end
+      end
+
+      # Capture existing vertices once for this collection's batch. A live
+      # Vertex remains useful after its original edge is split. API doubles
+      # without Vertex#valid? use the more conservative edge-endpoint witness.
+      def stroke_vertex_index(entities)
+        index = {}
+        index_stroke_vertices!(index, entities.to_a)
+        index
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch
+        raise
+      rescue StandardError
+        # Missing observation grants no authority. Exact source coverage can
+        # still succeed without using the legacy snap path.
+        {}
+      end
+
+      def index_stroke_vertices!(index, edges)
+        edges.each_with_index do |edge, edge_index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :vertex_snapshot,
+                          :edge_index => edge_index) if edge_index % 64 == 0
+          begin
+            next unless edge && edge.respond_to?(:valid?) && edge.valid? &&
+                        edge.respond_to?(:start) && edge.respond_to?(:end)
+            [:start, :end].each do |endpoint|
+              vertex = edge.send(endpoint)
+              values = stroke_point_values(vertex.position).freeze
+              witness = if vertex.respond_to?(:valid?)
+                          [vertex, nil]
+                        else
+                          [edge, endpoint]
+                        end
+              cell = stroke_vertex_cell(values)
+              points = (index[cell] ||= {})
+              witnesses = (points[values] ||= {})
+              witnesses[[witness[0].object_id, witness[1]]] = witness
+            end
+          rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch
+            raise
+          rescue StandardError
+            # An unreadable existing endpoint cannot justify a displacement.
+            next
+          end
+        end
+        index
+      end
+
+      def stroke_vertex_cell(values)
+        values.map { |value| (value / STROKE_VERTEX_SEARCH_RADIUS).floor }
+      end
+
+      def stroke_vertex_witness_live?(witness, values)
+        entity, endpoint = witness
+        return false unless entity.valid?
+        vertex = endpoint ? entity.send(endpoint) : entity
+        stroke_point_values(vertex.position) == values
+      rescue ImportRunControl::ImportCancelled, ImportRunControl::ResumeMismatch
+        raise
+      rescue StandardError
+        false
+      end
+
+      def nearby_stroke_vertices(index, point)
+        cell = stroke_vertex_cell(point)
+        radius_squared = STROKE_VERTEX_SEARCH_RADIUS ** 2
+        found = []
+        queries = 0
+        (-1..1).each do |x|
+          (-1..1).each do |y|
+            (-1..1).each do |z|
+              run_checkpoint!(:stroke_edge_flush, :phase => :vertex_query,
+                              :query_index => queries)
+              queries += 1
+              points = index[[cell[0] + x, cell[1] + y, cell[2] + z]]
+              next unless points
+              points.each do |values, witnesses|
+                run_checkpoint!(:stroke_edge_flush, :phase => :vertex_query,
+                                :query_index => queries) if queries % 64 == 0
+                queries += 1
+                distance_squared = (0...3).inject(0.0) do |sum, axis|
+                  sum + (point[axis] - values[axis]) ** 2
+                end
+                next if distance_squared > radius_squared
+                live = witnesses.values.select do |witness|
+                  run_checkpoint!(:stroke_edge_flush, :phase => :vertex_witness,
+                                  :query_index => queries) if queries % 64 == 0
+                  queries += 1
+                  stroke_vertex_witness_live?(witness, values)
+                end
+                next if live.empty?
+                found << [values, live]
+                return found if found.length > 1
+              end
+            end
+          end
+        end
+        found
+      end
+
+      # Candidate identity and ambiguity belong to the instant before the
+      # API call. Native merging must not erase a competing candidate and
+      # retrospectively make an ambiguous source point look unique.
+      def stroke_vertex_authority(vertex_index, points)
+        authority = {}
+        points.each_with_index do |point, index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :vertex_authority,
+                          :point_index => index) if index % 64 == 0
+          values = stroke_point_values(point)
+          next if authority.key?(values)
+          authority[values] = nearby_stroke_vertices(vertex_index, values)
+        end
+        authority
+      end
+
+      # Only an exact native endpoint at a unique pre-call vertex may replace
+      # a source point. This never infers a split vertex or closes a gap.
+      def stroke_source_at_observed_vertices(source, actual, vertex_authority)
+        endpoints = {}
+        actual.each { |pair| pair.each { |point| endpoints[point] = true } }
+        replacements = {}
+        changed = false
+        source.each_with_index do |pair, index|
+          run_checkpoint!(:stroke_edge_flush, :phase => :vertex_source,
+                          :segment_index => index) if index % 64 == 0
+          pair.each do |point|
+            next if replacements.key?(point)
+            replacements[point] = point
+            next if endpoints.key?(point)
+            nearby = vertex_authority.fetch(point, [])
+            next unless nearby.any? { |candidate| endpoints.key?(candidate[0]) }
+            return nil unless nearby.length == 1
+            values, witnesses = nearby.first
+            live = witnesses.any? do |witness|
+              run_checkpoint!(:stroke_edge_flush, :phase => :vertex_recheck)
+              stroke_vertex_witness_live?(witness, values)
+            end
+            return nil unless live
+            replacements[point] = values
+            changed = true
+          end
+        end
+        return nil unless changed
+        source.map do |pair|
+          moved = pair.map { |point| replacements.fetch(point) }
+          return nil if pair[0] != pair[1] && moved[0] == moved[1]
+          moved
+        end
+      end
+
       def stroke_native_segment(edge)
         unless edge && edge.respond_to?(:valid?) && edge.valid? &&
                edge.respond_to?(:start) && edge.respond_to?(:end)
@@ -1248,11 +1411,11 @@ module BlueCollarSystems
         (segment[0] <=> segment[1]) == -1 ? segment : segment.reverse
       end
 
-      # Usually the native/source segment keys already match. For native
-      # splits or collinear coalescing, compare exact interval unions grouped
-      # by their supporting lines: O(E log E). Only when that fails is
-      # SketchUp's own vertex snapping allowed for (see the fallback below).
-      def require_stroke_source_coverage!(points, edges)
+      # No tolerance increase or coordinate rounding is used. Usually the
+      # native/source segment keys already match. For native splits or
+      # collinear coalescing, compare exact interval unions grouped by their
+      # supporting lines: O(E log E), not a scan of every source/native pair.
+      def require_stroke_source_coverage!(points, edges, vertex_authority = nil)
         unless edges.is_a?(Array)
           raise StrokeBatchFailure, 'native add_edges did not return an edge roster'
         end
@@ -1274,10 +1437,20 @@ module BlueCollarSystems
             raise StrokeBatchFailure, 'native add_edges omitted a nonzero source segment'
           end
         end
+        return true if stroke_segments_cover?(source, actual)
+        if vertex_authority
+          observed = stroke_source_at_observed_vertices(source, actual, vertex_authority)
+          return true if observed && stroke_segments_cover?(observed, actual)
+        end
+        raise StrokeBatchFailure, 'native stroke roster does not exactly cover its source intervals'
+      end
+
+      def stroke_segments_cover?(source, actual)
+        source = source.reject { |pair| pair[0] == pair[1] }
+        actual = actual.reject { |pair| pair[0] == pair[1] }
         expected_keys = {}; actual_keys = {}
         [source, actual].each_with_index do |segments, side|
           keys = side == 0 ? expected_keys : actual_keys
-          segments.reject! { |pair| pair[0] == pair[1] }
           segments.each_with_index do |pair, index|
             run_checkpoint!(:stroke_edge_flush, :phase => :coverage_keys,
                             :segment_index => index) if index % 64 == 0
@@ -1313,68 +1486,7 @@ module BlueCollarSystems
           end
           break unless covered
         end
-        unless covered || stroke_coverage_within_vertex_tolerance?(source, actual)
-          raise StrokeBatchFailure, 'native stroke roster does not exactly cover its source intervals'
-        end
-        true
-      end
-
-      # Fallback after the exact comparison: every native edge must lie on a
-      # source segment, and the native edges on each source segment must
-      # cover it end to end, both within SketchUp's own vertex tolerance.
-      # A gap or an extra piece longer than that tolerance still fails.
-      def stroke_coverage_within_vertex_tolerance?(source, actual)
-        tol = STROKE_NATIVE_VERTEX_TOLERANCE
-        return false if source.empty? || actual.empty?
-        lines = source.map do |a, b|
-          d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
-          length = Math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
-          [a, d.map { |v| v / length }, length]
-        end
-        intervals = Array.new(lines.length) { [] }
-        actual.each_with_index do |(p, q), index|
-          run_checkpoint!(:stroke_edge_flush, :phase => :coverage_tolerance,
-                          :edge_index => index) if index % 64 == 0
-          placed = false
-          lines.each_with_index do |(origin, unit, length), line_index|
-            tp = stroke_line_parameter(origin, unit, p)
-            tq = stroke_line_parameter(origin, unit, q)
-            next unless tp >= -tol && tp <= length + tol && tq >= -tol && tq <= length + tol
-            next unless stroke_line_distance(origin, unit, p, tp) <= tol &&
-                        stroke_line_distance(origin, unit, q, tq) <= tol
-            intervals[line_index] << [tp, tq].minmax
-            placed = true
-          end
-          return false unless placed
-        end
-        lines.each_with_index do |(_origin, _unit, length), line_index|
-          run_checkpoint!(:stroke_edge_flush, :phase => :coverage_tolerance,
-                          :line_index => line_index) if line_index % 64 == 0
-          reach = nil
-          intervals[line_index].sort.each do |low, high|
-            if reach.nil?
-              return false if low > tol
-              reach = high
-            else
-              return false if low > reach + tol
-              reach = high if high > reach
-            end
-          end
-          return false if reach.nil? || reach < length - tol
-        end
-        true
-      end
-
-      def stroke_line_parameter(origin, unit, point)
-        (point[0] - origin[0]) * unit[0] + (point[1] - origin[1]) * unit[1] +
-          (point[2] - origin[2]) * unit[2]
-      end
-
-      def stroke_line_distance(origin, unit, point, t)
-        dx = point[0] - (origin[0] + unit[0] * t)
-        dy = point[1] - (origin[1] + unit[1] * t)
-        dz = point[2] - (origin[2] + unit[2] * t)
-        Math.sqrt(dx * dx + dy * dy + dz * dz)
+        covered
       end
 
       def stroke_line_interval_unions(segments)

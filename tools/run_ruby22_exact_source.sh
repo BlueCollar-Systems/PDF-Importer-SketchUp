@@ -174,6 +174,7 @@ readonly SMOKE_TESTS=(
   test/svg_text_3d_renderer_test.rb
   test/svg_3d_text_whitespace_span_test.rb
   test/command_runner_environment_test.rb
+  test/command_runner_legacy_capture_test.rb
   test/item_raster_page_renderer_test.rb
   test/item_raster_source_bounds_test.rb
   test/source_fill_only_paint_test.rb
