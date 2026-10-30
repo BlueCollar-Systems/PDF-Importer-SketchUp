@@ -199,8 +199,29 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/command_runner_environment_test.rb
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ruby test/command_runner_legacy_capture_test.rb
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # BEGIN source-bound legacy capture regression (PowerShell)
+          $legacyCaptureTest = 'test/command_runner_legacy_capture_test.rb'
+          if (Test-Path -LiteralPath $legacyCaptureTest -PathType Leaf) {
+            ruby $legacyCaptureTest
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            $selectedRef = '${{ needs.release-plan.outputs.build_ref }}'
+            $releaseState = '${{ needs.release-plan.outputs.release_state }}'
+            $sourceHead = git rev-parse HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot identify checked-out release source.' }
+            if ($selectedRef -notmatch '\A[0-9a-f]{40}\z' -or $env:GITHUB_SHA -notmatch '\A[0-9a-f]{40}\z' -or $sourceHead -ne $selectedRef -or $selectedRef -eq $env:GITHUB_SHA -or $releaseState -ne 'published') {
+              throw 'Required legacy capture regression is missing from this source selection.'
+            }
+            $trackedTest = @(git ls-tree --name-only $selectedRef -- $legacyCaptureTest)
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect selected source test roster.' }
+            $selectedRunner = git show "${selectedRef}:extracted/sketchup_ext/bc_pdf_vector_importer/command_runner.rb"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect selected source command runner.' }
+            if ($trackedTest.Count -ne 0 -or ($selectedRunner -join "`n") -match 'run_legacy_bundled_capture') {
+              throw 'Selected source requires the missing legacy capture regression.'
+            }
+            Write-Output "::notice::Published historical source $selectedRef predates the legacy capture backend and its regression; current-head CI still requires it."
+          }
+          # END source-bound legacy capture regression (PowerShell)
           ruby test/item_raster_page_renderer_test.rb
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ruby test/item_raster_display_test.rb
@@ -304,7 +325,27 @@ jobs:
           ruby test/import_health_test.rb
           ruby test/dependency_resolver_test.rb
           ruby test/command_runner_environment_test.rb
-          ruby test/command_runner_legacy_capture_test.rb
+          # BEGIN source-bound legacy capture regression (Bash)
+          LEGACY_CAPTURE_TEST='test/command_runner_legacy_capture_test.rb'
+          if [ -f "$LEGACY_CAPTURE_TEST" ]; then
+            ruby "$LEGACY_CAPTURE_TEST"
+          else
+            SELECTED_REF='${{ needs.release-plan.outputs.build_ref }}'
+            RELEASE_STATE='${{ needs.release-plan.outputs.release_state }}'
+            SOURCE_HEAD="$(git rev-parse HEAD)" || exit 1
+            if [[ ! "$SELECTED_REF" =~ ^[0-9a-f]{40}$ || ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ || "$SOURCE_HEAD" != "$SELECTED_REF" || "$SELECTED_REF" == "$GITHUB_SHA" || "$RELEASE_STATE" != 'published' ]]; then
+              echo 'Required legacy capture regression is missing from this source selection.' >&2
+              exit 1
+            fi
+            TRACKED_TEST="$(git ls-tree --name-only "$SELECTED_REF" -- "$LEGACY_CAPTURE_TEST")" || exit 1
+            SELECTED_RUNNER="$(git show "$SELECTED_REF:extracted/sketchup_ext/bc_pdf_vector_importer/command_runner.rb")" || exit 1
+            if [[ -n "$TRACKED_TEST" || "$SELECTED_RUNNER" == *run_legacy_bundled_capture* ]]; then
+              echo 'Selected source requires the missing legacy capture regression.' >&2
+              exit 1
+            fi
+            echo "::notice::Published historical source $SELECTED_REF predates the legacy capture backend and its regression; current-head CI still requires it."
+          fi
+          # END source-bound legacy capture regression (Bash)
           ruby test/item_raster_page_renderer_test.rb
           ruby test/item_raster_display_test.rb
           ruby test/source_image_paint_order_test.rb

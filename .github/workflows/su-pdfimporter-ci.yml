@@ -245,7 +245,7 @@ jobs:
         run: |
           python tools/test_release_safety.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest tools.test_complete_github_release tools.test_skp_probe_lock_contract
+          python -m unittest tools.test_complete_github_release tools.test_skp_probe_lock_contract tools.test_release_source_smoke_contract
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/test_build_steel_shapes_release.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
